@@ -689,6 +689,7 @@ class CollectAgent:
         self._combat_enter_logged = False
         self._combat_index = 0
         self._combat_won_keys: set[str] = set()
+        self._combat_won_steps: dict[str, int] = {}
         self._was_in_combat = False
         self._current_episode_id = ""
 
@@ -755,6 +756,31 @@ class CollectAgent:
         evidence = combat_exit_evidence(prev, curr)
         if not evidence.confirmed:
             return out
+        transition_id = f"{self._current_episode_id}:{self._combat_index}"
+        current_step = int(self._step_id or 0)
+        won_steps = getattr(self, "_combat_won_steps", {})
+        # This helper runs both before surface construction and before the ACT
+        # prompt.  A second confirmation in that same turn must preserve the
+        # freshly rebuilt reward surface, rather than clearing it again.
+        # Later stable reward observations stay canonical but do not re-emit
+        # the one-shot transition event.
+        if transition_id in self._combat_won_keys:
+            out["screen"] = "reward"
+            out["activity"] = "reward"
+            out["combat_active"] = False
+            out.pop("energy", None)
+            out.pop("energy_max", None)
+            out.pop("block", None)
+            if won_steps.get(transition_id) == current_step:
+                out["combat_won"] = True
+                out["combat_won_transition_id"] = transition_id
+            else:
+                out.pop("combat_won", None)
+                out.pop("combat_won_transition_id", None)
+                out.pop("combat_exit_score", None)
+                out.pop("combat_exit_reasons", None)
+            self._obs_metrics = dict(out)
+            return out
         self._apply_combat_exit_reset(reason="combat-won")
         curr = normalize_host_stats(dict(curr))
         self._host_stats = curr
@@ -765,18 +791,13 @@ class CollectAgent:
         out.pop("energy_max", None)
         out.pop("block", None)
         self._obs_metrics = dict(out)
-        transition_id = f"{self._current_episode_id}:{self._combat_index}"
-        if transition_id not in self._combat_won_keys:
-            self._combat_won_keys.add(transition_id)
-            out["combat_won"] = True
-            out["combat_won_transition_id"] = transition_id
-            out["combat_exit_score"] = evidence.score
-            out["combat_exit_reasons"] = list(evidence.reasons)
-        else:
-            out.pop("combat_won", None)
-            out.pop("combat_won_transition_id", None)
-            out.pop("combat_exit_score", None)
-            out.pop("combat_exit_reasons", None)
+        self._combat_won_keys.add(transition_id)
+        won_steps[transition_id] = current_step
+        self._combat_won_steps = won_steps
+        out["combat_won"] = True
+        out["combat_won_transition_id"] = transition_id
+        out["combat_exit_score"] = evidence.score
+        out["combat_exit_reasons"] = list(evidence.reasons)
         return out
 
     def _rebuild_reward_inventory(self, view: Any, *, screen: str = "reward") -> None:
@@ -5407,6 +5428,7 @@ class CollectAgent:
         self._selected = None
         self._combat_index = 0
         self._combat_won_keys = set()
+        self._combat_won_steps = {}
         self._was_in_combat = False
         self._current_episode_id = episode_id
         self._cancel_explore()

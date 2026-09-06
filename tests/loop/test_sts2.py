@@ -920,9 +920,49 @@ def test_combat_exit_transition_clears_stale_combat_state(tmp_path) -> None:
     assert agent._control_suppression.attempts == {}
     assert all(mark.role != "enemy" for mark in agent._aim.marks) if agent._aim else True
 
+    agent._step_id = 2
     again = agent._maybe_apply_combat_exit_transition(metrics)
     assert again.get("combat_won") is not True
     assert len(agent._combat_won_keys) == 1
+
+
+def test_combat_exit_repeated_same_step_preserves_reward_surface(tmp_path) -> None:
+    """The second pre-ACT check must not erase Loot rebuilt after the first."""
+    from loop.agent.loop import CollectAgent, CollectConfig
+    from loop.fixtures.sts2 import Sts2Fixture
+    from loop.log.store import EpisodeStore
+
+    agent = CollectAgent(
+        Sts2Fixture(controller=None),
+        EpisodeStore(tmp_path),
+        config=CollectConfig(skip_models=True, arm="no_skill"),
+    )
+    agent._current_episode_id = "ep1"
+    agent._combat_index = 1
+    agent._step_id = 8
+    agent._prev_host_stats = {
+        "screen": "combat", "combat_active": True,
+        "enemies": [{"hp": 0, "hp_max": 44}],
+    }
+    agent._host_stats = {
+        "screen": "reward", "ocr": "Loot! 16 Gold Add a card to your deck. Skip",
+        "enemies": [], "player": None, "black": False,
+    }
+    first = agent._maybe_apply_combat_exit_transition({"activity": "other"})
+    assert first["combat_won"] is True
+    reward_surface = object()
+    agent._action_surface = reward_surface
+
+    same_step = agent._maybe_apply_combat_exit_transition(first)
+    assert same_step["combat_won"] is True
+    assert same_step["combat_won_transition_id"] == "ep1:1"
+    assert agent._action_surface is reward_surface
+
+    agent._step_id = 9
+    stable = agent._maybe_apply_combat_exit_transition({"activity": "other"})
+    assert stable["screen"] == "reward"
+    assert stable.get("combat_won") is not True
+    assert agent._action_surface is reward_surface
 
 
 def test_combat_animation_then_loot_emits_once(tmp_path) -> None:
@@ -973,5 +1013,6 @@ def test_combat_animation_then_loot_emits_once(tmp_path) -> None:
     assert metrics["screen"] == "reward"
     assert agent._selected is None
 
+    agent._step_id = 2
     stable = agent._maybe_apply_combat_exit_transition(metrics)
     assert stable.get("combat_won") is not True
