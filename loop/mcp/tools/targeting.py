@@ -164,6 +164,81 @@ def invalidate_hand_snapshot(store: ScreenObjectStore, *, reason: str = "") -> d
     return identity
 
 
+def bind_snapshot_target_ids(
+    store: ScreenObjectStore,
+    rows: list[dict[str, Any]] | None,
+    *,
+    entity_targets_ok: bool = False,
+) -> None:
+    """Map prompt-facing instance ids onto canonical current-frame store objects."""
+    from loop.agent.entities import _row_center
+
+    if not rows:
+        return
+    enemies = [
+        obj for obj in store.objects
+        if object_role(obj, entity_targets_ok=entity_targets_ok) == "enemy"
+        and float(obj.y) >= 0.50
+        and str(obj.object_id or "").strip()
+    ]
+    used_objects: set[str] = set()
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        role = str(row.get("role") or "").strip().lower()
+        if role in {"unknown_character", "character", "target"}:
+            role = "enemy"
+        if role != "enemy":
+            continue
+        instance_id = str(row.get("entity_id") or row.get("id") or "").strip()
+        if not instance_id:
+            continue
+        canonical = store.by_object_id(instance_id)
+        if canonical is not None and object_role(canonical, entity_targets_ok=entity_targets_ok) in _COMBAT_TARGET_ROLES:
+            used_objects.add(instance_id)
+            continue
+        center = _row_center(row)
+        if center is None:
+            continue
+        cx, cy = center
+        candidates = [obj for obj in enemies if obj.object_id not in used_objects]
+        if not candidates:
+            continue
+        hit = min(candidates, key=lambda obj: (float(obj.x) - cx) ** 2 + (float(obj.y) - cy) ** 2)
+        if (float(hit.x) - cx) ** 2 + (float(hit.y) - cy) ** 2 > 0.16 ** 2:
+            continue
+        store.stamp_instance_alias(instance_id, hit.object_id)
+        row["entity_id"] = hit.object_id
+        if str(row.get("role") or "").strip().lower() in {"unknown_character", "character", "target"}:
+            row["role"] = "enemy"
+        used_objects.add(hit.object_id)
+
+    for obj in enemies:
+        label = str(obj.label or "").strip()
+        object_id = str(obj.object_id or "").strip()
+        if not object_id or object_id in used_objects:
+            continue
+        if _is_anonymous_enemy(label) and label != object_id:
+            store.stamp_instance_alias(label, object_id)
+
+
+def resolve_planned_target(
+    store: ScreenObjectStore,
+    target_id: str | None,
+    *,
+    entity_targets_ok: bool = False,
+) -> ScreenObject | None:
+    """Resolve a snapshot-scoped target id against the current inventory only."""
+    want = str(target_id or "").strip()
+    if not want:
+        return None
+    obj = store.object_for_instance_id(want)
+    if obj is None or object_role(obj, entity_targets_ok=entity_targets_ok) not in _COMBAT_TARGET_ROLES:
+        return None
+    return obj
+
+
 def _resolved_object(obj: ScreenObject, *, entity_targets_ok: bool = False) -> dict[str, Any]:
     """Frame-local execution data, emitted only after stable-ID resolution."""
     return {
@@ -401,8 +476,10 @@ def plan_card_by_id(
     target: ScreenObject | None = None
     target_key = str(target_id or "").strip()
     if target_key:
-        target = store.by_object_id(target_key)
-        if target is None or object_role(target, entity_targets_ok=entity_targets_ok) not in _COMBAT_TARGET_ROLES:
+        target = resolve_planned_target(
+            store, target_key, entity_targets_ok=entity_targets_ok,
+        )
+        if target is None:
             return {"ok": False, "reason": "target-not-found", "transaction": None}
 
     return {
@@ -446,10 +523,10 @@ def validate_stable_transaction(store: ScreenObjectStore, transaction: dict[str,
     if not resolved.get("ok"):
         return {"ok": False, "reason": str(resolved.get("reason") or "stale-snapshot")}
     candidate = transaction.get("target_candidate")
-    if candidate is not None and (
-        not isinstance(candidate, dict) or store.by_object_id(str(candidate.get("object_id") or "")) is None
-    ):
-        return {"ok": False, "reason": "target-not-found"}
+    if candidate is not None:
+        target_key = str((candidate or {}).get("object_id") or "") if isinstance(candidate, dict) else ""
+        if resolve_planned_target(store, target_key, entity_targets_ok=True) is None:
+            return {"ok": False, "reason": "target-not-found"}
     return {"ok": True, "reason": "current-snapshot"}
 
 

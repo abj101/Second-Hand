@@ -2380,7 +2380,7 @@ class CollectAgent:
         rebound = None
         if refreshed_inventory and planned_target_id:
             store = getattr(self, "_screen_objects", None)
-            fresh_obj = store.by_object_id(planned_target_id) if store is not None else None
+            fresh_obj = store.object_for_instance_id(planned_target_id) if store is not None else None
             if fresh_obj is not None:
                 rebound = self._aim_mark_for_object(fresh_obj)
                 if rebound is not None:
@@ -2608,11 +2608,13 @@ class CollectAgent:
         return after_id
 
     def _stamp_reason_control_ids(self, controls: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        from loop.mcp.tools.targeting import object_role
+        from loop.mcp.tools.targeting import bind_snapshot_target_ids, object_role
 
         store = getattr(self, "_screen_objects", None)
         if store is None:
             return controls
+        ok = self._combat_screen_now() if hasattr(self, "_combat_screen_now") else False
+        bind_snapshot_target_ids(store, controls, entity_targets_ok=ok)
         objs = list(getattr(store, "objects", []) or [])
         used: set[str] = set()
         out: list[dict[str, Any]] = []
@@ -2646,6 +2648,7 @@ class CollectAgent:
                 used.add(eid)
             out.append(row)
         ok = self._combat_screen_now() if hasattr(self, "_combat_screen_now") else False
+        bind_snapshot_target_ids(store, out, entity_targets_ok=ok)
         for obj in objs:
             if not obj.object_id or obj.object_id in used:
                 continue
@@ -2674,7 +2677,7 @@ class CollectAgent:
                 filtered.append(row)
                 continue
             eid = str(row.get("entity_id") or "").strip()
-            obj = store.by_object_id(eid) if eid else None
+            obj = store.object_for_instance_id(eid) if eid else None
             if obj is None or object_role(obj, entity_targets_ok=ok) != "enemy":
                 continue
             if float(obj.y) < 0.50:
@@ -2691,6 +2694,9 @@ class CollectAgent:
         if int(getattr(store, "_step_id", -1) or -1) != int(getattr(self, "_step_id", 0) or 0):
             return None
         hit = store.by_object_id(object_id)
+        if hit is not None:
+            return hit
+        hit = store.object_for_instance_id(object_id)
         if hit is not None:
             return hit
         return self._resolve_state_id_to_store_object(str(object_id).strip())
@@ -3745,12 +3751,36 @@ class CollectAgent:
 
     def _build_turn_snapshot(self, scene_desc: Any) -> TurnSnapshot:
         """Freeze the current typed object inventory for one v2 ACT call."""
+        from loop.mcp.tools.targeting import bind_snapshot_target_ids
+
         surface = getattr(self, "_action_surface", None)
         if surface is not None:
             snapshot_id = surface.snapshot_id
         else:
             identity = current_snapshot_identity(self._screen_objects)
             snapshot_id = str(identity["snapshot_id"])
+        instance_rows: list[dict[str, Any]] = []
+        if scene_desc is not None:
+            for bucket in (
+                getattr(scene_desc, "enemies", None) or [],
+                getattr(scene_desc, "characters", None) or [],
+                getattr(scene_desc, "controls", None) or [],
+            ):
+                for row in bucket:
+                    if isinstance(row, dict):
+                        instance_rows.append(dict(row))
+        tracker = getattr(self, "_entity_tracker", None)
+        if tracker is not None:
+            for ent in getattr(tracker, "entities", ()) or ():
+                instance_rows.append(ent.to_row())
+        for row in getattr(self, "_reason_controls", None) or []:
+            if isinstance(row, dict):
+                instance_rows.append(dict(row))
+        bind_snapshot_target_ids(
+            self._screen_objects,
+            instance_rows,
+            entity_targets_ok=self._combat_screen_now(),
+        )
         game_state = self._game_state
         player = getattr(game_state, "player", None)
         host_player = self._host_stats.get("player") or {}
@@ -3876,6 +3906,25 @@ class CollectAgent:
                 controls.append(ControlSnapshot(control_id, obj.label or slug, bbox, role=role))
             if obj.object_id:
                 self._v2_control_objects.setdefault(str(obj.object_id), obj)
+
+        alias_targets: list[TargetSnapshot] = []
+        seen_target_ids = {target.target_id for target in targets}
+        for alias, canonical in getattr(self._screen_objects, "_instance_aliases", {}).items():
+            if alias in seen_target_ids:
+                continue
+            base = next((row for row in targets if row.target_id == canonical), None)
+            if base is None:
+                continue
+            alias_targets.append(TargetSnapshot(
+                target_id=alias,
+                bbox=base.bbox,
+                name=base.name,
+                hp=base.hp,
+                intent=base.intent,
+                identity_confidence=base.identity_confidence,
+            ))
+            seen_target_ids.add(alias)
+        targets.extend(alias_targets)
 
         turn = self._field_value(getattr(game_state, "turn", None)) if game_state is not None else None
         if turn is None:

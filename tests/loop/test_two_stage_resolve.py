@@ -1199,3 +1199,41 @@ def test_missing_stable_target_never_clicks_stale_target(monkeypatch, tmp_path) 
     assert result.transaction.target_dispatched is False
     assert "missing-stable-target" in result.transaction.verification_evidence
     store.close()
+
+
+def test_stamp_reason_controls_binds_unknown_character_to_store_enemy(monkeypatch, tmp_path) -> None:
+    from loop.agent.loop import CollectAgent, CollectConfig
+    from loop.fixtures.sts2 import Sts2Fixture
+    from loop.memory.screen_objects import ScreenObjectStore
+
+    marks = (
+        AimMark(id=1, x=0.50, y=0.80, x0=0.40, y0=0.70, x1=0.60, y1=0.90, label="Strike", role="card"),
+        AimMark(id=2, x=0.75, y=0.63, x0=0.68, y0=0.56, x1=0.82, y1=0.72, label="unidentified_enemy", role="enemy"),
+    )
+    store = ScreenObjectStore(tmp_path / "stamp.db")
+    store.save_frame(run_id="r", step_id=1, marks=marks, screen="combat")
+    loop = CollectAgent.__new__(CollectAgent)
+    loop.config = CollectConfig(architecture="two_stage", arm="no_skill")
+    loop.fixture = Sts2Fixture(controller=type("C", (), {"execute": lambda *_a, **_k: [], "release_all": lambda: None})())  # type: ignore[arg-type]
+    loop._screen_objects = store
+    loop._obs_metrics = {"screen": "combat"}
+    loop._host_stats = {"screen": "combat"}
+    loop.session_id = "r"
+    loop._step_id = 1
+    controls = [{
+        "label": "unknown_character_1",
+        "role": "unknown_character",
+        "confidence": "high",
+        "entity_id": "unknown_character_1",
+        "bbox": [680, 560, 820, 720],
+    }]
+    stamped = loop._stamp_reason_control_ids(controls)
+    enemy_rows = [row for row in stamped if str(row.get("role") or "") == "enemy"]
+    assert enemy_rows
+    assert enemy_rows[0]["entity_id"] == "enemy_1"
+    from loop.mcp.tools.targeting import plan_card_by_id
+
+    plan = plan_card_by_id(store, card_id="card_1", target_id="unknown_character_1", entity_targets_ok=True)
+    assert plan["ok"] is True
+    assert plan["transaction"]["target_candidate"]["object_id"] == "enemy_1"
+    store.close()

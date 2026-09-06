@@ -10,6 +10,7 @@ from loop.mcp.orchestrator import ToolOrchestrator
 from loop.mcp.registry import ToolRegistry
 from loop.mcp.tools.memory import register_reasoner_tools
 from loop.mcp.tools.targeting import (
+    bind_snapshot_target_ids,
     current_snapshot_identity,
     inspect_object,
     invalidate_hand_snapshot,
@@ -18,6 +19,7 @@ from loop.mcp.tools.targeting import (
     play_card,
     play_card_plan,
     resolve_planned_source,
+    resolve_planned_target,
     screen_objects,
     targeting_validate,
     validate_stable_transaction,
@@ -237,6 +239,94 @@ def test_stable_id_plan_rejects_unknown_card_or_typed_target(tmp_path: Path) -> 
     store = _store_with_marks(tmp_path)
     assert plan_card_by_id(store, card_id="card_missing")["reason"] == "source-not-found"
     assert plan_card_by_id(store, card_id="card_1", target_id="enemy_missing")["reason"] == "target-not-found"
+    store.close()
+
+
+def test_prompt_instance_id_unknown_character_resolves_to_enemy_mark(tmp_path: Path) -> None:
+    store = ScreenObjectStore(tmp_path / "alias.db")
+    store.save_frame(
+        run_id="r",
+        step_id=1,
+        screen="combat",
+        marks=(
+            AimMark(id=1, x=0.50, y=0.80, x0=0.40, y0=0.70, x1=0.60, y1=0.90, label="Strike", role="card"),
+            AimMark(id=2, x=0.75, y=0.63, x0=0.68, y0=0.56, x1=0.82, y1=0.72, label="unidentified_enemy", role="enemy"),
+        ),
+    )
+    enemy = store.by_object_id("enemy_1")
+    assert enemy is not None
+    controls = [{
+        "label": "unknown_character_1",
+        "role": "unknown_character",
+        "confidence": "high",
+        "entity_id": "unknown_character_1",
+        "bbox": [680, 560, 820, 720],
+    }]
+    bind_snapshot_target_ids(store, controls, entity_targets_ok=True)
+    plan = plan_card_by_id(store, card_id="card_1", target_id="unknown_character_1", entity_targets_ok=True)
+    assert plan["ok"] is True
+    assert plan["transaction"]["target_candidate"]["mark_id"] == enemy.mark_id
+    assert plan["transaction"]["target_candidate"]["object_id"] == "enemy_1"
+    assert resolve_planned_target(store, "unknown_character_1", entity_targets_ok=True) == enemy
+    store.close()
+
+
+def test_prompt_instance_id_enemy_alias_resolves_when_geometry_matches(tmp_path: Path) -> None:
+    store = ScreenObjectStore(tmp_path / "enemy_alias.db")
+    store.save_frame(
+        run_id="r",
+        step_id=1,
+        screen="combat",
+        marks=(
+            AimMark(id=1, x=0.50, y=0.80, x0=0.40, y0=0.70, x1=0.60, y1=0.90, label="Strike", role="card"),
+            AimMark(id=2, x=0.75, y=0.63, x0=0.68, y0=0.56, x1=0.82, y1=0.72, label="unidentified_enemy", role="enemy"),
+        ),
+    )
+    controls = [{
+        "label": "unidentified_enemy",
+        "role": "enemy",
+        "confidence": "high",
+        "entity_id": "enemy_1",
+        "bbox": [680, 560, 820, 720],
+    }]
+    bind_snapshot_target_ids(store, controls, entity_targets_ok=True)
+    plan = plan_card_by_id(store, card_id="card_1", target_id="enemy_1", entity_targets_ok=True)
+    assert plan["ok"] is True
+    store.close()
+
+
+def test_stale_prompt_instance_id_fails_after_inventory_rebuild(tmp_path: Path) -> None:
+    store = ScreenObjectStore(tmp_path / "stale_alias.db")
+    store.save_frame(
+        run_id="r",
+        step_id=1,
+        screen="combat",
+        marks=(
+            AimMark(id=1, x=0.50, y=0.80, x0=0.40, y0=0.70, x1=0.60, y1=0.90, label="Strike", role="card"),
+            AimMark(id=2, x=0.75, y=0.63, x0=0.68, y0=0.56, x1=0.82, y1=0.72, label="unidentified_enemy", role="enemy"),
+        ),
+    )
+    controls = [{
+        "label": "unknown_character_1",
+        "role": "unknown_character",
+        "confidence": "high",
+        "entity_id": "unknown_character_1",
+        "bbox": [680, 560, 820, 720],
+    }]
+    bind_snapshot_target_ids(store, controls, entity_targets_ok=True)
+    assert plan_card_by_id(store, card_id="card_1", target_id="unknown_character_1", entity_targets_ok=True)["ok"]
+    store.save_frame(
+        run_id="r",
+        step_id=2,
+        screen="combat",
+        marks=(
+            AimMark(id=9, x=0.50, y=0.80, x0=0.40, y0=0.70, x1=0.60, y1=0.90, label="Strike", role="card"),
+            AimMark(id=8, x=0.75, y=0.63, x0=0.68, y0=0.56, x1=0.82, y1=0.72, label="unidentified_enemy", role="enemy"),
+        ),
+    )
+    stale = plan_card_by_id(store, card_id="card_1", target_id="unknown_character_1", entity_targets_ok=True)
+    assert stale["ok"] is False
+    assert stale["reason"] == "target-not-found"
     store.close()
 
 
