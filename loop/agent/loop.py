@@ -7,7 +7,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 import numpy as np
 
@@ -81,6 +81,7 @@ from loop.agent.prompts import (
     allowed_controls_for_turn,
     choice_in_allowed_controls,
     detector_candidates_from_marks,
+    detector_typed_rows_from_marks,
     scene_perceive_user,
     attack_cards_from_controls,
     instance_ids_from_controls,
@@ -123,7 +124,7 @@ from loop.memory.journal import (
     kind_from_boxes,
 )
 from loop.memory.lexicon import screen_from_labels
-from loop.memory.overlay_state import OverlayState
+from loop.memory.overlay_state import ControlSuppressionState, OverlayState
 from loop.memory.notebook import Notebook, avoid_devices, listing_has_dialog, overlay_screen
 from loop.memory.screen_objects import ScreenObjectStore
 from loop.memory.skills import Skill, SkillBank
@@ -147,8 +148,11 @@ from loop.os.frame_model import (
     ActionSurface,
     FrameContext,
     FrameModel,
+    GENERIC_CONTROL_ROLES,
     build_action_surface,
     build_frame_model,
+    control_key_from_row,
+    surface_fingerprint,
 )
 from loop.state.game_state import GameState, LegalAction, reconcile as reconcile_game_state
 from loop.os.primitives import mouse_move
@@ -654,6 +658,10 @@ class CollectAgent:
         self._last_targeting_opts: dict[str, Any] | None = None
         self._perceive_retry_reason: str | None = None
         self._overlay_state = OverlayState()
+        self._control_suppression = ControlSuppressionState()
+        self._last_surface_screen: str = ""
+        self._last_surface_membership: tuple[str, ...] = ()
+        self._prev_surface_controls: list[dict[str, Any]] = []
         self._prev_host_stats: dict[str, Any] = {}
         self._stuck_combat_steps = 0
         self._perception_recovery_steps = 0
@@ -2758,6 +2766,82 @@ class CollectAgent:
     def _detector_label_strings(self) -> list[str]:
         return [row["label"] for row in self._detector_candidates() if row.get("label")]
 
+    def _detector_typed_rows(self) -> list[dict[str, Any]]:
+        if self._aim is None:
+            return []
+        return detector_typed_rows_from_marks(self._aim.marks)
+
+    def _current_surface_screen(self) -> str:
+        return str(
+            self._host_stats.get("screen")
+            or self._obs_metrics.get("screen")
+            or getattr(getattr(self, "_scene_desc", None), "screen", None)
+            or ""
+        ).strip().lower()
+
+    def _surface_membership_signature(self, controls: Sequence[dict[str, Any]]) -> tuple[str, ...]:
+        screen = self._current_surface_screen()
+        keys: list[str] = []
+        for row in controls:
+            role = str(row.get("role") or "").strip().lower()
+            if role in GENERIC_CONTROL_ROLES or role in {"card", "enemy", "player", "target"}:
+                keys.append(control_key_from_row(row, screen=screen))
+        return tuple(sorted(keys))
+
+    def _apply_control_suppression(self, controls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        suppression = getattr(self, "_control_suppression", None)
+        if suppression is None:
+            suppression = ControlSuppressionState()
+            self._control_suppression = suppression
+        screen = self._current_surface_screen()
+        fingerprint = surface_fingerprint(screen=screen, rows=controls)
+        prev_screen = getattr(self, "_last_surface_screen", "")
+        prev_membership = getattr(self, "_last_surface_membership", ())
+        current_membership = self._surface_membership_signature(controls)
+        membership_changed = current_membership != prev_membership
+        screen_changed = bool(screen and prev_screen and screen != prev_screen)
+        bounds_moved = (
+            fingerprint != suppression.fingerprint
+            and not membership_changed
+            and not screen_changed
+        )
+        if screen_changed or membership_changed or bounds_moved or not suppression.fingerprint:
+            suppression.reset(fingerprint)
+        self._last_surface_screen = screen
+        self._last_surface_membership = current_membership
+        self._prev_surface_controls = [dict(row) for row in controls]
+        return [
+            row
+            for row in controls
+            if not suppression.is_suppressed(control_key_from_row(row, screen=screen))
+        ]
+
+    def _record_blocked_control_attempt(self, choice: str) -> None:
+        suppression = getattr(self, "_control_suppression", None)
+        if suppression is None:
+            suppression = ControlSuppressionState()
+            self._control_suppression = suppression
+        label = str(choice or "").strip()
+        if not label:
+            return
+        screen = self._current_surface_screen()
+        controls = list(getattr(self, "_prev_surface_controls", None) or getattr(self, "_reason_controls", None) or [])
+        fingerprint = surface_fingerprint(screen=screen, rows=controls)
+        compact = " ".join(label.lower().split())
+        row: dict[str, Any] | None = None
+        for candidate in controls:
+            if " ".join(str(candidate.get("label") or "").lower().split()) == compact:
+                row = candidate
+                break
+        if row is None:
+            row = {"label": label, "role": "button"}
+        key = control_key_from_row(row, screen=screen)
+        suppression.record_no_change(fingerprint, key)
+
+    def _finalize_reason_controls(self, controls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        filtered = self._apply_control_suppression(controls)
+        return self._stamp_reason_control_ids(filtered)
+
     def _scene_perceive_user(self, *, focus: str = "") -> str:
         overlay = getattr(self, "_overlay_state", None)
         suppress = None
@@ -3405,7 +3489,7 @@ class CollectAgent:
         self,
         scene_desc: Any,
         *,
-        detector_labels: list[str] | None = None,
+        detector_rows: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """Post-LLM1: ground combat/map labels, frame model."""
         self._scene_desc = scene_desc
@@ -3455,12 +3539,12 @@ class CollectAgent:
             self._reason_controls = reason_controls
             self._reconcile_game_state()
             return reason_controls
-        labels = detector_labels if detector_labels is not None else self._detector_label_strings()
+        labels = detector_rows if detector_rows is not None else self._detector_typed_rows()
         reason_controls = reason_controls_for_turn(
             controls=scene_desc.controls,
             uncertain=scene_desc.uncertain,
             enemies=(scene_desc.combat or {}).get("enemies"),
-            detector_labels=labels,
+            detector_rows=labels,
             tutorial_info=scene_desc.tutorial,
             host_stats=self._host_stats,
         )
@@ -3470,7 +3554,7 @@ class CollectAgent:
             if fused is not None:
                 reason_controls = fused
         self._reconcile_game_state()
-        stamped_controls = self._stamp_reason_control_ids(reason_controls)
+        stamped_controls = self._finalize_reason_controls(reason_controls)
         self._reason_controls = stamped_controls
         return stamped_controls
 
@@ -3959,7 +4043,7 @@ class CollectAgent:
             ran_llm1=ran_llm1,
             combat_errors=combat_errors if combat_errors else None,
         )
-        reason_controls = self._apply_perceive_scene(scene_desc, detector_labels=detector_labels)
+        reason_controls = self._apply_perceive_scene(scene_desc, detector_rows=self._detector_typed_rows())
         reason_route, route_reason = self._two_stage_reason_route(scene_desc)
         self._last_epistemic_blockers = self._two_stage_epistemic_blockers(scene_desc)
         self._route_before_discovery = f"{reason_route} ({route_reason})"
@@ -3969,11 +4053,11 @@ class CollectAgent:
         discover_ms = 0.0 if self.fixture.id == "sts2" else self._run_mechanical_discovery(scene_desc)
         self._last_discover_ms = discover_ms
         scene_desc = self._scene_desc or scene_desc
-        reason_controls = self._stamp_reason_control_ids(reason_controls_for_turn(
+        reason_controls = self._finalize_reason_controls(reason_controls_for_turn(
             controls=scene_desc.controls,
             uncertain=scene_desc.uncertain,
             enemies=(scene_desc.combat or {}).get("enemies"),
-            detector_labels=detector_labels,
+            detector_rows=self._detector_typed_rows(),
             tutorial_info=scene_desc.tutorial,
             host_stats=self._host_stats,
         ))
@@ -4130,15 +4214,14 @@ class CollectAgent:
                 except Exception:  # noqa: BLE001 — rescan is best-effort
                     break
                 scene_desc = self._scene_desc or scene_desc
-                reason_controls = reason_controls_for_turn(
+                reason_controls = self._finalize_reason_controls(reason_controls_for_turn(
                     controls=scene_desc.controls,
                     uncertain=scene_desc.uncertain,
                     enemies=(scene_desc.combat or {}).get("enemies"),
-                    detector_labels=self._clickable_labels(),
+                    detector_rows=self._detector_typed_rows(),
                     tutorial_info=scene_desc.tutorial,
                     host_stats=self._host_stats,
-                )
-                self._reason_controls = reason_controls
+                ))
                 state = reason_state_from_host(
                     screen=str(scene_desc.screen or host_screen or self._host_stats.get("screen") or ""),
                     turn=str(scene_desc.turn or self._host_stats.get("turn") or "unknown"),
@@ -4508,11 +4591,11 @@ class CollectAgent:
                 labels = list(clickable() or [])
             except Exception:  # noqa: BLE001 — labels are optional for ACT stamp
                 labels = []
-        self._reason_controls = self._stamp_reason_control_ids(reason_controls_for_turn(
+        self._reason_controls = self._finalize_reason_controls(reason_controls_for_turn(
             controls=scene_desc.controls,
             uncertain=getattr(scene_desc, "uncertain", None),
             enemies=(getattr(scene_desc, "combat", None) or {}).get("enemies"),
-            detector_labels=labels,
+            detector_rows=self._detector_typed_rows(),
             tutorial_info=getattr(scene_desc, "tutorial", None),
             host_stats=getattr(self, "_host_stats", None) or {},
         ))
@@ -5848,11 +5931,7 @@ class CollectAgent:
                     controls=_scene.controls if _scene is not None else [],
                     uncertain=_scene.uncertain if _scene is not None else [],
                     enemies=(_scene.combat or {}).get("enemies") if _scene is not None else [],
-                    detector_labels=(
-                        self._frame_model.interactive_labels()
-                        if self._frame_model is not None
-                        else []
-                    ),
+                    detector_rows=self._detector_typed_rows(),
                     tutorial_info=_scene.tutorial if _scene is not None else None,
                     host_stats=self._host_stats,
                 )
@@ -6749,6 +6828,17 @@ class CollectAgent:
                 if prev_screen and new_screen and prev_screen != new_screen:
                     line += f", screen {prev_screen}→{new_screen}"
                 self._last_outcome = line
+                if (
+                    turn
+                    and outcome == "blocked"
+                    and choice_label
+                    and not pixel_changed
+                ):
+                    allowed_controls, _allowed_targets = allowed_sets_from_controls(
+                        getattr(self, "_reason_controls", None) or []
+                    )
+                    if choice_in_allowed_controls(choice_label, allowed_controls):
+                        self._record_blocked_control_attempt(choice_label)
                 if error:
                     self._last_execution_failure = {
                         "code": str(error),
@@ -6802,6 +6892,12 @@ class CollectAgent:
                         streak=self._stuck_combat_steps,
                     )
                     self._stuck_combat_steps = 0
+                if (
+                    not pixel_changed
+                    and choice_label
+                    and getattr(getattr(self, "_control_suppression", None), "last_log_reason", "")
+                ):
+                    metrics["control_suppression"] = self._control_suppression.last_log_reason
                 if pixel_changed and choice_label:
                     screen_name = new_screen or prev_screen or "other"
                     saved = self.notebook.ingest(

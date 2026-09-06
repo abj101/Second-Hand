@@ -1,0 +1,435 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+from PIL import Image
+
+from loop.agent.loop import CollectAgent
+from loop.agent.decision import TurnSnapshot
+from loop.fixtures.sts2 import Sts2Fixture
+from loop.memory.screen_objects import ScreenObjectStore
+from loop.mcp.tools.targeting import object_role
+from loop.os.aim import AimMark
+from loop.os.aim import AimGuide
+from loop.os.frame_model import FrameContext, build_action_surface, build_frame_model
+
+
+def _mark(
+    mid: int,
+    label: str,
+    *,
+    x: float,
+    y: float,
+    role: str = "",
+    object_id: str = "",
+) -> AimMark:
+    return AimMark(
+        id=mid,
+        x=x,
+        y=y,
+        x0=max(0.0, x - 0.06),
+        y0=max(0.0, y - 0.05),
+        x1=min(1.0, x + 0.06),
+        y1=min(1.0, y + 0.05),
+        label=label,
+        role=role,
+        object_id=object_id,
+        source="test",
+        confidence=0.95,
+    )
+
+
+@pytest.mark.parametrize(
+    "screen,label",
+    [
+        ("select", "Yes"),
+        ("select", "No"),
+        ("title", "Continue"),
+        ("title", "Settings"),
+        ("shop", "Buy"),
+        ("inventory", "Equip"),
+        ("reward", "Skip"),
+        ("pause", "Resume"),
+    ],
+)
+def test_bottom_controls_never_become_cards_outside_combat(
+    tmp_path: Path,
+    screen: str,
+    label: str,
+) -> None:
+    mark = _mark(1, label, x=0.5, y=0.88)
+    context = FrameContext(screen=screen, activity=screen)
+    surface = build_action_surface(
+        [mark], run_id="r", step_id=1, screen=screen, activity=screen,
+    )
+    assert len(surface.objects) == 1
+    obj = surface.objects[0]
+    assert obj.role != "card"
+    assert not obj.object_id.startswith("card_")
+
+    store = ScreenObjectStore(tmp_path / f"{screen}.db")
+    try:
+        store.save_frame(
+            run_id="r", step_id=1, marks=[mark], screen=screen,
+            context=context, surface=surface,
+        )
+        stored = store.by_id(1)
+        assert stored is not None
+        assert stored.role != "card"
+        assert object_role(stored) != "card"
+        assert store.hand_cards() == []
+    finally:
+        store.close()
+
+
+def test_explicit_button_role_beats_hand_band_geometry() -> None:
+    surface = build_action_surface(
+        [_mark(1, "Accept", x=0.5, y=0.92, role="button")],
+        run_id="r",
+        step_id=2,
+        screen="other",
+        activity="unknown",
+    )
+    button = surface.objects[0]
+    assert button.role == "button"
+    assert button.object_id == "control:accept"
+    assert surface.legal_intents == ("click_control",)
+
+
+def test_next_label_is_nav_next() -> None:
+    mark = _mark(1, "Next", x=0.9, y=0.5)
+    frame = build_frame_model([mark], screen="tutorial")
+    assert frame.objects[0].role == "nav_next"
+
+    surface = build_action_surface(
+        [mark], run_id="r", step_id=1, screen="tutorial", activity="tutorial",
+    )
+    assert surface.objects[0].role == "nav_next"
+    assert surface.objects[0].object_id == "control:next"
+
+
+def test_modal_over_combat_suppresses_background_domain_objects() -> None:
+    fixture = Sts2Fixture()
+    context = FrameContext(
+        screen="tutorial",
+        activity="combat",
+        layout="modal_dialog",
+        blocking_overlay=True,
+    )
+    marks = [
+        _mark(1, "Strike", x=0.38, y=0.88),
+        _mark(2, "Cultist", x=0.72, y=0.61, role="enemy"),
+        _mark(3, "Yes", x=0.56, y=0.86, role="button"),
+        _mark(4, "End Turn", x=0.90, y=0.82, role="button"),
+    ]
+    enriched = fixture.enrich_frame_marks(marks, context, {"screen": "tutorial"})
+    surface = build_action_surface(
+        enriched,
+        run_id="r",
+        step_id=1,
+        screen=context.screen,
+        activity=context.activity,
+        layout=context.layout,
+        blocking_overlay=context.blocking_overlay,
+    )
+    roles = {obj.label: obj.role for obj in surface.objects}
+    assert roles["Yes"] == "button"
+    assert roles["Strike"] != "card"
+    assert roles["Cultist"] != "enemy"
+    assert roles["End Turn"] == "suppressed"
+    assert surface.legal_intents == ("click_control",)
+
+
+def test_confirmed_combat_retains_hand_and_end_turn() -> None:
+    fixture = Sts2Fixture()
+    context = FrameContext(
+        screen="combat",
+        activity="combat",
+        layout="hand_and_board",
+        blocking_overlay=False,
+    )
+    marks = [
+        _mark(1, "Strike", x=0.36, y=0.88),
+        _mark(2, "Defend", x=0.50, y=0.88),
+        _mark(3, "Cultist", x=0.72, y=0.61, role="enemy"),
+        _mark(4, "End Turn", x=0.90, y=0.82, role="button"),
+    ]
+    enriched = fixture.enrich_frame_marks(
+        marks,
+        context,
+        {"screen": "combat", "activity": "combat", "turn": "ours"},
+    )
+    surface = build_action_surface(
+        enriched,
+        run_id="r",
+        step_id=4,
+        screen="combat",
+        activity="combat",
+        layout="hand_and_board",
+        blocking_overlay=False,
+    )
+    by_label = {obj.label: obj for obj in surface.objects}
+    assert by_label["Strike"].role == "card"
+    assert by_label["Defend"].role == "card"
+    assert by_label["Cultist"].role == "enemy"
+    assert by_label["End Turn"].role == "button"
+    assert by_label["Strike"].object_id.startswith("card_")
+    assert by_label["Cultist"].object_id.startswith("enemy_")
+    assert by_label["End Turn"].object_id == "control:end_turn"
+    assert {"play_card", "end_turn"} <= set(surface.legal_intents)
+
+
+def test_latest_tutorial_failure_has_visible_choices_and_dispatchable_yes() -> None:
+    fixture_path = (
+        Path(__file__).resolve().parents[2]
+        / "loop"
+        / "fixtures"
+        / "sts2_screens"
+        / "tutorial_confirmation_failure.json"
+    )
+    data = json.loads(fixture_path.read_text(encoding="utf-8"))
+    marks = [
+        AimMark(
+            id=row["id"],
+            x=(row["bbox"][0] + row["bbox"][2]) / 2,
+            y=(row["bbox"][1] + row["bbox"][3]) / 2,
+            x0=row["bbox"][0],
+            y0=row["bbox"][1],
+            x1=row["bbox"][2],
+            y1=row["bbox"][3],
+            label=row["label"],
+            role=row["role"],
+            source=row["source"],
+            confidence=row["confidence"],
+        )
+        for row in data["marks"]
+    ]
+    surface = build_action_surface(
+        marks,
+        run_id=data["source_run"],
+        step_id=data["source_step"],
+        screen=data["screen"],
+        activity=data["activity"],
+        layout=data["layout"],
+        blocking_overlay=data["blocking_overlay"],
+    )
+    visible_labels = {row["label"] for row in data["scene_controls"]}
+    assert set(data["must_include"]) <= visible_labels
+    assert not set(data["must_not_include"]) & visible_labels
+
+    executable = {obj.label: obj for obj in surface.interactive()}
+    assert set(data["must_dispatch_one_of"]) & set(executable)
+    yes = executable["Yes"]
+    assert yes.role == "button"
+    assert yes.object_id == "control:yes"
+    assert "end_turn" not in surface.legal_intents
+
+    snapshot = TurnSnapshot.from_action_surface(surface)
+    assert [(control.control_id, control.label) for control in snapshot.controls] == [
+        ("control:yes", "Yes")
+    ]
+    assert snapshot.cards == ()
+
+
+def test_collect_agent_finalizes_tutorial_scene_from_current_marks(tmp_path: Path) -> None:
+    image = Image.new("RGB", (128, 96))
+    agent = CollectAgent.__new__(CollectAgent)
+    agent.fixture = Sts2Fixture()
+    agent.session_id = "run"
+    agent._step_id = 3
+    agent._host_stats = {"screen": "select"}
+    agent._obs_metrics = {"screen": "select"}
+    agent._last_obs_image = image
+    agent._aim = AimGuide.from_marks(
+        image,
+        [_mark(7, "Yes", x=0.54, y=0.86)],
+    )
+    agent._screen_objects = ScreenObjectStore(tmp_path / "objects.db")
+    agent._action_surface = None
+    agent._frame_model = None
+    scene = SimpleNamespace(
+        screen="select",
+        controls=[
+            {"label": "Yes", "role": "button", "confidence": "high"},
+            {"label": "No", "role": "button", "confidence": "high"},
+        ],
+        hand_cards=[],
+        enemies=[],
+        characters=[],
+    )
+    try:
+        surface = agent._finalize_action_surface(scene)
+        assert surface is not None
+        assert [(obj.object_id, obj.label, obj.role) for obj in surface.interactive()] == [
+            ("control:yes", "Yes", "button")
+        ]
+        stored = agent._screen_objects.by_object_id("control:yes")
+        assert stored is not None and stored.role == "button"
+
+        agent._game_state = None
+        agent._last_execution_failure = None
+        agent._v2_control_objects = {}
+        snapshot = agent._build_turn_snapshot(scene)
+        assert snapshot.snapshot_id == surface.snapshot_id
+        assert snapshot.legal_intents == ("click_control",)
+        assert [(row.control_id, row.label) for row in snapshot.controls] == [
+            ("control:yes", "Yes")
+        ]
+    finally:
+        agent._screen_objects.close()
+
+
+def test_empty_action_surface_skips_act_and_recovers_once() -> None:
+    surface = build_action_surface(
+        [_mark(1, "Mystery", x=0.5, y=0.5)],
+        run_id="r",
+        step_id=1,
+        screen="tutorial",
+        activity="combat",
+        layout="modal_dialog",
+        blocking_overlay=True,
+    )
+    snapshot = TurnSnapshot.from_action_surface(surface, turn="ours")
+    assert snapshot.legal_intents == ()
+
+    agent = CollectAgent.__new__(CollectAgent)
+    agent._action_surface = surface
+    agent.gateway = Mock()
+    agent._last_execution_failure = None
+    agent._last_reason_state_key = ""
+    agent._unchanged_failure_count = 0
+    agent._empty_action_surface_key = ""
+    agent._empty_action_surface_count = 0
+    agent._decision_softlock = False
+    agent._session_flags = []
+    agent._pending_exec_error = None
+    agent._force_perceive = False
+    agent._perception_cache = Mock()
+
+    parsed, latency = agent._run_v2_act(snapshot)
+    assert (parsed, latency) == ({}, 0.0)
+    assert agent._pending_exec_error == "inventory-inconsistent"
+    assert agent._force_perceive is True
+    agent.gateway.assert_not_called()
+    agent._perception_cache.reset.assert_called_once_with()
+
+    agent._pending_exec_error = None
+    parsed, latency = agent._run_v2_act(snapshot)
+    assert (parsed, latency) == ({}, 0.0)
+    assert agent._pending_exec_error == "empty-action-surface"
+    assert agent._decision_softlock is True
+    agent.gateway.assert_not_called()
+    agent._perception_cache.reset.assert_called_once_with()
+
+
+def test_combat_next_without_overlay_is_not_nav_next() -> None:
+    mark = _mark(1, "Next", x=0.9, y=0.5)
+    frame = build_frame_model([mark], screen="combat", host_stats={"screen": "combat", "activity": "combat"})
+    assert frame.objects[0].role != "nav_next"
+
+
+def test_tutorial_next_remains_nav_next() -> None:
+    mark = _mark(1, "Next", x=0.9, y=0.5)
+    frame = build_frame_model(
+        [mark],
+        screen="tutorial",
+        host_stats={"screen": "tutorial", "tutorial": {"active": True, "step": 1, "total": 3}},
+    )
+    assert frame.objects[0].role == "nav_next"
+
+
+def test_allowed_controls_admit_only_typed_generic_roles() -> None:
+    from loop.agent.prompts import allowed_controls_for_turn, allowed_sets_from_controls
+
+    admitted, source = allowed_controls_for_turn(
+        inventory=[
+            {"label": "Next", "role": "other", "confidence": "high"},
+            {"label": "Confirm", "role": "button", "confidence": "high", "x": 0.5, "y": 0.9},
+            {"label": "Strike", "role": "card", "confidence": "high"},
+        ],
+    )
+    assert source == "inventory"
+    assert [row["label"] for row in admitted] == ["Confirm"]
+    allowed, targets = allowed_sets_from_controls(
+        [
+            {"label": "Confirm", "role": "button", "confidence": "high"},
+            {"label": "Strike", "role": "card", "confidence": "high"},
+            {"label": "Cultist", "role": "enemy", "confidence": "high"},
+        ]
+    )
+    assert allowed == {"Confirm"}
+    assert targets == {"Cultist"}
+    assert "Strike" not in allowed
+
+
+def test_control_suppression_blocks_twice_on_unchanged_surface() -> None:
+    from loop.memory.overlay_state import ControlSuppressionState
+
+    agent = CollectAgent.__new__(CollectAgent)
+    agent._control_suppression = ControlSuppressionState()
+    agent._last_surface_screen = "combat"
+    agent._last_surface_membership = ()
+    agent._prev_surface_controls = []
+    agent._host_stats = {"screen": "combat"}
+    agent._obs_metrics = {"screen": "combat"}
+    controls = [
+        {"label": "Next", "role": "button", "confidence": "high", "x": 0.9, "y": 0.5, "x0": 0.86, "y0": 0.45, "x1": 0.94, "y1": 0.55},
+    ]
+    first = agent._apply_control_suppression(controls)
+    assert [row["label"] for row in first] == ["Next"]
+    agent._record_blocked_control_attempt("Next")
+    second = agent._apply_control_suppression(controls)
+    assert [row["label"] for row in second] == ["Next"]
+    agent._record_blocked_control_attempt("Next")
+    third = agent._apply_control_suppression(controls)
+    assert third == []
+    assert agent._control_suppression.last_log_reason == "suppressed:blocked-twice"
+
+
+def test_surface_change_clears_control_suppression() -> None:
+    from loop.memory.overlay_state import ControlSuppressionState
+
+    agent = CollectAgent.__new__(CollectAgent)
+    agent._control_suppression = ControlSuppressionState()
+    agent._last_surface_screen = "combat"
+    agent._last_surface_membership = ()
+    agent._prev_surface_controls = []
+    agent._host_stats = {"screen": "combat"}
+    agent._obs_metrics = {"screen": "combat"}
+    controls = [
+        {"label": "Next", "role": "button", "confidence": "high", "x": 0.9, "y": 0.5, "x0": 0.86, "y0": 0.45, "x1": 0.94, "y1": 0.55},
+    ]
+    agent._apply_control_suppression(controls)
+    agent._record_blocked_control_attempt("Next")
+    agent._record_blocked_control_attempt("Next")
+    agent._host_stats = {"screen": "loot"}
+    agent._obs_metrics = {"screen": "loot"}
+    controls[0]["label"] = "Continue"
+    refreshed = agent._apply_control_suppression(controls)
+    assert [row["label"] for row in refreshed] == ["Continue"]
+
+
+def test_rebound_control_with_new_bounds_is_new_attempt() -> None:
+    from loop.memory.overlay_state import ControlSuppressionState
+    from loop.os.frame_model import control_key_from_row
+
+    agent = CollectAgent.__new__(CollectAgent)
+    agent._control_suppression = ControlSuppressionState()
+    agent._last_surface_screen = "tutorial"
+    agent._last_surface_membership = ()
+    agent._prev_surface_controls = []
+    agent._host_stats = {"screen": "tutorial"}
+    agent._obs_metrics = {"screen": "tutorial"}
+    row_a = {"label": "Next", "role": "nav_next", "confidence": "high", "x": 0.9, "y": 0.5, "x0": 0.86, "y0": 0.45, "x1": 0.94, "y1": 0.55}
+    row_b = dict(row_a)
+    row_b.update({"x0": 0.80, "x1": 0.88})
+    assert control_key_from_row(row_a, screen="tutorial") != control_key_from_row(row_b, screen="tutorial")
+    agent._apply_control_suppression([row_a])
+    agent._record_blocked_control_attempt("Next")
+    agent._record_blocked_control_attempt("Next")
+    rebound = agent._apply_control_suppression([row_b])
+    assert [row["label"] for row in rebound] == ["Next"]
