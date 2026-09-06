@@ -3306,16 +3306,24 @@ class CollectAgent:
 
         def compatible(mark: AimMark, row_role: str) -> bool:
             mark_role = self._surface_key(mark.role)
-            if not mark_role or mark_role in {"unknown", "icon", "other"}:
-                return True
             if row_role in generic:
                 return True  # foreground/generic semantics take precedence
-            if mark_role in generic and row_role in domain:
+            if row_role in domain:
+                # Perception prose may annotate an already typed surface
+                # object, but cannot promote an arbitrary icon/body/text mark
+                # to a card or target.  Promotion here made transient
+                # ``object:N`` rows prompt-visible and later unresolvable.
+                if not mark_role or mark_role in {"unknown", "icon", "other"}:
+                    return False
+                if mark_role in generic:
+                    return False
+                if mark_role in domain:
+                    normalized_mark = "enemy" if mark_role in {"target", "character", "unknown character"} else mark_role
+                    normalized_row = "enemy" if row_role in {"target", "character", "unknown_character"} else row_role
+                    return normalized_mark == normalized_row
                 return False
-            if mark_role in domain and row_role in domain:
-                normalized_mark = "enemy" if mark_role in {"target", "character", "unknown character"} else mark_role
-                normalized_row = "enemy" if row_role in {"target", "character", "unknown_character"} else row_role
-                return normalized_mark == normalized_row
+            if not mark_role or mark_role in {"unknown", "icon", "other"}:
+                return True
             return True
 
         for row in rows:
@@ -3340,20 +3348,6 @@ class CollectAgent:
                 ]
                 if len(exact) == 1:
                     match = exact[0]
-            bbox = self._scene_bbox(row.get("bbox"))
-            if match is None and bbox is not None:
-                bx = (bbox[0] + bbox[2]) / 2
-                by = (bbox[1] + bbox[3]) / 2
-                ranked = sorted(
-                    (
-                        ((mark.x - bx) ** 2 + (mark.y - by) ** 2, index, mark)
-                        for index, mark in candidates
-                    ),
-                    key=lambda item: item[0],
-                )
-                if ranked and ranked[0][0] <= 0.12 * 0.12:
-                    _, index, mark = ranked[0]
-                    match = (index, mark)
             if match is None:
                 continue
             index, mark = match
@@ -3915,18 +3909,18 @@ class CollectAgent:
             bbox = BoundingBox(obj.x0, obj.y0, obj.x1, obj.y1)
             if role == "card":
                 state = _matching(hand_states, obj, name_field="name")
-                state_name = self._field_value(getattr(state, "name", None)) if state is not None else None
                 detail = next((
                     row for row in scene_cards
                     if str(row.get("entity_id") or row.get("id") or "") == str(obj.object_id)
                 ), None)
-                if detail is None:
-                    detail = next((
-                        row for row in scene_cards
-                        if _norm(row.get("label") or row.get("name")) in {_norm(obj.label), _norm(state_name)}
-                    ), {})
-                scene_name = detail.get("name") or detail.get("label")
-                card_name = str(scene_name or state_name or obj.label or "").strip() or None
+                # The ActionSurface/store object is the sole authority for a
+                # prompt-facing card's identity and visible name.  Perception
+                # and state rows can supply optional metadata below, but may
+                # not relabel a canonical object: their independently ordered
+                # duplicate-card lists otherwise turn e.g. ``card_3`` from a
+                # displayed Strike into a dispatched Defend.
+                detail = detail or {}
+                card_name = str(obj.label or "").strip() or None
                 cost = self._field_value(getattr(state, "cost", None)) if state is not None else None
                 playable = self._field_value(getattr(state, "playable", None)) if state is not None else None
                 if playable is None:

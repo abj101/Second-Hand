@@ -283,6 +283,82 @@ def test_collect_agent_finalizes_tutorial_scene_from_current_marks(tmp_path: Pat
         agent._screen_objects.close()
 
 
+def test_turn_snapshot_keeps_canonical_card_name_when_scene_rows_reflow(tmp_path: Path) -> None:
+    """Perception metadata cannot change which card a prompt-facing ID denotes.
+
+    This is distilled from the live reflow regression: the surface's third
+    card was visibly a Strike, while a separately ordered perception row
+    claimed that ``card_3`` was Defend.  The ACT prompt must retain the
+    surface label or a valid Strike intent can dispatch the wrong card.
+    """
+    marks = [
+        _mark(1, "Defend", x=0.36, y=0.91, role="card", object_id="card_1"),
+        _mark(2, "Strike", x=0.50, y=0.90, role="card", object_id="card_3"),
+        _mark(3, "Cultist", x=0.75, y=0.63, role="enemy", object_id="enemy_1"),
+    ]
+    surface = build_action_surface(
+        marks, run_id="r", step_id=2, screen="combat", activity="combat",
+    )
+    agent = CollectAgent.__new__(CollectAgent)
+    agent.fixture = Sts2Fixture()
+    agent.session_id = "r"
+    agent._step_id = 2
+    agent._host_stats = {"screen": "combat", "energy": 3}
+    agent._obs_metrics = {"screen": "combat", "energy": 3}
+    agent._screen_objects = ScreenObjectStore(tmp_path / "objects.db")
+    agent._screen_objects.save_frame(
+        run_id="r", step_id=2, marks=marks, screen="combat",
+        context=surface.context, surface=surface,
+    )
+    agent._action_surface = surface
+    agent._game_state = None
+    agent._entity_tracker = None
+    agent._reason_controls = []
+    agent._last_execution_failure = None
+    agent._v2_control_objects = {}
+    scene = SimpleNamespace(
+        hand_cards=[
+            {"entity_id": "card_1", "label": "Defend"},
+            # Stale, independently ordered metadata: never an execution authority.
+            {"entity_id": "card_3", "label": "Defend"},
+        ],
+        enemies=[], characters=[], controls=[],
+    )
+    try:
+        snapshot = agent._build_turn_snapshot(scene)
+        assert [(card.card_id, card.name) for card in snapshot.cards] == [
+            ("card_1", "Defend"), ("card_3", "Strike"),
+        ]
+    finally:
+        agent._screen_objects.close()
+
+
+def test_scene_metadata_cannot_promote_nearby_unknown_object_to_enemy() -> None:
+    """A bounding box is evidence, not authority to mint an executable role."""
+    image = Image.new("RGB", (128, 96))
+    agent = CollectAgent.__new__(CollectAgent)
+    agent._aim = AimGuide.from_marks(image, [
+        _mark(1, "Strike", x=0.40, y=0.90, role="card", object_id="card_1"),
+        _mark(2, "icon", x=0.58, y=0.61, role="unknown", object_id="object:2"),
+        _mark(3, "unidentified_enemy", x=0.75, y=0.63, role="enemy", object_id="enemy_1"),
+    ])
+    scene = SimpleNamespace(
+        controls=[], hand_cards=[], characters=[],
+        enemies=[{
+            "entity_id": "unknown_character_1",
+            "role": "enemy",
+            "label": "Enemy",
+            # Coordinates are fixture evidence only. The nearby icon must not
+            # become an enemy when this row lacks an exact canonical binding.
+            "bbox": [520, 560, 640, 660],
+        }],
+    )
+    reconciled = agent._reconcile_scene_marks(scene)
+    assert [(mark.object_id, mark.role) for mark in reconciled] == [
+        ("card_1", "card"), ("object:2", "unknown"), ("enemy_1", "enemy"),
+    ]
+
+
 def test_empty_action_surface_skips_act_and_recovers_once() -> None:
     surface = build_action_surface(
         [_mark(1, "Mystery", x=0.5, y=0.5)],
