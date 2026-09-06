@@ -105,12 +105,13 @@ from loop.log.schema import (
     EpisodeLog,
     MemoryHit,
     Observation,
+    PerceptionSource,
     PrimitiveLog,
     SessionSummary,
     StepLog,
     StepResult,
 )
-from loop.log.store import EpisodeStore
+from loop.log.store import EpisodeStore, registry_tool_names
 from loop.memory.episodic import WorkingMemory
 from loop.memory.journal import (
     FACE,
@@ -670,9 +671,14 @@ class CollectAgent:
         self._verified_card_actions = 0
         self._false_card_transactions = 0
         self._cached_perceive_scene: Any = None
+        self._cached_perceive_scene_step: int | None = None
         self._force_perceive = False
         self._perception_cache = PerceptionCache()
         self._force_inspect = False
+        self._turn_perception_source: PerceptionSource = "other"
+        self._turn_llm1_called = False
+        self._turn_llm1_reused_from_step: int | None = None
+        self._turn_reasoner_called = False
         self._combat_enter_logged = False
         self._combat_index = 0
         self._combat_won_keys: set[str] = set()
@@ -699,6 +705,7 @@ class CollectAgent:
         self._entity_tracker = EntityTracker()
         self._perception_cache.reset()
         self._cached_perceive_scene = None
+        self._cached_perceive_scene_step = None
         self._scene_desc = None
         self._action_surface = None
         self._frame_model = None
@@ -1020,7 +1027,7 @@ class CollectAgent:
             self._pending_exec_error = "invalid-target:state-gate"
             self._step_illegal_blocked = True
             self._last_legal_reason = reason
-            self._last_tool_events = list(getattr(self, "_last_tool_events", [])) + [{
+            self._append_collector_audit({
                 "tool": "targeting_validate",
                 "status": "rejected",
                 "reason": "state-gate",
@@ -1029,7 +1036,7 @@ class CollectAgent:
                     "run_id": str(getattr(self, "session_id", "")),
                     "step_id": int(getattr(self, "_step_id", 0) or 0),
                 },
-            }]
+            })
             _say(f"  {tag} target   rejected: {reason}")
             return ActionLog(duration_ms=action.duration_ms or self.config.burst_ms)
         if self._guard_non_combat_enemy_action(action, screen=screen):
@@ -1108,7 +1115,7 @@ class CollectAgent:
         self._pending_exec_error = f"invalid-target:{target_reason}"
         self._step_illegal_blocked = True
         self._last_legal_reason = target_reason
-        self._last_tool_events = list(getattr(self, "_last_tool_events", [])) + [{
+        self._append_collector_audit({
             "tool": "targeting_validate",
             "status": "rejected",
             "reason": str(target_reason),
@@ -1117,7 +1124,7 @@ class CollectAgent:
                 "run_id": str(getattr(self, "session_id", "")),
                 "step_id": int(getattr(self, "_step_id", 0) or 0),
             },
-        }]
+        })
         _say(f"  {tag} target   invalid: {target_reason}")
         # This is an execution boundary.  Recording an error while returning
         # the rejected chord would still dispatch an icon/card-like click.
@@ -1137,7 +1144,7 @@ class CollectAgent:
             return False
         self._pending_exec_error = None
         self._last_legal_reason = f"{pending}; superseded by safe inspection hover"
-        self._last_tool_events = list(getattr(self, "_last_tool_events", [])) + [{
+        self._append_collector_audit({
             "tool": "targeting_validate",
             "status": "superseded",
             "reason": str(pending),
@@ -1147,7 +1154,7 @@ class CollectAgent:
                 "run_id": str(getattr(self, "session_id", "")),
                 "step_id": int(getattr(self, "_step_id", 0) or 0),
             },
-        }]
+        })
         _say(f"  {tag} target   rejected action superseded by safe hover mk_{action.mark}")
         return True
 
@@ -1295,7 +1302,7 @@ class CollectAgent:
             self._pending_exec_error = f"invalid-target:{reason}"
             self._step_illegal_blocked = True
             self._last_legal_reason = reason
-            self._last_tool_events = list(getattr(self, "_last_tool_events", [])) + [{
+            self._append_collector_audit({
                 "tool": "targeting_validate",
                 "status": "rejected",
                 "reason": reason,
@@ -1304,7 +1311,7 @@ class CollectAgent:
                     "run_id": str(getattr(self, "session_id", "")),
                     "step_id": int(getattr(self, "_step_id", 0) or 0),
                 },
-            }]
+            })
             _say(f"  {tag} target   final gate rejected: {reason}")
             return ActionLog(duration_ms=action.duration_ms or self.config.burst_ms)
 
@@ -1712,6 +1719,7 @@ class CollectAgent:
         """Invalidate perception and rescan after repeated identical no-op actions."""
         self._clear_stale_target_state()
         self._cached_perceive_scene = None
+        self._cached_perceive_scene_step = None
         self._scene_desc = None
         label = chord or "?"
         count = streak or 2
@@ -2516,6 +2524,43 @@ class CollectAgent:
         self._last_llm1_final_schema_valid = bool(getattr(scene_desc, "llm1_final_schema_valid", False))
         self._last_llm1_schema_attempts = int(getattr(scene_desc, "llm1_schema_attempts", 0) or 0)
 
+    def _append_collector_audit(self, event: dict[str, Any]) -> None:
+        payload = dict(event)
+        payload.setdefault("kind", "collector_audit")
+        self._last_tool_events = list(getattr(self, "_last_tool_events", [])) + [payload]
+
+    def _reset_turn_telemetry(self) -> None:
+        self._turn_perception_source = "other"
+        self._turn_llm1_called = False
+        self._turn_llm1_reused_from_step = None
+        self._turn_reasoner_called = False
+
+    def _record_perception_telemetry(
+        self,
+        *,
+        ran_llm1: bool,
+        gate_reason: str,
+        forced: bool,
+    ) -> None:
+        if forced and ran_llm1:
+            source: PerceptionSource = "forced_rescan"
+        elif ran_llm1:
+            source = "llm1"
+        elif self._cached_perceive_scene is not None and gate_reason == "combat-stable":
+            source = "scene_cache"
+        elif str(gate_reason or "").startswith("ocr-only"):
+            source = "ocr_cache"
+        else:
+            source = "other"
+        self._turn_perception_source = source
+        self._turn_llm1_called = bool(ran_llm1)
+        if ran_llm1:
+            self._turn_llm1_reused_from_step = None
+        elif source == "scene_cache":
+            self._turn_llm1_reused_from_step = self._cached_perceive_scene_step
+        else:
+            self._turn_llm1_reused_from_step = None
+
     def _attach_action_identity(self, action: ActionLog) -> ActionLog:
         from loop.mcp.tools.targeting import object_role
 
@@ -3096,6 +3141,7 @@ class CollectAgent:
         reason_controls = self._apply_perceive_scene(desc)
         if str(desc.screen or "").strip().lower() == "combat":
             self._cached_perceive_scene = desc
+            self._cached_perceive_scene_step = int(self._step_id or 0)
         self._reason_controls = reason_controls
         self._legal_actions = list(getattr(desc, "legal_actions", []) or [])
         self._sync_legal_actions()
@@ -3911,6 +3957,7 @@ class CollectAgent:
             fallback_model=self.config.reason_fallback_model,
         )
         started = time.perf_counter()
+        self._turn_reasoner_called = True
         try:
             decision = reasoner.decide(snapshot)
         except ActReasonerError as exc:
@@ -4071,6 +4118,7 @@ class CollectAgent:
         prev_screen = str(
             self._prev_host_stats.get("screen") or self._obs_metrics.get("screen") or ""
         )
+        forced_perceive = bool(self._force_perceive)
         run_llm1, gate_reason = should_run_llm1_perceive(
             screen=resolved_screen,
             prev_screen=prev_screen,
@@ -4150,6 +4198,11 @@ class CollectAgent:
                 if combat_errors:
                     perceive_retry_reason = "; ".join(combat_errors)
         self._perceive_retry_reason = perceive_retry_reason or None
+        self._record_perception_telemetry(
+            ran_llm1=ran_llm1,
+            gate_reason=gate_reason,
+            forced=forced_perceive,
+        )
         self._log_combat_perception(
             scene_desc,
             gate_reason=gate_reason,
@@ -4208,8 +4261,10 @@ class CollectAgent:
         screen_key = str(scene_desc.screen or resolved_screen or "").strip().lower()
         if ran_llm1 and screen_key == "combat":
             self._cached_perceive_scene = scene_desc
+            self._cached_perceive_scene_step = int(self._step_id or 0)
         elif screen_key != "combat":
             self._cached_perceive_scene = None
+            self._cached_perceive_scene_step = None
         self._sync_legal_actions()
         if not getattr(scene_desc, "schema_valid", True):
             _say("  perceive schema invalid — skipping reasoner (CV/heuristic fallback)")
@@ -4354,6 +4409,7 @@ class CollectAgent:
             break
         reason_ms = tool_result.latency_ms
         perceive_ms += sum(recheck_ms)
+        self._turn_reasoner_called = True
         self._last_reason_raw = tool_result.text
         self._last_tool_trace = list(tool_result.tool_trace)
         self._last_tool_events = list(tool_result.tool_events)
@@ -4364,7 +4420,7 @@ class CollectAgent:
             if tool in {"inspect_object", "request_recheck"}:
                 # Act cannot acquire evidence. Fail closed as a clean recheck
                 # turn instead of allowing a malformed action or generic fill.
-                self._last_tool_events.append({
+                self._append_collector_audit({
                     "tool": tool,
                     "status": "rejected",
                     "reason": "act-route-observation-tool",
@@ -5185,6 +5241,7 @@ class CollectAgent:
         self._last_discover_ms = 0.0
         self._entity_tracker = EntityTracker()
         self._cached_perceive_scene = None
+        self._cached_perceive_scene_step = None
         self._force_perceive = False
         self._perception_cache.reset()
         self._action_surface = None
@@ -5251,6 +5308,8 @@ class CollectAgent:
             self._perceive_retry_reason = None
             self._last_scene = ""
             self._last_tool_trace = []
+            self._last_tool_events = []
+            self._reset_turn_telemetry()
             self._last_decision_schema = ""
             self._last_snapshot_id = ""
             self._last_turn_snapshot = {}
@@ -7255,6 +7314,17 @@ class CollectAgent:
                 route_before_discovery=self._route_before_discovery if self._two_stage() else "",
                 route_after_discovery=self._route_after_discovery if self._two_stage() else "",
                 entity_route_facts=list(self._entity_route_facts) if self._two_stage() else [],
+                perception_source=self._turn_perception_source if self._two_stage() else "other",
+                llm1_called_this_turn=self._turn_llm1_called if self._two_stage() else False,
+                llm1_reused_from_step=(
+                    self._turn_llm1_reused_from_step if self._two_stage() else None
+                ),
+                reasoner_called_this_turn=(
+                    self._turn_reasoner_called if self._two_stage() else False
+                ),
+                explicit_mcp_tools_called=(
+                    registry_tool_names(self._last_tool_events) if self._two_stage() else []
+                ),
                 paused=self.config.paused,  # type: ignore[arg-type]
                 arm=self.config.arm,
                 skill_on=skill_on,

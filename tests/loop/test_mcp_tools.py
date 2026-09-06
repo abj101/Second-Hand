@@ -500,3 +500,45 @@ def test_orchestrator_rejects_unknown_vision_tool() -> None:
     orch = ToolOrchestrator(reg, max_rounds=3, budget_s=5.0)
     result = orch.run(_Gw(), system="sys", user="user", table_name="sts2")
     assert "Unknown tool" in " ".join(result.tool_trace)
+
+
+def test_orchestrator_registry_events_carry_mcp_kind() -> None:
+    class _Gw(VlmGateway):
+        def complete_text(self, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            parsed = {"tool": "memory_notebook"}
+            return ModelCall(
+                text=json.dumps(parsed),
+                parsed=parsed,
+                latency_ms=1.0,
+                model="fake",
+            )
+
+    reg = ToolRegistry()
+    reg.register("memory_notebook", description="nb", parameters={}, handler=lambda **_: "ok")
+    result = ToolOrchestrator(reg, max_rounds=2, budget_s=5.0).run(
+        _Gw(), system="sys", user="user", table_name="sts2"
+    )
+    assert result.tool_events[0]["kind"] == "mcp_registry"
+    assert result.tool_events[0]["tool"] == "memory_notebook"
+
+
+def test_explicit_mcp_tools_exclude_collector_audits() -> None:
+    from loop.log.store import registry_tool_names
+
+    tool_events = [
+        {"kind": "mcp_registry", "tool": "memory_notebook"},
+        {"kind": "collector_audit", "tool": "targeting_validate", "status": "rejected"},
+    ]
+    explicit = registry_tool_names(tool_events)
+    assert explicit == ["memory_notebook"]
+    assert len(tool_events) > len(explicit)
+
+
+def test_direct_action_has_empty_explicit_mcp_list() -> None:
+    from loop.log.store import registry_tool_names
+
+    audit_only = [
+        {"kind": "collector_audit", "tool": "targeting_validate", "status": "rejected"},
+    ]
+    assert registry_tool_names(audit_only) == []
