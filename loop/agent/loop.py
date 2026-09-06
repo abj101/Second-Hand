@@ -51,7 +51,7 @@ from loop.agent.discovery import (
     rebind_unknowns,
     validate_contract,
 )
-from loop.agent.perception_cache import PerceptionCache, PerceptionReuse
+from loop.agent.perception_cache import PerceptionCache, PerceptionReuse, ocr_uncertain_for_reuse
 from loop.agent.perceive import (
     inject_host_enemies_into_scene,
     perceive_scene,
@@ -3056,46 +3056,61 @@ class CollectAgent:
         reuse: PerceptionReuse,
     ) -> tuple[list[Any], list[Any], list[Any], float]:
         """OCR + aim marks for a turn observation; respects perception cache."""
+        from loop.os.ocr import set_ocr_context
+
+        screen_key = str(
+            aim_screen
+            or self._host_stats.get("screen")
+            or self._obs_metrics.get("screen")
+            or ""
+        ).strip().lower()
+        set_ocr_context(
+            screen=screen_key,
+            uncertain=ocr_uncertain_for_reuse(reuse),
+        )
         t_ocr = time.perf_counter()
-        if reuse.reuse_ocr and self._perception_cache.last_ocr:
-            words = list(self._perception_cache.last_ocr)
-        else:
-            words = ocr_click_marks(view)
-        ocr_ms = _ms(t_ocr)
-        if reuse.reuse_ocr or reuse.reuse_enemies:
-            _say(f"  ocr      cache ({reuse.reason})")
-        t_gui = time.perf_counter()
-        gui_marks = gui_click_marks(view)
-        gui_ms = _ms(t_gui)
-        marks: list[Any] = []
-        if self._two_stage():
-            marks = list(
-                build_marks(
-                    view,
-                    lexicon=self.journal.lexicon,
-                    screen=aim_screen,
-                    words=words,
-                    gui_marks=gui_marks,
-                )
-            )
-            marks = self._number_aim_marks(
-                marks,
-                screen=aim_screen,
-                ocr_words=words,
-            )
-            if reuse.reuse_enemies and self._perception_cache.last_enemy_marks:
-                marks = merge_cached_enemy_marks(
-                    marks,
-                    self._perception_cache.last_enemy_marks,
-                )
+        try:
+            if reuse.reuse_ocr and self._perception_cache.last_ocr:
+                words = list(self._perception_cache.last_ocr)
             else:
-                marks = seed_enemies_from_host(
-                    marks,
-                    host_stats=self._host_stats,
-                    image=view,
-                    lexicon=self.journal.lexicon,
-                    screen=aim_screen,
+                words = ocr_click_marks(view)
+            ocr_ms = _ms(t_ocr)
+            if reuse.reuse_ocr or reuse.reuse_enemies:
+                _say(f"  ocr      cache ({reuse.reason})")
+            t_gui = time.perf_counter()
+            gui_marks = gui_click_marks(view)
+            gui_ms = _ms(t_gui)
+            marks: list[Any] = []
+            if self._two_stage():
+                marks = list(
+                    build_marks(
+                        view,
+                        lexicon=self.journal.lexicon,
+                        screen=aim_screen,
+                        words=words,
+                        gui_marks=gui_marks,
+                    )
                 )
+                marks = self._number_aim_marks(
+                    marks,
+                    screen=aim_screen,
+                    ocr_words=words,
+                )
+                if reuse.reuse_enemies and self._perception_cache.last_enemy_marks:
+                    marks = merge_cached_enemy_marks(
+                        marks,
+                        self._perception_cache.last_enemy_marks,
+                    )
+                else:
+                    marks = seed_enemies_from_host(
+                        marks,
+                        host_stats=self._host_stats,
+                        image=view,
+                        lexicon=self.journal.lexicon,
+                        screen=aim_screen,
+                    )
+        finally:
+            set_ocr_context(screen="", uncertain=False)
         entity_rows = [
             ent.to_row()
             for ent in getattr(self._entity_tracker, "entities", []) or []
@@ -5316,6 +5331,7 @@ class CollectAgent:
         from loop.os import ocr as ocr_mod
 
         ocr_mod.set_debug_dir(self.store.run_dir / "ocr_debug")
+        ocr_mod.warm_up_rapid_engine()
         self._blocked_marks.clear()
         self.working = WorkingMemory()
         memory_carry = self.notebook.reset_episode()
