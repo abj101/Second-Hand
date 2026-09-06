@@ -35,7 +35,7 @@ def _store_with_marks(tmp_path: Path) -> ScreenObjectStore:
         step_id=1,
         marks=(
             AimMark(id=1, x=0.75, y=0.63, x0=0.68, y0=0.56, x1=0.82, y1=0.72, label="Slime", role="enemy"),
-            AimMark(id=2, x=0.5, y=0.8, x0=0.4, y0=0.7, x1=0.6, y1=0.9, label="Strike"),
+            AimMark(id=2, x=0.5, y=0.8, x0=0.4, y0=0.7, x1=0.6, y1=0.9, label="Strike", role="card"),
         ),
         screen="combat",
     )
@@ -81,8 +81,8 @@ def test_typed_inventory_rejects_icon_card_and_proposes_unknown_inspection(tmp_p
         run_id="r", step_id=1, screen="combat",
         marks=(
             AimMark(id=1, x=0.50, y=0.84, x0=0.4, y0=0.75, x1=0.6, y1=0.95, label=":Icon"),
-            AimMark(id=2, x=0.75, y=0.64, x0=0.68, y0=0.56, x1=0.82, y1=0.72, label="unknown_character_1"),
-            AimMark(id=3, x=0.08, y=0.05, x0=0.01, y0=0.01, x1=0.15, y1=0.09, label=":Icon"),
+            AimMark(id=2, x=0.75, y=0.64, x0=0.68, y0=0.56, x1=0.82, y1=0.72, label="unknown_character_1", role="enemy"),
+            AimMark(id=3, x=0.08, y=0.05, x0=0.01, y0=0.01, x1=0.15, y1=0.09, label=":Icon", role="hud"),
         ),
     )
     inventory = screen_objects(store)
@@ -104,20 +104,42 @@ def _combat_obj(label: str, x: float, y: float) -> ScreenObject:
     )
 
 
-def test_object_role_midboard_anonymous_enemy_is_enemy() -> None:
+def test_object_role_requires_fixture_owned_domain_type() -> None:
     for label in ("unidentified_enemy", "unknown_character_1"):
         obj = _combat_obj(label, 0.75, 0.645)
-        assert object_role(obj, entity_targets_ok=True) == "enemy", label
-        assert object_role(obj) == "enemy", label
+        assert object_role(obj, entity_targets_ok=True) == "unknown", label
+        assert object_role(obj) == "unknown", label
+        typed = ScreenObject.from_mark(
+            AimMark(id=2, x=.13, y=.22, x0=.08, y0=.16, x1=.19, y1=.29, label=label, role="enemy"),
+            screen="combat",
+        )
+        assert object_role(typed, entity_targets_ok=True) == "enemy", label
 
 
 def test_object_role_hand_unknown_and_hud_unchanged() -> None:
     hand = _combat_obj("unknown_character_1", 0.40, 0.84)
     assert object_role(hand, entity_targets_ok=True) == "unknown"
-    hud = _combat_obj(":Icon", 0.08, 0.05)
+    hud = ScreenObject.from_mark(AimMark(id=2, x=.08, y=.05, x0=.02, y0=.01, x1=.14, y1=.09, label=":Icon", role="hud"), screen="combat")
     assert object_role(hud, entity_targets_ok=True) == "hud"
     icon = _combat_obj(":icon", 0.75, 0.645)
     assert object_role(icon, entity_targets_ok=True) == "unknown"
+
+
+def test_typed_targets_resolve_in_an_arbitrary_non_sts_layout(tmp_path: Path) -> None:
+    """Generic target binding is independent of screen bands or game layout."""
+    store = ScreenObjectStore(tmp_path / "arbitrary-layout.db")
+    store.save_frame(
+        run_id="r", step_id=1, screen="combat",
+        marks=(
+            AimMark(id=1, x=.11, y=.16, x0=.04, y0=.08, x1=.18, y1=.24, label="Tool", role="card"),
+            AimMark(id=2, x=.91, y=.11, x0=.84, y0=.03, x1=.98, y1=.19, label="Target", role="enemy"),
+        ),
+    )
+    plan = plan_card_by_id(store, card_id="card_1", target_id="enemy_1", entity_targets_ok=True)
+    assert plan["ok"] is True
+    assert plan["transaction"]["source"]["mark_id"] == 1
+    assert plan["transaction"]["target_candidate"]["mark_id"] == 2
+    store.close()
 
 
 def test_play_card_accepts_player_self_target(tmp_path: Path) -> None:
@@ -129,7 +151,7 @@ def test_play_card_accepts_player_self_target(tmp_path: Path) -> None:
         marks=(
             AimMark(
                 id=1, x=0.24, y=0.58, x0=0.20, y0=0.47, x1=0.30, y1=0.69,
-                label="unknown_character", role="unknown_character",
+                label="player", role="player",
             ),
             AimMark(
                 id=2, x=0.50, y=0.84, x0=0.40, y0=0.75, x1=0.60, y1=0.95,
@@ -188,7 +210,7 @@ def test_stable_id_plan_rebinds_after_mark_renumbering(tmp_path: Path) -> None:
         run_id="r", step_id=2, screen="combat",
         marks=(
             AimMark(id=81, x=0.75, y=0.63, x0=0.68, y0=0.56, x1=0.82, y1=0.72, label="Slime", role="enemy"),
-            AimMark(id=34, x=0.50, y=0.80, x0=0.40, y0=0.70, x1=0.60, y1=0.90, label="Strike"),
+                AimMark(id=34, x=0.50, y=0.80, x0=0.40, y0=0.70, x1=0.60, y1=0.90, label="Strike", role="card"),
         ),
     )
     rebound = plan_card_by_id(store, card_id="card_1", target_id="enemy_1")
@@ -224,7 +246,7 @@ def test_stable_id_plan_treats_target_as_optional_candidate(tmp_path: Path) -> N
         run_id="r", step_id=2, screen="combat",
         marks=(
             AimMark(id=9, x=0.75, y=0.63, x0=0.68, y0=0.56, x1=0.82, y1=0.72, label="Slime", role="enemy"),
-            AimMark(id=7, x=0.50, y=0.80, x0=0.40, y0=0.70, x1=0.60, y1=0.90, label="Defend"),
+                AimMark(id=7, x=0.50, y=0.80, x0=0.40, y0=0.70, x1=0.60, y1=0.90, label="Defend", role="card"),
         ),
     )
     defend_with_extra_target = plan_card_by_id(store, card_id="card_1", target_id="enemy_1")

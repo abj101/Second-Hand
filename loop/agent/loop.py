@@ -11,7 +11,7 @@ from typing import Any, Literal, Sequence
 
 import numpy as np
 
-from loop.agent.heuristic import HAND_Y, HEURISTIC_POLICY_ID, heuristic_action
+from loop.agent.heuristic import HEURISTIC_POLICY_ID, heuristic_action
 from loop.agent.decision import (
     ACT_SYSTEM_PROMPT,
     ACT_PROMPT_ID,
@@ -170,7 +170,6 @@ from loop.os.aim import (
     bind_aim,
     build_aim,
     build_marks,
-    detect_marks,
     clamp_to_overlay,
     fill_from_aim,
     apply_enemy_bboxes,
@@ -182,7 +181,6 @@ from loop.os.aim import (
     gui_click_marks,
     dino_boxes_to_marks,
     fuse_dino_marks,
-    in_combat_sprite_band,
     label_kind,
     needs_tooltip,
     number_spatial_nodes,
@@ -1197,7 +1195,7 @@ class CollectAgent:
         hit = self._aim.by_id(int(action.mark))
         return bool(
             hit is not None
-            and in_combat_sprite_band(float(hit.y), float(hit.x))
+            and str(hit.role or "").strip().lower() == "enemy"
             and needs_tooltip(str(hit.label or ""))
         )
 
@@ -1707,30 +1705,9 @@ class CollectAgent:
             return True
         if action.click_x2 is not None and action.click_y2 is not None:
             return True
-        screen = str(
-            getattr(self, "_obs_metrics", {}).get("screen")
-            or getattr(self, "_host_stats", {}).get("screen")
-            or ""
-        ).strip().lower()
-        # Positional enemy inference is meaningful only in combat.  Menu controls
-        # such as character-select "Next" live in the same upper-screen band.
-        if screen != "combat":
-            return False
-        y = action.click_y
-        x = action.click_x
-        if y is not None and in_combat_sprite_band(y, x):
-            return True
         if action.mark is not None and self._aim is not None:
             hit = self._aim.by_id(int(action.mark))
-            if hit is not None and in_combat_sprite_band(hit.y, hit.x):
-                return True
-            if (
-                hit is not None
-                and screen == "combat"
-                and hit.y >= HAND_Y
-                and action.target is None
-                and action.click_x2 is None
-            ):
+            if hit is not None and str(hit.role or "").strip().lower() in {"enemy", "player"}:
                 return True
         return False
 
@@ -1806,15 +1783,11 @@ class CollectAgent:
         if action.target is not None:
             self._selected = None
             return
-        if self._selected and not action.hover:
-            if action.click_y is not None and in_combat_sprite_band(action.click_y, action.click_x):
+        if self._selected and not action.hover and action.mark is not None and self._aim is not None:
+            hit = self._aim.by_id(int(action.mark))
+            if hit is not None and str(hit.role or "").strip().lower() in {"enemy", "player"}:
                 self._selected = None
                 return
-            if action.mark is not None and self._aim is not None:
-                hit = self._aim.by_id(int(action.mark))
-                if hit is not None and in_combat_sprite_band(hit.y, hit.x):
-                    self._selected = None
-                    return
         if selection_state == "confirmed" and label and not any(
             word in compact for word in ("continue", "got it", "resume", "confirm", "end turn")
         ):
@@ -1858,11 +1831,9 @@ class CollectAgent:
                 and str(getattr(self, "_last_execution_plan", {}).get("action") or "")
                 == "play_card"
             )
-        card = self._aim.by_id(int(action.mark)) if self._aim is not None and action.mark is not None else None
-        card_y = card.y if card is not None else action.click_y
         typed_card = str(action.source_role or "").strip().lower() == "card"
         return (
-            (typed_card or (card_y is not None and card_y >= HAND_Y))
+            typed_card
             and action.click_x is not None
             and action.click_y is not None
         )
@@ -2015,9 +1986,7 @@ class CollectAgent:
             return False
 
         def _is_card(mark: AimMark) -> bool:
-            return str(mark.role or "").strip().lower() == "card" or (
-                mark.y >= HAND_Y and bool(str(mark.label or "").strip())
-            )
+            return str(mark.role or "").strip().lower() == "card"
 
         before_marks = getattr(self, "_aim_before_transaction", ()) or ()
         before_count = sum(1 for mark in before_marks if _is_card(mark))
@@ -2073,161 +2042,19 @@ class CollectAgent:
         pre_frame: Any | None = None,
         fresh_frame: Any | None = None,
     ) -> AimMark | None:
-        """Fresh-frame target binding: stable object_id, then unambiguous bbox/center."""
-        if before is None:
-            return None
-        if pre_frame is not None and fresh_frame is not None:
-            # Prefer current-frame CV geometry. The old target is only an
-            # identity/search seed and never supplies the returned bounds.
-            candidates = [
-                mark for mark in detect_marks(fresh_frame)
-                if in_combat_sprite_band(mark.y, mark.x)
-                and (mark.x1 - mark.x0) * (mark.y1 - mark.y0) >= 0.003
-            ]
-            old_w = max(0.01, before.x1 - before.x0)
-            old_h = max(0.01, before.y1 - before.y0)
-            ranked = sorted(
-                (
-                    (
-                        ((mark.x - before.x) ** 2 + (mark.y - before.y) ** 2) ** 0.5
-                        + 0.25 * (
-                            abs((mark.x1 - mark.x0) - old_w)
-                            + abs((mark.y1 - mark.y0) - old_h)
-                        ),
-                        mark,
-                    )
-                    for mark in candidates
-                    if ((mark.x - before.x) ** 2 + (mark.y - before.y) ** 2) ** 0.5 <= 0.12
-                ),
-                key=lambda row: row[0],
-            )
-            if ranked and ranked[0][0] <= 0.12 and (
-                len(ranked) == 1 or ranked[1][0] - ranked[0][0] >= 0.015
-            ):
-                mark = ranked[0][1]
-                current_aim = getattr(self, "_aim", None)
-                return AimMark(
-                    id=max((item.id for item in getattr(current_aim, "marks", ())), default=0) + 1,
-                    x=mark.x, y=mark.y, x0=mark.x0, y0=mark.y0, x1=mark.x1, y1=mark.y1,
-                    label=before.label, score=mark.score,
-                    object_id=before.object_id, role="enemy",
-                    source="fresh-cv-rebind", confidence=mark.confidence,
-                )
-            return self._rebind_target_from_fresh_pixels(
-                before, pre_frame=pre_frame, fresh_frame=fresh_frame
-            )
-        if self._aim is None:
+        """Legacy helper: only a uniquely typed current-frame object may rebind."""
+        del pre_frame, fresh_frame
+        if before is None or self._aim is None:
             return None
         oid = str(before.object_id or "").strip()
-        if oid and not is_frame_mark_token(oid):
-            hits = [mark for mark in self._aim.marks if str(mark.object_id or "") == oid]
-            if len(hits) == 1:
-                return hits[0]
-            # Stable ids may be regenerated by a sensor-only refresh. Fall
-            # through to current-frame geometry instead of failing early.
-        placeholders = {"", "icon", "unknown", "character", "button"}
-        candidates = [
+        if not oid or is_frame_mark_token(oid):
+            return None
+        hits = [
             mark for mark in self._aim.marks
-            if in_combat_sprite_band(mark.y, mark.x)
-            and " ".join(str(mark.label or "").lower().replace(":", "").split()) not in placeholders
-            and not is_player_row({"label": mark.label, "role": mark.role})
+            if str(mark.object_id or "") == oid
+            and str(mark.role or "").strip().lower() == "enemy"
         ]
-        exact = [mark for mark in candidates if self._same_mark_label(before, mark)]
-        if len(exact) == 1:
-            return exact[0]
-        overlap = [mark for mark in candidates if self._mark_iou(before, mark) >= 0.15]
-        if len(overlap) == 1:
-            return overlap[0]
-        nearby = sorted(
-            (
-                ((mark.x - before.x) ** 2 + (mark.y - before.y) ** 2, mark)
-                for mark in candidates
-            ),
-            key=lambda row: row[0],
-        )
-        if not nearby or nearby[0][0] > 0.08 * 0.08:
-            return self._rebind_target_from_fresh_pixels(before)
-        if len(nearby) > 1 and abs(nearby[1][0] - nearby[0][0]) < 0.01 * 0.01:
-            return self._rebind_target_from_fresh_pixels(before)
-        return nearby[0][1]
-
-    def _rebind_target_from_fresh_pixels(
-        self,
-        before: AimMark,
-        *,
-        pre_frame: Any | None = None,
-        fresh_frame: Any | None = None,
-    ) -> AimMark | None:
-        """Re-detect the same target by local template match on the fresh frame.
-
-        The old box is only a search seed.  The returned click geometry comes
-        from the best measured location in the post-source raw frame, so stale
-        scene geometry is never copied into the executor unchecked.
-        """
-        old_image = pre_frame if pre_frame is not None else getattr(self, "_transaction_pre_image", None)
-        fresh_image = (
-            fresh_frame
-            if fresh_frame is not None
-            else getattr(getattr(self, "_aim", None), "image", None)
-        )
-        if old_image is None or fresh_image is None or old_image.size != fresh_image.size:
-            return None
-        old_gray = np.asarray(old_image.convert("L"), dtype=np.float32)
-        fresh_gray = np.asarray(fresh_image.convert("L"), dtype=np.float32)
-        height, width = old_gray.shape[:2]
-        x0 = max(0, min(width - 2, int(round(before.x0 * width))))
-        y0 = max(0, min(height - 2, int(round(before.y0 * height))))
-        x1 = max(x0 + 2, min(width, int(round(before.x1 * width))))
-        y1 = max(y0 + 2, min(height, int(round(before.y1 * height))))
-        template = old_gray[y0:y1, x0:x1]
-        # Flat regions are not identity-bearing and can produce an arbitrary
-        # "best" location when the background is unchanged.
-        if template.size < 64 or float(np.std(template)) < 5.0:
-            return None
-        radius_x = max(8, int(round(width * 0.04)))
-        radius_y = max(8, int(round(height * 0.04)))
-        matches: list[tuple[float, int, int]] = []
-        for dy in range(-radius_y, radius_y + 1, 4):
-            yy0, yy1 = y0 + dy, y1 + dy
-            if yy0 < 0 or yy1 > height:
-                continue
-            for dx in range(-radius_x, radius_x + 1, 4):
-                xx0, xx1 = x0 + dx, x1 + dx
-                if xx0 < 0 or xx1 > width:
-                    continue
-                patch = fresh_gray[yy0:yy1, xx0:xx1]
-                mad = float(np.mean(np.abs(template - patch)) / 255.0)
-                matches.append((mad, dx, dy))
-        matches.sort(key=lambda row: row[0])
-        best = matches[0] if matches else None
-        if best is None or best[0] > 0.20:
-            return None
-        # Nearby samples are one correlation peak. A second, spatially
-        # distinct peak with essentially the same score means identity is
-        # ambiguous, so fail closed instead of choosing scan order.
-        distinct_radius = max(8.0, min(template.shape[:2]) * 0.5)
-        competitor = next(
-            (
-                row for row in matches[1:]
-                if ((row[1] - best[1]) ** 2 + (row[2] - best[2]) ** 2) ** 0.5
-                >= distinct_radius
-            ),
-            None,
-        )
-        if competitor is not None and competitor[0] <= best[0] + 0.01:
-            return None
-        _, dx, dy = best
-        nx0, ny0, nx1, ny1 = x0 + dx, y0 + dy, x1 + dx, y1 + dy
-        current_aim = getattr(self, "_aim", None)
-        return AimMark(
-            id=max((mark.id for mark in getattr(current_aim, "marks", ())), default=0) + 1,
-            x=((nx0 + nx1) / 2) / width,
-            y=((ny0 + ny1) / 2) / height,
-            x0=nx0 / width, y0=ny0 / height, x1=nx1 / width, y1=ny1 / height,
-            label=before.label, score=max(0.0, 1.0 - best[0]),
-            object_id=before.object_id, role="enemy",
-            source="fresh-template-rebind", confidence=max(0.0, 1.0 - best[0]),
-        )
+        return hits[0] if len(hits) == 1 else None
 
     def _execute_card_transaction(
         self,
@@ -2735,7 +2562,7 @@ class CollectAgent:
         return self._resolve_state_id_to_store_object(str(object_id).strip())
 
     def _resolve_state_id_to_store_object(self, object_id: str):
-        """Map game-state enemy_1_1 / card ids onto this frame's sprite-band object."""
+        """Map a state id to one uniquely overlapping typed current-frame object."""
         from loop.mcp.tools.targeting import object_role
 
         store = getattr(self, "_screen_objects", None)
@@ -2767,12 +2594,14 @@ class CollectAgent:
             role = object_role(obj, entity_targets_ok=True)
             if role != want_role:
                 continue
-            if want_role == "enemy" and float(obj.y) < 0.50:
-                continue
-            candidates.append(obj)
-        if not candidates:
+            overlap_x = max(0.0, min(float(obj.x1), float(box[2])) - max(float(obj.x0), float(box[0])))
+            overlap_y = max(0.0, min(float(obj.y1), float(box[3])) - max(float(obj.y0), float(box[1])))
+            contains_center = float(obj.x0) <= cx <= float(obj.x1) and float(obj.y0) <= cy <= float(obj.y1)
+            if overlap_x > 0.0 and overlap_y > 0.0 or contains_center:
+                candidates.append(obj)
+        if len(candidates) != 1:
             return None
-        return min(candidates, key=lambda obj: (float(obj.x) - cx) ** 2 + (float(obj.y) - cy) ** 2)
+        return candidates[0]
 
     def _skip_labeled_combat_fill(self, action: Any) -> bool:
         """Empty two-stage combat chords must not labeled-click a hand card."""
@@ -3547,22 +3376,9 @@ class CollectAgent:
         return LegalAction("select_card", card_id=card.id), ("selection_confirmed",)
 
     def _resolve_enemy_alias_to_current_label(self, target: str) -> str:
-        """Map a durable EnemyState id to this frame's mark label, never a mark id."""
-        state = self._game_state
-        if state is None or self._aim is None:
-            return target
-        enemy = next((row for row in state.enemies if row.id.casefold() == str(target or "").casefold()), None)
-        if enemy is None or enemy.bbox.value is None:
-            return target
-        x0, y0, x1, y1 = enemy.bbox.value
-        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        candidates = [mark for mark in self._aim.marks if in_combat_sprite_band(mark.y, mark.x)]
-        if not candidates:
-            return target
-        hit = min(candidates, key=lambda mark: (mark.x - cx) ** 2 + (mark.y - cy) ** 2)
-        if (hit.x - cx) ** 2 + (hit.y - cy) ** 2 > 0.12 ** 2:
-            return target
-        return str(hit.label or target)
+        """Map a state alias through the current typed object store only."""
+        hit = self._resolve_state_id_to_store_object(str(target or "").strip())
+        return str(getattr(hit, "label", "") or target)
 
     def _persist_verified_tutorial_rules(self) -> None:
         """Persist only explicit OCR tutorial statements, never planner summaries."""
@@ -4747,8 +4563,8 @@ class CollectAgent:
         if mark is None:
             return None
         role = str(mark.role or "").strip().lower()
-        if role not in {"enemy", "card", "control"}:
-            role = "card" if mark.y >= 0.70 else "enemy" if in_combat_sprite_band(mark.y, mark.x) else "control"
+        if role not in {"enemy", "player", "card", "control", "button"}:
+            return None
         item = DiscoveryObject(
             object_id=str(mark.object_id or mark.label or f"mark_{mark.id}"),
             mark_id=int(mark.id), role=role,

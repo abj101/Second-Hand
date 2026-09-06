@@ -586,7 +586,7 @@ def test_selected_card_and_aim_label(tmp_path) -> None:
     agent._aim = AimGuide(
         marks=(
             AimMark(id=3, x=0.4, y=0.85, x0=0.3, y0=0.82, x1=0.5, y1=0.90, label="Strike"),
-            AimMark(id=7, x=0.55, y=0.30, x0=0.5, y0=0.25, x1=0.6, y1=0.35, label="Cultist"),
+            AimMark(id=7, x=0.55, y=0.30, x0=0.5, y0=0.25, x1=0.6, y1=0.35, label="Cultist", role="enemy"),
         ),
         last_xy=None,
         image=Image.new("RGB", (8, 8), (0, 0, 0)),

@@ -5,21 +5,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from loop.os.aim import GRID, AimMark, in_combat_sprite_band, label_kind
-
-HAND_Y = 0.70
-
-
-def _typed_label(label: str) -> bool:
-    """A hand-band icon is an unknown object, never a fallback card."""
-    text = " ".join((label or "").lower().replace("_", " ").split())
-    return text.lstrip(":") not in {"", "icon", "unknown", "character", "button"} and not any(
-        word in text for word in ("unknown", "unidentified")
-    )
-
-
-def _is_end_turn(label: str) -> bool:
-    return "end turn" in " ".join((label or "").lower().split())
+from loop.os.aim import GRID, AimMark, label_kind
 
 
 def _bbox_iou(a: ScreenObject | AimMark, b: ScreenObject | AimMark) -> float:
@@ -30,36 +16,6 @@ def _bbox_iou(a: ScreenObject | AimMark, b: ScreenObject | AimMark) -> float:
         return 0.0
     union = max(1e-9, (a.x1 - a.x0) * (a.y1 - a.y0) + (b.x1 - b.x0) * (b.y1 - b.y0) - inter)
     return inter / union
-
-
-def _is_player_object(obj: ScreenObject | AimMark) -> bool:
-    from loop.agent.entities import is_player_row
-
-    return is_player_row({
-        "label": obj.label,
-        "role": getattr(obj, "role", "") or "",
-        "x": getattr(obj, "x", None),
-        "y": getattr(obj, "y", None),
-        "x0": getattr(obj, "x0", None),
-        "y0": getattr(obj, "y0", None),
-        "x1": getattr(obj, "x1", None),
-        "y1": getattr(obj, "y1", None),
-    })
-
-
-def _is_player_sprite(obj: ScreenObject | AimMark) -> bool:
-    """Clickable hero body, not the HP/name plate above it."""
-    return (
-        _is_player_object(obj)
-        and in_combat_sprite_band(float(obj.y), float(obj.x))
-        and float(obj.y) >= 0.50
-    )
-
-
-def _is_hp_anchor(obj: ScreenObject | AimMark) -> bool:
-    from loop.agent.entities import is_hp_anchor_label
-
-    return is_hp_anchor_label(obj.label)
 
 
 def _is_mark_object_id(object_id: str) -> bool:
@@ -75,44 +31,14 @@ def _stable_object_id(mark: AimMark) -> str:
     return ""
 
 
-def _enemy_like_mark(mark: AimMark) -> bool:
-    from loop.agent.entities import is_anonymous_enemy_label
-
-    if _is_player_object(mark) or _is_hp_anchor(mark):
-        return False
-    role = (mark.role or "").strip().lower()
-    if role == "enemy":
-        return True
-    if role in {"unknown_character", "character", ""}:
-        compact = " ".join(str(mark.label or "").casefold().replace("_", " ").split())
-        if compact in {"", "unknown", "icon", ":icon", "character", "button"}:
-            return False
-        # HP/intent OCR sits ~0.35; live sprites sit ~0.58–0.71.
-        return (
-            is_anonymous_enemy_label(mark.label)
-            and in_combat_sprite_band(mark.y, mark.x)
-            and float(mark.y) >= 0.50
-        )
-    return False
-
-
 def _prepare_frame_marks(marks: list[AimMark], *, context: Any | None = None) -> list[AimMark]:
-    from loop.agent.entities import player_display_label
-    from loop.os.aim import HAND_Y, _copy_mark
-
-    domain_allowed = bool(getattr(context, "allows_domain_entities", False))
+    from loop.os.aim import _copy_mark
 
     def enemy_like(mark: AimMark) -> bool:
-        if _is_player_object(mark) or _is_hp_anchor(mark):
-            return False
-        return (mark.role or "").strip().lower() == "enemy" or (
-            domain_allowed and _enemy_like_mark(mark)
-        )
+        return (mark.role or "").strip().lower() in {"enemy", "target"}
 
     def player_like(mark: AimMark) -> bool:
-        return (mark.role or "").strip().lower() == "player" or (
-            domain_allowed and _is_player_sprite(mark)
-        )
+        return (mark.role or "").strip().lower() == "player"
 
     kept: list[AimMark] = []
     for mark in sorted(marks, key=lambda item: (item.x, item.y, item.id)):
@@ -125,10 +51,7 @@ def _prepare_frame_marks(marks: list[AimMark], *, context: Any | None = None) ->
                         (enemy_like(mark) and enemy_like(other))
                         or (player_like(mark) and player_like(other))
                     )
-                    and (
-                        _bbox_iou(mark, other) >= 0.45
-                        or ((mark.x - other.x) ** 2 + (mark.y - other.y) ** 2) ** 0.5 < 0.05
-                    )
+                    and _bbox_iou(mark, other) >= 0.45
                 ),
                 None,
             )
@@ -141,16 +64,6 @@ def _prepare_frame_marks(marks: list[AimMark], *, context: Any | None = None) ->
             mark
             for mark in kept
             if (mark.role or "").strip().lower() == "card"
-            or (
-                domain_allowed
-                and (
-                    mark.y >= HAND_Y
-                    and _typed_label(mark.label)
-                    and not _is_end_turn(mark.label)
-                    and (mark.role or "").strip().lower() not in {"button", "control", "dialog", "enemy", "player"}
-                    and label_kind(mark.label) not in {"progress", "danger"}
-                )
-            )
         ],
         key=lambda item: item.x,
     )
@@ -193,7 +106,6 @@ def _prepare_frame_marks(marks: list[AimMark], *, context: Any | None = None) ->
                 mark,
                 object_id=object_id,
                 role="player",
-                label=player_display_label(mark.label),
             )
         elif enemy_like(mark):
             mark = _copy_mark(mark, object_id=object_id, role="enemy")
@@ -480,25 +392,11 @@ class ScreenObjectStore:
         self._objects = rows
 
     def enemies(self) -> list[ScreenObject]:
-        from loop.agent.entities import is_anonymous_enemy_label
-
         seen: list[ScreenObject] = []
         out: list[ScreenObject] = []
         for obj in self._objects:
-            if _is_player_object(obj) or _is_hp_anchor(obj):
-                continue
             role = (obj.role or "").strip().lower()
-            if role == "enemy":
-                enemy = True
-            elif role in {"unknown_character", "character", ""}:
-                enemy = (
-                    is_anonymous_enemy_label(obj.label)
-                    and in_combat_sprite_band(obj.y, obj.x)
-                    and float(obj.y) >= 0.50
-                )
-            else:
-                enemy = False
-            if not enemy:
+            if role not in {"enemy", "target"}:
                 continue
             if any(_bbox_iou(obj, other) >= 0.45 for other in seen):
                 continue
@@ -507,19 +405,16 @@ class ScreenObjectStore:
         return out
 
     def players(self) -> list[ScreenObject]:
-        return [obj for obj in self._objects if _is_player_sprite(obj)]
+        return [obj for obj in self._objects if (obj.role or "").strip().lower() == "player"]
 
     def hand_cards(self, *, entity_targets_ok: bool = False) -> list[ScreenObject]:
-        """Hand-band marks. ``entity_targets_ok`` when underlying activity allows targeting."""
+        """Current-frame card objects; fixture enrichment owns card typing."""
         return [
             obj
             for obj in self._objects
             if (obj.screen == "combat" or entity_targets_ok)
-            and obj.y >= HAND_Y
-            and (obj.role == "card" or not obj.role)
+            and obj.role == "card"
             and obj.kind not in {"danger", "progress"}
-            and not _is_end_turn(obj.label)
-            and _typed_label(obj.label)
         ]
 
     def progress_buttons(self) -> list[ScreenObject]:

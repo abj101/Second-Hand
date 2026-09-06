@@ -11,9 +11,8 @@ import hashlib
 import json
 from typing import Any
 
-from loop.agent.heuristic import HAND_Y
 from loop.memory.screen_objects import ScreenObject, ScreenObjectStore
-from loop.os.aim import HUD_CHROME_Y, in_combat_sprite_band, label_kind
+from loop.os.aim import label_kind
 
 
 _PLACEHOLDERS = frozenset({
@@ -66,7 +65,9 @@ def object_role(obj: ScreenObject, *, entity_targets_ok: bool = False) -> str:
         return "button"
     if compact in {"yes", "no", "got it", "confirm", "continue", "close", "back", "prev", "previous", "next"}:
         return "button"
-    if is_hp_anchor_label(obj.label):
+    if explicit in {"card", "enemy", "player", "target"} and (screen == "combat" or entity_targets_ok):
+        return "enemy" if explicit == "target" else explicit
+    if explicit == "hud" or is_hp_anchor_label(obj.label):
         return "hud"
     if is_player_row({
         "label": obj.label,
@@ -78,32 +79,13 @@ def object_role(obj: ScreenObject, *, entity_targets_ok: bool = False) -> str:
         "x1": obj.x1,
         "y1": obj.y1,
     }):
-        # Hero body is a self-target. HP/name plate above it is HUD.
-        if in_combat_sprite_band(obj.y, obj.x) and float(obj.y) >= 0.50:
+        # Fixture-enriched role is the dispatch authority.  Generic targeting
+        # must not infer a player body from a screen band.
+        if explicit == "player":
             return "player"
         return "hud"
     if _is_menu_progress(obj) or label_kind(obj.label) in {"progress", "danger"}:
         return "button"
-    # Chrome is never a combat target, even if the detector calls it an icon.
-    if obj.y <= HUD_CHROME_Y:
-        return "hud"
-    domain_allowed = screen == "combat" or entity_targets_ok
-    if domain_allowed and explicit in {"card", "enemy", "player", "target"}:
-        return "enemy" if explicit == "target" else explicit
-    if domain_allowed:
-        if obj.y >= HAND_Y:
-            return "card" if not _is_unknown_label(obj.label) and not _is_end_turn(obj.label) else "unknown"
-        if in_combat_sprite_band(obj.y, obj.x):
-            # HP/intent text sits ~0.35; only sprite-band bodies are targets.
-            if float(obj.y) < 0.50 and explicit != "enemy":
-                return "hud"
-            if explicit == "enemy" or _is_anonymous_enemy(obj.label):
-                return "enemy"
-            if _is_unknown_label(obj.label):
-                return "unknown"
-            if explicit in {"", "target"}:
-                return "enemy"
-            return "unknown"
     return "unknown"
 
 

@@ -299,8 +299,8 @@ def _textured_target_image(*, x: int, y: int, size: int = 20) -> Image.Image:
     return image
 
 
-def test_pixel_target_rebind_finds_shifted_textured_target() -> None:
-    """A fresh frame may move the target slightly; click geometry must come from that frame."""
+def test_pixel_target_rebind_never_guesses_shifted_target() -> None:
+    """A moved target needs a fresh typed surface, not template/coordinate matching."""
     from loop.agent.loop import CollectAgent
 
     before_image = _textured_target_image(x=40, y=30)
@@ -315,13 +315,7 @@ def test_pixel_target_rebind_finds_shifted_textured_target() -> None:
 
     rebound = agent._rebind_target(before)
 
-    assert rebound is not None
-    assert rebound.source == "fresh-template-rebind"
-    assert rebound.object_id == "enemy-1"
-    assert rebound.x0 == .44
-    assert rebound.y0 == .26
-    assert rebound.x == .54
-    assert rebound.y == .36
+    assert rebound is None
 
 
 def test_pixel_target_rebind_rejects_low_information_template() -> None:

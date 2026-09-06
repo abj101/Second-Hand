@@ -128,7 +128,7 @@ def test_rejected_icon_card_is_superseded_only_by_safe_enemy_inspection_hover(tm
     agent.config = SimpleNamespace(burst_ms=10)
     marks = (
         AimMark(id=1, x=.30, y=.84, x0=.2, y0=.74, x1=.4, y1=.94, label=":Icon"),
-        AimMark(id=6, x=.52, y=.34, x0=.4, y0=.2, x1=.6, y1=.5, label=":Icon"),
+        AimMark(id=6, x=.52, y=.34, x0=.4, y0=.2, x1=.6, y1=.5, label=":Icon", role="enemy"),
     )
     agent._aim = AimGuide.from_marks(Image.new("RGB", (64, 64)), marks)
     frame = FrameModel(objects=[
@@ -186,7 +186,7 @@ def test_unresolved_inspect_cannot_fall_back_to_icon_hand_click(tmp_path) -> Non
     agent._two_stage = lambda: True
     agent._aim = AimGuide.from_marks(Image.new("RGB", (64, 64)), (
         AimMark(id=1, x=.30, y=.84, x0=.2, y0=.74, x1=.4, y1=.94, label=":Icon"),
-        AimMark(id=6, x=.52, y=.34, x0=.4, y0=.2, x1=.6, y1=.5, label=":Icon"),
+        AimMark(id=6, x=.52, y=.34, x0=.4, y0=.2, x1=.6, y1=.5, label=":Icon", role="enemy"),
     ))
 
     # ``fill_from_aim`` could have produced this generic hand mark after the
@@ -262,8 +262,8 @@ def test_play_card_tool_contract_requires_success_nonce_and_exact_marks(tmp_path
     """A play_card_plan result, not its request text, is the action contract."""
     store = ScreenObjectStore(tmp_path / "typed.db")
     marks = (
-        AimMark(id=1, x=.30, y=.84, x0=.2, y0=.74, x1=.4, y1=.94, label="Strike"),
-        AimMark(id=2, x=.45, y=.84, x0=.4, y0=.74, x1=.5, y1=.94, label="Defend"),
+        AimMark(id=1, x=.30, y=.84, x0=.2, y0=.74, x1=.4, y1=.94, label="Strike", role="card"),
+        AimMark(id=2, x=.45, y=.84, x0=.4, y0=.74, x1=.5, y1=.94, label="Defend", role="card"),
         AimMark(id=3, x=.75, y=.63, x0=.68, y0=.56, x1=.82, y1=.70, label="Slime", role="enemy"),
     )
     store.save_frame(run_id="r", step_id=1, screen="combat", marks=marks)
@@ -330,8 +330,8 @@ def test_play_card_tool_contract_requires_success_nonce_and_exact_marks(tmp_path
 
 def test_anonymous_enemy_alias_synthesizes_current_transaction_and_icon_does_not(tmp_path) -> None:
     marks = (
-        AimMark(id=1, x=.3, y=.85, x0=.2, y0=.75, x1=.4, y1=.95, label="Strike"),
-        AimMark(id=2, x=.75, y=.63, x0=.68, y0=.56, x1=.82, y1=.70, label="unknown_enemy"),
+        AimMark(id=1, x=.3, y=.85, x0=.2, y0=.75, x1=.4, y1=.95, label="Strike", role="card"),
+        AimMark(id=2, x=.75, y=.63, x0=.68, y0=.56, x1=.82, y1=.70, label="unknown_enemy", role="enemy"),
     )
     store = ScreenObjectStore(tmp_path / "anonymous.db")
     store.save_frame(run_id="r", step_id=1, screen="combat", marks=marks)
@@ -379,7 +379,7 @@ def test_midboard_unknown_inspect_hover_is_safe_and_dispatchable(tmp_path) -> No
     """Live STS2 sprites sit at y≈0.645; inspect hover must not validate as a card."""
     marks = (
         AimMark(id=1, x=.30, y=.84, x0=.2, y0=.74, x1=.4, y1=.94, label=":Icon"),
-        AimMark(id=5, x=.75, y=.645, x0=.69, y0=.58, x1=.81, y1=.71, label="unknown_character_1"),
+        AimMark(id=5, x=.75, y=.645, x0=.69, y0=.58, x1=.81, y1=.71, label="unknown_character_1", role="enemy"),
     )
     store = ScreenObjectStore(tmp_path / "midboard.db")
     store.save_frame(run_id="r", step_id=1, screen="combat", marks=marks)
@@ -462,16 +462,16 @@ def test_recheck_handler_skips_identical_frame_second_call(tmp_path) -> None:
     agent._screen_objects.close()
 
 
-def test_rebind_target_finds_midboard_sprite() -> None:
-    """Mid-board STS2 sprites (y≈0.645) must rebind for card transactions."""
+def test_rebind_target_requires_matching_current_typed_id() -> None:
+    """Rebinding is by current typed identity, never screen position."""
     from loop.agent.loop import CollectAgent
 
     for label in ("unidentified_enemy", "unknown_character_1"):
         before = AimMark(
-            id=10, x=0.75, y=0.645, x0=0.69, y0=0.58, x1=0.81, y1=0.71, label=label,
+            id=10, x=0.75, y=0.645, x0=0.69, y0=0.58, x1=0.81, y1=0.71, label=label, object_id="enemy_1", role="enemy",
         )
         current = AimMark(
-            id=11, x=0.75, y=0.645, x0=0.69, y0=0.58, x1=0.81, y1=0.71, label=label,
+            id=11, x=0.75, y=0.645, x0=0.69, y0=0.58, x1=0.81, y1=0.71, label=label, object_id="enemy_1", role="enemy",
         )
         agent = object.__new__(CollectAgent)
         agent._aim = AimGuide.from_marks(Image.new("RGB", (64, 64)), [current])
@@ -481,8 +481,8 @@ def test_rebind_target_finds_midboard_sprite() -> None:
         assert rebound.label == label
 
 
-def test_action_requires_enemy_midboard_combat_click() -> None:
-    """Positional enemy inference must cover live sprite band, not just ENEMY_Y_MAX."""
+def test_action_requires_enemy_rejects_untyped_coordinate_click() -> None:
+    """Coordinates alone never establish a target action."""
     agent = object.__new__(CollectAgent)
     agent._selected = None
     agent._aim = None
@@ -491,7 +491,7 @@ def test_action_requires_enemy_midboard_combat_click() -> None:
 
     assert agent._action_requires_enemy(
         ActionLog(click_x=0.75, click_y=0.645)
-    ) is True
+    ) is False
 
 
 def test_action_requires_enemy_excludes_hud_and_hand() -> None:
