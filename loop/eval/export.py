@@ -180,6 +180,13 @@ def load_episodes(run_dir: Path) -> list[EpisodeLog]:
     return [EpisodeLog.model_validate(row) for row in store.read_episodes()]
 
 
+def _determinate_success_rate(episodes: list[EpisodeLog]) -> float | None:
+    determinate = [episode for episode in episodes if episode.outcome in {"win", "loss"}]
+    if not determinate:
+        return None
+    return sum(1 for episode in determinate if episode.outcome == "win") / len(determinate)
+
+
 def _sts2_reward(prev: dict[str, Any], step: StepLog) -> float:
     from loop.reward.sts import turn_reward
 
@@ -713,9 +720,7 @@ def turn_run_metrics(run_dir: Path) -> dict[str, Any]:
         "unresolved_rate": (unresolved_steps / n) if n else 0.0,
         "recheck_rate": (recheck_steps / n) if n else 0.0,
         "affordance_detection_rate": (affordance_hits / n) if n else 0.0,
-        "success_rate": (
-            sum(1 for ep in episodes if ep.success) / len(episodes) if episodes else None
-        ),
+        "success_rate": _determinate_success_rate(episodes),
         "prompt_ids": prompt_ids,
         "mixed_prompt_id": bool(hashes["mixed"]),
     }

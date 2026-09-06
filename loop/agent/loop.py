@@ -111,6 +111,8 @@ from loop.log.schema import (
     SessionSummary,
     StepLog,
     StepResult,
+    episode_outcome,
+    execution_disposition,
 )
 from loop.log.store import EpisodeStore, registry_tool_names
 from loop.memory.episodic import WorkingMemory
@@ -534,6 +536,7 @@ class CollectAgent:
         self._all_actions: set[str] = set()
         self._episode_returns: list[float] = []
         self._episode_success: list[bool] = []
+        self._episode_outcomes: list[str] = []
         self._skill_on_flags: list[bool] = []
         self._think_ms: list[float] = []
         self._session_flags: list[str] = []
@@ -2314,6 +2317,7 @@ class CollectAgent:
             else:
                 sent = self.fixture.execute_chord(card_action, settle=False)
             executed.extend(sent)
+            transaction.source_dispatched = bool(sent)
             primitives.extend(
                 PrimitiveLog(phase="card", name=name, x=card_action.click_x, y=card_action.click_y)
                 for name in sent
@@ -5093,6 +5097,10 @@ class CollectAgent:
 
     def _build_session_summary(self) -> SessionSummary:
         n = len(self._episode_returns)
+        wins = sum(1 for value in self._episode_outcomes if value == "win")
+        losses = sum(1 for value in self._episode_outcomes if value == "loss")
+        inconclusive = sum(1 for value in self._episode_outcomes if value == "inconclusive")
+        determinate = wins + losses
         return SessionSummary(
             session_id=self.session_id,
             fixture=self.fixture.id,
@@ -5100,7 +5108,7 @@ class CollectAgent:
             unique_device_names=sorted(self._all_actions),
             memory_size=0 if self.memory is None else self.memory.size(),
             mean_return=(sum(self._episode_returns) / n if n else 0.0),
-            fail_rate=(sum(1 for v in self._episode_returns if v < 0) / n if n else 0.0),
+            fail_rate=(losses / determinate if determinate else 0.0),
             mean_think_ms=(sum(self._think_ms) / len(self._think_ms) if self._think_ms else None),
             audit_flags=sorted(set(self._session_flags)),
             policy_id=self._step_policy_id(),
@@ -5110,7 +5118,10 @@ class CollectAgent:
                 if self._skill_on_flags
                 else None
             ),
-            success_rate=(sum(self._episode_success) / n if n else None),
+            success_rate=(wins / determinate if determinate else None),
+            wins=wins,
+            losses=losses,
+            inconclusive_episodes=inconclusive,
             interrupt_cv=self._interrupt_cv,
             interrupt_dino=self._interrupt_dino,
         )
@@ -7388,6 +7399,11 @@ class CollectAgent:
                     gsm_ticks=gsm_ticks,
                     authoritative_state=dict(metrics.get("authoritative_state") or {}),
                     observed_effects=list((self._game_state.last_action.observed_effects if self._game_state is not None else ())),
+                    execution_disposition=execution_disposition(
+                        executed=executed,
+                        transaction=card_transaction,
+                        error=error,
+                    ),
                 ),
                 metrics=metrics,
                 score_delta=delta,
@@ -7707,7 +7723,8 @@ class CollectAgent:
             ep_flags.append("step_budget_timeout")
         self._session_flags.extend(ep_flags)
         unique = sorted({name for row in steps if row.action.name for name in [row.action.name]})
-        success = self.fixture.success(steps, terminal)  # type: ignore[arg-type]
+        outcome = episode_outcome(terminal)  # type: ignore[arg-type]
+        success = outcome == "win"
         for record in steps:
             record.success = success
         if steps:
@@ -7735,6 +7752,8 @@ class CollectAgent:
             skill_on=skill_on,
             active_skill_id=active_skill_id,
             success=success,
+            outcome=outcome,
+            outcome_evidence=[f"terminal:{terminal}"],
             memory_carry=memory_carry,
         )
         self.store.write_episode(episode)
@@ -7743,6 +7762,7 @@ class CollectAgent:
             write_sft_jsonl(self.store.run_dir)
         self._episode_returns.append(cumulative)
         self._episode_success.append(success)
+        self._episode_outcomes.append(outcome)
         _say(
             f"episode {self._episode_n} ended  {terminal}  "
             f"steps={len(steps)}  success={success}  return={cumulative:.3f}"

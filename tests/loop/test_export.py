@@ -549,7 +549,9 @@ def test_compare_turn_runs_deltas(tmp_path: Path) -> None:
     assert deltas["mean_floor"] == 1.0
     assert deltas["false_fail"] == 0
     assert deltas["two_click_rate"] == 1.0
-    assert deltas["success_rate"] == 1.0
+    # The historical timeout control is now inconclusive, so it has no
+    # determinate denominator from which to compute a rate delta.
+    assert deltas["success_rate"] is None
     assert "escape_rate" in deltas
 
 

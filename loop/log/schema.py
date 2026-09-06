@@ -11,6 +11,10 @@ DeviceKind = Literal["pad", "keyboard", "mouse"]
 ArmKind = Literal["no_skill", "dump_all", "ratchet"]
 StickDir = Literal["n", "ne", "e", "se", "s", "sw", "w", "nw"]
 PerceptionSource = Literal["llm1", "ocr_cache", "scene_cache", "forced_rescan", "other"]
+ExecutionDisposition = Literal[
+    "not_attempted", "rejected_pre_dispatch", "partially_dispatched", "dispatched", "unknown"
+]
+EpisodeOutcome = Literal["win", "loss", "inconclusive"]
 
 
 class Observation(BaseModel):
@@ -97,6 +101,8 @@ class CardTransaction(BaseModel):
         "not_applicable"
     )
     target_rebound: bool = False
+    # A card source click is distinct from a completed targeted transaction.
+    source_dispatched: bool = False
     target_dispatched: bool = False
     source_inspected: bool = False
     source_verified: bool = False
@@ -141,6 +147,9 @@ class StepResult(BaseModel):
     gsm_ticks: int = 0
     authoritative_state: dict[str, Any] = Field(default_factory=dict)
     observed_effects: list[str] = Field(default_factory=list)
+    # ``unknown`` preserves the meaning of historical rows that predate
+    # primitive-level execution accounting.
+    execution_disposition: ExecutionDisposition = "unknown"
 
 
 class MemoryHit(BaseModel):
@@ -254,7 +263,19 @@ class EpisodeLog(BaseModel):
     skill_on: bool = False
     active_skill_id: str | None = None
     success: bool = False
+    outcome: EpisodeOutcome | None = None
+    outcome_evidence: list[str] = Field(default_factory=list)
     memory_carry: dict[str, Any] = Field(default_factory=dict)
+
+    def model_post_init(self, __context: Any) -> None:
+        # Old episode rows have only terminal/success.  Terminal evidence is
+        # authoritative: a legacy success=True timeout is still inconclusive.
+        if self.outcome is None:
+            self.outcome = episode_outcome(self.terminal)
+        if not self.outcome_evidence:
+            self.outcome_evidence = [f"terminal:{self.terminal}"]
+        # Keep the legacy mirror truthful for both old rows and new writes.
+        self.success = self.outcome == "win"
 
 
 class SessionSummary(BaseModel):
@@ -271,7 +292,45 @@ class SessionSummary(BaseModel):
     arm: ArmKind = "no_skill"
     skill_on_frac: float | None = None
     success_rate: float | None = None
+    wins: int = 0
+    losses: int = 0
+    inconclusive_episodes: int = 0
     interrupt_cv: int = 0
     interrupt_dino: int = 0
     stop_requested: bool = False
     flush_completed: bool = False
+
+
+def episode_outcome(terminal: Terminal) -> EpisodeOutcome:
+    """Classify an episode from durable terminal evidence, never a legacy flag."""
+    if terminal == "win":
+        return "win"
+    if terminal == "fail":
+        return "loss"
+    return "inconclusive"
+
+
+def execution_disposition(
+    *,
+    executed: list[str],
+    transaction: CardTransaction | None,
+    error: str | None,
+) -> ExecutionDisposition:
+    """Report dispatch facts without treating source selection as target success."""
+    if transaction is not None:
+        if transaction.target_dispatched:
+            return "dispatched"
+        if transaction.source_dispatched:
+            targeted = bool(transaction.target_object_id or transaction.original_target_mark is not None)
+            if targeted or transaction.outcome in {
+                "target_required", "target_not_found", "target_rebind_failed", "dispatch_failed",
+            }:
+                return "partially_dispatched"
+            return "dispatched"
+        if transaction.error or transaction.outcome not in {None, "success", "auto_resolved"}:
+            return "rejected_pre_dispatch"
+    if executed:
+        return "dispatched"
+    if error:
+        return "rejected_pre_dispatch"
+    return "not_attempted"
