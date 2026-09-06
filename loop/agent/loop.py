@@ -744,13 +744,34 @@ class CollectAgent:
     def _maybe_apply_combat_exit_transition(
         self,
         metrics: dict[str, Any] | None = None,
+        *,
+        scene_desc: Any | None = None,
     ) -> dict[str, Any]:
         """Detect combat→reward and emit durable combat_won metrics once."""
         out = dict(metrics or self._obs_metrics or {})
         if getattr(self.fixture, "id", "") != "sts2":
             return out
         prev = getattr(self, "_prev_host_stats", {}) or {}
-        curr = getattr(self, "_host_stats", {}) or {}
+        # The compact host reader can miss an interstitial Loot heading.  The
+        # scorer and validated current-frame perception are independent
+        # evidence, so carry their typed reward facts into the same pure
+        # transition scorer rather than waiting for a later host OCR pass.
+        curr = dict(getattr(self, "_host_stats", {}) or {})
+        for key in ("screen", "ocr", "black", "player", "enemies", "markers"):
+            value = out.get(key)
+            if value not in (None, "", [], {}):
+                curr[key] = value
+        scene_screen = str(getattr(scene_desc, "screen", "") or "").strip().lower()
+        if scene_screen == "reward":
+            curr["screen"] = "reward"
+        scene_controls = getattr(scene_desc, "controls", None) or []
+        labels = [
+            str(row.get("label") or row.get("name") or "").strip()
+            for row in scene_controls
+            if isinstance(row, dict) and str(row.get("label") or row.get("name") or "").strip()
+        ]
+        if labels:
+            curr["markers"] = [*list(curr.get("markers") or []), *labels]
         evidence = combat_exit_evidence(prev, curr)
         if not evidence.confirmed:
             return out
@@ -780,7 +801,7 @@ class CollectAgent:
             self._obs_metrics = dict(out)
             return out
         self._apply_combat_exit_reset(reason="combat-won")
-        curr = normalize_host_stats(dict(curr))
+        curr = normalize_host_stats(curr)
         self._host_stats = curr
         out["screen"] = "reward"
         out["activity"] = "reward"
@@ -4139,6 +4160,19 @@ class CollectAgent:
             combat_errors=combat_errors if combat_errors else None,
         )
         reason_controls = self._apply_perceive_scene(scene_desc, detector_rows=self._detector_typed_rows())
+        transition_metrics = self._maybe_apply_combat_exit_transition(
+            self._obs_metrics, scene_desc=scene_desc
+        )
+        self._obs_metrics = transition_metrics
+        if transition_metrics.get("combat_won"):
+            # Reset drops cached combat perception. The just-validated reward
+            # scene is current-frame evidence, so use it only to rebuild the
+            # reward inventory before ACT; do not rerun the reasoner.
+            self._scene_desc = scene_desc
+            self._rebuild_reward_inventory(obs_frame, screen="reward")
+            scene_desc = self._scene_desc or scene_desc
+            reason_controls = self._reason_controls_from_surface(scene_desc)
+            self._reason_controls = reason_controls
         reason_route, route_reason = self._two_stage_reason_route(scene_desc)
         self._last_epistemic_blockers = self._two_stage_epistemic_blockers(scene_desc)
         self._route_before_discovery = f"{reason_route} ({route_reason})"

@@ -965,6 +965,49 @@ def test_combat_exit_repeated_same_step_preserves_reward_surface(tmp_path) -> No
     assert agent._action_surface is reward_surface
 
 
+def test_combat_exit_uses_current_scorer_and_perception_evidence(tmp_path) -> None:
+    """Loot must not wait for the host reader to classify the reward frame."""
+    from loop.agent.loop import CollectAgent, CollectConfig
+    from loop.agent.perceive import SceneDescription
+    from loop.fixtures.sts2 import Sts2Fixture
+    from loop.log.store import EpisodeStore
+
+    agent = CollectAgent(
+        Sts2Fixture(controller=None),
+        EpisodeStore(tmp_path),
+        config=CollectConfig(skip_models=True, arm="no_skill"),
+    )
+    agent._current_episode_id = "ep1"
+    agent._combat_index = 1
+    agent._step_id = 10
+    agent._prev_host_stats = {
+        "screen": "combat", "combat_active": True,
+        "enemies": [{"hp": 0, "hp_max": 44}],
+    }
+    # This matches the live regression: compact host OCR has no screen, but
+    # current-frame scorer OCR and validated LLM1 both identify Loot.
+    agent._host_stats = {"screen": None, "enemies": [], "player": None, "black": False}
+    scene = SceneDescription(
+        screen="reward",
+        controls=[{"label": "Add a card", "role": "button"}, {"label": "Skip", "role": "button"}],
+    )
+    metrics = agent._maybe_apply_combat_exit_transition(
+        {"ocr": "Loot! 17 Gold Add a card to your deck. Skip", "activity": "other"},
+        scene_desc=scene,
+    )
+    assert metrics["screen"] == "reward"
+    assert metrics["combat_won"] is True
+    assert metrics["combat_won_transition_id"] == "ep1:1"
+
+    agent._step_id = 11
+    stable = agent._maybe_apply_combat_exit_transition(
+        {"ocr": "Loot! 17 Gold Add a card to your deck. Skip", "activity": "other"},
+        scene_desc=scene,
+    )
+    assert stable["screen"] == "reward"
+    assert stable.get("combat_won") is not True
+
+
 def test_combat_animation_then_loot_emits_once(tmp_path) -> None:
     from loop.agent.loop import CollectAgent, CollectConfig
     from loop.fixtures.sts2 import Sts2Fixture
