@@ -1140,6 +1140,12 @@ def test_selected_card_resolves_target_from_post_selection_inventory(monkeypatch
         return {"screen": "combat"}
 
     monkeypatch.setattr(loop, "_refresh_obs_after_action", refresh)
+    reacquire_calls: list[str] = []
+    monkeypatch.setattr(
+        loop,
+        "_reacquire_current_target_surface",
+        lambda *, target_id: reacquire_calls.append(target_id) is None,
+    )
     monkeypatch.setattr(
         loop,
         "_rebind_target",
@@ -1156,7 +1162,43 @@ def test_selected_card_resolves_target_from_post_selection_inventory(monkeypatch
     assert [row.phase for row in result.primitives] == ["card", "target"]
     assert result.primitives[1].x == 0.70
     assert result.action.target == 21
+    assert reacquire_calls == ["enemy_1"]
     assert "post-selection-target:enemy_1" in result.transaction.verification_evidence
+    store.close()
+
+
+def test_target_reacquisition_publishes_fresh_surface_before_dispatch(monkeypatch, tmp_path) -> None:
+    from loop.os.frame_model import build_action_surface
+
+    marks = (
+        AimMark(id=3, x=0.40, y=0.85, x0=0.30, y0=0.80, x1=0.50, y1=0.90, label="Strike", role="card"),
+        AimMark(id=7, x=0.55, y=0.63, x0=0.48, y0=0.56, x1=0.62, y1=0.70, label="Cultist", role="enemy"),
+    )
+    loop, store, _controller, image, _plan_card_by_id = _v2_card_agent(monkeypatch, tmp_path, marks)
+    loop._last_obs_image = image
+    observed_focus: list[str] = []
+
+    def fresh_rescan(*, focus: str) -> float:
+        observed_focus.append(focus)
+        fresh_marks = (
+            AimMark(id=31, x=0.11, y=0.79, x0=0.06, y0=0.72, x1=0.16, y1=0.86, label="Strike", role="card"),
+            AimMark(id=47, x=0.22, y=0.19, x0=0.16, y0=0.13, x1=0.28, y1=0.25, label="new target", role="enemy"),
+        )
+        surface = build_action_surface(fresh_marks, run_id="r", step_id=1, screen="combat", activity="combat")
+        stamped = store.save_frame(run_id="r", step_id=1, marks=fresh_marks, screen="combat", context=surface.context, surface=surface)
+        loop._aim = AimGuide.from_marks(image, stamped)
+        loop._action_surface = surface
+        loop._scene_desc = SimpleNamespace(
+            enemies=[{"entity_id": "unknown_character_1", "role": "unknown_character", "bbox": [160, 130, 280, 250]}],
+            characters=[], controls=[],
+        )
+        return 1.0
+
+    monkeypatch.setattr(loop, "_rescan_scene", fresh_rescan)
+    assert loop._reacquire_current_target_surface(target_id="enemy_1") is True
+    assert observed_focus == ["reacquire current target enemy_1"]
+    fresh = store.by_object_id("enemy_1")
+    assert fresh is not None and fresh.mark_id == 47
     store.close()
 
 

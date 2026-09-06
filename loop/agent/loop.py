@@ -2375,8 +2375,11 @@ class CollectAgent:
         if getattr(getattr(self, "config", None), "architecture", "") == "two_stage":
             try:
                 self._refresh_obs_after_action(probe.fresh_frame, prev_metrics=prev_metrics)
-                refreshed_inventory = True
-                transaction.verification_evidence.append("post-selection-inventory")
+                refreshed_inventory = self._reacquire_current_target_surface(
+                    target_id=planned_target_id,
+                )
+                if refreshed_inventory:
+                    transaction.verification_evidence.append("post-selection-current-surface")
             except Exception:
                 refreshed_inventory = False
         rebound = None
@@ -2392,7 +2395,7 @@ class CollectAgent:
                     transaction.verification_evidence.append(
                         f"post-selection-target:{fresh_obj.object_id}"
                     )
-        if rebound is None and not (refreshed_inventory and planned_target_id):
+        if rebound is None and not v2_source:
             rebound = self._rebind_target(
                 target,
                 pre_frame=probe.pre_frame,
@@ -3174,6 +3177,35 @@ class CollectAgent:
         self._legal_actions = list(getattr(desc, "legal_actions", []) or [])
         self._sync_legal_actions()
         return float(call.latency_ms)
+
+    def _reacquire_current_target_surface(self, *, target_id: str) -> bool:
+        """Publish a fresh typed surface after selection without invoking ACT."""
+        if not self._two_stage() or self._last_obs_image is None:
+            return False
+        # The source click changes the screen.  Do not let a pre-selection
+        # scene survive the LLM1-only rescan that owns target reacquisition.
+        self._action_surface = None
+        self._frame_model = None
+        self._scene_desc = None
+        try:
+            self._rescan_scene(focus=f"reacquire current target {target_id}")
+        except Exception:
+            return False
+        if self._action_surface is None or self._screen_objects is None:
+            return False
+        # Aliases are recreated only after _apply_perceive_scene has saved the
+        # fresh ActionSurface. ACT exposes canonical IDs, never these aliases.
+        from loop.mcp.tools.targeting import bind_snapshot_target_ids
+
+        rows: list[dict[str, Any]] = []
+        for bucket in (
+            getattr(self._scene_desc, "enemies", None) or [],
+            getattr(self._scene_desc, "characters", None) or [],
+            getattr(self._scene_desc, "controls", None) or [],
+        ):
+            rows.extend(row for row in bucket if isinstance(row, dict))
+        bind_snapshot_target_ids(self._screen_objects, rows, entity_targets_ok=True)
+        return self._screen_objects.by_object_id(str(target_id or "")) is not None
 
     def _clickable_labels(self) -> list[str]:
         if self._frame_model is not None:

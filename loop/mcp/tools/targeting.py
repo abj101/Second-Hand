@@ -171,8 +171,6 @@ def bind_snapshot_target_ids(
     entity_targets_ok: bool = False,
 ) -> None:
     """Map prompt-facing instance ids onto canonical current-frame store objects."""
-    from loop.agent.entities import _row_center
-
     if not rows:
         return
     enemies = [
@@ -197,27 +195,38 @@ def bind_snapshot_target_ids(
         if canonical is not None and object_role(canonical, entity_targets_ok=entity_targets_ok) in _COMBAT_TARGET_ROLES:
             used_objects.add(instance_id)
             continue
-        center = _row_center(row)
-        if center is None:
+        raw_bbox = row.get("bbox")
+        if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) < 4:
             continue
-        cx, cy = center
-        candidates = [obj for obj in enemies if obj.object_id not in used_objects]
-        if not candidates:
+        try:
+            x0, y0, x1, y1 = (float(value) for value in raw_bbox[:4])
+        except (TypeError, ValueError):
             continue
-        ranked = sorted(
-            [
-                (((float(obj.x) - cx) ** 2 + (float(obj.y) - cy) ** 2), obj)
-                for obj in candidates
-            ],
-            key=lambda item: item[0],
-        )
-        if not ranked or ranked[0][0] > 0.16 ** 2:
+        if max(abs(x0), abs(y0), abs(x1), abs(y1)) > 1.5:
+            x0, y0, x1, y1 = (value / 1000.0 for value in (x0, y0, x1, y1))
+        if x1 <= x0 or y1 <= y0:
             continue
-        # A perception row must identify one canonical surface object. Do not
-        # break ties or infer from columns/cardinality.
-        if len(ranked) > 1 and abs(ranked[1][0] - ranked[0][0]) < 1e-9:
+
+        def overlaps_or_contains(obj: ScreenObject) -> bool:
+            overlap_x = max(0.0, min(x1, obj.x1) - max(x0, obj.x0))
+            overlap_y = max(0.0, min(y1, obj.y1) - max(y0, obj.y0))
+            if overlap_x > 0.0 and overlap_y > 0.0:
+                return True
+            return (
+                x0 <= obj.x <= x1 and y0 <= obj.y <= y1
+            ) or (
+                obj.x0 <= (x0 + x1) / 2 <= obj.x1
+                and obj.y0 <= (y0 + y1) / 2 <= obj.y1
+            )
+
+        matches = [
+            obj for obj in enemies
+            if obj.object_id not in used_objects and overlaps_or_contains(obj)
+        ]
+        # A perception row must identify exactly one canonical surface object.
+        if len(matches) != 1:
             continue
-        hit = ranked[0][1]
+        hit = matches[0]
         store.stamp_instance_alias(instance_id, hit.object_id)
         row["entity_id"] = hit.object_id
         if str(row.get("role") or "").strip().lower() in {"unknown_character", "character", "target"}:
