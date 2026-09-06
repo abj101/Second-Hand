@@ -1,191 +1,85 @@
 # Batch 6: Live Validation Report
 
-**Branch:** `feat/collect-loop` @ `46326e4` (Batch 5C)  
-**Date:** 2026-09-06  
-**Command:** `python -u -m loop collect --fixture sts2 --until-fail --no-learn --countdown 3 --gui --gui-device cpu`  
+**Status:** FAIL — `skill_on` is **not authorized**. This report recomputes the accounting from immutable `turns.jsonl`, `episodes.jsonl`, and `summary.json` artifacts. It does not modify those artifacts.
+
+**Command:** `python -u -m loop collect --fixture sts2 --until-fail --no-learn --countdown 3 --gui --gui-device cpu`
 **Baseline preserved:** `runs/20260906T021305Z_sts2_collect` (untouched)
+**Accounting rule:** a `target-not-found` with `target_dispatched=false` is a target-resolution reject. A stale target dispatch requires a target primitive actually sent from an invalid snapshot. Source-only card transactions are partial; effect verification is separate.
 
-## Executive summary
+## Handoff
 
-Three live validation runs were executed from comparable combat starts (80/80 HP, 3 energy, one enemy, no modal). **All three failed** — none reached a combat reward screen. Each run hit the 24-step HUD-identity stuck timeout with 22–23 `target-not-found` errors per run. **Batch 6 does not pass.** Definition-of-done is not met; `skill_on` A/B is **not authorized**.
+The original three Batch 6 samples and the complete post-reopen sample all ended in HUD-stuck timeouts. The later `20260906T064037Z` attempt was stopped by the operator and is incomplete; it is not a comparable validation outcome.
 
-Primary regression vs baseline: entity target resolution (`unknown_character_1` / `enemy_1` in model intent cannot be mapped to current-frame aim marks), producing a fail-closed loop where every targeted card play is rejected before dispatch.
+`20260906T063400Z` confirms the live target-binding defect remains: intents use `unknown_character_1` or `enemy_1`, the source card is selected, fresh target resolution fails, and no target primitive is sent. This is fail-closed behavior, not stale-coordinate dispatch.
 
----
+Do not continue a partial session. Before the next sample, start a fresh ordinary player combat turn. Historical run files, databases, and exports are evidence only and must remain unchanged.
 
-## 1. Baseline metrics (`20260906T021305Z_sts2_collect`)
+## Recomputed evidence
 
-Pre-fix reference run (Batch 0). Preserved unchanged.
+### Transaction accounting
 
-| Metric | Value |
-|---|---|
-| Turns | 29 |
-| Wall time | 372 s (~6.2 min) |
-| Combat won | Yes (Loot OCR on step 29) |
-| Start state | combat, HP 80/80, energy 1 |
-| Intent counts | 19 `play_card`, 7 `click_control`, 2 `end_turn`, 1 empty |
-| Structured errors | 9 `source-unconfirmed`, 2 `target-not-found`, 2 `effect-unverified`, 1 `inventory-inconsistent` |
-| Stale-target dispatches | 2 |
-| Repeated blocked clicks | 0 (but 4 ineffective Next clicks across two pairs: steps 7–8, 23–24) |
-| MCP tool calls | 0 |
-| LLM1 fresh/cache | not tagged in metrics (field absent on all steps) |
-| Perceive ms (min/mean/max) | 3114 / 5561 / 7649 |
-| Reason ms (min/mean/max) | 542 / 620 / 817 |
-| OCR ms (min/mean/max) | 1666 / 2485 / 5935 |
-| First post-kill screen | Loot (OCR on step 29) |
-| Journal contradictions | 0 detected |
-| Malformed lessons | 0 detected |
-| Export eligible / excluded | 9 / 14 |
-| Artifacts | `turns.jsonl`, `journal.json`, `objects.db` present; **`memory_grounded.json` and `summary.json` missing** (pre–Batch 5B) |
-| DB quick_check | ok |
+| Run | Outcome | Target-resolution rejects | Source primitives | Target primitives | Partial transactions | Verified effects | Stale target dispatches |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `20260906T021305Z` baseline | win (Loot at step 29) | 2 | 19 | 8 | 11 | 6 | 0 |
+| `20260906T060636Z` | inconclusive (timeout) | 22 | 24 | 0 | 24 | 0 | 0 |
+| `20260906T061312Z` | inconclusive (timeout) | 23 | 24 | 0 | 24 | 0 | 0 |
+| `20260906T062024Z` | inconclusive (timeout) | 23 | 24 | 0 | 24 | 0 | 0 |
+| `20260906T063400Z` | inconclusive (timeout) | 24 | 24 | 0 | 24 | 0 | 0 |
+| `20260906T064037Z` | inconclusive (operator-stopped) | 10 | 11 | 0 | 11 | 1 | 0 |
 
----
+The baseline's two `target-not-found` transactions also have `target_dispatched=false`; they are resolution rejects, not stale dispatches. The baseline separately has eight actual target primitives, six with verified effects. No raw run provides evidence of a target primitive sent from an invalid/stale snapshot, so the stale-dispatch count is zero for every row.
 
-## 2. Per-run sections
+### Per-run validation table
 
-### Run 1 — `20260906T060636Z_sts2_collect`
+| Run ID | Comparable | Recomputed outcome | Steps | Wall (s) | Structured errors | Repeated blocked control clicks | Stale dispatches | First post-kill screen | MCP calls | LLM1 fresh/cache | Journal contradictions / malformed lessons | Export eligible / excluded | Artifacts | Notes |
+|---|---|---|---:|---:|---|---:|---:|---|---:|---|---|---|---|---|
+| `20260906T021305Z` baseline | reference | win | 29 | 372 | source-unconfirmed: 9; target-not-found: 2; effect-unverified: 2; inventory-inconsistent: 1 | 0* | 0 | Loot | 0 | unavailable | 0 / 0 | 9 / 14 | partial | Pre-5B artifacts lack `memory_grounded.json` and `summary.json`. |
+| `20260906T060636Z` | yes | inconclusive | 24 | 354 | target-not-found: 22; source-unconfirmed: 2 | 0 | 0 | — | 0 | unavailable | 0 / 0 | 0 / 24 | complete | `hud_identity_stuck`; legacy episode/summary say `success=true`, but terminal is timeout. |
+| `20260906T061312Z` | yes | inconclusive | 24 | 376 | target-not-found: 23; source-unconfirmed: 1 | 0 | 0 | — | 0 | unavailable | 0 / 0 | 0 / 24 | complete | `hud_identity_stuck`; legacy `success=true` is not a win. |
+| `20260906T062024Z` | yes | inconclusive | 24 | 372 | target-not-found: 23; source-unconfirmed: 1 | 0 | 0 | — | 0 | unavailable | 0 / 0 | 0 / 24 | complete | `hud_identity_stuck`; legacy `success=true` is not a win. |
+| `20260906T063400Z` | yes | inconclusive | 24 | n/a | target-not-found: 24 (19 `unknown_character_1`, 5 `enemy_1`) | 0 | 0 | — | 0 | unavailable | 0 / 0 | 0 / 24 | complete | Post-`9435b2d` failure; energy stayed 3 and `flush_completed=true`. |
+| `20260906T064037Z` | no — stopped | inconclusive | 12 | n/a | target-not-found: 10; action-surface-invariant: 1 | 0 | 0 | — | 0 | unavailable | not finalized | not finalized | incomplete | Operator stop; no `summary.json` or `memory_grounded.json`. |
 
-**Start:** combat, HP 80/80, energy 3/3, one enemy (Jaw Worm), no modal. Comparable: **yes**.
+\*The baseline had four ineffective Next clicks across two pairs before Batch 2, but no repeated click on a twice-blocked unchanged control under the current criterion.
 
-**End:** step 24 timeout (`hud_identity_stuck`, `no_pixel_change`). Still on combat screen; enemy HP unchanged at 44/44; player energy still 3/3.
+### Aggregate comparison
 
-| Metric | Value |
-|---|---|
-| Won | **No** |
-| Turns | 24 |
-| Wall time | 354 s |
-| Errors | 22 `target-not-found`, 2 `source-unconfirmed` |
-| Stale dispatches | 22 |
-| Repeated blocked clicks | 0 |
-| MCP calls | 0 |
-| First post-kill screen | N/A (combat never ended) |
-| Export eligible / excluded | 0 / 24 |
-| Artifacts complete | **Yes** (`flush_completed=true`, DB ok) |
+| Metric | Baseline | Comparable Batch 6 samples (`060636`, `061312`, `062024`, `063400`) |
+|---|---:|---:|
+| Determinate wins / losses / inconclusive | 1 / 0 / 0 | 0 / 0 / 4 |
+| Recomputed success rate | 1.0 | null (no determinate episodes) |
+| Target-resolution rejects | 2 | 92 |
+| Source-only partial transactions | 11 | 94 |
+| Target primitives dispatched | 8 | 0 |
+| Verified effects | 6 | 0 |
+| Stale target dispatches | 0 | 0 |
+| Loot reached | yes | no |
+| Complete finalization artifacts | no (pre-5B) | yes, 4/4 |
 
-**Failure signature:** Every targeted `play_card` intent named `unknown_character_1` or `enemy_1`, but aim marks used numeric mark IDs (e.g. `mk_9`). Gate rejected with `target-not-found:unknown_character_1` before any card reached the enemy. Rescan loop broke repeat but could not resolve identity. Audit flags: `hud_identity_stuck`, `no_pixel_change`.
+The previous report's 22–24 “stale dispatches” per post-fix run was incorrect: those counts were target-resolution rejects. The reliability regression remains severe—94 source selections produced no target dispatch or verified effect—but it is a target-binding failure rather than unsafe stale input.
 
----
-
-### Run 2 — `20260906T061312Z_sts2_collect`
-
-**Start:** combat, HP 80/80, energy 3/3. Comparable: **yes** (same combat, agent re-entered mid-fight).
-
-**End:** step 24 timeout, identical stuck pattern.
-
-| Metric | Value |
-|---|---|
-| Won | **No** |
-| Turns | 24 |
-| Wall time | 376 s |
-| Errors | 23 `target-not-found`, 1 `source-unconfirmed` |
-| Stale dispatches | 23 |
-| Repeated blocked clicks | 0 |
-| MCP calls | 0 |
-| Export eligible / excluded | 0 / 24 |
-| Artifacts complete | **Yes** |
-
-Same `unknown_character_1` target resolution failure as Run 1.
-
----
-
-### Run 3 — `20260906T062024Z_sts2_collect`
-
-**Start:** combat, HP 80/80, energy 3/3. Comparable: **yes**.
-
-**End:** step 24 timeout, identical stuck pattern.
-
-| Metric | Value |
-|---|---|
-| Won | **No** |
-| Turns | 24 |
-| Wall time | 372 s |
-| Errors | 23 `target-not-found`, 1 `source-unconfirmed` |
-| Stale dispatches | 23 |
-| Repeated blocked clicks | 0 |
-| MCP calls | 0 |
-| Export eligible / excluded | 0 / 24 |
-| Artifacts complete | **Yes** |
-
----
-
-## 3. Aggregate comparison
-
-| Metric | Baseline | Run 1 | Run 2 | Run 3 | Fixed Δ (runs 1–3 avg vs baseline) |
-|---|---:|---:|---:|---:|---|
-| Combat wins | 1 | 0 | 0 | 0 | **−1** |
-| Turns to outcome | 29 | 24 | 24 | 24 | stuck earlier |
-| Wall time (s) | 372 | 354 | 376 | 372 | similar |
-| `target-not-found` | 2 | 22 | 23 | 23 | **+20** (regression) |
-| `source-unconfirmed` | 9 | 2 | 1 | 1 | improved |
-| Stale dispatches | 2 | 22 | 23 | 23 | **+21** (regression) |
-| Repeated blocked clicks | 0* | 0 | 0 | 0 | same |
-| Loot recognized | yes (step 29) | no | no | no | **regression** |
-| Export eligible rows | 9 | 0 | 0 | 0 | **−9** |
-| Artifacts complete | partial | yes | yes | yes | Batch 5B fix works |
-| Perceive ms mean | 5561 | 3679 | 3622 | 2748 | faster (OCR cache) |
-| OCR ms mean | 2485 | 2951 | 3147 | 3210 | similar |
-
-\*Baseline had 4 ineffective Next clicks on unchanged surface (steps 7–8, 23–24) — pre–Batch 2 behavior.
-
----
-
-## 4. Summary table
-
-| Run ID | Comparable | Won | Turns | Wall (s) | Errors (cat.) | Repeated | Stale disp. | 1st post-kill | MCP | LLM1 f/c | Journal contra | Malformed | Export el/ex | Artifacts | Notes |
-|---|---|---:|---:|---:|---|---:|---:|---|---:|---|---:|---:|---:|---|---|
-| `20260906T021305Z` (baseline) | yes | yes | 29 | 372 | src-unconf:9, tgt-nf:2, eff-unv:2, inv:1 | 0 | 2 | Loot | 0 | n/a | 0 | 0 | 9/14 | partial | pre-fix reference |
-| `20260906T060636Z` | yes | **no** | 24 | 354 | tgt-nf:22, src-unconf:2 | 0 | 22 | — | 0 | n/a | 0 | 0 | 0/24 | yes | identity stuck |
-| `20260906T061312Z` | yes | **no** | 24 | 376 | tgt-nf:23, src-unconf:1 | 0 | 23 | — | 0 | n/a | 0 | 0 | 0/24 | yes | identity stuck |
-| `20260906T062024Z` | yes | **no** | 24 | 372 | tgt-nf:23, src-unconf:1 | 0 | 23 | — | 0 | n/a | 0 | 0 | 0/24 | yes | identity stuck |
-
----
-
-## 5. Pass/fail checklist
+## Gate checklist
 
 | Criterion | Result | Evidence |
 |---|---|---|
-| Two consecutive combat wins | **FAIL** | 0/3 wins; 0 consecutive |
-| Zero stale-target dispatches | **FAIL** | 22–23 per run (baseline had 2) |
-| Zero repeated clicks on twice-blocked control | **PASS** | 0 across all validation runs |
-| ≤1 source-unconfirmed per combat, no same-coord retry | **FAIL** | 1–2 per run, but combat never progressed; target-not-found dominates |
-| Loot on first stable post-victory observation | **FAIL** | No run reached victory |
-| No stale combat objects on Loot | **N/A** | No loot reached |
-| No contradictory typed memory identities | **PASS** | 0 contradictions in all run journals |
-| No malformed lesson text | **PASS** | 0 detected |
-| Uncertain rows excluded from training exports | **PASS** | 0 eligible, 100% excluded |
-| Graceful stop flushes all artifacts | **PASS** | Runs 1–3: `flush_completed=true`, DB quick_check ok, all 5 artifacts present |
+| Two consecutive combat wins | **FAIL** | Zero wins in four comparable post-fix samples. |
+| Zero stale-target dispatches | **PASS (safety only)** | Zero target primitives from invalid/stale snapshots in all raw logs. |
+| Zero repeated clicks on a twice-blocked unchanged control | **PASS** | Zero in all validation samples. |
+| At most one source-unconfirmed event and no same-coordinate immediate retry | **FAIL** | `060636` has two source-unconfirmed events; no sample achieved combat progress. |
+| Loot on first stable post-victory observation | **FAIL** | No post-fix sample reached victory. |
+| No stale combat objects on Loot | **N/A** | No post-fix Loot observation. |
+| No contradictory typed memory identities | **PASS** | Zero reported in finalized journals. |
+| No malformed lesson text | **PASS** | Zero reported in finalized journals. |
+| Uncertain rows excluded from positive training exports | **PASS** | Every finalized post-fix train row is excluded (0 / 24). |
+| Graceful finalization writes complete artifacts | **PASS** | `060636`, `061312`, `062024`, and `063400` have all expected artifacts and `flush_completed=true`. |
 
-**Overall Batch 6 gate: FAIL**
+**Overall:** FAIL. Passing the stale-dispatch safety sub-criterion does not compensate for zero successful target dispatches, zero verified effects, or zero wins.
 
----
+## Remaining requirements and recommendation
 
-## 6. Remaining risks
+1. Reopen Batch 1 only: repair canonical prompt target ID to fresh-frame actionable-object binding. The `unknown_character_1` / `enemy_1` defect is live in `063400`; do not add a coordinate, lane, nearest-object, or one-enemy fallback.
+2. Run one fresh-combat diagnostic after that repair. Require a fresh target primitive and verified game effect before beginning Batch 6 samples.
+3. Run at least three new comparable `no_skill` samples and require two consecutive wins, zero resolution rejects in successful samples, first stable Loot, clean memory/export evidence, and complete finalization.
+4. Keep `skill_on` unauthorized until those requirements pass.
 
-1. **Entity ID → aim mark bridging is broken for unidentified enemies.** Model emits `unknown_character_1` / `enemy_1`; gate cannot resolve to current mark IDs. Every targeted card play fails closed. → **Reopen Batch 1** (card identity and reflow / target resolution).
-
-2. **HUD identity stuck timeout masks combat failure.** Collector reports `success=True` with `success_rate=1.0` despite zero progress — telemetry gap (Batch 5A).
-
-3. **Baseline comparability caveat.** Baseline started at energy 1 (mid-combat); validation runs at energy 3 (turn 1). Same enemy/HP but different turn phase may affect card hand — still comparable per plan (one enemy, ordinary player turn).
-
-4. **Batch 5B artifact flush verified.** Post-fix runs correctly write `summary.json`, `memory_grounded.json`, and close `objects.db`. This sub-criterion passes.
-
-5. **Batch 5C OCR cache.** Perceive/OCR timing improved (mean perceive 3622 ms vs baseline 5561 ms) without fixture regression — performance fix holds, but combat reliability regressed independently.
-
----
-
-## 7. Recommendation: `skill_on` A/B
-
-**Not authorized.** Definition of done requires two consecutive clean `no_skill` combat wins with zero stale dispatches and immediate Loot recognition. Current validation shows 0 wins and 22–23 stale dispatches per run — a regression from baseline (1 win, 2 stale dispatches).
-
-**Suggested orchestrator action:** Reopen **Batch 1** (entity/target identity resolution). Do not proceed to skill A/B until a repeat of Batch 6 passes.
-
----
-
-## Failure routing
-
-| Symptom | Batch |
-|---|---|
-| `target-not-found:unknown_character_1` on every targeted play | **Batch 1** |
-| HUD stuck timeout with `success=True` misreport | Batch 5A (secondary) |
-
-No product-code changes were made during this validation batch.
+No product-code changes or live UI runs were performed while recomputing this report.
