@@ -433,3 +433,62 @@ def test_rebound_control_with_new_bounds_is_new_attempt() -> None:
     agent._record_blocked_control_attempt("Next")
     rebound = agent._apply_control_suppression([row_b])
     assert [row["label"] for row in rebound] == ["Next"]
+
+
+def test_reward_inventory_has_no_combat_actions_after_combat_won(tmp_path: Path) -> None:
+    from loop.agent.loop import CollectAgent, CollectConfig
+    from loop.agent.prompts import allowed_sets_from_controls
+    from loop.log.store import EpisodeStore
+    from loop.memory.overlay_state import ControlSuppressionState
+    from loop.agent.entities import EntityTracker
+    from loop.agent.perception_cache import PerceptionCache
+    from loop.os.aim import AimGuide
+
+    agent = CollectAgent.__new__(CollectAgent)
+    agent.fixture = Sts2Fixture(controller=None)
+    agent.store = EpisodeStore(tmp_path)
+    agent.config = CollectConfig(skip_models=True, arm="no_skill")
+    agent.session_id = "sess"
+    agent._step_id = 3
+    agent._screen_objects = ScreenObjectStore(tmp_path / "reward.db")
+    agent._last_click = None
+    agent._current_episode_id = "ep1"
+    agent._combat_index = 1
+    agent._combat_won_keys = set()
+    agent._prev_host_stats = {
+        "screen": "combat",
+        "enemies": [{"hp": 0, "hp_max": 40, "label": "Nibbit"}],
+        "player": {"energy": 0},
+    }
+    agent._host_stats = {
+        "screen": "loot",
+        "ocr": "Loot 40 Gold Take Gold Skip",
+        "enemies": [],
+        "player": None,
+    }
+    agent._obs_metrics = {"screen": "combat", "energy": 1}
+    agent._control_suppression = ControlSuppressionState()
+    agent._entity_tracker = EntityTracker()
+    agent._perception_cache = PerceptionCache()
+    agent._selected = "Strike"
+    image = Image.new("RGB", (64, 64), (30, 30, 30))
+    agent._aim = AimGuide.from_marks(
+        image,
+        [
+            _mark(3, "Strike", x=0.4, y=0.85, role="card", object_id="card_3"),
+            _mark(9, "Nibbit", x=0.7, y=0.6, role="enemy", object_id="enemy_9"),
+            _mark(4, "Take Gold", x=0.5, y=0.8, role="button", object_id="ctl_4"),
+        ],
+    )
+    metrics = agent._maybe_apply_combat_exit_transition(agent._obs_metrics)
+    assert metrics["screen"] == "reward"
+    assert metrics["combat_won"] is True
+    allowed, targets = allowed_sets_from_controls(
+        [
+            {"label": "Take Gold", "role": "button", "confidence": "high"},
+            {"label": "Skip", "role": "button", "confidence": "high"},
+        ]
+    )
+    assert "Strike" not in allowed
+    assert targets == set()
+    assert agent._selected is None

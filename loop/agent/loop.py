@@ -244,7 +244,8 @@ from loop.os.window import foreground_title
 from loop.reward.audits import audit_episode, audit_step, explore_progress, hud_identity_stuck, score_delta
 from loop.reward.hud import HudPoller, hud_visible, is_black_frame
 from loop.os.sts_stats import extract_sts_stats, stats_to_score_metrics
-from loop.reward.sts import extract_sts_hud, stale_to_act, turn_reward
+from loop.fixtures.sts2 import normalize_host_stats
+from loop.reward.sts import combat_exit_evidence, extract_sts_hud, stale_to_act, turn_reward
 from loop.eval.export import write_sft_jsonl, write_train_jsonl
 
 
@@ -673,6 +674,118 @@ class CollectAgent:
         self._perception_cache = PerceptionCache()
         self._force_inspect = False
         self._combat_enter_logged = False
+        self._combat_index = 0
+        self._combat_won_keys: set[str] = set()
+        self._was_in_combat = False
+        self._current_episode_id = ""
+
+    def _read_host_stats(self, image: Any) -> dict[str, Any]:
+        stats = extract_sts_stats(image)
+        if getattr(self.fixture, "id", "") == "sts2":
+            stats = normalize_host_stats(stats)
+        return stats
+
+    def _track_combat_index(self) -> None:
+        host = getattr(self, "_host_stats", {}) or {}
+        screen = str(host.get("screen") or "").strip().lower()
+        in_combat = bool(host.get("combat_active")) or screen == "combat"
+        if in_combat and not self._was_in_combat:
+            self._combat_index += 1
+        self._was_in_combat = in_combat
+
+    def _apply_combat_exit_reset(self, *, reason: str) -> None:
+        """Idempotent combat-only reset before reward grounding/decision."""
+        self._selected = None
+        self._entity_tracker = EntityTracker()
+        self._perception_cache.reset()
+        self._cached_perceive_scene = None
+        self._scene_desc = None
+        self._action_surface = None
+        self._frame_model = None
+        self._last_execution_plan = {}
+        self._last_execution_failure = None
+        self._pending_exec_error = None
+        self._planned_hand_signature = None
+        self._stale_source_plan = None
+        self._last_intent = {}
+        self._force_perceive = True
+        self._combat_enter_logged = False
+        suppression = getattr(self, "_control_suppression", None)
+        if suppression is not None:
+            suppression.reset("")
+        self._last_surface_screen = ""
+        self._last_surface_membership = ()
+        self._prev_surface_controls = []
+        store = getattr(self, "_screen_objects", None)
+        if store is not None:
+            invalidate_hand_snapshot(store, reason=reason)
+            store.save_frame(
+                run_id=self.session_id,
+                step_id=int(self._step_id or 0),
+                marks=[],
+                screen="reward",
+                source="combat-exit-reset",
+            )
+        self._aim = None
+
+    def _maybe_apply_combat_exit_transition(
+        self,
+        metrics: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Detect combat→reward and emit durable combat_won metrics once."""
+        out = dict(metrics or self._obs_metrics or {})
+        if getattr(self.fixture, "id", "") != "sts2":
+            return out
+        prev = getattr(self, "_prev_host_stats", {}) or {}
+        curr = getattr(self, "_host_stats", {}) or {}
+        evidence = combat_exit_evidence(prev, curr)
+        if not evidence.confirmed:
+            return out
+        self._apply_combat_exit_reset(reason="combat-won")
+        curr = normalize_host_stats(dict(curr))
+        self._host_stats = curr
+        out["screen"] = "reward"
+        out["activity"] = "reward"
+        out["combat_active"] = False
+        out.pop("energy", None)
+        out.pop("energy_max", None)
+        out.pop("block", None)
+        self._obs_metrics = dict(out)
+        transition_id = f"{self._current_episode_id}:{self._combat_index}"
+        if transition_id not in self._combat_won_keys:
+            self._combat_won_keys.add(transition_id)
+            out["combat_won"] = True
+            out["combat_won_transition_id"] = transition_id
+            out["combat_exit_score"] = evidence.score
+            out["combat_exit_reasons"] = list(evidence.reasons)
+        else:
+            out.pop("combat_won", None)
+            out.pop("combat_won_transition_id", None)
+            out.pop("combat_exit_score", None)
+            out.pop("combat_exit_reasons", None)
+        return out
+
+    def _rebuild_reward_inventory(self, view: Any, *, screen: str = "reward") -> None:
+        """Publish reward-only controls before the next decision."""
+        if view is None:
+            return
+        reuse = self._perception_reuse(view, aim_screen=screen)
+        words, marks, gui_marks, _ = self._build_turn_marks(
+            view,
+            aim_screen=screen,
+            reuse=reuse,
+        )
+        stamped = self._screen_objects.save_frame(
+            run_id=self.session_id,
+            step_id=int(self._step_id or 0),
+            marks=marks,
+            screen=screen,
+            source="reward-rebuild",
+        )
+        self._aim = AimGuide.from_marks(view, stamped, last_xy=self._last_click)
+        self._build_frame_model()
+        if self._scene_desc is not None:
+            self._finalize_action_surface(self._scene_desc, informational=[])
 
     def _combat_screen_now(self) -> bool:
         """True when underlying activity allows combat/entity play (overlays OK)."""
@@ -1402,7 +1515,7 @@ class CollectAgent:
         retries = 0
         while retries < max_retries and current_executed:
             metrics = self.fixture.scorer(current_after)
-            host = extract_sts_stats(current_after)
+            host = self._read_host_stats(current_after)
             pixel_mad = mean_absdiff(roi_thumb(before, 256), roi_thumb(current_after, 256))
             if str(metrics.get("screen") or "") != "combat":
                 break
@@ -4359,7 +4472,7 @@ class CollectAgent:
         self._last_obs_image = view
         if self._two_stage():
             self._prev_host_stats = dict(self._host_stats) if self._host_stats else {}
-            self._host_stats = extract_sts_stats(view)
+            self._host_stats = self._read_host_stats(view)
             self._obs_metrics = (
                 stats_to_score_metrics(self._host_stats)
                 if str(self._host_stats.get("screen") or "") == "combat"
@@ -4450,7 +4563,12 @@ class CollectAgent:
                 ):
                     reason = "column-shift"
             self._invalidate_hand_inventory(reason=reason)
-        return dict(self._obs_metrics)
+        self._track_combat_index()
+        refreshed = self._maybe_apply_combat_exit_transition(dict(self._obs_metrics))
+        self._obs_metrics = refreshed
+        if refreshed.get("combat_won") and self._last_obs_image is not None:
+            self._rebuild_reward_inventory(self._last_obs_image, screen="reward")
+        return dict(refreshed)
 
     def _discovery_contract_for_action(self, action: ActionLog) -> Any | None:
         """Freeze current mark geometry before a buttonless inspection move."""
@@ -5080,6 +5198,10 @@ class CollectAgent:
         self._false_card_transactions = 0
         self._aim = None
         self._selected = None
+        self._combat_index = 0
+        self._combat_won_keys = set()
+        self._was_in_combat = False
+        self._current_episode_id = episode_id
         self._cancel_explore()
         self._survey.reset()
         self._approach.reset()
@@ -5269,12 +5391,14 @@ class CollectAgent:
                 t_hud = time.perf_counter()
                 if self._two_stage():
                     self._prev_host_stats = dict(self._host_stats) if self._host_stats else {}
-                    self._host_stats = extract_sts_stats(view)
+                    self._host_stats = self._read_host_stats(view)
+                    self._track_combat_index()
                     self._obs_metrics = (
                         stats_to_score_metrics(self._host_stats)
                         if str(self._host_stats.get("screen") or "") == "combat"
                         else self.fixture.scorer(view)
                     )
+                    self._obs_metrics = self._maybe_apply_combat_exit_transition(self._obs_metrics)
                 else:
                     self._obs_metrics = self.fixture.scorer(view)
                 hud_ocr_ms = _ms(t_hud)
@@ -5887,6 +6011,7 @@ class CollectAgent:
                 thought = "skip-models round-robin"
                 proposed = action.model_copy(deep=True)
             elif self._two_stage() and turn:
+                self._obs_metrics = self._maybe_apply_combat_exit_transition(self._obs_metrics)
                 parsed, stage_perceive_ms, stage_reason_ms, _scene = self._run_two_stage_vlm(
                     obs_frame=vlm_frames[0],
                     host_screen=host_screen if turn else None,
@@ -6850,7 +6975,7 @@ class CollectAgent:
                 else:
                     self._last_execution_failure = None
                 if not rich_turn_refresh:
-                    self._host_stats = extract_sts_stats(after)
+                    self._host_stats = self._read_host_stats(after)
                 if (
                     prev_screen == "tutorial"
                     and new_screen in {"combat", "map"}
