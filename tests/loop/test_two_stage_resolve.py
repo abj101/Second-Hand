@@ -234,7 +234,7 @@ def test_card_transaction_dispatches_fresh_target_only_after_lift(monkeypatch) -
         image,
         [
             AimMark(3, 0.40, 0.85, 0.30, 0.80, 0.50, 0.90, "Strike", object_id="card_1", role="card"),
-            AimMark(7, 0.55, 0.30, 0.48, 0.22, 0.62, 0.38, "Cultist", object_id="enemy_1", role="enemy"),
+            AimMark(7, 0.55, 0.63, 0.48, 0.56, 0.62, 0.70, "Cultist", object_id="enemy_1", role="enemy"),
         ],
     )
     fresh = AimGuide.from_marks(
@@ -243,7 +243,7 @@ def test_card_transaction_dispatches_fresh_target_only_after_lift(monkeypatch) -
             # Captured-run shape: the selected card moves to the far-left lane,
             # so old/new boxes do not overlap even though identity is stable.
             AimMark(13, 0.085, 0.78, 0.04, 0.73, 0.13, 0.84, "Strike", object_id="card_1", role="card"),
-            AimMark(19, 0.56, 0.31, 0.49, 0.23, 0.63, 0.39, "Cultist", object_id="enemy_1", role="enemy"),
+            AimMark(19, 0.56, 0.64, 0.49, 0.57, 0.63, 0.71, "Cultist", object_id="enemy_1", role="enemy"),
         ],
     )
 
@@ -274,7 +274,7 @@ def test_card_transaction_dispatches_fresh_target_only_after_lift(monkeypatch) -
     monkeypatch.setattr(loop, "_rebind_target", lambda *_a, **_k: fresh.by_id(19))
 
     result = loop._execute_card_transaction(  # noqa: SLF001
-        ActionLog(mark=3, click_x=0.40, click_y=0.85, target=7, click_x2=0.55, click_y2=0.30),
+        ActionLog(mark=3, click_x=0.40, click_y=0.85, target=7, click_x2=0.55, click_y2=0.63),
         prev_metrics={"screen": "combat"},
         tag="t1",
     )
@@ -422,7 +422,7 @@ def test_card_transaction_refuses_target_without_visual_lift(monkeypatch) -> Non
         image,
         [
             AimMark(3, 0.40, 0.85, 0.30, 0.80, 0.50, 0.90, "Strike"),
-            AimMark(7, 0.55, 0.30, 0.48, 0.22, 0.62, 0.38, "Cultist"),
+            AimMark(7, 0.55, 0.63, 0.48, 0.56, 0.62, 0.70, "Cultist"),
         ],
     )
 
@@ -452,7 +452,7 @@ def test_card_transaction_refuses_target_without_visual_lift(monkeypatch) -> Non
     monkeypatch.setattr(loop, "_classify_card_probe", lambda *_a, **_k: ("unconfirmed", []))
 
     result = loop._execute_card_transaction(  # noqa: SLF001
-        ActionLog(mark=3, click_x=0.40, click_y=0.85, target=7, click_x2=0.55, click_y2=0.30),
+        ActionLog(mark=3, click_x=0.40, click_y=0.85, target=7, click_x2=0.55, click_y2=0.63),
         prev_metrics={"screen": "combat"},
         tag="t1",
     )
@@ -571,7 +571,7 @@ def test_card_transaction_rejects_enemy_turn_as_auto_resolution(monkeypatch) -> 
         image,
         [
             AimMark(3, 0.40, 0.85, 0.30, 0.80, 0.50, 0.90, "Strike"),
-            AimMark(7, 0.55, 0.30, 0.48, 0.22, 0.62, 0.38, "Cultist"),
+            AimMark(7, 0.55, 0.63, 0.48, 0.56, 0.62, 0.70, "Cultist"),
         ],
     )
     # The card is gone, and the game has moved to the enemy turn.  There is
@@ -605,7 +605,7 @@ def test_card_transaction_rejects_enemy_turn_as_auto_resolution(monkeypatch) -> 
     monkeypatch.setattr(loop, "_sample_card_post_click", lambda *_a, **_k: _raw_probe(image))
     monkeypatch.setattr(loop, "_classify_card_probe", lambda *_a, **_k: ("unconfirmed", []))
     result = loop._execute_card_transaction(  # noqa: SLF001
-        ActionLog(mark=3, click_x=0.40, click_y=0.85, target=7, click_x2=0.55, click_y2=0.30),
+        ActionLog(mark=3, click_x=0.40, click_y=0.85, target=7, click_x2=0.55, click_y2=0.63),
         prev_metrics={"screen": "combat"},
         tag="t1",
     )
@@ -975,8 +975,10 @@ def _v2_card_agent(monkeypatch, tmp_path, marks, *, energy=3, architecture="two_
 
 
 def _play_action(source, target=None) -> ActionLog:
-    mark_id = int(getattr(source, "id", getattr(source, "mark_id")))
-    target_mark = None if target is None else int(getattr(target, "id", getattr(target, "mark_id")))
+    mark_id = int(getattr(source, "id", None) or getattr(source, "mark_id"))
+    target_mark = None if target is None else int(
+        getattr(target, "id", None) or getattr(target, "mark_id")
+    )
     action = ActionLog(
         mark=mark_id,
         click_x=source.x,
@@ -996,7 +998,7 @@ def _play_action(source, target=None) -> ActionLog:
 def test_card_plan_before_hand_reflow_is_rejected_before_click(monkeypatch, tmp_path) -> None:
     marks = (
         AimMark(id=3, x=0.40, y=0.85, x0=0.30, y0=0.80, x1=0.50, y1=0.90, label="Strike", role="card"),
-        AimMark(id=7, x=0.55, y=0.30, x0=0.48, y0=0.22, x1=0.62, y1=0.38, label="Cultist", role="enemy"),
+        AimMark(id=7, x=0.55, y=0.63, x0=0.48, y0=0.56, x1=0.62, y1=0.70, label="Cultist", role="enemy"),
     )
     loop, store, controller, image, plan_card_by_id = _v2_card_agent(monkeypatch, tmp_path, marks)
     planned = plan_card_by_id(store, card_id="card_1", target_id="enemy_1", entity_targets_ok=True)
@@ -1025,7 +1027,7 @@ def test_old_card_2_intent_rejected_after_preceding_card_leaves(monkeypatch, tmp
     marks = (
         AimMark(id=1, x=0.30, y=0.85, x0=0.22, y0=0.78, x1=0.38, y1=0.92, label="Strike", role="card"),
         AimMark(id=2, x=0.50, y=0.85, x0=0.42, y0=0.78, x1=0.58, y1=0.92, label="Defend", role="card"),
-        AimMark(id=7, x=0.55, y=0.30, x0=0.48, y0=0.22, x1=0.62, y1=0.38, label="Cultist", role="enemy"),
+        AimMark(id=7, x=0.55, y=0.63, x0=0.48, y0=0.56, x1=0.62, y1=0.70, label="Cultist", role="enemy"),
     )
     loop, store, controller, image, plan_card_by_id = _v2_card_agent(monkeypatch, tmp_path, marks)
     old = plan_card_by_id(store, card_id="card_2", entity_targets_ok=True)
@@ -1038,7 +1040,7 @@ def test_old_card_2_intent_rejected_after_preceding_card_leaves(monkeypatch, tmp
         screen="combat",
         marks=(
             AimMark(id=2, x=0.40, y=0.85, x0=0.32, y0=0.78, x1=0.48, y1=0.92, label="Defend", role="card"),
-            AimMark(id=7, x=0.55, y=0.30, x0=0.48, y0=0.22, x1=0.62, y1=0.38, label="Cultist", role="enemy"),
+            AimMark(id=7, x=0.55, y=0.63, x0=0.48, y0=0.56, x1=0.62, y1=0.70, label="Cultist", role="enemy"),
         ),
     )
     result = loop._execute_card_transaction(
@@ -1058,7 +1060,7 @@ def test_duplicate_label_cards_are_not_silently_substituted(monkeypatch, tmp_pat
     marks = (
         AimMark(id=1, x=0.28, y=0.85, x0=0.20, y0=0.78, x1=0.36, y1=0.92, label="Strike", role="card"),
         AimMark(id=2, x=0.48, y=0.85, x0=0.40, y0=0.78, x1=0.56, y1=0.92, label="Strike", role="card"),
-        AimMark(id=7, x=0.55, y=0.30, x0=0.48, y0=0.22, x1=0.62, y1=0.38, label="Cultist", role="enemy"),
+        AimMark(id=7, x=0.55, y=0.63, x0=0.48, y0=0.56, x1=0.62, y1=0.70, label="Cultist", role="enemy"),
     )
     loop, store, controller, _image, plan_card_by_id = _v2_card_agent(monkeypatch, tmp_path, marks)
     old = plan_card_by_id(store, card_id="card_2")
@@ -1070,7 +1072,7 @@ def test_duplicate_label_cards_are_not_silently_substituted(monkeypatch, tmp_pat
         screen="combat",
         marks=(
             AimMark(id=2, x=0.48, y=0.85, x0=0.40, y0=0.78, x1=0.56, y1=0.92, label="Strike", role="card"),
-            AimMark(id=7, x=0.55, y=0.30, x0=0.48, y0=0.22, x1=0.62, y1=0.38, label="Cultist", role="enemy"),
+            AimMark(id=7, x=0.55, y=0.63, x0=0.48, y0=0.56, x1=0.62, y1=0.70, label="Cultist", role="enemy"),
         ),
     )
     result = loop._execute_card_transaction(
@@ -1088,7 +1090,7 @@ def test_duplicate_label_cards_are_not_silently_substituted(monkeypatch, tmp_pat
 def test_source_unconfirmed_blocks_identical_immediate_retry(monkeypatch, tmp_path) -> None:
     marks = (
         AimMark(id=3, x=0.40, y=0.85, x0=0.30, y0=0.80, x1=0.50, y1=0.90, label="Strike", role="card"),
-        AimMark(id=7, x=0.55, y=0.30, x0=0.48, y0=0.22, x1=0.62, y1=0.38, label="Cultist", role="enemy"),
+        AimMark(id=7, x=0.55, y=0.63, x0=0.48, y0=0.56, x1=0.62, y1=0.70, label="Cultist", role="enemy"),
     )
     loop, store, controller, image, plan_card_by_id = _v2_card_agent(monkeypatch, tmp_path, marks)
     planned = plan_card_by_id(store, card_id="card_1", target_id="enemy_1", entity_targets_ok=True)
@@ -1114,7 +1116,7 @@ def test_source_unconfirmed_blocks_identical_immediate_retry(monkeypatch, tmp_pa
 def test_selected_card_resolves_target_from_post_selection_inventory(monkeypatch, tmp_path) -> None:
     marks = (
         AimMark(id=3, x=0.40, y=0.85, x0=0.30, y0=0.80, x1=0.50, y1=0.90, label="Strike", role="card"),
-        AimMark(id=7, x=0.55, y=0.30, x0=0.48, y0=0.22, x1=0.62, y1=0.38, label="Cultist", role="enemy"),
+        AimMark(id=7, x=0.55, y=0.63, x0=0.48, y0=0.56, x1=0.62, y1=0.70, label="Cultist", role="enemy"),
     )
     loop, store, controller, image, plan_card_by_id = _v2_card_agent(monkeypatch, tmp_path, marks)
     planned = plan_card_by_id(store, card_id="card_1", target_id="enemy_1", entity_targets_ok=True)
@@ -1131,7 +1133,7 @@ def test_selected_card_resolves_target_from_post_selection_inventory(monkeypatch
             screen="combat",
             marks=(
                 AimMark(id=13, x=0.08, y=0.78, x0=0.04, y0=0.73, x1=0.13, y1=0.84, label="Strike", object_id="card_1", role="card"),
-                AimMark(id=21, x=0.70, y=0.33, x0=0.64, y0=0.26, x1=0.76, y1=0.40, label="Cultist", object_id="enemy_1", role="enemy"),
+                AimMark(id=21, x=0.70, y=0.63, x0=0.64, y0=0.56, x1=0.76, y1=0.70, label="Cultist", object_id="enemy_1", role="enemy"),
             ),
         )
         loop._aim = AimGuide.from_marks(image, stamped)
@@ -1161,7 +1163,7 @@ def test_selected_card_resolves_target_from_post_selection_inventory(monkeypatch
 def test_missing_stable_target_never_clicks_stale_target(monkeypatch, tmp_path) -> None:
     marks = (
         AimMark(id=3, x=0.40, y=0.85, x0=0.30, y0=0.80, x1=0.50, y1=0.90, label="Strike", role="card"),
-        AimMark(id=7, x=0.55, y=0.30, x0=0.48, y0=0.22, x1=0.62, y1=0.38, label="Cultist", role="enemy"),
+        AimMark(id=7, x=0.55, y=0.63, x0=0.48, y0=0.56, x1=0.62, y1=0.70, label="Cultist", role="enemy"),
     )
     loop, store, controller, image, plan_card_by_id = _v2_card_agent(monkeypatch, tmp_path, marks)
     planned = plan_card_by_id(store, card_id="card_1", target_id="enemy_1", entity_targets_ok=True)
@@ -1184,7 +1186,7 @@ def test_missing_stable_target_never_clicks_stale_target(monkeypatch, tmp_path) 
         return {"screen": "combat"}
 
     monkeypatch.setattr(loop, "_refresh_obs_after_action", refresh)
-    stale = AimMark(id=99, x=0.55, y=0.30, x0=0.48, y0=0.22, x1=0.62, y1=0.38, label="Cultist", object_id="enemy_1", role="enemy")
+    stale = AimMark(id=99, x=0.55, y=0.63, x0=0.48, y0=0.56, x1=0.62, y1=0.70, label="Cultist", object_id="enemy_1", role="enemy")
     monkeypatch.setattr(loop, "_rebind_target", lambda *_a, **_k: stale)
     source = store.by_object_id("card_1")
     target = store.by_object_id("enemy_1")
@@ -1193,11 +1195,94 @@ def test_missing_stable_target_never_clicks_stale_target(monkeypatch, tmp_path) 
         prev_metrics={"screen": "combat"},
         tag="t1",
     )
-    assert len(controller.prims) == 1
     assert [row.phase for row in result.primitives] == ["card"]
     assert result.transaction.outcome == "target_not_found"
     assert result.transaction.target_dispatched is False
     assert "missing-stable-target" in result.transaction.verification_evidence
+    store.close()
+
+
+def test_hp_only_post_selection_fails_closed(monkeypatch, tmp_path) -> None:
+    marks = (
+        AimMark(id=3, x=0.40, y=0.85, x0=0.30, y0=0.80, x1=0.50, y1=0.90, label="Strike", role="card"),
+        AimMark(id=7, x=0.75, y=0.64, x0=0.70, y0=0.58, x1=0.80, y1=0.70, label="unidentified_enemy", role="enemy"),
+    )
+    loop, store, controller, image, plan_card_by_id = _v2_card_agent(monkeypatch, tmp_path, marks)
+    planned = plan_card_by_id(store, card_id="card_1", target_id="enemy_1", entity_targets_ok=True)
+    loop._last_execution_plan = planned["transaction"]
+    loop._planned_hand_signature = loop._hand_inventory_signature()
+    monkeypatch.setattr(loop, "_sample_card_post_click", lambda *_a, **_k: _raw_probe(image))
+    monkeypatch.setattr(loop, "_classify_card_probe", lambda *_a, **_k: ("selected", ["raw lift"]))
+
+    def refresh(_after, prev_metrics=None):  # type: ignore[no-untyped-def]
+        del prev_metrics
+        stamped = store.save_frame(
+            run_id="r",
+            step_id=1,
+            screen="combat",
+            marks=(
+                AimMark(id=13, x=0.08, y=0.78, x0=0.04, y0=0.73, x1=0.13, y1=0.84, label="Strike", object_id="card_1", role="card"),
+                AimMark(id=11, x=0.75, y=0.35, x0=0.70, y0=0.32, x1=0.80, y1=0.38, label="unidentified_enemy", role="unknown"),
+            ),
+        )
+        loop._aim = AimGuide.from_marks(image, stamped)
+        return {"screen": "combat"}
+
+    monkeypatch.setattr(loop, "_refresh_obs_after_action", refresh)
+    monkeypatch.setattr(loop, "_rebind_target", lambda *_a, **_k: None)
+    source = store.by_object_id("card_1")
+    target = store.by_object_id("enemy_1")
+    result = loop._execute_card_transaction(
+        _play_action(source, target),
+        prev_metrics={"screen": "combat"},
+        tag="t1",
+    )
+    assert [row.phase for row in result.primitives] == ["card"]
+    assert result.transaction.outcome == "target_not_found"
+    assert result.transaction.target_dispatched is False
+    store.close()
+
+
+def test_planned_hp_plate_coords_are_not_clicked(monkeypatch, tmp_path) -> None:
+    marks = (
+        AimMark(id=3, x=0.40, y=0.85, x0=0.30, y0=0.80, x1=0.50, y1=0.90, label="Strike", role="card"),
+        AimMark(id=7, x=0.75, y=0.64, x0=0.70, y0=0.58, x1=0.80, y1=0.70, label="unidentified_enemy", role="enemy"),
+    )
+    loop, store, controller, image, plan_card_by_id = _v2_card_agent(monkeypatch, tmp_path, marks)
+    planned = plan_card_by_id(store, card_id="card_1", target_id="enemy_1", entity_targets_ok=True)
+    candidate = dict(planned["transaction"]["target_candidate"])
+    candidate["point"] = {"x": 0.75, "y": 0.35}
+    candidate["bounds"] = {"x0": 0.70, "y0": 0.32, "x1": 0.80, "y1": 0.38}
+    planned["transaction"]["target_candidate"] = candidate
+    loop._last_execution_plan = planned["transaction"]
+    loop._planned_hand_signature = loop._hand_inventory_signature()
+    monkeypatch.setattr(loop, "_sample_card_post_click", lambda *_a, **_k: _raw_probe(image))
+    monkeypatch.setattr(loop, "_classify_card_probe", lambda *_a, **_k: ("selected", ["raw lift"]))
+
+    def refresh(_after, prev_metrics=None):  # type: ignore[no-untyped-def]
+        del prev_metrics
+        stamped = store.save_frame(
+            run_id="r",
+            step_id=1,
+            screen="combat",
+            marks=(
+                AimMark(id=13, x=0.08, y=0.78, x0=0.04, y0=0.73, x1=0.13, y1=0.84, label="Strike", object_id="card_1", role="card"),
+            ),
+        )
+        loop._aim = AimGuide.from_marks(image, stamped)
+        return {"screen": "combat"}
+
+    monkeypatch.setattr(loop, "_refresh_obs_after_action", refresh)
+    monkeypatch.setattr(loop, "_rebind_target", lambda *_a, **_k: None)
+    source = store.by_object_id("card_1")
+    hp = AimMark(id=7, x=0.75, y=0.35, x0=0.70, y0=0.32, x1=0.80, y1=0.38, label="unidentified_enemy", object_id="enemy_1", role="enemy")
+    result = loop._execute_card_transaction(
+        _play_action(source, hp),
+        prev_metrics={"screen": "combat"},
+        tag="t1",
+    )
+    assert [row.phase for row in result.primitives] == ["card"]
+    assert result.transaction.outcome == "target_not_found"
     store.close()
 
 

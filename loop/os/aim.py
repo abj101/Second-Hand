@@ -746,6 +746,8 @@ def apply_enemy_bboxes(
     role: str = "enemy",
 ) -> list[AimMark]:
     """Place synthetic combat-sprite marks from LLM1 bbox entries."""
+    from loop.agent.entities import is_prompt_instance_id
+
     stamp_role = (role or "enemy").strip().lower() or "enemy"
     prefix = "player" if stamp_role == "player" else "enemy"
     out = list(marks or ())
@@ -779,6 +781,8 @@ def apply_enemy_bboxes(
         key = _compact_label(label)
         if key in have and not _is_unknown_entity_label(label):
             continue
+        raw_id = str(row.get("entity_id") or row.get("id") or "").strip()
+        stamp_id = "" if is_prompt_instance_id(raw_id) else raw_id
         nearby = next(
             (
                 mark for mark in out
@@ -788,11 +792,16 @@ def apply_enemy_bboxes(
             None,
         )
         if nearby is not None:
+            # LLM instance tokens are aliases, never executable object IDs.
+            # Keep the observed mark untouched; the current action surface
+            # assigns canonical IDs and the store may bind an alias afterward.
+            if not stamp_id and raw_id:
+                continue
             out = [
                 _copy_mark(
                     mark,
                     label=label,
-                    object_id=str(row.get("entity_id") or row.get("id") or f"{prefix}_{enemy_index}"),
+                    object_id=stamp_id or str(mark.object_id or f"{prefix}_{enemy_index}"),
                     role=stamp_role,
                     source=f"{mark.source}+llm1-bbox" if mark.source else "cv+llm1-bbox",
                     confidence=max(mark.confidence, 0.72),
@@ -814,7 +823,7 @@ def apply_enemy_bboxes(
         )
         out[-1] = _copy_mark(
             out[-1],
-            object_id=str(row.get("entity_id") or row.get("id") or f"{prefix}_{enemy_index}"),
+            object_id=stamp_id or f"{prefix}_{enemy_index}",
             role=stamp_role,
             source=str(row.get("source") or "llm1-bbox"),
             confidence=0.72,

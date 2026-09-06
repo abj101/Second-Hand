@@ -295,6 +295,39 @@ def test_prompt_instance_id_enemy_alias_resolves_when_geometry_matches(tmp_path:
     store.close()
 
 
+def test_captured_run_alias_binds_to_one_current_surface_object(tmp_path: Path) -> None:
+    """Reduced 20260906T063400Z evidence: LLM alias → canonical enemy_1."""
+    store = ScreenObjectStore(tmp_path / "captured-alias.db")
+    store.save_frame(
+        run_id="61138978e78f", step_id=1, screen="combat",
+        marks=(
+            AimMark(id=6, x=0.687, y=0.95, x0=0.617, y0=0.823, x1=0.757, y1=1.0, label="Bash", role="card"),
+            AimMark(id=11, x=0.7505, y=0.6405, x0=0.6905, y0=0.5605, x1=0.8105, y1=0.7205, label="unknown_character_1", role="enemy"),
+        ),
+    )
+    rows = [{"entity_id": "unknown_character_1", "role": "unknown_character", "bbox": [690, 560, 811, 721]}]
+    bind_snapshot_target_ids(store, rows, entity_targets_ok=True)
+    assert rows[0]["entity_id"] == "enemy_1"
+    assert resolve_planned_target(store, "unknown_character_1", entity_targets_ok=True) == store.by_object_id("enemy_1")
+    store.close()
+
+
+def test_alias_resolution_rejects_ambiguous_arbitrary_layout(tmp_path: Path) -> None:
+    store = ScreenObjectStore(tmp_path / "ambiguous.db")
+    store.save_frame(
+        run_id="any", step_id=4, screen="combat",
+        marks=(
+            AimMark(id=1, x=0.12, y=0.17, x0=0.08, y0=0.12, x1=0.16, y1=0.22, label="Card", role="card"),
+            AimMark(id=2, x=0.31, y=0.33, x0=0.27, y0=0.28, x1=0.35, y1=0.38, label="A", role="enemy"),
+            AimMark(id=3, x=0.49, y=0.33, x0=0.45, y0=0.28, x1=0.53, y1=0.38, label="B", role="enemy"),
+        ),
+    )
+    rows = [{"entity_id": "unknown_character_1", "role": "unknown_character", "bbox": [360, 280, 440, 380]}]
+    bind_snapshot_target_ids(store, rows, entity_targets_ok=True)
+    assert store.object_for_instance_id("unknown_character_1") is None
+    store.close()
+
+
 def test_stale_prompt_instance_id_fails_after_inventory_rebuild(tmp_path: Path) -> None:
     store = ScreenObjectStore(tmp_path / "stale_alias.db")
     store.save_frame(
@@ -327,6 +360,9 @@ def test_stale_prompt_instance_id_fails_after_inventory_rebuild(tmp_path: Path) 
     stale = plan_card_by_id(store, card_id="card_1", target_id="unknown_character_1", entity_targets_ok=True)
     assert stale["ok"] is False
     assert stale["reason"] == "target-not-found"
+    live = plan_card_by_id(store, card_id="card_1", target_id="enemy_1", entity_targets_ok=True)
+    assert live["ok"] is True
+    assert live["transaction"]["target_candidate"]["object_id"] == "enemy_1"
     store.close()
 
 

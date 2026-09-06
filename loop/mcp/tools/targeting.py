@@ -178,7 +178,6 @@ def bind_snapshot_target_ids(
     enemies = [
         obj for obj in store.objects
         if object_role(obj, entity_targets_ok=entity_targets_ok) == "enemy"
-        and float(obj.y) >= 0.50
         and str(obj.object_id or "").strip()
     ]
     used_objects: set[str] = set()
@@ -205,9 +204,20 @@ def bind_snapshot_target_ids(
         candidates = [obj for obj in enemies if obj.object_id not in used_objects]
         if not candidates:
             continue
-        hit = min(candidates, key=lambda obj: (float(obj.x) - cx) ** 2 + (float(obj.y) - cy) ** 2)
-        if (float(hit.x) - cx) ** 2 + (float(hit.y) - cy) ** 2 > 0.16 ** 2:
+        ranked = sorted(
+            [
+                (((float(obj.x) - cx) ** 2 + (float(obj.y) - cy) ** 2), obj)
+                for obj in candidates
+            ],
+            key=lambda item: item[0],
+        )
+        if not ranked or ranked[0][0] > 0.16 ** 2:
             continue
+        # A perception row must identify one canonical surface object. Do not
+        # break ties or infer from columns/cardinality.
+        if len(ranked) > 1 and abs(ranked[1][0] - ranked[0][0]) < 1e-9:
+            continue
+        hit = ranked[0][1]
         store.stamp_instance_alias(instance_id, hit.object_id)
         row["entity_id"] = hit.object_id
         if str(row.get("role") or "").strip().lower() in {"unknown_character", "character", "target"}:

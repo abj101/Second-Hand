@@ -36,6 +36,7 @@ from loop.agent.entities import (
     is_anonymous_enemy_label,
     is_frame_mark_token,
     is_player_row,
+    is_prompt_instance_id,
     is_targetable_anonymous_enemy,
     pending_inspect_target,
     player_display_label,
@@ -141,6 +142,7 @@ from loop.mcp.tools.targeting import (
     plan_card_by_id,
     register_targeting_tools,
     resolve_planned_source,
+    resolve_planned_target,
     validate_stable_transaction,
 )
 from loop.model.gateway import VlmGateway
@@ -2380,12 +2382,15 @@ class CollectAgent:
         rebound = None
         if refreshed_inventory and planned_target_id:
             store = getattr(self, "_screen_objects", None)
-            fresh_obj = store.object_for_instance_id(planned_target_id) if store is not None else None
+            fresh_obj = (
+                resolve_planned_target(store, planned_target_id, entity_targets_ok=True)
+                if store is not None else None
+            )
             if fresh_obj is not None:
                 rebound = self._aim_mark_for_object(fresh_obj)
                 if rebound is not None:
                     transaction.verification_evidence.append(
-                        f"post-selection-target:{planned_target_id}"
+                        f"post-selection-target:{fresh_obj.object_id}"
                     )
         if rebound is None and not (refreshed_inventory and planned_target_id):
             rebound = self._rebind_target(
@@ -3303,11 +3308,14 @@ class CollectAgent:
                 role = "nav_prev"
             elif role in {"dialog", "menu"}:
                 role = "button"
+            object_id = row_id or mark.object_id
+            if row_role in {"enemy", "unknown_character", "character", "target"} and is_prompt_instance_id(str(object_id or "")):
+                object_id = mark.object_id
             source = "+".join(dict.fromkeys(filter(None, (str(mark.source or ""), "llm1"))))
             marks[index] = _copy_mark(
                 mark,
                 label=label or mark.label,
-                object_id=row_id or mark.object_id,
+                object_id=object_id,
                 role=role or mark.role,
                 source=source,
                 confidence=max(float(mark.confidence or mark.score or 0.0), 0.75),
@@ -3870,7 +3878,7 @@ class CollectAgent:
                 ))
             elif role == "enemy":
                 target_id = str(obj.object_id or "").strip()
-                if not target_id:
+                if not target_id or is_prompt_instance_id(target_id):
                     # A frame-local visual blob is not a canonical target.  It
                     # stays available to perception, but ACT cannot address it
                     # until the object store assigns a stable identity.
@@ -3906,25 +3914,6 @@ class CollectAgent:
                 controls.append(ControlSnapshot(control_id, obj.label or slug, bbox, role=role))
             if obj.object_id:
                 self._v2_control_objects.setdefault(str(obj.object_id), obj)
-
-        alias_targets: list[TargetSnapshot] = []
-        seen_target_ids = {target.target_id for target in targets}
-        for alias, canonical in getattr(self._screen_objects, "_instance_aliases", {}).items():
-            if alias in seen_target_ids:
-                continue
-            base = next((row for row in targets if row.target_id == canonical), None)
-            if base is None:
-                continue
-            alias_targets.append(TargetSnapshot(
-                target_id=alias,
-                bbox=base.bbox,
-                name=base.name,
-                hp=base.hp,
-                intent=base.intent,
-                identity_confidence=base.identity_confidence,
-            ))
-            seen_target_ids.add(alias)
-        targets.extend(alias_targets)
 
         turn = self._field_value(getattr(game_state, "turn", None)) if game_state is not None else None
         if turn is None:
