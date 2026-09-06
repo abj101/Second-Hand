@@ -107,3 +107,15 @@ def test_step_log_telemetry_defaults_and_old_jsonl_load() -> None:
     assert loaded.reasoner_called_this_turn is False
     assert loaded.explicit_mcp_tools_called == []
     assert registry_tool_names(loaded.tool_events) == []
+
+
+def test_session_summary_stop_flush_defaults_and_legacy_load() -> None:
+    from loop.log.schema import SessionSummary
+
+    summary = SessionSummary(session_id="s1", fixture="fake")
+    assert summary.stop_requested is False
+    assert summary.flush_completed is False
+    legacy = {"session_id": "s1", "fixture": "fake", "episodes": 2}
+    loaded = SessionSummary.model_validate(legacy)
+    assert loaded.stop_requested is False
+    assert loaded.flush_completed is False

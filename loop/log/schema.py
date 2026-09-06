@@ -273,3 +273,5 @@ class SessionSummary(BaseModel):
     success_rate: float | None = None
     interrupt_cv: int = 0
     interrupt_dino: int = 0
+    stop_requested: bool = False
+    flush_completed: bool = False

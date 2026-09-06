@@ -564,6 +564,8 @@ class CollectAgent:
         self.rng = random.Random(self.config.rng_seed)
         self._episode_n = 0
         self._stopped = False
+        self._session_finalized = False
+        self._final_summary: SessionSummary | None = None
         self._hud_poller: HudPoller | None = None
         self._hud_seen: bool | None = None
         self._carry_after = None
@@ -5004,6 +5006,67 @@ class CollectAgent:
         )
         self._hud_poller.start()
 
+    def _build_session_summary(self) -> SessionSummary:
+        n = len(self._episode_returns)
+        return SessionSummary(
+            session_id=self.session_id,
+            fixture=self.fixture.id,
+            episodes=n,
+            unique_device_names=sorted(self._all_actions),
+            memory_size=0 if self.memory is None else self.memory.size(),
+            mean_return=(sum(self._episode_returns) / n if n else 0.0),
+            fail_rate=(sum(1 for v in self._episode_returns if v < 0) / n if n else 0.0),
+            mean_think_ms=(sum(self._think_ms) / len(self._think_ms) if self._think_ms else None),
+            audit_flags=sorted(set(self._session_flags)),
+            policy_id=self._step_policy_id(),
+            arm=self.config.arm,
+            skill_on_frac=(
+                sum(self._skill_on_flags) / len(self._skill_on_flags)
+                if self._skill_on_flags
+                else None
+            ),
+            success_rate=(sum(self._episode_success) / n if n else None),
+            interrupt_cv=self._interrupt_cv,
+            interrupt_dino=self._interrupt_dino,
+        )
+
+    def _finalize_session(self, summary: SessionSummary | None = None) -> SessionSummary:
+        if self._session_finalized and self._final_summary is not None:
+            return self._final_summary
+
+        flush_ok = True
+        try:
+            self.journal.save()
+        except OSError:
+            flush_ok = False
+
+        try:
+            self.notebook.save_grounded(self._grounded_path)
+        except OSError:
+            flush_ok = False
+
+        screen_store = self._screen_objects
+        if screen_store is not None:
+            try:
+                screen_store._conn.commit()
+                screen_store.close()
+            except Exception:
+                flush_ok = False
+            self._screen_objects = None
+
+        if summary is None:
+            summary = self._build_session_summary()
+        summary.stop_requested = bool(self._stopped)
+        summary.flush_completed = flush_ok
+        try:
+            self.store.write_summary(summary)
+        except OSError:
+            summary.flush_completed = False
+
+        self._session_finalized = True
+        self._final_summary = summary
+        return summary
+
     def run_session(self) -> SessionSummary:
         if self._turn_based():
             self.config.survey = False
@@ -5019,6 +5082,8 @@ class CollectAgent:
             if callable(geo):
                 _say("view  " + str(geo(probe)))
         self._stopped = False
+        self._session_finalized = False
+        self._final_summary = None
         self._start_hud_poller()
         self._ensure_detector()
         if self.config.dino_required:
@@ -5049,28 +5114,10 @@ class CollectAgent:
             if self._hud_poller is not None:
                 self._hud_poller.stop()
                 self._hud_poller = None
-        n = len(self._episode_returns)
-        summary = SessionSummary(
-            session_id=self.session_id,
-            fixture=self.fixture.id,
-            episodes=n,
-            unique_device_names=sorted(self._all_actions),
-            memory_size=0 if self.memory is None else self.memory.size(),
-            mean_return=(sum(self._episode_returns) / n if n else 0.0),
-            fail_rate=(sum(1 for v in self._episode_returns if v < 0) / n if n else 0.0),
-            mean_think_ms=(sum(self._think_ms) / len(self._think_ms) if self._think_ms else None),
-            audit_flags=sorted(set(self._session_flags)),
-            policy_id=self._step_policy_id(),
-            arm=self.config.arm,
-            skill_on_frac=(sum(self._skill_on_flags) / len(self._skill_on_flags) if self._skill_on_flags else None),
-            success_rate=(sum(self._episode_success) / n if n else None),
-            interrupt_cv=self._interrupt_cv,
-            interrupt_dino=self._interrupt_dino,
-        )
-        self.store.write_summary(summary)
+            summary = self._finalize_session()
         _say(
             f"{'stopped' if self._stopped else 'session complete'}  "
-            f"episodes={n}  mean_return={summary.mean_return:.3f}"
+            f"episodes={summary.episodes}  mean_return={summary.mean_return:.3f}"
         )
         self._live(
             phase="stopped" if self._stopped else "done",
