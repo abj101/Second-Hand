@@ -3520,8 +3520,15 @@ class CollectAgent:
             str(row.label.value or "").casefold() == target.casefold()
             or row.id.casefold() == target.casefold()
         )), None)
-        if enemy is not None:
-            return LegalAction("play_card", card_id=card.id, target_id=enemy.id), ("energy_spent", "card_leaves_hand", "enemy_hp_changes")
+        if target:
+            # This helper runs after dispatch.  The execution transaction has
+            # already proven that ``target`` named a current-frame actionable
+            # object, while GameState may use a different tracker-local ID.
+            # Preserve the matched tracker ID when available, but do not turn
+            # an ID-namespace mismatch into a false ``selection_confirmed``
+            # expectation for a card that was actually sent to a target.
+            target_id = enemy.id if enemy is not None else target
+            return LegalAction("play_card", card_id=card.id, target_id=target_id), ("energy_spent", "card_leaves_hand", "enemy_hp_changes")
         return LegalAction("select_card", card_id=card.id), ("selection_confirmed",)
 
     def _resolve_enemy_alias_to_current_label(self, target: str) -> str:
@@ -7069,8 +7076,13 @@ class CollectAgent:
                         self._reperceive_after_hover(
                             after, hovered_label=hovered_label, tag=tag, discovery=discovery
                         )
+                    dispatched_target = ""
+                    if card_transaction is not None and card_transaction.target_dispatched:
+                        dispatched_target = str(card_transaction.target_object_id or "")
                     state_action, expected_effects = self._state_action_from_labels(
-                        str(vlm_hud.get("choice") or ""), str(parsed.get("target") or "") if 'parsed' in locals() else ""
+                        str(vlm_hud.get("choice") or ""),
+                        dispatched_target
+                        or (str(parsed.get("target") or "") if 'parsed' in locals() else ""),
                     )
                     selected_id = None
                     if card_transaction is not None and card_transaction.selection_state == "confirmed" and state_action is not None:
