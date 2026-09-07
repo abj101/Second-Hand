@@ -1008,6 +1008,34 @@ def test_combat_exit_uses_current_scorer_and_perception_evidence(tmp_path) -> No
     assert stable.get("combat_won") is not True
 
 
+def test_reward_rebuild_uses_captured_image_not_encoded_model_frame(tmp_path, monkeypatch) -> None:
+    """Reward grounding needs pixels, while LLM frames are byte payloads."""
+    from loop.agent.loop import CollectAgent, CollectConfig
+    from loop.fixtures.sts2 import Sts2Fixture
+    from loop.log.store import EpisodeStore
+    from loop.os.capture import encode_image
+
+    agent = CollectAgent(
+        Sts2Fixture(controller=None),
+        EpisodeStore(tmp_path),
+        config=CollectConfig(skip_models=True, arm="no_skill"),
+    )
+    captured = Image.new("RGB", (64, 64), (30, 30, 30))
+    encoded = encode_image(captured, longest_side=64)
+    agent._last_obs_image = captured
+    agent._reason_vlm_frames = [encoded]
+    rebuilt: list[Image.Image] = []
+    monkeypatch.setattr(
+        agent,
+        "_rebuild_reward_inventory",
+        lambda view, *, screen: rebuilt.append(view),
+    )
+
+    agent._rebuild_current_reward_inventory()
+    assert rebuilt == [captured]
+    assert rebuilt[0] is not encoded
+
+
 def test_combat_animation_then_loot_emits_once(tmp_path) -> None:
     from loop.agent.loop import CollectAgent, CollectConfig
     from loop.fixtures.sts2 import Sts2Fixture

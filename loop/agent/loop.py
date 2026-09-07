@@ -841,6 +841,12 @@ class CollectAgent:
         if self._scene_desc is not None:
             self._finalize_action_surface(self._scene_desc, informational=[])
 
+    def _rebuild_current_reward_inventory(self) -> None:
+        """Rebuild from the captured image, never the encoded model payload."""
+        view = self._last_obs_image
+        if view is not None:
+            self._rebuild_reward_inventory(view, screen="reward")
+
     def _combat_screen_now(self) -> bool:
         """True when underlying activity allows combat/entity play (overlays OK)."""
         host_stats = getattr(self, "_host_stats", {})
@@ -4169,7 +4175,7 @@ class CollectAgent:
             # scene is current-frame evidence, so use it only to rebuild the
             # reward inventory before ACT; do not rerun the reasoner.
             self._scene_desc = scene_desc
-            self._rebuild_reward_inventory(obs_frame, screen="reward")
+            self._rebuild_current_reward_inventory()
             scene_desc = self._scene_desc or scene_desc
             reason_controls = self._reason_controls_from_surface(scene_desc)
             self._reason_controls = reason_controls
