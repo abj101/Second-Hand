@@ -31,6 +31,7 @@ from loop.agent.decision import (
 )
 from loop.agent.entities import (
     EntityTracker,
+    _host_enemy_count,
     _row_center,
     entity_route_facts,
     is_anonymous_enemy_label,
@@ -132,7 +133,7 @@ from loop.memory.journal import (
 from loop.memory.lexicon import screen_from_labels
 from loop.memory.overlay_state import ControlSuppressionState, OverlayState
 from loop.memory.notebook import Notebook, avoid_devices, listing_has_dialog, overlay_screen
-from loop.memory.screen_objects import ScreenObjectStore
+from loop.memory.screen_objects import ScreenObjectStore, collapse_same_sprite_cluster
 from loop.memory.skills import Skill, SkillBank
 from loop.memory.store import MemoryStore
 from loop.memory.semantic import SemanticMemoryStore
@@ -4153,6 +4154,39 @@ class CollectAgent:
         """Read a reconciled Field or a plain sensor value."""
         return getattr(value, "value", value)
 
+    @staticmethod
+    def _prefer_published_target(kept: TargetSnapshot, challenger: TargetSnapshot) -> TargetSnapshot:
+        kept_e1 = str(kept.target_id or "").strip().lower() == "enemy_1"
+        chall_e1 = str(challenger.target_id or "").strip().lower() == "enemy_1"
+        if kept_e1 != chall_e1:
+            return kept if kept_e1 else challenger
+
+        def identified(name: str | None) -> bool:
+            raw = str(name or "").strip()
+            if not raw:
+                return False
+            compact = " ".join(raw.lower().replace("_", " ").split())
+            if compact.startswith("unknown"):
+                return False
+            return not is_anonymous_enemy_label(raw)
+
+        kept_named = identified(kept.name)
+        chall_named = identified(challenger.name)
+        if kept_named != chall_named:
+            return kept if kept_named else challenger
+
+        def conf(row: TargetSnapshot) -> float:
+            value = row.identity_confidence
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return -1.0
+            return float(value)
+
+        kept_c = conf(kept)
+        chall_c = conf(challenger)
+        if chall_c != kept_c:
+            return challenger if chall_c > kept_c else kept
+        return kept
+
     def _build_turn_snapshot(self, scene_desc: Any) -> TurnSnapshot:
         """Freeze the current typed object inventory for one v2 ACT call."""
         from loop.mcp.tools.targeting import bind_snapshot_target_ids
@@ -4333,6 +4367,12 @@ class CollectAgent:
         self._snapshot_dropped_noncanonical = dropped_noncanonical
         if dropped_noncanonical:
             _say(f"  snapshot  dropped_noncanonical={dropped_noncanonical}")
+        targets = collapse_same_sprite_cluster(
+            targets,
+            is_candidate=lambda _row: True,
+            prefer=self._prefer_published_target,
+            host_enemies=_host_enemy_count(self._host_stats),
+        )
         turn = self._field_value(getattr(game_state, "turn", None)) if game_state is not None else None
         if turn is None:
             turn = self._host_stats.get("turn")

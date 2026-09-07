@@ -753,13 +753,25 @@ def merge_cached_enemy_marks(
         return list(marks or ())
     if not adapter.enables_combat_role_stamps("combat"):
         return list(marks or ())
-    out = [m for m in (marks or ()) if not in_combat_sprite_band(m.y, m.x, layout_adapter=adapter)]
+    from loop.memory.screen_objects import same_sprite_cluster
+
+    def in_band(mark: AimMark) -> bool:
+        return in_combat_sprite_band(mark.y, mark.x, layout_adapter=adapter)
+
+    out = [m for m in (marks or ()) if not in_band(m)]
     have = {_compact_label(m.label) for m in out if (m.label or "").strip()}
+    kept_band: list[AimMark] = []
     for em in cached:
         key = _compact_label(em.label)
-        if key and key not in have:
-            out.append(em)
+        if key and key in have:
+            continue
+        if in_band(em) and any(same_sprite_cluster(em, other) for other in kept_band):
+            continue
+        out.append(em)
+        if key:
             have.add(key)
+        if in_band(em):
+            kept_band.append(em)
     return out
 
 

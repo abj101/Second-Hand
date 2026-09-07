@@ -1,21 +1,139 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from loop.os.aim import GRID, AimMark, label_kind
 
+# Same-sprite cluster (2e): looser than the IoU≥0.45 collapse. Body vs HP-plate
+# often sits near IoU 0.04 with centers ~0.10 apart.
+SAME_SPRITE_IOU = 0.20
+SAME_SPRITE_CENTER = 0.12
+SEPARATED_SPRITE_CENTER = 0.25
 
-def _bbox_iou(a: ScreenObject | AimMark, b: ScreenObject | AimMark) -> float:
-    ix0, iy0 = max(a.x0, b.x0), max(a.y0, b.y0)
-    ix1, iy1 = min(a.x1, b.x1), min(a.y1, b.y1)
+_T = TypeVar("_T")
+
+
+def _as_xyxy(item: Any) -> tuple[float, float, float, float]:
+    bbox = getattr(item, "bbox", None)
+    if bbox is not None:
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            return float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
+        return (
+            float(getattr(bbox, "x0")),
+            float(getattr(bbox, "y0")),
+            float(getattr(bbox, "x1")),
+            float(getattr(bbox, "y1")),
+        )
+    return float(item.x0), float(item.y0), float(item.x1), float(item.y1)
+
+
+def _bbox_iou(a: Any, b: Any) -> float:
+    ax0, ay0, ax1, ay1 = _as_xyxy(a)
+    bx0, by0, bx1, by1 = _as_xyxy(b)
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
     inter = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
     if inter <= 0:
         return 0.0
-    union = max(1e-9, (a.x1 - a.x0) * (a.y1 - a.y0) + (b.x1 - b.x0) * (b.y1 - b.y0) - inter)
+    union = max(1e-9, (ax1 - ax0) * (ay1 - ay0) + (bx1 - bx0) * (by1 - by0) - inter)
     return inter / union
+
+
+def _item_center(item: Any) -> tuple[float, float]:
+    x = getattr(item, "x", None)
+    y = getattr(item, "y", None)
+    if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+        return float(x), float(y)
+    x0, y0, x1, y1 = _as_xyxy(item)
+    return (x0 + x1) / 2.0, (y0 + y1) / 2.0
+
+
+def bbox_center_distance(a: Any, b: Any) -> float:
+    ax, ay = _item_center(a)
+    bx, by = _item_center(b)
+    return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+
+
+def same_sprite_cluster(a: Any, b: Any, *, host_enemies: int | None = None) -> bool:
+    """True when two boxes are the same visible sprite (IoU≥0.20 or center≤0.12).
+
+    Centers ≥0.25 apart stay distinct unless host reports exactly one enemy.
+    """
+    dist = bbox_center_distance(a, b)
+    if dist >= SEPARATED_SPRITE_CENTER:
+        return host_enemies == 1
+    if _bbox_iou(a, b) >= SAME_SPRITE_IOU:
+        return True
+    return dist <= SAME_SPRITE_CENTER
+
+
+def _context_host_enemy_count(context: Any | None) -> int | None:
+    from loop.agent.entities import _host_enemy_count
+
+    if context is None:
+        return None
+    if isinstance(context, dict):
+        return _host_enemy_count(context)
+    host = getattr(context, "host_stats", None)
+    if isinstance(host, dict):
+        counted = _host_enemy_count(host)
+        if counted is not None:
+            return counted
+    enemies = getattr(context, "enemies", None)
+    if enemies is not None:
+        return _host_enemy_count({"enemies": enemies})
+    return None
+
+
+def collapse_same_sprite_cluster(
+    items: Sequence[_T],
+    *,
+    is_candidate: Callable[[_T], bool],
+    prefer: Callable[[_T, _T], _T],
+    host_enemies: int | None = None,
+) -> list[_T]:
+    """Greedy 2e collapse. Host enemies==1 caps remaining candidates to one."""
+    kept: list[_T] = []
+    for item in items:
+        if not is_candidate(item):
+            kept.append(item)
+            continue
+        dup_idx = next(
+            (
+                index
+                for index, other in enumerate(kept)
+                if is_candidate(other)
+                and same_sprite_cluster(item, other, host_enemies=host_enemies)
+            ),
+            None,
+        )
+        if dup_idx is not None:
+            kept[dup_idx] = prefer(kept[dup_idx], item)
+            continue
+        kept.append(item)
+    if host_enemies != 1:
+        return kept
+    idxs = [index for index, item in enumerate(kept) if is_candidate(item)]
+    if len(idxs) <= 1:
+        return kept
+    winner = kept[idxs[0]]
+    for index in idxs[1:]:
+        winner = prefer(winner, kept[index])
+    out: list[_T] = []
+    placed = False
+    drop = set(idxs)
+    for index, item in enumerate(kept):
+        if index not in drop:
+            out.append(item)
+            continue
+        if not placed:
+            out.append(winner)
+            placed = True
+    return out
 
 
 def _is_mark_object_id(object_id: str) -> bool:
@@ -68,6 +186,12 @@ def _prefer_target_row(kept_mark: AimMark, challenger: AimMark) -> AimMark:
     chall_canon = _canonical_sprite_id(challenger.object_id)
     if kept_canon != chall_canon:
         return kept_mark if kept_canon else challenger
+    kept_oid = str(kept_mark.object_id or "").strip().lower()
+    chall_oid = str(challenger.object_id or "").strip().lower()
+    if kept_oid == "enemy_1" and chall_oid != "enemy_1":
+        return kept_mark
+    if chall_oid == "enemy_1" and kept_oid != "enemy_1":
+        return challenger
     kept_conf = _mark_confidence(kept_mark)
     chall_conf = _mark_confidence(challenger)
     if chall_conf != kept_conf:
@@ -110,6 +234,13 @@ def _prepare_frame_marks(marks: list[AimMark], *, context: Any | None = None) ->
                 kept[dup_idx] = _prefer_target_row(kept[dup_idx], mark)
                 continue
         kept.append(mark)
+
+    kept = collapse_same_sprite_cluster(
+        kept,
+        is_candidate=sprite_like,
+        prefer=_prefer_target_row,
+        host_enemies=_context_host_enemy_count(context),
+    )
 
     cards = sorted(
         [
@@ -362,8 +493,8 @@ class ScreenObjectStore:
             prepared.append(_copy_mark(
                 mark,
                 label=str(obj.label or mark.label),
-                object_id=str(obj.object_id or ""),
-                role=str(obj.role or ""),
+                object_id=str(mark.object_id or obj.object_id or ""),
+                role=str(obj.role or mark.role or ""),
                 source=str(obj.source or mark.source or source),
                 confidence=float(obj.confidence or mark.confidence or mark.score or 0.0),
             ))

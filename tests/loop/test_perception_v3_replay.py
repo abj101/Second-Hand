@@ -13,7 +13,7 @@ from loop.agent.perception_cache import PerceptionCache
 from loop.fixtures.sts2 import Sts2Fixture
 from loop.memory.overlay_state import OverlayState
 from loop.memory.screen_objects import ScreenObject, ScreenObjectStore
-from loop.os.aim import AimGuide, AimMark
+from loop.os.aim import AimGuide, AimMark, in_combat_sprite_band, merge_cached_enemy_marks
 from loop.os.frame_model import build_action_surface
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "perception3"
@@ -363,6 +363,38 @@ def test_identity_confidence_clamped_or_none() -> None:
     assert ok.identity_confidence == 0.72
 
 
+def _bbox_center(bbox: tuple[float, float, float, float]) -> tuple[float, float]:
+    return ((bbox[0] + bbox[2]) * 0.5, (bbox[1] + bbox[3]) * 0.5)
+
+
+def _center_dist(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    ax, ay = _bbox_center(a)
+    bx, by = _bbox_center(b)
+    return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+
+
+def _combat_scene(
+    *,
+    enemies: list | None = None,
+    hand_cards: list | None = None,
+    controls: list | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        screen="combat",
+        enemies=list(enemies or []),
+        characters=[],
+        controls=list(controls or []),
+        hand_cards=list(hand_cards or []),
+        tutorial={},
+        turn="ours",
+        informational_text=lambda: [],
+        dialog=None,
+    )
+
+
 def test_anchored_single_enemy_routes_to_act_without_blocker(tmp_path: Path) -> None:
     marks = [
         _mark_from_row({
@@ -404,3 +436,192 @@ def test_anchored_single_enemy_routes_to_act_without_blocker(tmp_path: Path) -> 
         assert agent._two_stage_epistemic_blockers(scene) == []
     finally:
         agent._screen_objects.close()
+
+
+_BODY_BBOX = (0.69, 0.57, 0.81, 0.72)
+_HP_BBOX = (0.70, 0.50, 0.80, 0.58)
+
+
+def test_two_same_sprite_enemy_marks_below_iou_045_collapse_to_enemy_1(tmp_path: Path) -> None:
+    iou = _bbox_iou_vals(_BODY_BBOX, _HP_BBOX)
+    dist = _center_dist(_BODY_BBOX, _HP_BBOX)
+    assert iou < 0.45, iou
+    assert dist <= 0.12, dist
+    marks = [
+        _mark_from_row({
+            "id": 1, "label": "Strike", "role": "card", "object_id": "card_1",
+            "x": 0.50, "y": 0.90, "bbox": [0.40, 0.80, 0.60, 1.0],
+        }),
+        _mark_from_row({
+            "id": 2, "label": "unknown enemy", "role": "enemy",
+            "x": _bbox_center(_BODY_BBOX)[0], "y": _bbox_center(_BODY_BBOX)[1],
+            "bbox": list(_BODY_BBOX),
+        }),
+        _mark_from_row({
+            "id": 3, "label": "unknown enemy", "role": "enemy",
+            "x": _bbox_center(_HP_BBOX)[0], "y": _bbox_center(_HP_BBOX)[1],
+            "bbox": list(_HP_BBOX),
+        }),
+        _mark_from_row({
+            "id": 4, "label": "End Turn", "role": "button", "object_id": "",
+            "x": 0.89, "y": 0.82, "bbox": [0.82, 0.78, 0.96, 0.88],
+        }),
+    ]
+    host = {"screen": "combat", "activity": "combat"}
+    agent = _agent_for_combat(tmp_path, marks, host)
+    scene = _combat_scene(
+        enemies=[{"label": "unknown enemy", "role": "enemy", "confidence": "high"}],
+        hand_cards=[{"label": "Strike", "role": "card"}],
+        controls=[{"label": "End Turn", "role": "button"}],
+    )
+    try:
+        surface = agent._finalize_action_surface(scene)
+        assert surface is not None
+        snapshot = agent._build_turn_snapshot(scene)
+        assert len(snapshot.targets) == 1, [t.target_id for t in snapshot.targets]
+        assert snapshot.targets[0].target_id == "enemy_1"
+        enemies = [obj for obj in agent._screen_objects.objects if obj.role == "enemy"]
+        assert len(enemies) == 1, [obj.object_id for obj in enemies]
+    finally:
+        agent._screen_objects.close()
+
+
+def test_two_named_nibbit_store_rows_snapshot_publishes_one(tmp_path: Path) -> None:
+    body = (0.70, 0.55, 0.82, 0.70)
+    plate = (0.71, 0.52, 0.81, 0.62)
+    iou = _bbox_iou_vals(body, plate)
+    dist = _center_dist(body, plate)
+    assert iou < 0.45, iou
+    assert dist <= 0.12 or iou >= 0.20, (dist, iou)
+    marks = [
+        _mark_from_row({
+            "id": 1, "label": "Strike", "role": "card", "object_id": "card_1",
+            "x": 0.50, "y": 0.90, "bbox": [0.40, 0.80, 0.60, 1.0],
+        }),
+        _mark_from_row({
+            "id": 2, "label": "Nibbit", "role": "enemy",
+            "x": _bbox_center(body)[0], "y": _bbox_center(body)[1],
+            "bbox": list(body),
+        }),
+        _mark_from_row({
+            "id": 3, "label": "Nibbit", "role": "enemy",
+            "x": _bbox_center(plate)[0], "y": _bbox_center(plate)[1],
+            "bbox": list(plate),
+        }),
+        _mark_from_row({
+            "id": 4, "label": "End Turn", "role": "button",
+            "x": 0.89, "y": 0.82, "bbox": [0.82, 0.78, 0.96, 0.88],
+        }),
+    ]
+    agent = _agent_for_combat(tmp_path, marks, {"screen": "combat", "activity": "combat"})
+    scene = _combat_scene(
+        enemies=[{"label": "Nibbit", "role": "enemy", "confidence": "high"}],
+        hand_cards=[{"label": "Strike", "role": "card"}],
+        controls=[{"label": "End Turn", "role": "button"}],
+    )
+    try:
+        surface = agent._finalize_action_surface(scene)
+        assert surface is not None
+        bx, by = _bbox_center(body)
+        px, py = _bbox_center(plate)
+        rest = [obj for obj in agent._screen_objects.objects if obj.role != "enemy"]
+        agent._screen_objects._objects = rest + [
+            ScreenObject(
+                mark_id=2, x=bx, y=by, x0=body[0], y0=body[1], x1=body[2], y1=body[3],
+                label="Nibbit", kind="interactive", source="test", screen="combat",
+                listing="2@760,625:Nibbit", object_id="enemy_1", role="enemy",
+                confidence=0.9,
+            ),
+            ScreenObject(
+                mark_id=3, x=px, y=py, x0=plate[0], y0=plate[1], x1=plate[2], y1=plate[3],
+                label="Nibbit", kind="interactive", source="test", screen="combat",
+                listing="3@760,570:Nibbit", object_id="enemy_2", role="enemy",
+                confidence=0.8,
+            ),
+        ]
+        snapshot = agent._build_turn_snapshot(scene)
+        assert len(snapshot.targets) == 1, [t.target_id for t in snapshot.targets]
+        assert isinstance(snapshot.targets[0], TargetSnapshot)
+    finally:
+        agent._screen_objects.close()
+
+
+def test_two_separated_enemies_stay_two(tmp_path: Path) -> None:
+    left = (0.49, 0.50, 0.61, 0.66)
+    right = (0.76, 0.50, 0.88, 0.66)
+    dist = _center_dist(left, right)
+    assert dist >= 0.25, dist
+    marks = [
+        _mark_from_row({
+            "id": 1, "label": "Strike", "role": "card", "object_id": "card_1",
+            "x": 0.50, "y": 0.90, "bbox": [0.40, 0.80, 0.60, 1.0],
+        }),
+        _mark_from_row({
+            "id": 2, "label": "Nibbit", "role": "enemy",
+            "x": 0.55, "y": 0.58, "bbox": list(left),
+        }),
+        _mark_from_row({
+            "id": 3, "label": "Louse", "role": "enemy",
+            "x": 0.82, "y": 0.58, "bbox": list(right),
+        }),
+        _mark_from_row({
+            "id": 4, "label": "End Turn", "role": "button",
+            "x": 0.89, "y": 0.82, "bbox": [0.82, 0.78, 0.96, 0.88],
+        }),
+    ]
+    host = {
+        "screen": "combat",
+        "activity": "combat",
+        "enemies": [
+            {"label": "Nibbit", "hp": 12, "hp_max": 20},
+            {"label": "Louse", "hp": 8, "hp_max": 16},
+        ],
+    }
+    agent = _agent_for_combat(tmp_path, marks, host)
+    scene = _combat_scene(
+        enemies=[
+            {"label": "Nibbit", "role": "enemy", "confidence": "high"},
+            {"label": "Louse", "role": "enemy", "confidence": "high"},
+        ],
+        hand_cards=[{"label": "Strike", "role": "card"}],
+        controls=[{"label": "End Turn", "role": "button"}],
+    )
+    try:
+        surface = agent._finalize_action_surface(scene)
+        assert surface is not None
+        snapshot = agent._build_turn_snapshot(scene)
+        assert len(snapshot.targets) == 2, [t.target_id for t in snapshot.targets]
+        ids = {t.target_id for t in snapshot.targets}
+        assert ids == {"enemy_1", "enemy_2"}
+    finally:
+        agent._screen_objects.close()
+
+
+def test_merge_cached_does_not_reattach_clustered_duplicate() -> None:
+    current = [
+        AimMark(
+            id=1, x=0.50, y=0.90, x0=0.40, y0=0.80, x1=0.60, y1=1.0,
+            label="Strike", role="card", source="ocr-hand",
+        ),
+        AimMark(
+            id=2, x=0.75, y=0.645, x0=0.69, y0=0.57, x1=0.81, y1=0.72,
+            label="Nibbit", role="enemy", object_id="enemy_1",
+            source="test", confidence=0.95,
+        ),
+    ]
+    cached = [
+        AimMark(
+            id=9, x=0.75, y=0.54, x0=0.70, y0=0.50, x1=0.80, y1=0.58,
+            label="Nibbit", role="enemy", object_id="enemy_2",
+            source="cache", confidence=0.55,
+        ),
+    ]
+    merged = merge_cached_enemy_marks(current, cached)
+    enemy_band = [
+        mark for mark in merged
+        if in_combat_sprite_band(mark.y, mark.x)
+        and (mark.role or "").strip().lower() in {"enemy", "target"}
+    ]
+    if not enemy_band:
+        enemy_band = [mark for mark in merged if in_combat_sprite_band(mark.y, mark.x)]
+    assert len(enemy_band) == 1, [(m.object_id, m.label, m.y) for m in enemy_band]
