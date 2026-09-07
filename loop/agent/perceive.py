@@ -51,6 +51,7 @@ _DECK_OVERLAY_MARKERS = frozenset(
 _COMBAT_SCREEN_MARKERS = frozenset({"end turn", "enemy turn"})
 _PAGINATED_TUTORIAL_NAV = frozenset({"prev", "next", "back", "arrow"})
 _NAME_SOURCES = frozenset({"ocr", "dino", "game_state", "unresolved"})
+_NAME_SOURCE_ALIASES = {"detector": "dino"}
 _UNKNOWN_ENEMY = "unknown_enemy"
 
 
@@ -99,6 +100,32 @@ def _entity_name_source(row: dict[str, Any], observed: set[str]) -> str:
     if source_hint in {"game_state", "host", "state"}:
         return "game_state"
     return "unresolved"
+
+
+def normalize_perceive_provenance(parsed: dict[str, Any]) -> dict[str, Any]:
+    """Normalize only known producer aliases before schema validation.
+
+    LLM1 may echo the detector's raw provenance as ``detector`` while the
+    perception contract calls that source ``dino``.  Normalize the known alias
+    without widening the accepted schema for arbitrary model-provided values.
+    """
+    out = dict(parsed)
+    for slot in ("characters", "enemies", "hand_cards", "hud", "controls"):
+        rows = out.get(slot)
+        if not isinstance(rows, list):
+            continue
+        normalized: list[Any] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                normalized.append(row)
+                continue
+            copy = dict(row)
+            source = str(copy.get("name_source") or "").strip().lower()
+            if source in _NAME_SOURCE_ALIASES:
+                copy["name_source"] = _NAME_SOURCE_ALIASES[source]
+            normalized.append(copy)
+        out[slot] = normalized
+    return out
 
 
 def _ground_entity_row(row: dict[str, Any], *, observed: set[str], role: str) -> dict[str, Any]:
@@ -1137,7 +1164,11 @@ def perceive_scene(
             timeout_s=timeout_s,
         )
         last_call = call
-        candidate = call.parsed if isinstance(call.parsed, dict) else None
+        candidate = (
+            normalize_perceive_provenance(call.parsed)
+            if isinstance(call.parsed, dict)
+            else None
+        )
         if candidate is not None:
             last_candidate = candidate
         errors = validate_perceive_schema(candidate, raw_text=call.text)
