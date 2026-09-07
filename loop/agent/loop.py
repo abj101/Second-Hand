@@ -3188,6 +3188,7 @@ class CollectAgent:
             if is_frame_mark_token(row_id):
                 row_id = ""
             row_role = self._surface_key(row.get("role") or row.get("kind") or "other")
+            ocr_bound = False
             candidates = [
                 (index, mark) for index, mark in enumerate(marks)
                 if index not in used and compatible(mark, row_role)
@@ -3218,6 +3219,42 @@ class CollectAgent:
                     ]
                     if len(contained) == 1:
                         match = contained[0]
+            if match is None and row_role in generic and label:
+                # OCR words are current-frame evidence even when aim merging
+                # excludes an otherwise unknown control label. Materialize it
+                # only when the typed control and exactly one OCR word agree.
+                ocr_matches = [
+                    word for word in getattr(self, "_last_ocr_words", ()) or ()
+                    if self._surface_key(getattr(word, "label", "")) == self._surface_key(label)
+                ]
+                if len(ocr_matches) == 1:
+                    word = ocr_matches[0]
+                    word_contained = [
+                        (index, mark) for index, mark in candidates
+                        if (
+                            float(word.x0) <= float(mark.x) <= float(word.x1)
+                            and float(word.y0) <= float(mark.y) <= float(word.y1)
+                        ) or (
+                            float(mark.x0) <= float(word.x) <= float(mark.x1)
+                            and float(mark.y0) <= float(word.y) <= float(mark.y1)
+                        )
+                    ]
+                    if len(word_contained) == 1:
+                        match = word_contained[0]
+                        ocr_bound = True
+                    elif not word_contained:
+                        index = len(marks)
+                        mark = _copy_mark(
+                            word,
+                            mid=max((int(item.id) for item in marks), default=0) + 1,
+                            label=label,
+                            role=str(row.get("role") or "button").strip().lower(),
+                            source="+".join(dict.fromkeys(filter(None, (str(word.source or ""), "ocr-control")))),
+                            confidence=max(float(word.confidence or word.score or 0.0), 0.75),
+                        )
+                        marks.append(mark)
+                        match = (index, mark)
+                        ocr_bound = True
             if match is None:
                 continue
             index, mark = match
@@ -3232,7 +3269,9 @@ class CollectAgent:
             object_id = row_id or mark.object_id
             if row_role in {"enemy", "unknown_character", "character", "target"} and is_prompt_instance_id(str(object_id or "")):
                 object_id = mark.object_id
-            source = "+".join(dict.fromkeys(filter(None, (str(mark.source or ""), "llm1"))))
+            source = "+".join(dict.fromkeys(filter(None, (
+                str(mark.source or ""), "ocr-control" if ocr_bound else "", "llm1",
+            ))))
             marks[index] = _copy_mark(
                 mark,
                 label=label or mark.label,

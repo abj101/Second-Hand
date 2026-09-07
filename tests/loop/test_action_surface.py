@@ -331,6 +331,47 @@ def test_collect_agent_publishes_typed_reward_controls_from_unique_current_bboxe
         agent._screen_objects.close()
 
 
+def test_collect_agent_publishes_typed_control_from_unique_current_ocr_word(tmp_path: Path) -> None:
+    """A typed control can use one exact OCR word when its scene has no bbox."""
+    image = Image.new("RGB", (128, 96))
+    agent = CollectAgent.__new__(CollectAgent)
+    agent.fixture = Sts2Fixture()
+    agent.session_id = "run"
+    agent._step_id = 1
+    agent._host_stats = {"screen": "reward", "activity": "reward"}
+    agent._obs_metrics = {"screen": "reward", "activity": "reward"}
+    agent._last_obs_image = image
+    agent._aim = AimGuide.from_marks(image, [_mark(5, "icon", x=0.89, y=0.92)])
+    # Shape distilled from 20260907T003920Z: the word is current OCR evidence
+    # but aim merging retained only the visual icon.
+    agent._last_ocr_words = [_mark(1, "Skip", x=0.89, y=0.92, role="", object_id="")]
+    agent._screen_objects = ScreenObjectStore(tmp_path / "ocr-reward-objects.db")
+    agent._action_surface = None
+    agent._frame_model = None
+    scene = SimpleNamespace(
+        screen="reward",
+        controls=[{"label": "Skip", "role": "button", "source": "ocr"}],
+        hand_cards=[], enemies=[], characters=[],
+    )
+    try:
+        surface = agent._finalize_action_surface(scene)
+        assert surface is not None
+        assert [(obj.label, obj.role) for obj in surface.interactive()] == [("Skip", "button")]
+        assert "ocr-control" in surface.interactive()[0].provenance
+        agent._game_state = None
+        agent._entity_tracker = None
+        agent._reason_controls = []
+        agent._last_execution_failure = None
+        agent._v2_control_objects = {}
+        snapshot = agent._build_turn_snapshot(scene)
+        assert snapshot.legal_intents == ("click_control",)
+        assert [(control.control_id, control.label) for control in snapshot.controls] == [
+            ("control:skip", "Skip")
+        ]
+    finally:
+        agent._screen_objects.close()
+
+
 def test_turn_snapshot_keeps_canonical_card_name_when_scene_rows_reflow(tmp_path: Path) -> None:
     """Perception metadata cannot change which card a prompt-facing ID denotes.
 
