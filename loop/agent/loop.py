@@ -3204,6 +3204,20 @@ class CollectAgent:
                 ]
                 if len(exact) == 1:
                     match = exact[0]
+            if match is None and row_role in generic:
+                # A validated control may be textless in local OCR while the
+                # current frame still has one visual mark for its typed bbox.
+                # Bind only a uniquely-contained current mark; no geometry
+                # may invent a card, enemy, or other domain entity.
+                bbox = self._scene_bbox(row.get("bbox"))
+                if bbox is not None:
+                    x0, y0, x1, y1 = bbox
+                    contained = [
+                        (index, mark) for index, mark in candidates
+                        if x0 <= float(mark.x) <= x1 and y0 <= float(mark.y) <= y1
+                    ]
+                    if len(contained) == 1:
+                        match = contained[0]
             if match is None:
                 continue
             index, mark = match

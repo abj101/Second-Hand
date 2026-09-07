@@ -284,6 +284,53 @@ def test_collect_agent_finalizes_tutorial_scene_from_current_marks(tmp_path: Pat
         agent._screen_objects.close()
 
 
+def test_collect_agent_publishes_typed_reward_controls_from_unique_current_bboxes(tmp_path: Path) -> None:
+    """Textless local marks may become controls only through unique typed bounds."""
+    image = Image.new("RGB", (128, 96))
+    agent = CollectAgent.__new__(CollectAgent)
+    agent.fixture = Sts2Fixture()
+    agent.session_id = "run"
+    agent._step_id = 2
+    agent._host_stats = {"screen": "reward", "activity": "reward"}
+    agent._obs_metrics = {"screen": "reward", "activity": "reward"}
+    agent._last_obs_image = image
+    # Shape distilled from 20260907T003540Z: three textless current-frame
+    # marks aligned with the reward buttons and Skip.
+    agent._aim = AimGuide.from_marks(image, [
+        _mark(2, "icon", x=0.50, y=0.48),
+        _mark(3, "icon", x=0.50, y=0.59),
+        _mark(5, "icon", x=0.89, y=0.92),
+    ])
+    agent._screen_objects = ScreenObjectStore(tmp_path / "reward-objects.db")
+    agent._action_surface = None
+    agent._frame_model = None
+    scene = SimpleNamespace(
+        screen="reward",
+        controls=[
+            {"label": "11 Gold", "role": "button", "bbox": "390,430,610,530"},
+            {"label": "Add a card", "role": "button", "bbox": "390,540,610,640"},
+            {"label": "Skip", "role": "button", "bbox": "800,850,980,990"},
+        ],
+        hand_cards=[], enemies=[], characters=[],
+    )
+    try:
+        surface = agent._finalize_action_surface(scene)
+        assert surface is not None
+        assert [(obj.label, obj.role) for obj in surface.interactive()] == [
+            ("11 Gold", "button"), ("Add a card", "button"), ("Skip", "button"),
+        ]
+        agent._game_state = None
+        agent._entity_tracker = None
+        agent._reason_controls = []
+        agent._last_execution_failure = None
+        agent._v2_control_objects = {}
+        snapshot = agent._build_turn_snapshot(scene)
+        assert snapshot.legal_intents == ("click_control",)
+        assert [control.label for control in snapshot.controls] == ["11 Gold", "Add a card", "Skip"]
+    finally:
+        agent._screen_objects.close()
+
+
 def test_turn_snapshot_keeps_canonical_card_name_when_scene_rows_reflow(tmp_path: Path) -> None:
     """Perception metadata cannot change which card a prompt-facing ID denotes.
 
