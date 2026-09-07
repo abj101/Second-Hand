@@ -1322,6 +1322,60 @@ def _tracker_needs_inspect(entity_tracker: Any | None) -> bool:
     return False
 
 
+def _is_candidate_placeholder(label: str) -> bool:
+    """True when a mark/candidate label carries no stable identity."""
+    from loop.os.aim import _is_placeholder_label, _is_unknown_entity_label
+
+    raw = str(label or "").strip()
+    if not raw:
+        return True
+    if re.fullmatch(r"node_\d+", raw, re.I):
+        return True
+    if _is_placeholder_label(raw):
+        return True
+    if _is_unknown_entity_label(raw):
+        return True
+    compact = _compact(raw)
+    if compact.startswith("unidentified ") or compact.startswith("unknown "):
+        return True
+    return False
+
+
+def candidates_unidentified_only(labels: list[str] | None) -> bool:
+    """True when every supplied candidate label is empty or a placeholder.
+
+    Returns False when ``labels`` is omitted (``None``) so callers must pass an
+    explicit candidate list to trigger this uncertainty signal.
+    """
+    if labels is None:
+        return False
+    return all(_is_candidate_placeholder(label) for label in labels)
+
+
+def _is_first_observation(prev_screen: str, prev_host_stats: dict[str, Any] | None) -> bool:
+    if (prev_screen or "").strip():
+        return False
+    if prev_host_stats is None:
+        return True
+    return not any(prev_host_stats.values())
+
+
+def _scene_materially_changed(
+    *,
+    screen_key: str,
+    prev_screen_key: str,
+    activity: str,
+    prev_activity: str,
+    prev_screen: str,
+    prev_host_stats: dict[str, Any] | None,
+) -> bool:
+    if _is_first_observation(prev_screen, prev_host_stats):
+        return True
+    if screen_key != prev_screen_key:
+        return True
+    return activity != prev_activity
+
+
 def should_run_llm1_perceive(
     *,
     screen: str,
@@ -1331,16 +1385,34 @@ def should_run_llm1_perceive(
     entity_tracker: Any | None = None,
     cached_scene: SceneDescription | None = None,
     force: bool = False,
+    unverified_effect: bool = False,
+    contradictory: bool = False,
+    candidate_labels: list[str] | None = None,
 ) -> tuple[bool, str]:
     """Gate expensive LLM1 visual perception.
 
-    Non-combat activities always use OCR/aim. Combat (including under UI
-    overlays when host publishes ``activity``/``combat_active``) runs LLM1 on
-    entry, missing cache, material HP/roster change, or explicit force.
-    Unidentified sprites are mechanical hover+OCR, not another Gemma pass.
+    Runs LLM1 on explicit uncertainty signals (force, unverified dispatch,
+    contradiction, scene change, placeholder-only candidates) or combat cache
+    misses / material HP-roster drift. Skips when evidence is stable.
+
+    Optional kwargs for orchestrator wiring:
+
+    - ``unverified_effect``: prior action succeeded but no verified pixel/task
+      effect was observed.
+    - ``contradictory``: OCR/state channels disagree materially.
+    - ``candidate_labels``: mark labels from aim/frame; when every label is
+      empty or placeholder, triggers ``unidentified-only``. Omitted (``None``)
+      does not trigger that path.
+
+    Unidentified combat sprites on an otherwise named cache use mechanical
+    hover+OCR, not another Gemma pass (see combat-stable tests).
     """
     if force:
         return True, "forced"
+    if unverified_effect:
+        return True, "unverified-effect"
+    if contradictory:
+        return True, "contradictory"
 
     from loop.os.activity import activity_from_state
 
@@ -1352,25 +1424,41 @@ def should_run_llm1_perceive(
         host_stats=host_stats,
     )
 
-    if activity != "combat":
-        return False, f"ocr-only:{screen_key or activity or 'other'}"
-
+    prev_screen_key = (prev_screen or "").strip().lower()
+    prev_ocr = str((prev_host_stats or {}).get("ocr") or "")
+    prev_screen_key = reconcile_combat_screen(prev_screen_key, ocr=prev_ocr).strip().lower()
     prev_activity = activity_from_state(
-        screen=(prev_screen or "").strip().lower(),
+        screen=prev_screen_key,
         host_stats=prev_host_stats,
     )
-    if prev_activity != "combat":
-        return True, "entering-combat"
 
-    if cached_scene is None:
-        return True, "no-cached-combat-scene"
+    if _scene_materially_changed(
+        screen_key=screen_key,
+        prev_screen_key=prev_screen_key,
+        activity=activity,
+        prev_activity=prev_activity,
+        prev_screen=prev_screen,
+        prev_host_stats=prev_host_stats,
+    ):
+        if prev_activity != "combat" and activity == "combat":
+            return True, "entering-combat"
+        return True, "scene-change"
 
-    _ = entity_tracker  # unidentified sprites use mechanical hover+OCR, not LLM1
+    if candidates_unidentified_only(candidate_labels):
+        return True, "unidentified-only"
 
-    if combat_materially_changed(prev_host_stats, host_stats):
-        return True, "combat-material-change"
+    if activity == "combat":
+        if cached_scene is None:
+            return True, "no-cached-combat-scene"
 
-    return False, "combat-stable"
+        _ = entity_tracker  # unidentified sprites use mechanical hover+OCR, not LLM1
+
+        if combat_materially_changed(prev_host_stats, host_stats):
+            return True, "combat-material-change"
+
+        return False, "combat-stable"
+
+    return False, f"ocr-only:{screen_key or activity or 'other'}"
 
 
 def _controls_from_frame_model(frame_model: Any | None) -> list[dict[str, str]]:

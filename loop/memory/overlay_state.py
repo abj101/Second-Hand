@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
 
 @dataclass
@@ -17,6 +17,37 @@ class OverlayState:
 
     dismissals: dict[str, OverlayDismissal] = field(default_factory=dict)
     screen_disagreements: list[dict[str, Any]] = field(default_factory=list)
+    _tutorial_frame_hash: str = ""
+
+    def resolve_tutorial(
+        self,
+        *,
+        host_tutorial: dict[str, Any] | None,
+        llm1_tutorial: dict[str, Any] | None,
+        frame_hash: str = "",
+        layout: str = "",
+        dialog_open: bool = False,
+        activity: str = "",
+    ) -> dict[str, Any]:
+        """Prefer current-frame LLM1 tutorial; close leftover pages on a live board."""
+        host = dict(host_tutorial) if isinstance(host_tutorial, dict) else {}
+        llm1 = dict(llm1_tutorial) if isinstance(llm1_tutorial, dict) else {}
+        layout_key = (layout or "").strip().lower()
+        activity_key = (activity or "").strip().lower()
+        combat_live = layout_key == "hand_and_board" or activity_key == "combat"
+        llm1_open = bool(llm1.get("active")) and isinstance(llm1.get("step"), int) and isinstance(llm1.get("total"), int) and llm1["step"] < llm1["total"]
+        if combat_live and not dialog_open and not llm1_open and layout_key != "paginated_overlay":
+            if frame_hash:
+                self._tutorial_frame_hash = frame_hash
+            return {}
+        hash_changed = bool(frame_hash) and frame_hash != self._tutorial_frame_hash
+        if frame_hash:
+            self._tutorial_frame_hash = frame_hash
+        if llm1_open and (hash_changed or host.get("step") != llm1.get("step")):
+            return llm1
+        if host.get("active"):
+            return host
+        return llm1 if llm1.get("active") else {}
 
     def record_dismissal(
         self,
@@ -120,3 +151,25 @@ class ControlSuppressionState:
     def clear_key(self, control_key: str) -> None:
         self.attempts.pop(control_key, None)
         self.suppressed.discard(control_key)
+
+    def key_for_row(
+        self,
+        row: dict[str, Any],
+        *,
+        screen: str,
+        prior_rows: Sequence[dict[str, Any]] | None = None,
+    ) -> str:
+        """Resolve suppression key; spatial fallback when object_id is absent."""
+        from loop.os.frame_model import (
+            control_key_from_row,
+            find_control_row_for_suppression,
+            stable_object_id_from_row,
+        )
+
+        if stable_object_id_from_row(row):
+            return control_key_from_row(row, screen=screen)
+        if prior_rows:
+            matched = find_control_row_for_suppression(row, prior_rows, screen=screen)
+            if matched is not None:
+                return control_key_from_row(matched, screen=screen)
+        return control_key_from_row(row, screen=screen)

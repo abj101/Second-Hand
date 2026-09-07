@@ -642,7 +642,19 @@ def _legal_intents(objects: list[FrameObject], *, context: FrameContext) -> tupl
         and any(obj.kind == "interactive" and obj.role in {"unknown", "icon"} for obj in objects)
     ):
         intents.append("inspect")
+    if context.allows_domain_entities and any(_anonymous_combat_target(obj) for obj in objects):
+        if "inspect" not in intents:
+            intents.append("inspect")
     return tuple(intents)
+
+
+def _anonymous_combat_target(obj: FrameObject) -> bool:
+    if obj.role != "enemy":
+        return False
+    if float(obj.confidence or 1.0) < 0.75:
+        return True
+    compact = _compact_label(obj.label).replace("_", " ")
+    return compact.startswith("unknown") or compact in {"", "icon", "unidentified enemy"}
 
 
 def build_action_surface(

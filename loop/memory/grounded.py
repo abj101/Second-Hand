@@ -329,6 +329,13 @@ def unresolved_stable_identity(step: StepLog) -> bool:
     metrics = step.metrics or {}
     if int(metrics.get("unresolved_count") or 0) > 0:
         return True
+    snapshot = step.turn_snapshot or {}
+    for target in snapshot.get("targets") or []:
+        if not isinstance(target, dict):
+            continue
+        conf = target.get("identity_confidence")
+        if isinstance(conf, (int, float)) and conf < 0.75:
+            return True
     tx = step.result.card_transaction
     if tx is None:
         return False

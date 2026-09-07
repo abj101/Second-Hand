@@ -1,0 +1,7 @@
+{"file": "title.png", "screen": "title", "must_include": ["Singleplayer"], "must_not_include": ["46/46"]}
+{"file": "select_confirm.jpg", "screen": "select", "must_include": ["Confirm", "Yes"], "must_not_include": ["End Turn"]}
+{"file": "tutorial_combat_basics_1of3.jpg", "screen": "tutorial", "must_include": ["Strike", "End Turn", "Combat Basics"], "must_not_include": ["Singleplayer"]}
+{"file": "map_got_it.jpg", "screen": "map", "must_include": ["Legend"], "must_not_include": ["End Turn"]}
+{"file": "combat_turn.jpg", "screen": "tutorial", "must_include": ["End Turn", "Defend"], "must_not_include": ["tutorial complete"]}
+{"file": "combat_inventory_failure.json", "screen": "combat", "must_include": ["Defend", "Strike", "Bash", "End Turn"], "must_not_include": ["paginated_overlay"], "scorer_only": {"cards": 5, "targets_min": 1}}
+{"file": "transition_empty_frame.json", "screen": "other", "must_include": [], "must_not_include": ["empty-action-surface"], "scorer_only": {"marks": 0, "transition": true}}

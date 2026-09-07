@@ -10,16 +10,19 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from loop.log.schema import ActionLog
+from loop.os.layout_adapter import (
+    ENEMY_Y_MAX,
+    ENEMY_Y_MIN,
+    HAND_Y,
+    HUD_CHROME_Y,
+    LayoutAdapter,
+    default_layout_adapter,
+)
 
 GRID = 1000
 _MAX_MARKS = 16
-# Shared bands with screen_objects / heuristic (enemy click targets / hand cards).
-# Tuned from collect step 2: HUD ::Icon ghosts at y≈0.04–0.10; real sprites ~0.15–0.45.
-HUD_CHROME_Y = 0.08
-ENEMY_Y_MIN = 0.15
-ENEMY_Y_MAX = 0.45
+# Re-exported from layout_adapter for heuristic / perception_cache callers.
 ENEMY_Y = ENEMY_Y_MAX  # legacy alias (was 0.55)
-HAND_Y = 0.70
 _ENEMY_HP_SPRITE_OFFSET = 0.35
 _UNKNOWN_ENTITY_RE = re.compile(
     r"^(unknown_character(?:_\d+)?|unidentified_enemy|unidentified enemy)$",
@@ -123,10 +126,12 @@ _DIALOG_Y = 0.78
 _CV_MAX_EDGE = 0.28
 _GUI_ATTACH_IOU = 0.2
 _GUI_PLACEHOLDER_CAP = 6
+# Complementary fusion: keep non-overlapping CV even when GUI found something.
+_FUSION_IOU = 0.25
+_CV_COVERAGE_RESERVE = 4
+_NEAR_CENTER = 0.04
 _HUD_CHROME_Y = 0.12
 _TOP_HUD_Y = 0.15
-_CORNER_HUD_X = 0.74
-_CORNER_HUD_Y = 0.20
 _HUD_ONLY_LABELS = frozenset(
     {
         "end turn",
@@ -407,6 +412,7 @@ def _eligible_label_for_region(
     label: str,
     *,
     screen: str | None = None,
+    layout_adapter: LayoutAdapter | None = None,
 ) -> bool:
     """Reject labels that belong in a different screen region (HUD vs hand vs enemy)."""
     lab = _compact_label(label)
@@ -415,8 +421,9 @@ def _eligible_label_for_region(
     x, y = float(mark.x), float(mark.y)
     kind = (screen or "").strip().lower()
     combatish = kind in {"combat", "tutorial", "other", ""}
+    adapter = layout_adapter or default_layout_adapter()
 
-    if x > _CORNER_HUD_X and y < _CORNER_HUD_Y:
+    if adapter.in_corner_hud(x, y):
         return (
             lab in _HUD_ONLY_LABELS
             or label_kind(label) in {"progress", "danger"}
@@ -433,10 +440,10 @@ def _eligible_label_for_region(
     if _is_end_turn_label(label):
         return x >= _HAND_X1
 
-    if y >= HAND_Y:
+    if y >= adapter.hand_y:
         return lab not in _HAND_FORBIDDEN
 
-    if in_combat_sprite_band(y, x):
+    if adapter.in_combat_sprite_band(y, x):
         if lab in _HAND_FORBIDDEN:
             return False
         if combatish and lab in _CARD_NAME_HINTS:
@@ -452,38 +459,40 @@ def _strip_region_invalid_labels(
     marks: list[AimMark],
     *,
     screen: str | None = None,
+    layout_adapter: LayoutAdapter | None = None,
 ) -> list[AimMark]:
     out: list[AimMark] = []
     for mark in marks:
         label = str(mark.label or "").strip()
-        if label and not _eligible_label_for_region(mark, label, screen=screen):
+        if label and not _eligible_label_for_region(
+            mark, label, screen=screen, layout_adapter=layout_adapter
+        ):
             out.append(_copy_mark(mark, label=":icon"))
         else:
             out.append(mark)
     return out
 
 
-def in_enemy_band(y: float, x: float | None = None) -> bool:
+def in_enemy_band(
+    y: float,
+    x: float | None = None,
+    *,
+    layout_adapter: LayoutAdapter | None = None,
+) -> bool:
     """True when normalized coords are in the combat enemy sprite band."""
-    if y < HUD_CHROME_Y or y > ENEMY_Y_MAX:
-        return False
-    if y < ENEMY_Y_MIN:
-        return False
-    if x is not None and float(x) > _CORNER_HUD_X and float(y) < _CORNER_HUD_Y:
-        return False
-    return True
+    adapter = layout_adapter or default_layout_adapter()
+    return adapter.in_enemy_band(y, x)
 
 
-def in_combat_sprite_band(y: float, x: float | None = None) -> bool:
-    """True when coords sit on the combat board, not HUD chrome or the hand.
-
-    Live STS2 combat sprites sit ~0.58–0.71, below ENEMY_Y_MAX=0.45.
-    """
-    if not (HUD_CHROME_Y < float(y) < HAND_Y):
-        return False
-    if x is not None and float(x) > _CORNER_HUD_X and float(y) < _CORNER_HUD_Y:
-        return False
-    return True
+def in_combat_sprite_band(
+    y: float,
+    x: float | None = None,
+    *,
+    layout_adapter: LayoutAdapter | None = None,
+) -> bool:
+    """True when coords sit on the combat board, not HUD chrome or the hand."""
+    adapter = layout_adapter or default_layout_adapter()
+    return adapter.in_combat_sprite_band(y, x)
 
 
 def _is_unknown_entity_label(label: str) -> bool:
@@ -528,6 +537,7 @@ def propose_hand_cards(
     *,
     screen: str | None,
     cap: int = 10,
+    layout_adapter: LayoutAdapter | None = None,
 ) -> list[AimMark]:
     """Turn one OCR title per visible card into pixel-backed hand geometry.
 
@@ -536,7 +546,8 @@ def propose_hand_cards(
     use it as an anchor inside a strict hand crop.  This preserves duplicate
     names and cannot absorb the right-side End Turn button.
     """
-    if (screen or "").strip().lower() != "combat":
+    adapter = layout_adapter or default_layout_adapter()
+    if not adapter.enables_hand_card_proposals(screen):
         return []
     candidates: list[AimMark] = []
     for word in words or ():
@@ -594,17 +605,22 @@ def _looks_like_stat_label(label: str) -> bool:
     return False
 
 
-def strip_misplaced_progress(marks: Sequence[AimMark]) -> list[AimMark]:
+def strip_misplaced_progress(
+    marks: Sequence[AimMark],
+    *,
+    layout_adapter: LayoutAdapter | None = None,
+) -> list[AimMark]:
     """Drop End Turn / menu OCR ghosts that land in the enemy band (top chrome).
 
     Real End Turn sits lower-right near the hand; top-of-screen End Turn labels are
     OCR bleed from the button and steal enemy-band slots.
     """
+    adapter = layout_adapter or default_layout_adapter()
     kept: list[AimMark] = []
     for mark in marks:
-        if _is_end_turn_label(mark.label) and in_enemy_band(mark.y, mark.x):
+        if _is_end_turn_label(mark.label) and adapter.in_enemy_band(mark.y, mark.x):
             continue
-        if label_kind(mark.label) == "progress" and mark.y < _HUD_CHROME_Y:
+        if label_kind(mark.label) == "progress" and mark.y < adapter.hud_chrome_y:
             continue
         kept.append(mark)
     return kept if kept else list(marks)
@@ -643,13 +659,17 @@ def seed_enemies_from_host(
     cap: int = _MAX_MARKS,
     lexicon: Any | None = None,
     screen: str | None = None,
+    layout_adapter: LayoutAdapter | None = None,
 ) -> list[AimMark]:
     """Seed enemy-band marks from host HP pairs; names come from object library, not HP tables."""
+    adapter = layout_adapter or default_layout_adapter()
     rows = (host_stats or {}).get("enemies") or []
     if not rows:
         return list(marks or ())
-    screen = str((host_stats or {}).get("screen") or "").strip().lower()
-    if screen not in {"combat", "tutorial", ""}:
+    screen_key = str(screen or (host_stats or {}).get("screen") or "").strip().lower()
+    if screen_key not in {"combat", "tutorial", ""}:
+        return list(marks or ())
+    if not adapter.enables_combat_role_stamps(screen_key or None):
         return list(marks or ())
 
     out = list(marks or ())
@@ -672,7 +692,7 @@ def seed_enemies_from_host(
                     continue
                 if player_max is not None and mx == int(player_max):
                     continue
-                if word.y < HUD_CHROME_Y:
+                if word.y < adapter.hud_chrome_y:
                     continue
                 hp_positions.append((float(word.x), float(word.y), mx))
         except Exception:  # noqa: BLE001 — seeding must never abort collect
@@ -690,8 +710,8 @@ def seed_enemies_from_host(
             if mx == int(hp_max):
                 x = wx
                 y = wy - _ENEMY_HP_SPRITE_OFFSET
-                if not in_combat_sprite_band(y, x):
-                    y = max(HUD_CHROME_Y + 0.02, min(HAND_Y - 0.02, float(wy)))
+                if not in_combat_sprite_band(y, x, layout_adapter=adapter):
+                    y = max(adapter.hud_chrome_y + 0.02, min(adapter.hand_y - 0.02, float(wy)))
                 found_hp = True
                 break
         label = str(row.get("label") or "").strip()
@@ -724,11 +744,16 @@ def seed_enemies_from_host(
 def merge_cached_enemy_marks(
     marks: Sequence[AimMark] | None,
     cached: Sequence[AimMark] | None,
+    *,
+    layout_adapter: LayoutAdapter | None = None,
 ) -> list[AimMark]:
     """Drop fresh enemy-band OCR and reattach cached sprite marks."""
+    adapter = layout_adapter or default_layout_adapter()
     if not cached:
         return list(marks or ())
-    out = [m for m in (marks or ()) if not in_combat_sprite_band(m.y, m.x)]
+    if not adapter.enables_combat_role_stamps("combat"):
+        return list(marks or ())
+    out = [m for m in (marks or ()) if not in_combat_sprite_band(m.y, m.x, layout_adapter=adapter)]
     have = {_compact_label(m.label) for m in out if (m.label or "").strip()}
     for em in cached:
         key = _compact_label(em.label)
@@ -1149,7 +1174,7 @@ def ground_spatial_labels(
             continue
         claimed.add(matched.id)
         out = [
-            _copy_mark(m, label=label, score=max(m.score, 0.75))
+            _copy_mark(m, label=label, score=max(m.score, 0.75), role="button")
             if m.id == matched.id
             else m
             for m in out
@@ -1483,11 +1508,13 @@ def build_marks(
     cap: int = _MAX_MARKS,
     gui_marks: list[AimMark] | None = None,
     words: list[AimMark] | None = None,
+    cv_marks: list[AimMark] | None = None,
     lexicon: object | None = None,
     screen: str | None = None,
     proposal_backend: Any | None = None,
+    layout_adapter: LayoutAdapter | None = None,
 ) -> tuple[AimMark, ...]:
-    cv = detect_marks(image, cap=cap)
+    cv = list(cv_marks) if cv_marks is not None else detect_marks(image, cap=cap)
     ocr = list(words) if words is not None else ocr_click_marks(image, cap=cap)
     gui = list(gui_marks) if gui_marks is not None else gui_click_marks(image, cap=cap)
     if proposal_backend is not None:
@@ -1500,36 +1527,44 @@ def build_marks(
             for mark in external
             if isinstance(mark, AimMark)
         )
+    adapter = layout_adapter or default_layout_adapter()
     ocr, gui, cv = _strip_legend(ocr, cv, gui)
     marks = _merge_aim_marks(
-        ocr, cv, cap=cap, gui=gui, lexicon=lexicon, screen=screen
+        ocr, cv, cap=cap, gui=gui, lexicon=lexicon, screen=screen, layout_adapter=adapter
     )
-    hand = propose_hand_cards(ocr, screen=screen, cap=min(10, cap))
+    hand = propose_hand_cards(
+        ocr, screen=screen, cap=min(10, cap), layout_adapter=adapter
+    )
     if hand:
         # Card proposals outrank generic GUI/CV blobs in the hand crop. Keep
         # non-overlapping chrome/board marks, then publish one mark per card.
+        hand_y = adapter.hand_y
         kept = [
             mark for mark in marks
             if not any(
                 _mark_iou(mark, card) >= 0.08
-                or (card.x0 <= mark.x <= card.x1 and mark.y >= HAND_Y)
+                or (card.x0 <= mark.x <= card.x1 and mark.y >= hand_y)
                 for card in hand
             )
         ]
         marks = hand + kept
         marks = [_copy_mark(mark, mid=i) for i, mark in enumerate(marks[:cap], start=1)]
-    if (screen or "").strip().lower() == "combat":
+    if adapter.enables_combat_role_stamps(screen):
         marks = [
             _copy_mark(mark, role="button", source=mark.source or "ocr-chrome")
             if _is_end_turn_label(mark.label)
             else _copy_mark(mark, role="board_candidate", source=mark.source or "cv-board")
-            if in_combat_sprite_band(mark.y, mark.x) and _is_placeholder_label(mark.label)
+            if adapter.in_combat_sprite_band(mark.y, mark.x) and _is_placeholder_label(mark.label)
             else mark
             for mark in marks
         ]
     guessed = _lexicon_screen(marks, fallback=screen)
-    relabeled = _relabel_from_lexicon(marks, lexicon, guessed, ocr=ocr)
-    region_ok = _strip_region_invalid_labels(list(relabeled), screen=screen)
+    relabeled = _relabel_from_lexicon(
+        marks, lexicon, guessed, ocr=ocr, layout_adapter=adapter
+    )
+    region_ok = _strip_region_invalid_labels(
+        list(relabeled), screen=screen, layout_adapter=adapter
+    )
     return tuple(_strip_unverified_menu_labels(region_ok, ocr))
 
 
@@ -1675,18 +1710,22 @@ def build_aim(
     cap: int = _MAX_MARKS,
     gui_marks: list[AimMark] | None = None,
     words: list[AimMark] | None = None,
+    cv_marks: list[AimMark] | None = None,
     lexicon: object | None = None,
     screen: str | None = None,
     proposal_backend: Any | None = None,
+    layout_adapter: LayoutAdapter | None = None,
 ) -> AimGuide:
     marks = build_marks(
         image,
         cap=cap,
         gui_marks=gui_marks,
         words=words,
+        cv_marks=cv_marks,
         lexicon=lexicon,
         screen=screen,
         proposal_backend=proposal_backend,
+        layout_adapter=layout_adapter,
     )
     painted = paint_aim(image, marks=marks, last_xy=last_xy)
     return AimGuide(marks=marks, last_xy=last_xy, image=painted)
@@ -1804,6 +1843,7 @@ def ocr_click_marks(image: Image.Image, *, cap: int = _MAX_MARKS) -> list[AimMar
                     y1=float(word.y1),
                     label=label,
                     score=float(word.score),
+                    source="ocr",
                 )
             )
             if len(found) >= cap * 3:
@@ -1884,6 +1924,21 @@ def _copy_mark(
     )
 
 
+def _with_source(mark: AimMark, source: str) -> AimMark:
+    if str(mark.source or "").strip():
+        return mark
+    return _copy_mark(mark, source=source)
+
+
+def _proposal_overlap_reason(mark: AimMark, others: Sequence[AimMark]) -> str | None:
+    for other in others:
+        if abs(mark.x - other.x) < _NEAR_CENTER and abs(mark.y - other.y) < _NEAR_CENTER:
+            return "overlap"
+        if _mark_iou(mark, other) >= _FUSION_IOU:
+            return "overlap"
+    return None
+
+
 def _attach_ocr_to_gui(
     ocr: list[AimMark],
     gui: list[AimMark],
@@ -1916,12 +1971,22 @@ def _attach_ocr_to_gui(
                 best_i = i
         if best_i is None:
             leftover_gui.append(
-                box if (box.label or "").strip() else _copy_mark(box, label="icon")
+                _with_source(
+                    box if (box.label or "").strip() else _copy_mark(box, label="icon"),
+                    "gui",
+                )
             )
             continue
         used.add(best_i)
         word = ocr[best_i]
-        attached.append(_copy_mark(box, label=word.label, score=max(box.score, word.score)))
+        attached.append(
+            _copy_mark(
+                box,
+                label=word.label,
+                score=max(box.score, word.score),
+                source="ocr-gui",
+            )
+        )
     leftover_ocr = [word for i, word in enumerate(ocr) if i not in used]
     return attached, leftover_ocr, leftover_gui
 
@@ -1938,6 +2003,7 @@ def _relabel_from_lexicon(
     screen: str | None,
     *,
     ocr: Sequence[AimMark] | None = None,
+    layout_adapter: LayoutAdapter | None = None,
 ) -> list[AimMark]:
     lookup = getattr(lexicon, "label_for", None) if lexicon is not None else None
     if not callable(lookup):
@@ -1952,7 +2018,9 @@ def _relabel_from_lexicon(
         if not learned:
             out.append(mark)
             continue
-        if not _eligible_label_for_region(mark, learned, screen=screen):
+        if not _eligible_label_for_region(
+            mark, learned, screen=screen, layout_adapter=layout_adapter
+        ):
             out.append(mark)
             continue
         if _needs_ocr_proof(learned) and not _corner_heuristic_ok(mark, learned) and not _ocr_supports_label(
@@ -1972,40 +2040,65 @@ def _merge_aim_marks(
     gui: list[AimMark] | None = None,
     lexicon: object | None = None,
     screen: str | None = None,
+    audit: dict[str, Any] | None = None,
+    layout_adapter: LayoutAdapter | None = None,
 ) -> list[AimMark]:
     picked: list[AimMark] = []
+    rejected: list[dict[str, Any]] = []
 
-    def _take(mark: AimMark) -> None:
-        if any(abs(mark.x - other.x) < 0.04 and abs(mark.y - other.y) < 0.04 for other in picked):
+    def _reject(mark: AimMark, reason: str) -> None:
+        if audit is None or len(rejected) >= 48:
             return
+        rejected.append(
+            {
+                "source": str(mark.source or ""),
+                "label": mark.label,
+                "x": float(mark.x),
+                "y": float(mark.y),
+                "reason": reason,
+            }
+        )
+
+    def _take(mark: AimMark) -> bool:
+        reason = _proposal_overlap_reason(mark, picked)
+        if reason is not None:
+            _reject(mark, reason)
+            return False
         picked.append(mark)
+        return True
 
     ocr = [
-        m
+        _with_source(m, "ocr")
         for m in ocr
         if not is_legend_label(m.label) and not _ocr_junk(m.label) and not _bottom_chrome(m)
     ]
+    gui_in = [_with_source(m, "gui") for m in (gui or [])]
     gui_kept = [
         m
-        for m in (gui or [])
+        for m in gui_in
         if not _cv_too_big(m) and not _hud_chrome(m, lexicon=lexicon, screen=screen)
     ]
+    for mark in gui_in:
+        if _cv_too_big(mark):
+            _reject(mark, "too_big")
+        elif _hud_chrome(mark, lexicon=lexicon, screen=screen):
+            _reject(mark, "hud_chrome")
     attached, leftover_ocr, leftover_gui = _attach_ocr_to_gui(ocr, gui_kept, screen=screen)
     leftover_gui = [
         m for m in leftover_gui if not _hud_chrome(m, lexicon=lexicon, screen=screen)
     ]
-    leftover_ocr = _drop_label_fragments(leftover_ocr)
+    leftover_ocr = _drop_label_fragments([_with_source(m, "ocr") for m in leftover_ocr])
     dialog = _labels_have_dialog(ocr) or _labels_have_dialog(attached + leftover_gui)
-    progress = [m for m in attached if label_kind(m.label) == "progress"]
+    progress = [_with_source(m, "ocr-gui") for m in attached if label_kind(m.label) == "progress"]
     progress.extend(
-        m
+        _with_source(m, "ocr")
         for m in leftover_ocr
         if label_kind(m.label) == "progress"
         and _unattached_ocr_click_label(m, screen=screen)
     )
-    attached_other = [m for m in attached if label_kind(m.label) != "progress"]
+    attached_other = [_with_source(m, "ocr-gui") for m in attached if label_kind(m.label) != "progress"]
     other_ocr = [
-        m
+        _with_source(m, "ocr")
         for m in leftover_ocr
         if label_kind(m.label) != "progress"
         and _unattached_ocr_click_label(m, screen=screen)
@@ -2017,10 +2110,14 @@ def _merge_aim_marks(
         named_gui + placeholder_gui[:_GUI_PLACEHOLDER_CAP],
         key=lambda m: (-m.score, (m.x1 - m.x0) * (m.y1 - m.y0), m.x),
     )
+    cv_all = [_with_source(m, "cv") for m in cv]
     cv_ranked = sorted(
-        (m for m in cv if not _cv_too_big(m)),
+        (m for m in cv_all if not _cv_too_big(m)),
         key=lambda m: (-m.score, -m.y, m.x),
     )
+    for mark in cv_all:
+        if _cv_too_big(mark):
+            _reject(mark, "too_big")
     for mark in sorted(progress, key=lambda m: (m.y, m.x)):
         _take(mark)
         if len(picked) >= cap:
@@ -2035,12 +2132,19 @@ def _merge_aim_marks(
             _take(mark)
             if len(picked) >= cap:
                 break
-    if len(picked) < cap:
+    complementary_cv = [m for m in cv_ranked if _proposal_overlap_reason(m, picked) is None]
+    reserve = min(_CV_COVERAGE_RESERVE, len(complementary_cv), max(0, cap - len(picked)))
+    gui_room = max(0, cap - len(picked) - reserve)
+    if gui_room and len(picked) < cap:
+        taken_gui = 0
         for mark in gui_ranked:
-            _take(mark)
-            if len(picked) >= cap:
+            if taken_gui >= gui_room or len(picked) >= cap:
+                if taken_gui >= gui_room:
+                    _reject(mark, "budget")
                 break
-    if len(picked) < cap and not gui_kept:
+            if _take(mark):
+                taken_gui += 1
+    if len(picked) < cap:
         for mark in cv_ranked:
             _take(mark)
             if len(picked) >= cap:
@@ -2054,11 +2158,32 @@ def _merge_aim_marks(
     labeled = _label_inspect_arrows(labeled)
     labeled = _label_lateral_nav(labeled, screen=screen)
     labeled = _scope_overlay_marks(labeled, screen=screen, dialog=dialog)
-    labeled = strip_misplaced_progress(labeled)
-    return [
+    labeled = strip_misplaced_progress(labeled, layout_adapter=layout_adapter)
+    out = [
         _copy_mark(m, mid=i)
         for i, m in enumerate(labeled[:cap], start=1)
     ]
+    if audit is not None:
+        sources: dict[str, int] = {}
+        for mark in out:
+            key = str(mark.source or "") or "unknown"
+            sources[key] = sources.get(key, 0) + 1
+        audit.clear()
+        audit.update(
+            {
+                "raw_counts": {
+                    "ocr": len(ocr),
+                    "gui": len(gui_in),
+                    "gui_kept": len(gui_kept),
+                    "cv": len(cv_all),
+                },
+                "kept_sources": sources,
+                "rejected": rejected,
+                "cv_reserve": reserve,
+                "cap": cap,
+            }
+        )
+    return out
 
 
 def _is_corner_confirm(label: str) -> bool:
@@ -2081,34 +2206,11 @@ def _tighten_corner_control(mark: AimMark) -> AimMark:
         height = y1 - y0
     x = float(max(0.0, min(1.0, (mark.x0 + mark.x1) * 0.5)))
     y = float(max(0.0, min(1.0, y0 + height * _CORNER_CLICK_T)))
-    return AimMark(
-        id=mark.id,
-        x=x,
-        y=y,
-        x0=mark.x0,
-        y0=y0,
-        x1=mark.x1,
-        y1=y1,
-        label=mark.label,
-        score=mark.score,
-    )
+    return _copy_mark(mark, x=x, y=y, y0=y0, y1=y1)
 
 
 def _relabel(marks: list[AimMark], mark_id: int, label: str) -> list[AimMark]:
-    return [
-        AimMark(
-            id=m.id,
-            x=m.x,
-            y=m.y,
-            x0=m.x0,
-            y0=m.y0,
-            x1=m.x1,
-            y1=m.y1,
-            label=label if m.id == mark_id else m.label,
-            score=m.score,
-        )
-        for m in marks
-    ]
+    return [_copy_mark(m, label=label) if m.id == mark_id else m for m in marks]
 
 
 def _label_unlabeled_corner(
@@ -2905,6 +3007,7 @@ def _marks_from_boxes(
                 x1=fx1,
                 y1=fy1,
                 score=score,
+                source="cv",
             )
         )
     return marks

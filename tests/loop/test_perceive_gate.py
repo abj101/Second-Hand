@@ -4,6 +4,7 @@ from loop.agent.entities import EntityTracker, TrackedEntity
 from loop.agent.loop import CollectAgent
 from loop.agent.perceive import (
     SceneDescription,
+    candidates_unidentified_only,
     combat_materially_changed,
     enemy_signature,
     scene_from_ocr,
@@ -12,11 +13,92 @@ from loop.agent.perceive import (
 from loop.os.frame_model import FrameModel, FrameObject
 
 
-def test_non_combat_never_runs_llm1() -> None:
+def test_scene_change_runs_llm1() -> None:
+    run, reason = should_run_llm1_perceive(screen="map", prev_screen="combat")
+    assert run
+    assert reason == "scene-change"
+
+    run, reason = should_run_llm1_perceive(
+        screen="title",
+        prev_screen="map",
+        host_stats={"screen": "title"},
+        prev_host_stats={"screen": "map"},
+    )
+    assert run
+    assert reason == "scene-change"
+
+
+def test_first_observation_runs_llm1() -> None:
+    run, reason = should_run_llm1_perceive(screen="map")
+    assert run
+    assert reason == "scene-change"
+
+
+def test_stable_non_combat_skips_llm1() -> None:
     for screen in ("map", "title", "tutorial", "select", "pause"):
-        run, reason = should_run_llm1_perceive(screen=screen, prev_screen="combat")
+        run, reason = should_run_llm1_perceive(
+            screen=screen,
+            prev_screen=screen,
+            host_stats={"screen": screen},
+            prev_host_stats={"screen": screen},
+            candidate_labels=["Continue", "Embark"],
+        )
         assert not run
-        assert reason.startswith("ocr-only:")
+        assert reason == f"ocr-only:{screen}"
+
+
+def test_unverified_effect_runs_llm1() -> None:
+    run, reason = should_run_llm1_perceive(
+        screen="map",
+        prev_screen="map",
+        host_stats={"screen": "map"},
+        prev_host_stats={"screen": "map"},
+        unverified_effect=True,
+    )
+    assert run
+    assert reason == "unverified-effect"
+
+
+def test_contradictory_runs_llm1() -> None:
+    run, reason = should_run_llm1_perceive(
+        screen="map",
+        prev_screen="map",
+        host_stats={"screen": "map"},
+        prev_host_stats={"screen": "map"},
+        contradictory=True,
+    )
+    assert run
+    assert reason == "contradictory"
+
+
+def test_unidentified_only_candidates_runs_llm1() -> None:
+    run, reason = should_run_llm1_perceive(
+        screen="map",
+        prev_screen="map",
+        host_stats={"screen": "map"},
+        prev_host_stats={"screen": "map"},
+        candidate_labels=["node_0", "icon", "unknown_character_1"],
+    )
+    assert run
+    assert reason == "unidentified-only"
+
+
+def test_candidates_none_does_not_trigger_unidentified_only() -> None:
+    run, reason = should_run_llm1_perceive(
+        screen="map",
+        prev_screen="map",
+        host_stats={"screen": "map"},
+        prev_host_stats={"screen": "map"},
+        candidate_labels=None,
+    )
+    assert not run
+    assert reason == "ocr-only:map"
+
+
+def test_candidates_unidentified_only_helper() -> None:
+    assert not candidates_unidentified_only(None)
+    assert candidates_unidentified_only(["node_0", "icon", ""])
+    assert not candidates_unidentified_only(["Continue", "node_0"])
 
 
 def test_entering_combat_runs_llm1() -> None:
@@ -234,3 +316,265 @@ def test_record_perception_telemetry_ocr_only_vs_scene_cache() -> None:
     )
     assert agent._turn_perception_source == "ocr_cache"
     assert agent._turn_llm1_reused_from_step is None
+
+
+def test_record_dispatch_effect_keeps_unverified_noop() -> None:
+    agent = object.__new__(CollectAgent)
+    agent._last_intent = {"kind": "click_control", "control_id": "icon"}
+    record = agent._record_dispatch_effect(
+        error=None,
+        executed=["click"],
+        pixel_changed=False,
+        hover=False,
+    )
+    assert record["dispatch"] == "ok"
+    assert record["effect"] == "unverified"
+    assert record["code"] == "effect-unverified"
+    assert agent._last_unverified_effect is True
+    assert agent._last_execution_failure is not None
+    assert agent._last_execution_failure["effect"] == "unverified"
+
+
+def test_record_dispatch_effect_clears_on_verified_move() -> None:
+    agent = object.__new__(CollectAgent)
+    agent._last_intent = {"kind": "click_control"}
+    agent._last_unverified_effect = True
+    agent._last_execution_failure = {"code": "effect-unverified"}
+    record = agent._record_dispatch_effect(
+        error=None,
+        executed=["click"],
+        pixel_changed=True,
+        hover=False,
+    )
+    assert record["dispatch"] == "ok"
+    assert record["effect"] == "verified"
+    assert record["code"] is None
+    assert agent._last_unverified_effect is False
+    assert agent._last_execution_failure is None
+
+
+def test_record_dispatch_effect_hover_stays_inconclusive() -> None:
+    agent = object.__new__(CollectAgent)
+    agent._last_intent = {"kind": "inspect"}
+    record = agent._record_dispatch_effect(
+        error=None,
+        executed=["hover"],
+        pixel_changed=False,
+        hover=True,
+    )
+    assert record["effect"] == "inconclusive"
+    assert agent._last_unverified_effect is False
+    assert agent._last_execution_failure is None
+
+
+def test_record_dispatch_effect_card_unverified_keeps_dispatch_ok() -> None:
+    from loop.log.schema import CardTransaction
+
+    agent = object.__new__(CollectAgent)
+    agent._last_intent = {"kind": "play_card"}
+    txn = CardTransaction(source_dispatched=True, target_dispatched=True, outcome="effect_unverified")
+    record = agent._record_dispatch_effect(
+        error=None,
+        executed=["click", "click"],
+        pixel_changed=False,
+        hover=False,
+        card_transaction=txn,
+    )
+    assert record["dispatch"] == "ok"
+    assert record["effect"] == "unverified"
+    assert record["code"] == "effect-unverified"
+    assert record["transaction_outcome"] == "effect_unverified"
+    assert agent._last_unverified_effect is True
+
+
+def test_hover_pixel_jitter_without_screen_change_stays_inconclusive() -> None:
+    agent = object.__new__(CollectAgent)
+    agent._last_intent = {"kind": "inspect"}
+    record = agent._record_dispatch_effect(
+        error=None,
+        executed=["hover"],
+        pixel_changed=True,
+        hover=True,
+        screen_changed=False,
+        global_tiny_change=True,
+    )
+    assert record["effect"] == "inconclusive"
+    assert agent._last_unverified_effect is False
+
+
+def test_same_object_unverified_twice_flags_cycle_not_unresolved() -> None:
+    agent = object.__new__(CollectAgent)
+    agent._last_intent = {}
+    kwargs = dict(
+        error=None,
+        executed=["click"],
+        pixel_changed=False,
+        hover=False,
+        screen="map",
+        evidence_fingerprint="map-legend-panel-v1",
+        bbox=[0.86, 0.14, 0.94, 0.22],
+    )
+    first = agent._record_dispatch_effect(object_id="legend_elite_icon", **kwargs)
+    second = agent._record_dispatch_effect(object_id="legend_elite_icon", **kwargs)
+    assert first["effect"] == "unverified"
+    assert second["cycle_repeat"] is True
+    assert second["unresolved"] is False
+    assert agent._last_unverified_effect is True
+
+
+def test_distinct_unverified_retry_marks_perception_unresolved() -> None:
+    agent = object.__new__(CollectAgent)
+    agent._last_intent = {}
+    shared = dict(
+        error=None,
+        executed=["click"],
+        pixel_changed=False,
+        hover=False,
+        screen="map",
+        evidence_fingerprint="map-unchanged-v1",
+    )
+    agent._record_dispatch_effect(
+        object_id="legend_elite_icon",
+        bbox=[0.86, 0.14, 0.94, 0.22],
+        **shared,
+    )
+    second = agent._record_dispatch_effect(
+        object_id="map_node_center",
+        bbox=[0.38, 0.34, 0.46, 0.42],
+        **shared,
+    )
+    assert second["unresolved"] is True
+    assert second["cycle_repeat"] is False
+    assert second["code"] == "perception-unresolved"
+    assert agent._last_unverified_effect is False
+    assert agent._pending_exec_error == "perception-unresolved"
+
+
+def test_empty_snapshot_still_bounds_same_object_retry() -> None:
+    agent = object.__new__(CollectAgent)
+    agent._last_intent = {}
+    agent._last_snapshot_id = ""
+    agent._last_surface_membership = ()
+    agent._perception_cache = None
+    agent._last_obs_image = None
+    kwargs = dict(
+        error=None,
+        executed=["click"],
+        pixel_changed=False,
+        hover=False,
+        screen="map",
+        bbox=[0.86, 0.14, 0.94, 0.22],
+    )
+    first = agent._record_dispatch_effect(object_id="legend_elite_icon", **kwargs)
+    second = agent._record_dispatch_effect(object_id="legend_elite_icon", **kwargs)
+    assert first["effect"] == "unverified"
+    assert second["cycle_repeat"] is True
+    assert agent._effect_attempts[-1]["evidence_fingerprint"] == "map|obs"
+
+
+
+def test_perception_gate_signals_pass_unverified_and_placeholders() -> None:
+    from loop.os.aim import AimGuide, AimMark
+    from PIL import Image
+
+    agent = object.__new__(CollectAgent)
+    agent._last_unverified_effect = True
+    agent._host_stats = {"screen": "map"}
+    agent._obs_metrics = {"screen": "map"}
+    agent._cached_perceive_scene = None
+    agent._overlay_state = None
+    agent._aim = AimGuide.from_marks(
+        Image.new("RGB", (8, 8)),
+        [
+            AimMark(id=1, x=0.2, y=0.8, x0=0.16, y0=0.76, x1=0.24, y1=0.84, label="icon"),
+            AimMark(id=2, x=0.42, y=0.38, x0=0.38, y0=0.34, x1=0.46, y1=0.42, label=""),
+        ],
+    )
+    signals = agent._perception_gate_signals()
+    assert signals["unverified_effect"] is True
+    assert signals["contradictory"] is False
+    assert signals["candidate_labels"] == ["icon", ""]
+    run, reason = should_run_llm1_perceive(
+        screen="map",
+        prev_screen="map",
+        host_stats=agent._host_stats,
+        prev_host_stats=agent._host_stats,
+        **signals,
+    )
+    assert run
+    assert reason == "unverified-effect"
+
+
+def test_perception_contradictory_cached_screen_mismatch() -> None:
+    agent = object.__new__(CollectAgent)
+    agent._host_stats = {"screen": "map"}
+    agent._obs_metrics = {"screen": "map"}
+    agent._cached_perceive_scene = SceneDescription(screen="combat")
+    agent._overlay_state = None
+    assert agent._perception_contradictory() is True
+
+
+def test_rebuild_observation_marks_drops_stale_labels(monkeypatch) -> None:
+    from loop.os.aim import AimGuide, AimMark
+    from PIL import Image
+
+    stale = AimMark(id=1, x=0.1, y=0.1, x0=0.05, y0=0.05, x1=0.15, y1=0.15, label="stale_old")
+    fresh = AimMark(id=2, x=0.42, y=0.38, x0=0.38, y0=0.34, x1=0.46, y1=0.42, label="")
+    image = Image.new("RGB", (16, 16))
+    agent = object.__new__(CollectAgent)
+    agent._aim = AimGuide.from_marks(image, [stale])
+    agent._host_stats = {"screen": "map"}
+    agent._obs_metrics = {"screen": "map"}
+    agent._scene_desc = None
+    agent.journal = type("Journal", (), {"lexicon": None})()
+    agent._last_ocr_words = []
+    monkeypatch.setattr("loop.agent.loop.ocr_click_marks", lambda *_a, **_k: [])
+    monkeypatch.setattr("loop.agent.loop.gui_click_marks", lambda *_a, **_k: [])
+    monkeypatch.setattr("loop.agent.loop.build_marks", lambda *_a, **_k: (fresh,))
+    monkeypatch.setattr(CollectAgent, "_number_aim_marks", lambda self, marks, **_k: list(marks))
+    out = agent._rebuild_observation_marks(image)
+    assert len(out) == 1
+    assert abs(out[0].x - 0.42) < 0.01
+    assert agent._gate_candidate_labels() == [""]
+    assert "stale_old" not in (agent._gate_candidate_labels() or [])
+
+
+def test_inventory_inconsistent_forces_llm1_rescan() -> None:
+    from unittest.mock import Mock
+
+    from loop.agent.decision import TurnSnapshot
+    from loop.agent.perception_cache import PerceptionCache
+    from loop.os.aim import AimMark
+    from loop.os.frame_model import build_action_surface
+
+    marks = [
+        AimMark(id=1, x=0.5, y=0.5, x0=0.4, y0=0.4, x1=0.6, y1=0.6, label="icon", role="icon"),
+    ]
+    agent = CollectAgent.__new__(CollectAgent)
+    agent._action_surface = build_action_surface(
+        marks, run_id="r", step_id=1, screen="combat", activity="combat",
+    )
+    agent.gateway = Mock()
+    agent._last_execution_failure = None
+    agent._last_reason_state_key = ""
+    agent._unchanged_failure_count = 0
+    agent._empty_action_surface_key = ""
+    agent._empty_action_surface_count = 0
+    agent._decision_softlock = False
+    agent._session_flags = []
+    agent._pending_exec_error = None
+    agent._force_perceive = False
+    agent._perception_cache = PerceptionCache()
+    agent._pending_inventory_rescan = False
+    agent._last_frame_mad = 0.0
+    agent._obs_metrics = {}
+    agent._host_stats = {"screen": "combat"}
+    agent._aim = None
+    agent._last_obs_image = None
+    snapshot = TurnSnapshot(snapshot_id="t", screen="combat", turn="ours", hp=80, block=None, energy=3)
+    agent._run_v2_act(snapshot)
+    assert agent._pending_exec_error == "inventory-inconsistent"
+    assert agent._force_perceive is True
+    assert agent._pending_inventory_rescan is True
+    run, _reason = should_run_llm1_perceive(screen="combat", force=True)
+    assert run

@@ -8,7 +8,8 @@ from typing import Any
 
 from PIL import Image
 
-from loop.os.aim import AimMark, HAND_Y, HUD_CHROME_Y, in_combat_sprite_band, merge_cached_enemy_marks
+from loop.os.aim import AimMark, merge_cached_enemy_marks
+from loop.os.layout_adapter import LayoutAdapter, default_layout_adapter
 from loop.os.profile import mean_absdiff, roi_thumb
 
 __all__ = [
@@ -34,8 +35,6 @@ _UNCERTAIN_OCR_REASONS = frozenset(
 )
 
 _FRAME_MAD_THRESHOLD = 0.02
-# Board crop for enemy-stability thumbs. Live STS2 sprites sit ~0.58–0.71.
-_ENEMY_BAND = (0.0, HUD_CHROME_Y, 1.0, HAND_Y)
 
 
 def enemy_roster_signature(host_stats: dict[str, Any] | None) -> tuple[tuple[Any, ...], ...]:
@@ -64,11 +63,18 @@ def enemy_roster_changed(
     return enemy_roster_signature(prev_host) != enemy_roster_signature(host_stats)
 
 
-def enemy_marks_from(marks: list[AimMark] | tuple[AimMark, ...]) -> list[AimMark]:
+def enemy_marks_from(
+    marks: list[AimMark] | tuple[AimMark, ...],
+    *,
+    layout_adapter: LayoutAdapter | None = None,
+) -> list[AimMark]:
+    adapter = layout_adapter or default_layout_adapter()
+    if not adapter.enables_combat_role_stamps("combat"):
+        return []
     return [
         m
         for m in marks
-        if in_combat_sprite_band(m.y, m.x) and (m.label or "").strip()
+        if adapter.in_combat_sprite_band(m.y, m.x) and (m.label or "").strip()
     ]
 
 
@@ -118,9 +124,10 @@ class PerceptionCache:
         thumb = roi_thumb(image, size)
         return hashlib.md5(thumb.tobytes()).hexdigest()
 
-    def _enemy_thumb(self, image: Image.Image) -> Image.Image:
+    def _enemy_thumb(self, image: Image.Image, *, layout_adapter: LayoutAdapter | None = None) -> Image.Image:
+        adapter = layout_adapter or default_layout_adapter()
         w, h = image.size
-        x0, y0, x1, y1 = _ENEMY_BAND
+        x0, y0, x1, y1 = (0.0, adapter.hud_chrome_y, 1.0, adapter.hand_y)
         crop = image.crop((int(x0 * w), int(y0 * h), int(x1 * w), int(y1 * h)))
         return roi_thumb(crop, 64)
 
@@ -134,6 +141,7 @@ class PerceptionCache:
         entity_tracker: Any | None = None,
         force: bool = False,
         inspect: bool = False,
+        layout_adapter: LayoutAdapter | None = None,
     ) -> PerceptionReuse:
         if force:
             return PerceptionReuse(reason="forced")
@@ -175,7 +183,7 @@ class PerceptionCache:
                 return PerceptionReuse(reason="enemy-roster-change")
             if enemy_roster_changed(prev_host_stats, host_stats):
                 return PerceptionReuse(reason="enemy-roster-change")
-            enemy_thumb = self._enemy_thumb(view)
+            enemy_thumb = self._enemy_thumb(view, layout_adapter=layout_adapter)
             if self._last_enemy_thumb is not None:
                 enemy_mad = mean_absdiff(self._last_enemy_thumb, enemy_thumb)
                 if enemy_mad <= _FRAME_MAD_THRESHOLD:
@@ -194,12 +202,13 @@ class PerceptionCache:
         marks: list[AimMark] | tuple[AimMark, ...],
         entity_rows: list[dict[str, Any]] | None = None,
         host_stats: dict[str, Any] | None = None,
+        layout_adapter: LayoutAdapter | None = None,
     ) -> None:
         self.last_screen = (screen or "").strip().lower()
         self.last_ocr = list(ocr_words)
-        self.last_enemy_marks = enemy_marks_from(list(marks))
+        self.last_enemy_marks = enemy_marks_from(list(marks), layout_adapter=layout_adapter)
         self.last_entities = list(entity_rows or [])
         self.last_frame_hash = self.compute_frame_hash(view)
         self._last_thumb = roi_thumb(view, 64)
-        self._last_enemy_thumb = self._enemy_thumb(view)
+        self._last_enemy_thumb = self._enemy_thumb(view, layout_adapter=layout_adapter)
         self._last_roster_sig = enemy_roster_signature(host_stats)
