@@ -606,10 +606,17 @@ def cmd_inspect_run(argv: list[str] | None = None) -> int:
     from loop.eval.export import inspect_run
 
     parser = argparse.ArgumentParser(description="SFT/DPO yield, prompt hashes, reward mix")
+    parser.add_argument("run", nargs="*", type=Path, help="run directory (positional)")
     parser.add_argument("--fixture", default="sts2")
     _parse_run_dirs(parser)
     args = parser.parse_args(argv)
-    run_dirs = _run_dirs_from_args(args)
+    paths = list(args.run or [])
+    if args.run_dir:
+        paths.extend(args.run_dir)
+    if paths:
+        run_dirs = [path.resolve() for path in paths]
+    else:
+        run_dirs = _run_dirs_from_args(args)
     if not run_dirs:
         print("no run dir", file=sys.stderr)
         return 2

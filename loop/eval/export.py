@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -789,6 +790,97 @@ def compare_turn_runs(baseline: Path, candidate: Path) -> dict[str, Any]:
     }
 
 
+_NONCANONICAL_SNAPSHOT_ID_RE = re.compile(r"^(object:|mark_|mk_)\d+$")
+_DUPLICATE_TARGET_IOU = 0.45
+
+
+def is_noncanonical_snapshot_id(value: str) -> bool:
+    """True for mark-derived / prompt-instance ids that must not be executable."""
+    from loop.agent.entities import is_prompt_instance_id
+
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    if _NONCANONICAL_SNAPSHOT_ID_RE.match(raw):
+        return True
+    return is_prompt_instance_id(raw)
+
+
+def _snapshot_bbox(item: dict[str, Any]) -> tuple[float, float, float, float] | None:
+    raw = item.get("bbox")
+    if isinstance(raw, dict):
+        try:
+            return (float(raw["x0"]), float(raw["y0"]), float(raw["x1"]), float(raw["y1"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+    if isinstance(raw, (list, tuple)) and len(raw) >= 4:
+        try:
+            return (float(raw[0]), float(raw[1]), float(raw[2]), float(raw[3]))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _box_iou(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    inter = max(0.0, min(ax1, bx1) - max(ax0, bx0)) * max(0.0, min(ay1, by1) - max(ay0, by0))
+    area_a = max(0.0, ax1 - ax0) * max(0.0, ay1 - ay0)
+    area_b = max(0.0, bx1 - bx0) * max(0.0, by1 - by0)
+    union = area_a + area_b - inter
+    return inter / union if union else 0.0
+
+
+def perception_hygiene_from_steps(steps: list[StepLog]) -> dict[str, Any]:
+    """Id / bbox / confidence audits plus router and perception-source histograms."""
+    noncanonical = 0
+    duplicate_steps = 0
+    conf_oor = 0
+    router: dict[str, int] = {}
+    sources: dict[str, int] = {}
+    for step in steps:
+        snap = step.turn_snapshot if isinstance(step.turn_snapshot, dict) else {}
+        cards = snap.get("cards") or []
+        targets = snap.get("targets") or []
+        if isinstance(cards, list):
+            for card in cards:
+                if isinstance(card, dict) and is_noncanonical_snapshot_id(str(card.get("card_id") or "")):
+                    noncanonical += 1
+        boxes: list[tuple[float, float, float, float]] = []
+        if isinstance(targets, list):
+            for target in targets:
+                if not isinstance(target, dict):
+                    continue
+                if is_noncanonical_snapshot_id(str(target.get("target_id") or "")):
+                    noncanonical += 1
+                conf = target.get("identity_confidence")
+                if isinstance(conf, (int, float)) and not (0.0 <= float(conf) <= 1.0):
+                    conf_oor += 1
+                box = _snapshot_bbox(target)
+                if box is not None:
+                    boxes.append(box)
+        if any(
+            _box_iou(boxes[i], boxes[j]) >= _DUPLICATE_TARGET_IOU
+            for i in range(len(boxes))
+            for j in range(i + 1, len(boxes))
+        ):
+            duplicate_steps += 1
+        reason = str(step.router_reason or "")
+        router[reason] = router.get(reason, 0) + 1
+        src = str(step.perception_source or "")
+        sources[src] = sources.get(src, 0) + 1
+    return {
+        "noncanonical_target_ids": noncanonical,
+        "duplicate_target_bboxes": duplicate_steps,
+        "confidence_out_of_range": conf_oor,
+        "router_reason": router,
+        "perception_source": sources,
+    }
+
+
 def inspect_run(run_dirs: list[Path]) -> dict[str, Any]:
     """SFT/DPO yield, prompt hashes, screen mix, transition vs combat reward mass."""
     hashes = prompt_hash_report(run_dirs)
@@ -798,9 +890,11 @@ def inspect_run(run_dirs: list[Path]) -> dict[str, Any]:
     screens: dict[str, int] = {}
     mix = {"transition": 0.0, "combat": 0.0, "transition_raw": 0.0, "n": 0}
     metrics_rows: list[dict[str, Any]] = []
+    all_steps: list[StepLog] = []
     for path in run_dirs:
         metrics_rows.append({"run": str(path), **turn_run_metrics(path)})
         steps = load_steps(path)
+        all_steps.extend(steps)
         by_ep: dict[str, list[StepLog]] = {}
         for step in steps:
             if step.fixture != "sts2":
@@ -825,6 +919,7 @@ def inspect_run(run_dirs: list[Path]) -> dict[str, Any]:
     for row in dpo:
         kind = str(row.get("pair_type") or "state_bound")
         pair_types[kind] = pair_types.get(kind, 0) + 1
+    hygiene = perception_hygiene_from_steps(all_steps)
     return {
         "runs": [str(path) for path in run_dirs],
         "sft_n": len(sft),
@@ -836,6 +931,7 @@ def inspect_run(run_dirs: list[Path]) -> dict[str, Any]:
         "prompt": hashes,
         "notebook_schema": schema,
         "metrics": metrics_rows,
+        **hygiene,
     }
 
 
