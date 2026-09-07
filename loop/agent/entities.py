@@ -176,6 +176,7 @@ def is_targetable_anonymous_enemy(row: dict[str, Any]) -> bool:
 
 
 _FRAME_MARK_RE = re.compile(r"^(?:mark|mk)_?\d+$", re.I)
+_MARK_DERIVED_OID_RE = re.compile(r"^object:\d+$", re.I)
 _STAT_FRACTION_RE = re.compile(r"^\d+\s*/\s*\d+$")
 
 
@@ -183,6 +184,16 @@ def is_frame_mark_token(text: str) -> bool:
     """True for frame-local mark ids such as mark_9 / mk_14 — never executable identity."""
     compact = re.sub(r"[\s-]+", "_", (text or "").strip())
     return bool(_FRAME_MARK_RE.match(compact))
+
+
+def is_mark_derived_object_id(text: str) -> bool:
+    """True for mark_N, mk_N, and object:N — never executable identity."""
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    if is_frame_mark_token(raw):
+        return True
+    return bool(_MARK_DERIVED_OID_RE.match(raw))
 
 
 def is_hp_anchor_label(label: str) -> bool:

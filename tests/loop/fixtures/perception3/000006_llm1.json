@@ -1,0 +1,249 @@
+{
+  "source_run": "20260907T200835Z_sts2_collect",
+  "source_step": 6,
+  "llm1_raw": {
+    "screen": "combat",
+    "tutorial": null,
+    "turn": "ours",
+    "controls": [
+      {
+        "label": "Defend",
+        "role": "card",
+        "confidence": "high",
+        "source": "ocr"
+      },
+      {
+        "label": "Bash",
+        "role": "card",
+        "confidence": "high",
+        "source": "ocr"
+      },
+      {
+        "label": "End Turn 1",
+        "role": "button",
+        "confidence": "high",
+        "source": "ocr"
+      }
+    ],
+    "combat": {
+      "active": true,
+      "confidence": "high"
+    },
+    "dialog": null,
+    "visible_text": [
+      "End Turn 1",
+      "Defend",
+      "Skill",
+      "Bash",
+      "Attack",
+      "Deal 8 damage."
+    ],
+    "uncertain": [],
+    "unresolved": [],
+    "legal_actions": [],
+    "hud": [],
+    "hand_cards": [
+      {
+        "id": "card_1",
+        "role": "card",
+        "confidence": "high",
+        "playable": true,
+        "bbox": [
+          330,
+          785,
+          445,
+          995
+        ],
+        "label": "Defend",
+        "name": "Defend",
+        "name_source": "ocr"
+      },
+      {
+        "id": "card_2",
+        "role": "card",
+        "confidence": "high",
+        "playable": true,
+        "bbox": [
+          445,
+          715,
+          640,
+          995
+        ],
+        "label": "Bash",
+        "name": "Bash",
+        "name_source": "ocr"
+      }
+    ],
+    "characters": [
+      {
+        "role": "character",
+        "confidence": "high",
+        "inspectable": false,
+        "bbox": [
+          195,
+          455,
+          295,
+          685
+        ],
+        "label": null,
+        "name": null,
+        "name_source": "unresolved"
+      }
+    ],
+    "enemies": [
+      {
+        "role": "enemy",
+        "confidence": "high",
+        "inspectable": true,
+        "bbox": [
+          690,
+          575,
+          805,
+          685
+        ],
+        "label": null,
+        "name": null,
+        "name_source": "unresolved"
+      }
+    ],
+    "overlays_active": []
+  },
+  "aim_marks": [
+    {
+      "id": 1,
+      "label": "Defend",
+      "role": "card",
+      "object_id": "",
+      "x": 0.4013,
+      "y": 0.9081,
+      "bbox": [
+        0.3313,
+        0.7681,
+        0.4713,
+        1.0
+      ],
+      "source": "ocr-hand",
+      "confidence": 0.999
+    },
+    {
+      "id": 2,
+      "label": "Strike",
+      "role": "card",
+      "object_id": "object:8",
+      "x": 0.5,
+      "y": 0.906,
+      "bbox": [
+        0.43,
+        0.766,
+        0.57,
+        1.0
+      ],
+      "source": "ocr-hand",
+      "confidence": 0.999
+    },
+    {
+      "id": 3,
+      "label": "Bash",
+      "role": "card",
+      "object_id": "",
+      "x": 0.575,
+      "y": 0.8417,
+      "bbox": [
+        0.505,
+        0.7017,
+        0.645,
+        0.9817
+      ],
+      "source": "ocr-hand",
+      "confidence": 0.999
+    },
+    {
+      "id": 4,
+      "label": "Strike",
+      "role": "card",
+      "object_id": "",
+      "x": 0.6391,
+      "y": 0.8944,
+      "bbox": [
+        0.5691,
+        0.7544,
+        0.7091,
+        1.0
+      ],
+      "source": "ocr-hand",
+      "confidence": 0.999
+    },
+    {
+      "id": 5,
+      "label": "Nibbit",
+      "role": "enemy",
+      "object_id": "object:13",
+      "x": 0.747,
+      "y": 0.63,
+      "bbox": [
+        0.69,
+        0.575,
+        0.808,
+        0.685
+      ],
+      "source": "gui",
+      "confidence": 0.72
+    },
+    {
+      "id": 6,
+      "label": "Nibbit",
+      "role": "unknown",
+      "object_id": "object:8",
+      "x": 0.75,
+      "y": 0.628,
+      "bbox": [
+        0.7,
+        0.57,
+        0.805,
+        0.682
+      ],
+      "source": "cv",
+      "confidence": 0.7
+    },
+    {
+      "id": 7,
+      "label": "unidentified_enemy",
+      "role": "unknown",
+      "object_id": "object:16",
+      "x": 0.749,
+      "y": 0.3499,
+      "bbox": [
+        0.689,
+        0.2699,
+        0.809,
+        0.4299
+      ],
+      "source": "aim",
+      "confidence": 0.78
+    },
+    {
+      "id": 8,
+      "label": "End Turn",
+      "role": "button",
+      "object_id": "",
+      "x": 0.8916,
+      "y": 0.825,
+      "bbox": [
+        0.8387,
+        0.7863,
+        0.9444,
+        0.8638
+      ],
+      "source": "ocr-gui",
+      "confidence": 0.91
+    }
+  ],
+  "host_stats": {
+    "screen": "combat",
+    "activity": "combat",
+    "turn": "ours",
+    "hp": 80,
+    "energy": 2,
+    "combat_active": true
+  }
+}

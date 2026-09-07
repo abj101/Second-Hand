@@ -122,7 +122,6 @@ def quantized_bounds_key(row: dict[str, Any]) -> str:
     return ",".join(str(quantize_coord(part)) for part in bounds)
 
 
-_MARK_DERIVED_OID_RE = re.compile(r"^object:\d+$", re.I)
 _SPATIAL_IOU_THRESHOLD = 0.1
 
 
@@ -131,9 +130,9 @@ def stable_object_id_from_row(row: dict[str, Any]) -> str:
     raw = str(row.get("object_id") or "").strip()
     if not raw:
         return ""
-    from loop.agent.entities import is_frame_mark_token
+    from loop.agent.entities import is_mark_derived_object_id
 
-    if is_frame_mark_token(raw) or _MARK_DERIVED_OID_RE.match(raw):
+    if is_mark_derived_object_id(raw):
         return ""
     row_id = row.get("id")
     if row_id is not None and raw == str(row_id):
@@ -353,6 +352,8 @@ def _slug(label: str) -> str:
 
 def _control_ids(objects: list[FrameObject]) -> list[FrameObject]:
     """Assign deterministic, unique semantic IDs after role resolution."""
+    from loop.agent.entities import is_mark_derived_object_id
+
     used: set[str] = set()
     out: list[FrameObject] = []
     ordinals: dict[str, int] = {}
@@ -364,7 +365,7 @@ def _control_ids(objects: list[FrameObject]) -> list[FrameObject]:
             ordinals[base] = ordinal
             object_id = base if ordinal == 1 else f"{base}:{ordinal}"
         elif obj.role in {"card", "enemy", "player"}:
-            if not object_id or object_id.startswith("mark_"):
+            if not object_id or object_id.startswith("mark_") or is_mark_derived_object_id(object_id):
                 base = obj.role
                 ordinal = ordinals.get(base, 0) + 1
                 ordinals[base] = ordinal

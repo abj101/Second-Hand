@@ -19,9 +19,9 @@ def _bbox_iou(a: ScreenObject | AimMark, b: ScreenObject | AimMark) -> float:
 
 
 def _is_mark_object_id(object_id: str) -> bool:
-    from loop.agent.entities import is_frame_mark_token
+    from loop.agent.entities import is_mark_derived_object_id
 
-    return is_frame_mark_token(object_id)
+    return is_mark_derived_object_id(object_id)
 
 
 def _stable_object_id(mark: AimMark) -> str:
@@ -31,8 +31,53 @@ def _stable_object_id(mark: AimMark) -> str:
     return ""
 
 
+_UNTYPED_SPRITE_ROLES = frozenset({"unknown", "icon", "body"})
+_SPRITE_ROLE_RANK = {
+    "enemy": 3,
+    "target": 3,
+    "unknown_character": 2,
+    "character": 2,
+    "unknown": 1,
+    "icon": 1,
+    "body": 1,
+}
+
+
+def _canonical_sprite_id(object_id: str) -> bool:
+    raw = str(object_id or "").strip()
+    if not raw or _is_mark_object_id(raw):
+        return False
+    lowered = raw.lower()
+    return lowered.startswith("enemy_") or lowered.startswith("player_")
+
+
+def _mark_confidence(mark: AimMark) -> float:
+    return float(mark.confidence or mark.score or 0.0)
+
+
+def _sprite_role_rank(mark: AimMark) -> int:
+    return _SPRITE_ROLE_RANK.get((mark.role or "").strip().lower(), 0)
+
+
+def _prefer_target_row(kept_mark: AimMark, challenger: AimMark) -> AimMark:
+    kept_rank = _sprite_role_rank(kept_mark)
+    chall_rank = _sprite_role_rank(challenger)
+    if kept_rank != chall_rank:
+        return kept_mark if kept_rank > chall_rank else challenger
+    kept_canon = _canonical_sprite_id(kept_mark.object_id)
+    chall_canon = _canonical_sprite_id(challenger.object_id)
+    if kept_canon != chall_canon:
+        return kept_mark if kept_canon else challenger
+    kept_conf = _mark_confidence(kept_mark)
+    chall_conf = _mark_confidence(challenger)
+    if chall_conf != kept_conf:
+        return challenger if chall_conf > kept_conf else kept_mark
+    return kept_mark
+
+
 def _prepare_frame_marks(marks: list[AimMark], *, context: Any | None = None) -> list[AimMark]:
     from loop.os.aim import _copy_mark
+    from loop.os.frame_model import _TARGET_ROLES
 
     def enemy_like(mark: AimMark) -> bool:
         return (mark.role or "").strip().lower() in {"enemy", "target"}
@@ -40,22 +85,29 @@ def _prepare_frame_marks(marks: list[AimMark], *, context: Any | None = None) ->
     def player_like(mark: AimMark) -> bool:
         return (mark.role or "").strip().lower() == "player"
 
+    def sprite_like(mark: AimMark) -> bool:
+        role = (mark.role or "").strip().lower()
+        if role == "player":
+            return False
+        return role in _TARGET_ROLES or role in _UNTYPED_SPRITE_ROLES
+
     kept: list[AimMark] = []
     for mark in sorted(marks, key=lambda item: (item.x, item.y, item.id)):
-        if enemy_like(mark) or player_like(mark):
-            dup = next(
+        if sprite_like(mark) or player_like(mark):
+            dup_idx = next(
                 (
-                    other
-                    for other in kept
+                    index
+                    for index, other in enumerate(kept)
                     if (
-                        (enemy_like(mark) and enemy_like(other))
+                        (sprite_like(mark) and sprite_like(other))
                         or (player_like(mark) and player_like(other))
                     )
                     and _bbox_iou(mark, other) >= 0.45
                 ),
                 None,
             )
-            if dup is not None:
+            if dup_idx is not None:
+                kept[dup_idx] = _prefer_target_row(kept[dup_idx], mark)
                 continue
         kept.append(mark)
 

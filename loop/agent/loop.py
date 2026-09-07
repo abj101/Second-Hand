@@ -35,6 +35,7 @@ from loop.agent.entities import (
     entity_route_facts,
     is_anonymous_enemy_label,
     is_frame_mark_token,
+    is_mark_derived_object_id,
     is_player_row,
     is_prompt_instance_id,
     is_targetable_anonymous_enemy,
@@ -659,6 +660,7 @@ class CollectAgent:
         self._action_surface: ActionSurface | None = None
         self._empty_action_surface_key: str = ""
         self._empty_action_surface_count: int = 0
+        self._snapshot_dropped_noncanonical: int = 0
         self._decision_softlock: bool = False
         self._last_frame_mad: float = 0.0
         self._turn_transition: bool = False
@@ -3754,6 +3756,17 @@ class CollectAgent:
             context=surface.context,
             surface=surface,
         )
+        surface = build_action_surface(
+            stamped,
+            run_id=self.session_id,
+            step_id=int(self._step_id or 0),
+            screen=screen,
+            activity=activity,
+            layout=surface.context.layout,
+            blocking_overlay=surface.context.blocking_overlay,
+            host_stats=self._host_stats,
+            informational=informational,
+        )
         self._aim = AimGuide.from_marks(
             self._last_obs_image if self._last_obs_image is not None else self._aim.image,
             stamped,
@@ -4210,6 +4223,7 @@ class CollectAgent:
             return best[1] if best is not None and best[0] <= 0.16 * 0.16 else None
 
         control_counts: dict[str, int] = {}
+        dropped_noncanonical = 0
         for obj in self._screen_objects.objects:
             # A finalized surface has already applied generic precedence and
             # fixture policy.  Reclassifying persisted objects here recreated
@@ -4218,6 +4232,17 @@ class CollectAgent:
             if surface is None:
                 role = object_role(obj, entity_targets_ok=self._combat_screen_now())
             bbox = BoundingBox(obj.x0, obj.y0, obj.x1, obj.y1)
+            if role in {"card", "enemy"}:
+                object_id = str(obj.object_id or "").strip()
+                if (
+                    not object_id
+                    or is_prompt_instance_id(object_id)
+                    or is_mark_derived_object_id(object_id)
+                ):
+                    # Mark-derived / prompt ids are not executable. Count and skip;
+                    # 1a/1b should have rewritten these before the store freeze.
+                    dropped_noncanonical += 1
+                    continue
             if role == "card":
                 state = _matching(hand_states, obj, name_field="name")
                 detail = next((
@@ -4247,11 +4272,6 @@ class CollectAgent:
                 ))
             elif role == "enemy":
                 target_id = str(obj.object_id or "").strip()
-                if not target_id or is_prompt_instance_id(target_id):
-                    # A frame-local visual blob is not a canonical target.  It
-                    # stays available to perception, but ACT cannot address it
-                    # until the object store assigns a stable identity.
-                    continue
                 state = _matching(enemy_states, obj, name_field="label")
                 hp = self._field_value(getattr(state, "hp", None)) if state is not None else None
                 intent = self._field_value(getattr(state, "intent", None)) if state is not None else None
@@ -4284,9 +4304,17 @@ class CollectAgent:
                 control_id = str(obj.object_id or f"control:{slug}{suffix}")
                 self._v2_control_objects[control_id] = obj
                 controls.append(ControlSnapshot(control_id, obj.label or slug, bbox, role=role))
-            if obj.object_id:
-                self._v2_control_objects.setdefault(str(obj.object_id), obj)
+            object_id = str(obj.object_id or "").strip()
+            if (
+                object_id
+                and not is_prompt_instance_id(object_id)
+                and not is_mark_derived_object_id(object_id)
+            ):
+                self._v2_control_objects.setdefault(object_id, obj)
 
+        self._snapshot_dropped_noncanonical = dropped_noncanonical
+        if dropped_noncanonical:
+            _say(f"  snapshot  dropped_noncanonical={dropped_noncanonical}")
         turn = self._field_value(getattr(game_state, "turn", None)) if game_state is not None else None
         if turn is None:
             turn = self._host_stats.get("turn")
