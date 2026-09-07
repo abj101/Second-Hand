@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 from PIL import Image
 
-from loop.agent.decision import TurnSnapshot
-from loop.agent.loop import CollectAgent
+from loop.agent.decision import BoundingBox, TargetSnapshot, TurnSnapshot
+from loop.agent.loop import CollectAgent, CollectConfig
 from loop.agent.perception_cache import PerceptionCache
 from loop.fixtures.sts2 import Sts2Fixture
 from loop.memory.overlay_state import OverlayState
@@ -265,3 +265,142 @@ def test_snapshot_drops_mark_derived_ids_and_counts(tmp_path: Path) -> None:
         assert "object:3" not in agent._v2_control_objects
     finally:
         store.close()
+
+
+def _assert_unit_identity_confidence(snapshot: TurnSnapshot) -> None:
+    for target in snapshot.targets:
+        conf = target.identity_confidence
+        assert conf is None or 0.0 <= float(conf) <= 1.0, (target.target_id, conf)
+
+
+def test_run_b_step7_replay_single_target(tmp_path: Path) -> None:
+    payload = _load_step(7)
+    image = _frozen_image(7)
+    agent, _marks = _agent_for_replay(tmp_path, payload, image, 7)
+    scene = _scene_from_sidecar(payload)
+    try:
+        surface = agent._finalize_action_surface(scene)
+        assert surface is not None
+        snapshot = agent._build_turn_snapshot(scene)
+        assert len(snapshot.targets) == 1
+        target = snapshot.targets[0]
+        assert target.target_id.startswith("enemy_")
+        _assert_no_object_n(snapshot)
+        _assert_unit_identity_confidence(snapshot)
+        enemies = [obj for obj in agent._screen_objects.objects if obj.role == "enemy"]
+        assert len(enemies) == 1
+        assert enemies[0].object_id.startswith("enemy_")
+    finally:
+        agent._screen_objects.close()
+
+
+def test_run_b_step19_replay_single_target_canonical_id(tmp_path: Path) -> None:
+    payload = _load_step(19)
+    image = _frozen_image(19)
+    agent, _marks = _agent_for_replay(tmp_path, payload, image, 19)
+    scene = _scene_from_sidecar(payload)
+    try:
+        surface = agent._finalize_action_surface(scene)
+        assert surface is not None
+        snapshot = agent._build_turn_snapshot(scene)
+        assert len(snapshot.targets) == 1
+        target = snapshot.targets[0]
+        assert target.target_id.startswith("enemy_")
+        assert _OBJECT_N.match(target.target_id) is None
+        _assert_no_object_n(snapshot)
+        _assert_unit_identity_confidence(snapshot)
+        enemies = [obj for obj in agent._screen_objects.objects if obj.role == "enemy"]
+        assert len(enemies) == 1
+        assert enemies[0].object_id.startswith("enemy_")
+        name = (target.name or "").strip().lower().replace("_", " ")
+        assert name in {"nibbit", "unknown enemy"}
+    finally:
+        agent._screen_objects.close()
+
+
+def test_identity_confidence_clamped_or_none() -> None:
+    high = ScreenObject.from_mark(
+        AimMark(
+            id=1, x=0.75, y=0.62, x0=0.68, y0=0.55, x1=0.82, y1=0.70,
+            label="Nibbit", role="enemy", confidence=143.1, score=143.1,
+        ),
+        screen="combat",
+    )
+    assert high.confidence == 0.0
+    assert 0.0 <= high.confidence <= 1.0
+
+    mid = ScreenObject.from_mark(
+        AimMark(
+            id=2, x=0.75, y=0.62, x0=0.68, y0=0.55, x1=0.82, y1=0.70,
+            label="Nibbit", role="enemy", confidence=0.72, score=106.0,
+        ),
+        screen="combat",
+    )
+    assert mid.confidence == 0.72
+
+    score_fallback = ScreenObject.from_mark(
+        AimMark(
+            id=3, x=0.75, y=0.62, x0=0.68, y0=0.55, x1=0.82, y1=0.70,
+            label="Nibbit", role="enemy", confidence=143.1, score=0.55,
+        ),
+        screen="combat",
+    )
+    assert score_fallback.confidence == 0.55
+
+    spilled = TargetSnapshot(
+        target_id="enemy_1",
+        bbox=BoundingBox(0.68, 0.55, 0.82, 0.70),
+        name="Nibbit",
+        identity_confidence=143.1,
+    )
+    assert spilled.identity_confidence is None
+    ok = TargetSnapshot(
+        target_id="enemy_1",
+        bbox=BoundingBox(0.68, 0.55, 0.82, 0.70),
+        name="Nibbit",
+        identity_confidence=0.72,
+    )
+    assert ok.identity_confidence == 0.72
+
+
+def test_anchored_single_enemy_routes_to_act_without_blocker(tmp_path: Path) -> None:
+    marks = [
+        _mark_from_row({
+            "id": 1, "label": "Strike", "role": "card", "object_id": "card_1",
+            "x": 0.50, "y": 0.90, "bbox": [0.40, 0.80, 0.60, 1.0],
+        }),
+        _mark_from_row({
+            "id": 2, "label": "Nibbit", "role": "enemy", "object_id": "enemy_1",
+            "x": 0.75, "y": 0.58, "bbox": [0.68, 0.50, 0.82, 0.68],
+        }),
+        _mark_from_row({
+            "id": 3, "label": "End Turn", "role": "button", "object_id": "",
+            "x": 0.89, "y": 0.82, "bbox": [0.82, 0.78, 0.96, 0.88],
+        }),
+    ]
+    agent = _agent_for_combat(tmp_path, marks, {"screen": "combat", "activity": "combat", "enemies": 1})
+    agent.config = CollectConfig(identify_before_act=True)
+    scene = SimpleNamespace(
+        screen="combat",
+        enemies=[{
+            "label": "Nibbit", "role": "enemy", "confidence": "high",
+            "bbox": [680, 500, 820, 680],
+        }],
+        characters=[{
+            "label": "unknown_character_2", "role": "unknown_character",
+            "confidence": "low", "inspectable": "true",
+            "bbox": [100, 100, 180, 180],
+        }],
+        controls=[],
+        hand_cards=[],
+        tutorial={},
+        informational_text=lambda: [],
+    )
+    try:
+        surface = agent._finalize_action_surface(scene)
+        assert surface is not None
+        route, reason = agent._two_stage_reason_route(scene)
+        assert route == "act", (route, reason)
+        assert agent._two_stage_epistemic_blockers(scene) == []
+    finally:
+        agent._screen_objects.close()

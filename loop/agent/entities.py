@@ -34,6 +34,7 @@ _PLAYER_LABELS = frozenset(
     }
 )
 _MATCH_RADIUS = 0.14  # normalized center distance for same sprite across frames
+_STALE_CYCLES = 2  # drop tracker rows unseen for this many combat cycles
 
 
 def _compact(text: str) -> str:
@@ -414,6 +415,24 @@ def _distance(a: tuple[float, float], b: tuple[float, float]) -> float:
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
 
 
+def _host_enemy_count(host_stats: dict[str, Any] | None) -> int | None:
+    """HP-plate count from host OCR. ``None`` when the host did not report enemies."""
+    if not host_stats:
+        return None
+    raw = host_stats.get("enemies")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    if not isinstance(raw, list):
+        return None
+    n = 0
+    for row in raw:
+        if isinstance(row, dict):
+            n += 1
+    return n
+
+
 @dataclass
 class TrackedEntity:
     entity_id: str
@@ -459,6 +478,11 @@ class EntityTracker:
     entities: list[TrackedEntity] = field(default_factory=list)
     _next_unknown: int = 1
     _cycle: int = 0
+    # Canonical names of identified sprites that aged out. Re-appearance
+    # re-identifies without a fresh inspect when the bbox is nearby.
+    _identified_memory: dict[str, tuple[float, float, float, float] | None] = field(
+        default_factory=dict
+    )
 
     def max_unresolved_age(self) -> int:
         ages = [self._cycle - ent.first_seen_cycle + 1 for ent in self.entities if not ent.identified]
@@ -493,12 +517,65 @@ class EntityTracker:
                 ent.canonical_name = name
                 ent.role = role
                 ent.inspectable = False
+                self._remember_identified(ent)
                 return
 
     def identify_at(self, cx: float, cy: float, name: str, *, role: str = "enemy") -> None:
         hit = self._match(cx, cy)
         if hit is not None:
             self.identify(hit.entity_id, name, role=role)
+
+    def _remember_identified(self, ent: TrackedEntity) -> None:
+        name = (ent.canonical_name or "").strip()
+        if not name or is_unknown_entity_label(name):
+            return
+        self._identified_memory[name] = ent.bbox
+
+    def _recall_identified(self, cx: float, cy: float) -> str:
+        best = ""
+        best_d = _MATCH_RADIUS
+        for name, last in self._identified_memory.items():
+            if last is None:
+                continue
+            center = _center(last)
+            if center is None:
+                continue
+            d = _distance((cx, cy), center)
+            if d < best_d:
+                best_d = d
+                best = name
+        return best
+
+    def _prune_unseen(self, host_stats: dict[str, Any] | None) -> None:
+        kept: list[TrackedEntity] = []
+        for ent in self.entities:
+            if self._cycle - ent.last_seen_cycle >= _STALE_CYCLES:
+                if ent.identified:
+                    self._remember_identified(ent)
+                continue
+            kept.append(ent)
+        self.entities = kept
+        self._cap_unresolved_blockers(host_stats)
+
+    def _cap_unresolved_blockers(self, host_stats: dict[str, Any] | None) -> None:
+        """Host HP plates == 1 → at most one unresolved row as a blocker.
+
+        Sprites seen this cycle are never dropped (a real second enemy).
+        """
+        if _host_enemy_count(host_stats) != 1:
+            return
+        unresolved = [ent for ent in self.entities if not ent.identified]
+        if len(unresolved) <= 1:
+            return
+        live = [ent for ent in unresolved if ent.last_seen_cycle == self._cycle]
+        stale = [ent for ent in unresolved if ent.last_seen_cycle != self._cycle]
+        if live:
+            drop = {ent.entity_id for ent in stale}
+        else:
+            drop = {ent.entity_id for ent in stale[1:]}
+        if not drop:
+            return
+        self.entities = [ent for ent in self.entities if ent.entity_id not in drop]
 
     def apply_object_library(
         self,
@@ -554,6 +631,7 @@ class EntityTracker:
             bbox = _parse_bbox(row)
 
             ent = self._match(cx, cy)
+            recalled = "" if ent is not None else self._recall_identified(cx, cy)
             if ent is None:
                 if label and not is_unknown_entity_label(label):
                     eid = _compact(label).replace(" ", "_")
@@ -573,6 +651,24 @@ class EntityTracker:
                         first_seen_cycle=self._cycle,
                         last_seen_cycle=self._cycle,
                     )
+                    self._remember_identified(ent)
+                elif recalled:
+                    eid = _compact(recalled).replace(" ", "_")
+                    ent = TrackedEntity(
+                        entity_id=eid,
+                        label=recalled,
+                        role="enemy",
+                        cx=cx,
+                        cy=cy,
+                        bbox=bbox,
+                        confidence=0.85,
+                        inspectable=False,
+                        identified=True,
+                        canonical_name=recalled,
+                        first_seen_cycle=self._cycle,
+                        last_seen_cycle=self._cycle,
+                    )
+                    self._remember_identified(ent)
                 else:
                     provided = _row_entity_id(row)
                     if provided and is_unknown_entity_label(provided):
@@ -603,6 +699,11 @@ class EntityTracker:
                     ent.canonical_name = label
                     ent.role = "enemy"
                     ent.inspectable = False
+                    self._remember_identified(ent)
+                elif not ent.identified:
+                    recalled = self._recall_identified(cx, cy)
+                    if recalled:
+                        self.identify(ent.entity_id, recalled)
 
             seen_ids.add(ent.entity_id)
 
@@ -623,6 +724,8 @@ class EntityTracker:
         # otherwise be promoted into an enemy identity.  Keep the entity
         # anonymous until current-frame typed perception supplies a name.
         del lexicon, screen
+
+        self._prune_unseen(host_stats)
 
         out: list[dict[str, str]] = []
         seen_ids.clear()

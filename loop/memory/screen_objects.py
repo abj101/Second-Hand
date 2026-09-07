@@ -176,6 +176,23 @@ def _mark_cell(mark: AimMark) -> str:
     return cell
 
 
+def _unit_interval_confidence(mark: AimMark) -> float:
+    """Probability in [0, 1]. Unnormalized DINO/template scores become 0.0."""
+    try:
+        conf = float(mark.confidence)
+    except (TypeError, ValueError):
+        conf = None
+    if conf is not None and 0.0 <= conf <= 1.0:
+        return conf
+    try:
+        score = float(mark.score)
+    except (TypeError, ValueError):
+        score = None
+    if score is not None and 0.0 <= score <= 1.0:
+        return score
+    return 0.0
+
+
 @dataclass(frozen=True)
 class ScreenObject:
     mark_id: int
@@ -212,7 +229,7 @@ class ScreenObject:
             listing=_mark_cell(mark),
             object_id=str(mark.object_id or ""),
             role=str(mark.role or ""),
-            confidence=float(mark.confidence or mark.score or 0.0),
+            confidence=_unit_interval_confidence(mark),
             provenance=str(mark.source or source),
         )
 

@@ -2683,7 +2683,21 @@ class CollectAgent:
             identity_unresolved=self._identity_unresolved_keys(),
         )
         self._entity_route_facts = facts
-        return [str(row.get("label") or "") for row in facts if row.get("blocker")]
+        blockers = [row for row in facts if row.get("blocker")]
+        store = getattr(self, "_screen_objects", None)
+        store_enemies = [
+            obj for obj in (tuple(getattr(store, "objects", ()) or ()) if store is not None else ())
+            if str(getattr(obj, "role", "") or "").strip().lower() in {"enemy", "target"}
+            and str(getattr(obj, "object_id", "") or "").startswith("enemy_")
+        ]
+        if store_enemies:
+            # Current-frame canonical enemy is enough to act. Phantom tracker /
+            # prompt ids must not force explore→rescan on an anchored fight.
+            blockers = [
+                row for row in blockers
+                if str(row.get("rule") or "") != "identify-before-act"
+            ]
+        return [str(row.get("label") or "") for row in blockers]
 
     def _two_stage_reason_route(self, scene_desc: Any) -> tuple[str, str]:
         """Choose Explore or Act from action-relevant uncertainty only."""
@@ -4281,7 +4295,11 @@ class CollectAgent:
                 )
                 target_name = str(raw_target_name or "").strip()
                 compact_target = _norm(target_name)
-                identity_confidence = float(confidence) if isinstance(confidence, (int, float)) else None
+                if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+                    identity_confidence = None
+                else:
+                    number = float(confidence)
+                    identity_confidence = number if 0.0 <= number <= 1.0 else None
                 if (
                     is_anonymous_enemy_label(target_name)
                     or any(phrase in compact_target for phrase in (
