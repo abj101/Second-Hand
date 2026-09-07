@@ -67,16 +67,28 @@ def quantize_coord(value: float) -> float:
     return round(round(float(value) / step) * step, 3)
 
 
+def paginated_tutorial_active(
+    tutorial_info: dict[str, Any] | None = None,
+    *,
+    host_stats: dict[str, Any] | None = None,
+) -> bool:
+    """True on multi-step tutorial overlays before the final dismiss step."""
+    tut: dict[str, Any] = {}
+    if isinstance(tutorial_info, dict):
+        tut = tutorial_info
+    elif isinstance((host_stats or {}).get("tutorial"), dict):
+        tut = host_stats["tutorial"]  # type: ignore[index]
+    if not tut.get("active"):
+        return False
+    step, total = tut.get("step"), tut.get("total")
+    return isinstance(step, int) and isinstance(total, int) and step < total
+
+
 def infer_overlay_nav(context: FrameContext, *, host_stats: dict[str, Any] | None = None) -> bool:
     """True when paginated/dialog overlay nav (Prev/Next) is expected."""
     stats = host_stats or {}
     if context.screen == "combat" and context.activity == "combat":
-        tutorial = stats.get("tutorial")
-        if isinstance(tutorial, dict) and tutorial.get("active"):
-            step, total = tutorial.get("step"), tutorial.get("total")
-            if isinstance(step, int) and isinstance(total, int) and step < total:
-                return True
-        return False
+        return paginated_tutorial_active(host_stats=stats)
     if context.screen == "tutorial":
         return True
     if context.layout in {"paginated_overlay", "modal_dialog"}:
@@ -110,10 +122,121 @@ def quantized_bounds_key(row: dict[str, Any]) -> str:
     return ",".join(str(quantize_coord(part)) for part in bounds)
 
 
+_MARK_DERIVED_OID_RE = re.compile(r"^object:\d+$", re.I)
+_SPATIAL_IOU_THRESHOLD = 0.1
+
+
+def stable_object_id_from_row(row: dict[str, Any]) -> str:
+    """Return durable object_id for suppression keys; omit mark-local tokens."""
+    raw = str(row.get("object_id") or "").strip()
+    if not raw:
+        return ""
+    from loop.agent.entities import is_frame_mark_token
+
+    if is_frame_mark_token(raw) or _MARK_DERIVED_OID_RE.match(raw):
+        return ""
+    row_id = row.get("id")
+    if row_id is not None and raw == str(row_id):
+        return ""
+    return raw
+
+
+def observation_context_from_row(row: dict[str, Any]) -> str:
+    """Observation/snapshot id when present; omitted for backward compatibility."""
+    for field in ("observation_id", "snapshot_id"):
+        value = str(row.get(field) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def bounds_iou(
+    bounds_a: tuple[float, float, float, float],
+    bounds_b: tuple[float, float, float, float],
+) -> float:
+    ix0, iy0 = max(bounds_a[0], bounds_b[0]), max(bounds_a[1], bounds_b[1])
+    ix1, iy1 = min(bounds_a[2], bounds_b[2]), min(bounds_a[3], bounds_b[3])
+    inter = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+    if inter <= 0:
+        return 0.0
+    area_a = max(1e-9, (bounds_a[2] - bounds_a[0]) * (bounds_a[3] - bounds_a[1]))
+    area_b = max(1e-9, (bounds_b[2] - bounds_b[0]) * (bounds_b[3] - bounds_b[1]))
+    return inter / (area_a + area_b - inter)
+
+
+def center_in_bounds(
+    point: tuple[float, float],
+    bounds: tuple[float, float, float, float],
+) -> bool:
+    x, y = point
+    return bounds[0] <= x <= bounds[2] and bounds[1] <= y <= bounds[3]
+
+
+def rows_spatially_overlap(
+    row_a: dict[str, Any],
+    row_b: dict[str, Any],
+    *,
+    iou_threshold: float = _SPATIAL_IOU_THRESHOLD,
+) -> bool:
+    """True when quantized boxes overlap or either center lies in the other box."""
+    bounds_a = row_bounds(row_a)
+    bounds_b = row_bounds(row_b)
+    if bounds_a is None or bounds_b is None:
+        return False
+    if bounds_iou(bounds_a, bounds_b) >= iou_threshold:
+        return True
+    center_a = ((bounds_a[0] + bounds_a[2]) / 2.0, (bounds_a[1] + bounds_a[3]) / 2.0)
+    center_b = ((bounds_b[0] + bounds_b[2]) / 2.0, (bounds_b[1] + bounds_b[3]) / 2.0)
+    return center_in_bounds(center_a, bounds_b) or center_in_bounds(center_b, bounds_a)
+
+
+def find_control_row_for_suppression(
+    row: dict[str, Any],
+    candidates: Sequence[dict[str, Any]],
+    *,
+    screen: str = "",
+) -> dict[str, Any] | None:
+    """Pick a prior row by stable object_id, else label + spatial overlap."""
+    if not candidates:
+        return None
+    object_id = stable_object_id_from_row(row)
+    if object_id:
+        for candidate in candidates:
+            if stable_object_id_from_row(candidate) == object_id:
+                return candidate
+    compact = _compact_label(str(row.get("label") or ""))
+    if not compact:
+        return None
+    label_matches = [
+        candidate
+        for candidate in candidates
+        if _compact_label(str(candidate.get("label") or "")) == compact
+    ]
+    if len(label_matches) == 1:
+        return label_matches[0]
+    spatial = [candidate for candidate in label_matches if rows_spatially_overlap(row, candidate)]
+    if len(spatial) == 1:
+        return spatial[0]
+    if not spatial and label_matches:
+        return label_matches[0]
+    return None
+
+
 def control_key_from_row(row: dict[str, Any], *, screen: str = "") -> str:
-    label = _compact_label(str(row.get("label") or ""))
+    screen_key = (screen or str(row.get("screen") or "")).strip().lower()
     role = str(row.get("role") or "").strip().lower()
-    return "|".join([screen.strip().lower(), label, quantized_bounds_key(row), role])
+    bounds = quantized_bounds_key(row)
+    parts: list[str] = [screen_key]
+    observation = observation_context_from_row(row)
+    if observation:
+        parts.append(observation)
+    object_id = stable_object_id_from_row(row)
+    if object_id:
+        parts.append(f"oid:{object_id}")
+    else:
+        parts.append(f"lbl:{_compact_label(str(row.get('label') or ''))}")
+    parts.extend([bounds, role])
+    return "|".join(parts)
 
 
 def surface_fingerprint(
@@ -389,16 +512,26 @@ def infer_layout(
     objects: list[FrameObject],
     *,
     screen_hint: str = "",
+    activity: str | None = None,
     host_stats: dict[str, Any] | None = None,
 ) -> LayoutArchetype:
     interactives = [o for o in objects if o.kind == "interactive"]
     roles = {o.role for o in interactives}
     labels = {_compact_label(o.label) for o in interactives}
     screen = (screen_hint or "").strip().lower()
-    tutorial = (host_stats or {}).get("tutorial")
-    paginated = isinstance(tutorial, dict) and isinstance(tutorial.get("step"), int)
-
-    if roles & {"nav_prev", "nav_next"} or labels & _NAV_LABELS or paginated:
+    activity_key = str(
+        activity or (host_stats or {}).get("activity") or ""
+    ).strip().lower()
+    tutorial_open = paginated_tutorial_active(host_stats=host_stats)
+    nav_signal = bool(
+        roles & {"nav_prev", "nav_next"} or labels & _NAV_LABELS or tutorial_open
+    )
+    # Combat leftovers of Prev/Next/Back must not invent an overlay. Same gate
+    # as infer_overlay_nav: only an unfinished tutorial page paginates combat.
+    combat_board = screen == "combat" and activity_key in {"", "combat"}
+    if combat_board and not tutorial_open:
+        nav_signal = False
+    if nav_signal:
         return "paginated_overlay"
     if labels >= {"yes", "no"} or (labels & {"yes", "no", "got it"} and screen in {"select", "tutorial", "other"}):
         return "modal_dialog"
@@ -545,7 +678,12 @@ def build_action_surface(
     provisional = _objects_from_marks(
         marks, context=provisional_context, informational=informational, host_stats=stats,
     )
-    resolved_layout = layout or infer_layout(provisional, screen_hint=screen_key, host_stats=stats)
+    resolved_layout = layout or infer_layout(
+        provisional,
+        screen_hint=screen_key,
+        activity=activity_key,
+        host_stats=stats,
+    )
     blocked = (
         bool(blocking_overlay)
         if blocking_overlay is not None

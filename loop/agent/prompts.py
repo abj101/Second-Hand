@@ -15,6 +15,7 @@ from loop.memory.skills import Skill
 from loop.os.frame_model import (
     GENERIC_CONTROL_ROLES,
     control_key_from_row,
+    paginated_tutorial_active,
     quantize_coord,
     quantized_bounds_key,
     row_bounds,
@@ -1085,23 +1086,6 @@ def choice_in_allowed_controls(
     return _compact_control_label(tgt) in {
         _compact_control_label(row) for row in (target_pool or []) if str(row or "").strip()
     }
-
-
-def paginated_tutorial_active(
-    tutorial_info: dict[str, Any] | None = None,
-    *,
-    host_stats: dict[str, Any] | None = None,
-) -> bool:
-    """True on multi-step tutorial overlays before the final dismiss step."""
-    tut: dict[str, Any] = {}
-    if isinstance(tutorial_info, dict):
-        tut = tutorial_info
-    elif isinstance((host_stats or {}).get("tutorial"), dict):
-        tut = host_stats["tutorial"]  # type: ignore[index]
-    if not tut.get("active"):
-        return False
-    step, total = tut.get("step"), tut.get("total")
-    return isinstance(step, int) and isinstance(total, int) and step < total
 
 
 def _admit_control_row(row: dict[str, Any], *, require_geometry: bool = False) -> bool:

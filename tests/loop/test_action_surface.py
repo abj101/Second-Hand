@@ -184,6 +184,116 @@ def test_confirmed_combat_retains_hand_and_end_turn() -> None:
     assert {"play_card", "end_turn"} <= set(surface.legal_intents)
 
 
+def test_combat_ghost_next_does_not_paginate_or_strip_hand() -> None:
+    """Live 20260907T191012Z: leftover Prev/Next/Back on combat must not empty ACT."""
+    fixture = Sts2Fixture()
+    marks = [
+        _mark(1, "Prev", x=0.08, y=0.47),
+        _mark(2, "Back", x=0.09, y=0.81),
+        _mark(3, "Defend", x=0.31, y=0.95),
+        _mark(4, "Strike", x=0.41, y=0.92),
+        _mark(5, "Bash", x=0.59, y=0.92),
+        _mark(6, "End Turn", x=0.89, y=0.82, role="button"),
+        _mark(7, "Next", x=0.96, y=0.50),
+        _mark(8, "Cultist", x=0.75, y=0.35, role="enemy"),
+    ]
+    host = {"screen": "combat", "activity": "combat", "turn": "ours"}
+    provisional = build_action_surface(
+        marks,
+        run_id="r",
+        step_id=3,
+        screen="combat",
+        activity="combat",
+        host_stats=host,
+    )
+    assert provisional.context.layout == "hand_and_board"
+    assert provisional.context.blocking_overlay is False
+    assert provisional.context.allows_domain_entities is True
+    enriched = fixture.enrich_frame_marks(marks, provisional.context, host)
+    surface = build_action_surface(
+        enriched,
+        run_id="r",
+        step_id=3,
+        screen="combat",
+        activity="combat",
+        layout=provisional.context.layout,
+        blocking_overlay=provisional.context.blocking_overlay,
+        host_stats=host,
+    )
+    by_label = {obj.label: obj for obj in surface.objects}
+    assert by_label["Strike"].role == "card"
+    assert by_label["Defend"].role == "card"
+    assert by_label["Bash"].role == "card"
+    assert by_label["Cultist"].role == "enemy"
+    assert by_label["End Turn"].role == "button"
+    assert by_label["Next"].role != "nav_next"
+    assert {"play_card", "end_turn"} <= set(surface.legal_intents)
+
+
+def test_finished_tutorial_page_does_not_paginate_combat() -> None:
+    marks = [
+        _mark(1, "Prev", x=0.08, y=0.47),
+        _mark(2, "Strike", x=0.41, y=0.92),
+        _mark(3, "End Turn", x=0.89, y=0.82, role="button"),
+        _mark(4, "Next", x=0.96, y=0.50),
+    ]
+    surface = build_action_surface(
+        marks,
+        run_id="r",
+        step_id=3,
+        screen="combat",
+        activity="combat",
+        host_stats={
+            "screen": "combat",
+            "activity": "combat",
+            "tutorial": {"active": True, "title": "Combat Basics", "step": 3, "total": 3},
+        },
+    )
+    assert surface.context.layout == "hand_and_board"
+    assert surface.context.blocking_overlay is False
+
+
+def test_open_tutorial_pagination_still_overlays_combat() -> None:
+    marks = [
+        _mark(1, "Prev", x=0.08, y=0.47),
+        _mark(2, "Strike", x=0.41, y=0.92),
+        _mark(3, "End Turn", x=0.89, y=0.82, role="button"),
+        _mark(4, "Next", x=0.96, y=0.50),
+    ]
+    host = {
+        "screen": "combat",
+        "activity": "combat",
+        "tutorial": {"active": True, "title": "Combat Basics", "step": 2, "total": 3},
+    }
+    provisional = build_action_surface(
+        marks,
+        run_id="r",
+        step_id=1,
+        screen="combat",
+        activity="combat",
+        host_stats=host,
+    )
+    assert provisional.context.layout == "paginated_overlay"
+    assert provisional.context.blocking_overlay is True
+    fixture = Sts2Fixture()
+    enriched = fixture.enrich_frame_marks(marks, provisional.context, host)
+    surface = build_action_surface(
+        enriched,
+        run_id="r",
+        step_id=1,
+        screen="combat",
+        activity="combat",
+        layout=provisional.context.layout,
+        blocking_overlay=provisional.context.blocking_overlay,
+        host_stats=host,
+    )
+    roles = {obj.label: obj.role for obj in surface.objects}
+    assert roles["Next"] == "nav_next"
+    assert roles["Strike"] != "card"
+    assert "play_card" not in surface.legal_intents
+    assert "click_control" in surface.legal_intents
+
+
 def test_latest_tutorial_failure_has_visible_choices_and_dispatchable_yes() -> None:
     fixture_path = (
         Path(__file__).resolve().parents[2]
@@ -629,6 +739,171 @@ def test_rebound_control_with_new_bounds_is_new_attempt() -> None:
     agent._record_blocked_control_attempt("Next")
     rebound = agent._apply_control_suppression([row_b])
     assert [row["label"] for row in rebound] == ["Next"]
+
+
+def test_control_key_prefers_stable_object_id_over_mark_number() -> None:
+    from loop.os.frame_model import control_key_from_row
+
+    bounds = {"x0": 0.86, "y0": 0.45, "x1": 0.94, "y1": 0.55}
+    row_mark_3 = {
+        "id": 3,
+        "label": "Next",
+        "role": "nav_next",
+        "object_id": "control:next",
+        **bounds,
+    }
+    row_mark_9 = dict(row_mark_3)
+    row_mark_9["id"] = 9
+    key_a = control_key_from_row(row_mark_3, screen="tutorial")
+    key_b = control_key_from_row(row_mark_9, screen="tutorial")
+    assert key_a == key_b
+    assert "oid:control:next" in key_a
+    assert "|3|" not in key_a and "|9|" not in key_a
+
+
+def test_control_key_same_label_icons_at_different_bounds_are_distinct() -> None:
+    from loop.os.frame_model import control_key_from_row
+
+    left = {
+        "label": "icon",
+        "role": "button",
+        "x0": 0.10,
+        "y0": 0.40,
+        "x1": 0.22,
+        "y1": 0.55,
+    }
+    right = {
+        "label": "icon",
+        "role": "button",
+        "x0": 0.78,
+        "y0": 0.40,
+        "x1": 0.90,
+        "y1": 0.55,
+    }
+    assert control_key_from_row(left, screen="reward") != control_key_from_row(right, screen="reward")
+
+
+def test_control_key_rebound_same_object_id_new_bounds() -> None:
+    from loop.os.frame_model import control_key_from_row
+
+    row_a = {
+        "label": "Next",
+        "role": "nav_next",
+        "object_id": "control:next",
+        "x0": 0.86,
+        "y0": 0.45,
+        "x1": 0.94,
+        "y1": 0.55,
+    }
+    row_b = dict(row_a)
+    row_b.update({"x0": 0.80, "x1": 0.88})
+    assert control_key_from_row(row_a, screen="tutorial") != control_key_from_row(row_b, screen="tutorial")
+    assert "oid:control:next" in control_key_from_row(row_a, screen="tutorial")
+
+
+def test_control_key_includes_observation_context_when_present() -> None:
+    from loop.os.frame_model import control_key_from_row
+
+    base = {
+        "label": "Yes",
+        "role": "button",
+        "object_id": "control:yes",
+        "x0": 0.45,
+        "y0": 0.80,
+        "x1": 0.55,
+        "y1": 0.90,
+    }
+    with_obs = dict(base, observation_id="obs-42")
+    without_obs = control_key_from_row(base, screen="select")
+    with_obs_key = control_key_from_row(with_obs, screen="select")
+    assert "obs-42" in with_obs_key
+    assert with_obs_key != without_obs
+
+
+def test_control_key_ignores_mark_derived_object_ids() -> None:
+    from loop.os.frame_model import control_key_from_row
+
+    row = {
+        "id": 7,
+        "label": "icon",
+        "role": "button",
+        "object_id": "object:7",
+        "x0": 0.40,
+        "y0": 0.40,
+        "x1": 0.60,
+        "y1": 0.60,
+    }
+    key = control_key_from_row(row, screen="reward")
+    assert key.startswith("reward|lbl:icon|")
+    assert "object:7" not in key
+
+
+def test_record_blocked_attempt_uses_spatial_match_for_duplicate_icons() -> None:
+    from loop.memory.overlay_state import ControlSuppressionState
+
+    agent = CollectAgent.__new__(CollectAgent)
+    agent._control_suppression = ControlSuppressionState()
+    agent._last_surface_screen = "reward"
+    agent._last_surface_membership = ()
+    agent._prev_surface_controls = []
+    agent._last_snapshot_id = ""
+    agent._host_stats = {"screen": "reward"}
+    agent._obs_metrics = {"screen": "reward"}
+    left = {
+        "label": "icon",
+        "role": "button",
+        "x": 0.16,
+        "y": 0.47,
+        "x0": 0.10,
+        "y0": 0.40,
+        "x1": 0.22,
+        "y1": 0.55,
+    }
+    right = {
+        "label": "icon",
+        "role": "button",
+        "x": 0.84,
+        "y": 0.47,
+        "x0": 0.78,
+        "y0": 0.40,
+        "x1": 0.90,
+        "y1": 0.55,
+    }
+    agent._apply_control_suppression([left, right])
+    agent._record_blocked_control_attempt("icon", x=0.84, y=0.47)
+    agent._record_blocked_control_attempt("icon", x=0.84, y=0.47)
+    kept = agent._apply_control_suppression([left, right])
+    assert len(kept) == 1
+    assert abs(float(kept[0]["x0"]) - 0.10) < 0.01
+
+
+def test_spatial_overlap_resolves_duplicate_label_rows() -> None:
+    from loop.memory.overlay_state import ControlSuppressionState
+    from loop.os.frame_model import control_key_from_row, find_control_row_for_suppression
+
+    left = {
+        "label": "icon",
+        "role": "button",
+        "x0": 0.10,
+        "y0": 0.40,
+        "x1": 0.22,
+        "y1": 0.55,
+    }
+    right = {
+        "label": "icon",
+        "role": "button",
+        "x0": 0.78,
+        "y0": 0.40,
+        "x1": 0.90,
+        "y1": 0.55,
+    }
+    prior = [left, right]
+    matched = find_control_row_for_suppression(right, prior, screen="reward")
+    assert matched is right
+    suppression = ControlSuppressionState()
+    assert suppression.key_for_row(right, screen="reward", prior_rows=prior) == control_key_from_row(
+        right, screen="reward"
+    )
 
 
 def test_reward_inventory_has_no_combat_actions_after_combat_won(tmp_path: Path) -> None:
