@@ -751,9 +751,28 @@ def apply_enemy_bboxes(
     stamp_role = (role or "enemy").strip().lower() or "enemy"
     prefix = "player" if stamp_role == "player" else "enemy"
     out = list(marks or ())
-    have = {_compact_label(m.label) for m in out if (m.label or "").strip()}
+
+    def compatible(mark: AimMark) -> bool:
+        mark_role = str(mark.role or "").strip().lower()
+        return mark_role == stamp_role or (stamp_role == "enemy" and mark_role == "target")
+
+    def overlaps(mark: AimMark, bounds: tuple[float, float, float, float]) -> bool:
+        bx0, by0, bx1, by1 = bounds
+        return (
+            max(float(mark.x0), bx0) < min(float(mark.x1), bx1)
+            and max(float(mark.y0), by0) < min(float(mark.y1), by1)
+        ) or (
+            float(mark.x0) <= (bx0 + bx1) * .5 <= float(mark.x1)
+            and float(mark.y0) <= (by0 + by1) * .5 <= float(mark.y1)
+        )
+
     for enemy_index, row in enumerate(enemy_rows or [], start=1):
         if not isinstance(row, dict):
+            continue
+        row_role = str(row.get("role") or stamp_role).strip().lower()
+        if stamp_role == "enemy" and row_role not in {"enemy", "target", "unknown_character", "character"}:
+            continue
+        if stamp_role == "player" and row_role not in {"player", "character"}:
             continue
         default_label = "player" if stamp_role == "player" else "unidentified_enemy"
         label = str(row.get("label") or default_label).strip() or default_label
@@ -776,22 +795,14 @@ def apply_enemy_bboxes(
             x0, y0, x1, y1 = x0 / GRID, y0 / GRID, x1 / GRID, y1 / GRID
         x = (x0 + x1) * 0.5
         y = (y0 + y1) * 0.5
-        if not in_combat_sprite_band(y, x):
-            continue
-        key = _compact_label(label)
-        if key in have and not _is_unknown_entity_label(label):
-            continue
         raw_id = str(row.get("entity_id") or row.get("id") or "").strip()
         stamp_id = "" if is_prompt_instance_id(raw_id) else raw_id
-        nearby = next(
-            (
-                mark for mark in out
-                if abs(mark.x - x) < 0.06 and abs(mark.y - y) < 0.06
-                and in_combat_sprite_band(mark.y, mark.x)
-            ),
-            None,
-        )
-        if nearby is not None:
+        compatible_hits = [
+            mark for mark in out
+            if compatible(mark) and overlaps(mark, (x0, y0, x1, y1))
+        ]
+        if len(compatible_hits) == 1:
+            nearby = compatible_hits[0]
             # LLM instance tokens are aliases, never executable object IDs.
             # Keep the observed mark untouched; the current action surface
             # assigns canonical IDs and the store may bind an alias afterward.
@@ -808,7 +819,11 @@ def apply_enemy_bboxes(
                 ) if mark.id == nearby.id else mark
                 for mark in out
             ]
-            have.add(key)
+            continue
+        # A same-label card/control/unknown mark is not enemy evidence and
+        # cannot suppress a current typed enemy bbox.  Multiple compatible
+        # objects are ambiguous and fail closed rather than picking one.
+        if len(compatible_hits) > 1:
             continue
         if len(out) >= cap:
             break
@@ -828,7 +843,6 @@ def apply_enemy_bboxes(
             source=str(row.get("source") or "llm1-bbox"),
             confidence=0.72,
         )
-        have.add(key)
     return out
 
 

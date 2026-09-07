@@ -15,6 +15,7 @@ from loop.memory.screen_objects import ScreenObjectStore
 from loop.mcp.tools.targeting import object_role
 from loop.os.aim import AimMark
 from loop.os.aim import AimGuide
+from loop.os.aim import apply_enemy_bboxes
 from loop.os.frame_model import FrameContext, build_action_surface, build_frame_model
 
 
@@ -357,6 +358,37 @@ def test_scene_metadata_cannot_promote_nearby_unknown_object_to_enemy() -> None:
     assert [(mark.object_id, mark.role) for mark in reconciled] == [
         ("card_1", "card"), ("object:2", "unknown"), ("enemy_1", "enemy"),
     ]
+
+
+def test_enemy_bbox_survives_unrelated_control_ocr_across_frames(tmp_path: Path) -> None:
+    """A control label must not suppress or relabel typed enemy bbox evidence."""
+    frame_one = apply_enemy_bboxes(
+        [_mark(1, "Strike", x=.15, y=.15, role="card", object_id="card_1")],
+        [{"role": "enemy", "label": "unknown_enemy", "bbox": [.70, .55, .82, .70]}],
+    )
+    frame_two = apply_enemy_bboxes(
+        [
+            _mark(1, "Strike", x=.15, y=.15, role="card", object_id="card_1"),
+            # Same frame includes unrelated control OCR and an untyped cached
+            # label. Neither is enemy-compatible evidence.
+            _mark(2, "End Turn", x=.90, y=.10, role="button", object_id="control:end_turn"),
+            _mark(3, "unknown_enemy", x=.76, y=.62, role="unknown", object_id="object:3"),
+        ],
+        [{"role": "enemy", "name": "Nibbit", "name_source": "ocr", "bbox": [.70, .55, .82, .70]}],
+    )
+    enemies = [mark for mark in frame_two if mark.role == "enemy"]
+    assert len(enemies) == 1
+    # Identity is optional, but a control's label must never leak across roles.
+    assert enemies[0].label != "End Turn"
+
+    store = ScreenObjectStore(tmp_path / "sequence.db")
+    try:
+        store.save_frame(run_id="r", step_id=1, marks=frame_one, screen="combat")
+        store.save_frame(run_id="r", step_id=2, marks=frame_two, screen="combat")
+        target = store.by_object_id("enemy_1")
+        assert target is not None and target.role == "enemy"
+    finally:
+        store.close()
 
 
 def test_empty_action_surface_skips_act_and_recovers_once() -> None:
