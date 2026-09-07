@@ -652,6 +652,42 @@ def cmd_benchmark_perceive(argv: list[str] | None = None) -> int:
     return 0
 
 
+def cmd_benchmark_proposals(argv: list[str] | None = None) -> int:
+    from loop.eval.grounding_benchmark import run_production_proposal_benchmark
+    from loop.eval.perception_cost import default_proposal_replay_path
+
+    parser = argparse.ArgumentParser(description="Production proposal fusion replay (truth is scorer-only)")
+    parser.add_argument("--labels", type=Path, default=None)
+    args = parser.parse_args(argv)
+    report = run_production_proposal_benchmark(args.labels or default_proposal_replay_path())
+    print(json.dumps(report, indent=2, default=str), flush=True)
+    return 0 if report.get("legend_clean", True) else 1
+
+
+def cmd_benchmark_effects(argv: list[str] | None = None) -> int:
+    from loop.eval.effect_benchmark import run_effect_benchmark
+    from loop.eval.perception_cost import default_effect_replay_path
+
+    parser = argparse.ArgumentParser(description="Offline dispatch/effect sequence replay")
+    parser.add_argument("--labels", type=Path, default=None)
+    args = parser.parse_args(argv)
+    report = run_effect_benchmark(args.labels or default_effect_replay_path())
+    print(json.dumps(report, indent=2, default=str), flush=True)
+    return 0
+
+
+def cmd_benchmark_perception_cost(argv: list[str] | None = None) -> int:
+    from loop.eval.perception_cost import build_perception_cost_report
+
+    parser = argparse.ArgumentParser(description="Merged proposal+effect perception cost report")
+    parser.add_argument("--proposal", type=Path, default=None)
+    parser.add_argument("--effect", type=Path, default=None)
+    args = parser.parse_args(argv)
+    report = build_perception_cost_report(proposal_path=args.proposal, effect_path=args.effect)
+    print(json.dumps(report, indent=2, default=str), flush=True)
+    return 0
+
+
 def cmd_eval(argv: list[str] | None = None) -> int:
     from loop.eval.export import compare_turn_runs, turn_run_metrics
 
@@ -969,7 +1005,8 @@ def main(argv: list[str] | None = None) -> int:
     if not argv or argv[0] in {"-h", "--help"}:
         print(
             "usage: python -m loop {perceive,collect,curate,clear-memory,status,analyze,"
-            "calibrate-view,inspect-run,benchmark-perceive,eval,cycle,export-sft,export-dpo,export-frames,"
+            "calibrate-view,inspect-run,benchmark-perceive,benchmark-proposals,"
+            "benchmark-effects,benchmark-perception-cost,eval,cycle,export-sft,export-dpo,export-frames,"
             "train-sft,train-dpo,vram-probe,train-grpo,train-rl,smoke,ui} ..."
         )
         return 0
@@ -994,6 +1031,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_inspect_run(rest)
     if cmd in {"benchmark-perceive", "benchmark_perceive"}:
         return cmd_benchmark_perceive(rest)
+    if cmd in {"benchmark-proposals", "benchmark_proposals"}:
+        return cmd_benchmark_proposals(rest)
+    if cmd in {"benchmark-effects", "benchmark_effects"}:
+        return cmd_benchmark_effects(rest)
+    if cmd in {"benchmark-perception-cost", "benchmark_perception_cost"}:
+        return cmd_benchmark_perception_cost(rest)
     if cmd == "eval":
         return cmd_eval(rest)
     if cmd == "cycle":
