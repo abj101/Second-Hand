@@ -108,7 +108,15 @@ Product: hand-band gate, `_blocked_sources` keyed on object+coord (survives snap
 
 | Run | Start | Dir | Steps | Combat won | `source-unconfirmed` | `decision_softlock` | TNF | Pass |
 |---|---|---|---|---|---|---|---|---|
-| B5-B combat-start | pending | — | — | — | — | — | — | pending |
-| B5-C combat-start | pending | — | — | — | — | — | — | pending |
+| B5-B combat-start | first combat 80/80 3 energy | `runs/20260908T070054Z_sts2_collect` | 26 | yes (reward ~14) | **0** | **1** (map) | **2** `enemy_2` | **partial** — card-confirm pass; TNF+map fail |
+| B5-C combat-start | not started | — | — | — | — | — | — | pending |
 
-Operator: fresh Ironclad, first combat, first player turn (80/80, 3 energy, 5 cards). Same collect command; monitor in second terminal. Pass = fight won, TNF=0, `source-unconfirmed < 3`, no `decision_softlock`, `forced_rescan/steps <= 0.3`. If hover shows no lift at an in-band mark, **stop and report** — do not iterate live. Window size is not the bug; read `geometry:` on the first card play.
+Card-confirm on B5-B: hover-lift, in-band `(0.312, 0.950)`, `geometry:client=1277x720 box=0.00,0.00,1.00,1.00`. Dual snapshot `enemy_1`+`enemy_2` (HP y≈0.35 over body y≈0.62). Map `click_control` no-ops → `decision_softlock` step 26.
+
+## Batch 6 (dual-target + map) — code landed, live pending
+
+Product: HP/body column stack in `same_sprite_cluster`; `_blocked_targets` drop + TNF replan; `_blocked_controls` omit + map replan.
+
+`tests/loop`: **829 passed**.
+
+Operator: fresh Ironclad, first combat, first player turn (80/80, 3 energy, 5 cards). Same collect + monitor. Pass = fight won, TNF=0, `source-unconfirmed < 3`, no `decision_softlock`, loot on first stable reward. Dual `enemy_1`+`enemy_2` still publishing → stop and report.

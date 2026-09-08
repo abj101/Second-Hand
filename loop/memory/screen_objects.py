@@ -7,12 +7,15 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from loop.os.aim import GRID, AimMark, label_kind
+from loop.os.layout_adapter import ENEMY_Y_MAX, ENEMY_Y_MIN, HAND_Y
 
 # Same-sprite cluster (2e): looser than the IoU≥0.45 collapse. Body vs HP-plate
 # often sits near IoU 0.04 with centers ~0.10 apart.
 SAME_SPRITE_IOU = 0.20
 SAME_SPRITE_CENTER = 0.12
 SEPARATED_SPRITE_CENTER = 0.25
+# Live STS2 HP/intent (y≈0.35) stacked over the body (y≈0.62) is ~0.27 apart.
+SAME_SPRITE_COLUMN = 0.08
 
 _T = TypeVar("_T")
 
@@ -58,14 +61,37 @@ def bbox_center_distance(a: Any, b: Any) -> float:
     return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
 
 
+def _in_hp_intent_band(y: float) -> bool:
+    return ENEMY_Y_MIN <= float(y) <= ENEMY_Y_MAX
+
+
+def _in_body_sprite_band(y: float) -> bool:
+    return ENEMY_Y_MAX < float(y) < HAND_Y
+
+
+def hp_body_column_stack(a: Any, b: Any) -> bool:
+    """True when HP/intent chrome sits over the body in the same column."""
+    ax, ay = _item_center(a)
+    bx, by = _item_center(b)
+    if abs(ax - bx) > SAME_SPRITE_COLUMN:
+        return False
+    return (
+        (_in_hp_intent_band(ay) and _in_body_sprite_band(by))
+        or (_in_hp_intent_band(by) and _in_body_sprite_band(ay))
+    )
+
+
 def same_sprite_cluster(a: Any, b: Any, *, host_enemies: int | None = None) -> bool:
     """True when two boxes are the same visible sprite (IoU≥0.20 or center≤0.12).
 
-    Centers ≥0.25 apart stay distinct unless host reports exactly one enemy.
+    Centers ≥0.25 apart stay distinct unless host reports exactly one enemy,
+    or the pair is a vertical HP/body stack in the same column.
     """
     dist = bbox_center_distance(a, b)
     if dist >= SEPARATED_SPRITE_CENTER:
-        return host_enemies == 1
+        if host_enemies == 1:
+            return True
+        return hp_body_column_stack(a, b)
     if _bbox_iou(a, b) >= SAME_SPRITE_IOU:
         return True
     return dist <= SAME_SPRITE_CENTER

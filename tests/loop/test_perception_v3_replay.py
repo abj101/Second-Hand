@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from PIL import Image
 
 from loop.agent.decision import BoundingBox, TargetSnapshot, TurnSnapshot
@@ -86,6 +87,10 @@ def _agent_for_combat(tmp_path: Path, marks: list[AimMark], host: dict) -> Colle
     agent._pending_exec_error = None
     agent._blocked_sources = {}
     agent._blocked_hand_signature = None
+    agent._blocked_targets = set()
+    agent._blocked_target_host_count = None
+    agent._blocked_controls = set()
+    agent._blocked_controls_screen = ""
     return agent
 
 
@@ -669,5 +674,95 @@ def test_b4_opening_strike_binds_in_hand_band(tmp_path: Path) -> None:
         agent._last_execution_failure = {"code": "source-unconfirmed:card_1"}
         assert agent._replan_after_source_failure(snapshot2, legal) is True
         assert agent._decision_softlock is False
+    finally:
+        agent._screen_objects.close()
+
+
+def test_hp_body_column_stack_collapses_without_host_count(tmp_path: Path) -> None:
+    """Live B step 1: HP/intent y≈0.35 over body y≈0.62, host enemies omitted."""
+    hp = (0.70, 0.30, 0.80, 0.40)
+    body = (0.69, 0.55, 0.81, 0.70)
+    dist = _center_dist(hp, body)
+    assert dist >= 0.25, dist
+    marks = [
+        _mark_from_row({
+            "id": 1, "label": "Strike", "role": "card", "object_id": "card_1",
+            "x": 0.312, "y": 0.95, "bbox": [0.25, 0.85, 0.38, 1.0],
+        }),
+        _mark_from_row({
+            "id": 8, "label": "unknown enemy", "role": "enemy",
+            "x": 0.745, "y": 0.622, "bbox": [0.69, 0.55, 0.80, 0.70],
+        }),
+        _mark_from_row({
+            "id": 9, "label": "unidentified enemy", "role": "enemy",
+            "x": 0.750, "y": 0.347, "bbox": [0.70, 0.30, 0.80, 0.40],
+        }),
+        _mark_from_row({
+            "id": 10, "label": "End Turn", "role": "button",
+            "x": 0.89, "y": 0.82, "bbox": [0.82, 0.78, 0.96, 0.88],
+        }),
+    ]
+    host = {"screen": "combat", "activity": "combat"}
+    agent = _agent_for_combat(tmp_path, marks, host)
+    scene = _combat_scene(
+        enemies=[{"label": "unknown enemy", "role": "enemy", "confidence": "high"}],
+        hand_cards=[{"label": "Strike", "role": "card"}],
+        controls=[{"label": "End Turn", "role": "button"}],
+    )
+    try:
+        surface = agent._finalize_action_surface(scene)
+        assert surface is not None
+        snapshot = agent._build_turn_snapshot(scene)
+        assert len(snapshot.targets) == 1, [t.target_id for t in snapshot.targets]
+        assert snapshot.targets[0].target_id == "enemy_1"
+        enemies = [obj for obj in agent._screen_objects.objects if obj.role == "enemy"]
+        assert len(enemies) == 1, [obj.object_id for obj in enemies]
+    finally:
+        agent._screen_objects.close()
+
+
+def test_b5b_step1_hp_body_marks_publish_one_target(tmp_path: Path) -> None:
+    """Replay 20260908T070054Z step 1 / 7 dual Nibbit stack."""
+    marks = [
+        _mark_from_row({
+            "id": 3, "label": "Strike", "role": "card",
+            "x": 0.312, "y": 0.95, "bbox": [0.25, 0.85, 0.38, 1.0],
+        }),
+        _mark_from_row({
+            "id": 8, "label": "Nibbit", "role": "enemy",
+            "x": 0.745, "y": 0.622, "bbox": [0.68, 0.52, 0.82, 0.72],
+        }),
+        _mark_from_row({
+            "id": 9, "label": "Nibbit", "role": "enemy",
+            "x": 0.750, "y": 0.347, "bbox": [0.70, 0.30, 0.80, 0.40],
+        }),
+        _mark_from_row({
+            "id": 10, "label": "End Turn", "role": "button",
+            "x": 0.89, "y": 0.82, "bbox": [0.82, 0.78, 0.96, 0.88],
+        }),
+    ]
+    agent = _agent_for_combat(tmp_path, marks, {"screen": "combat", "activity": "combat"})
+    scene = _combat_scene(
+        enemies=[{"label": "Nibbit", "role": "enemy", "confidence": "high"}],
+        hand_cards=[{"label": "Strike", "role": "card"}],
+        controls=[{"label": "End Turn", "role": "button"}],
+    )
+    try:
+        agent._finalize_action_surface(scene)
+        snapshot = agent._build_turn_snapshot(scene)
+        assert [t.target_id for t in snapshot.targets] == ["enemy_1"]
+        agent._record_blocked_target("enemy_2")
+        snapshot2 = agent._build_turn_snapshot(scene)
+        assert all(t.target_id != "enemy_2" for t in snapshot2.targets)
+        from loop.agent.decision import PlayCardIntent, validate_action_intent, ActionIntentError
+        with pytest.raises(ActionIntentError, match="unknown-target-id"):
+            validate_action_intent(
+                snapshot2,
+                PlayCardIntent(card_id="card_1", target_id="enemy_2"),
+            )
+        agent._last_execution_failure = {"code": "target-not-found:enemy_2", "transaction_outcome": "target_not_found"}
+        from loop.agent.decision import legal_intents_for_snapshot
+        legal = legal_intents_for_snapshot(snapshot2)
+        assert agent._replan_after_tnf(snapshot2, legal) is True
     finally:
         agent._screen_objects.close()

@@ -633,6 +633,10 @@ class CollectAgent:
         self._stale_source_plan: tuple[Any, ...] | None = None
         self._blocked_sources: dict[tuple[str, float | None, float | None], int] = {}
         self._blocked_hand_signature: tuple[Any, ...] | None = None
+        self._blocked_targets: set[str] = set()
+        self._blocked_target_host_count: int | None = None
+        self._blocked_controls: set[str] = set()
+        self._blocked_controls_screen: str = ""
         self._last_reason_backend: str = ""
         self._last_reason_fallback: str = ""
         self._last_reason_call: dict[str, Any] = {}
@@ -750,6 +754,10 @@ class CollectAgent:
         self._stale_source_plan = None
         self._blocked_sources = {}
         self._blocked_hand_signature = None
+        self._blocked_targets = set()
+        self._blocked_target_host_count = None
+        self._blocked_controls = set()
+        self._blocked_controls_screen = ""
         self._last_intent = {}
         self._force_perceive = True
         self._combat_enter_logged = False
@@ -1750,6 +1758,62 @@ class CollectAgent:
         oid, x, y = self._source_block_coords(plan, card)
         return self._source_is_blocked(oid, x, y)
 
+    def _prune_blocked_targets(self) -> None:
+        current = _host_enemy_count(getattr(self, "_host_stats", None) or {})
+        prior = getattr(self, "_blocked_target_host_count", None)
+        if prior is not None and current != prior:
+            self._blocked_targets = set()
+            self._blocked_target_host_count = None
+
+    def _record_blocked_target(self, target_id: str) -> None:
+        oid = str(target_id or "").strip()
+        if not oid or oid in {"target", "none"}:
+            return
+        self._prune_blocked_targets()
+        blocked = getattr(self, "_blocked_targets", None)
+        if blocked is None:
+            blocked = set()
+            self._blocked_targets = blocked
+        blocked.add(oid)
+        if getattr(self, "_blocked_target_host_count", None) is None:
+            self._blocked_target_host_count = _host_enemy_count(getattr(self, "_host_stats", None) or {})
+
+    def _target_is_blocked(self, target_id: str) -> bool:
+        self._prune_blocked_targets()
+        oid = str(target_id or "").strip()
+        if not oid:
+            return False
+        return oid in (getattr(self, "_blocked_targets", None) or set())
+
+    def _prune_blocked_controls(self) -> None:
+        screen = self._current_surface_screen()
+        prior = getattr(self, "_blocked_controls_screen", "")
+        if prior and screen and prior != screen:
+            self._blocked_controls = set()
+        if screen:
+            self._blocked_controls_screen = screen
+
+    def _record_blocked_control_id(self, control_id: str) -> None:
+        cid = str(control_id or "").strip()
+        if not cid:
+            return
+        self._prune_blocked_controls()
+        blocked = getattr(self, "_blocked_controls", None)
+        if blocked is None:
+            blocked = set()
+            self._blocked_controls = blocked
+        blocked.add(cid)
+        screen = self._current_surface_screen()
+        if screen:
+            self._blocked_controls_screen = screen
+
+    def _control_is_blocked(self, control_id: str) -> bool:
+        self._prune_blocked_controls()
+        cid = str(control_id or "").strip()
+        if not cid:
+            return False
+        return cid in (getattr(self, "_blocked_controls", None) or set())
+
     def _hand_inventory_mutated_since_plan(self) -> bool:
         planned = getattr(self, "_planned_hand_signature", None)
         if planned is None:
@@ -2485,6 +2549,7 @@ class CollectAgent:
             transaction.outcome = "target_not_found"
             transaction.error = f"target-not-found:{missing}"
             transaction.verification_evidence.append("missing-stable-target")
+            self._record_blocked_target(str(missing))
             return _CardExecution(
                 action, executed, self._probe_after_frame(probe), primitives, transaction, transaction.error
             )
@@ -3341,6 +3406,13 @@ class CollectAgent:
             row = probe
         key = suppression.key_for_row(row, screen=screen, prior_rows=controls)
         suppression.record_no_change(fingerprint, key)
+        cid = str(
+            oid
+            or (row.get("object_id") if isinstance(row, dict) else "")
+            or ""
+        ).strip()
+        if cid:
+            self._record_blocked_control_id(cid)
 
     def _finalize_reason_controls(self, controls: list[dict[str, Any]]) -> list[dict[str, Any]]:
         stamped = self._stamp_reason_control_ids(controls)
@@ -4520,6 +4592,8 @@ class CollectAgent:
                     target_name = "unknown enemy"
                     if identity_confidence is None or identity_confidence >= 0.75:
                         identity_confidence = 0.35
+                if self._target_is_blocked(target_id):
+                    continue
                 targets.append(TargetSnapshot(
                     target_id=target_id, bbox=bbox, name=target_name or None,
                     hp=int(hp) if isinstance(hp, (int, float)) else None,
@@ -4531,6 +4605,8 @@ class CollectAgent:
                 control_counts[slug] = control_counts.get(slug, 0) + 1
                 suffix = f"_{control_counts[slug]}" if control_counts[slug] > 1 else ""
                 control_id = str(obj.object_id or f"control:{slug}{suffix}")
+                if self._control_is_blocked(control_id):
+                    continue
                 self._v2_control_objects[control_id] = obj
                 controls.append(ControlSnapshot(control_id, obj.label or slug, bbox, role=role))
             object_id = str(obj.object_id or "").strip()
@@ -4617,6 +4693,70 @@ class CollectAgent:
             return False
         return bool(legal_intents)
 
+    def _target_not_found_failed(self) -> bool:
+        rec = getattr(self, "_last_execution_failure", None) or {}
+        if not isinstance(rec, dict):
+            return False
+        blob = " ".join(str(rec.get(key) or "") for key in ("code", "dispatch", "transaction_outcome"))
+        return "target-not-found" in blob or "target_not_found" in blob
+
+    def _replan_after_tnf(
+        self,
+        snapshot: TurnSnapshot,
+        legal_intents: tuple[dict[str, Any], ...],
+    ) -> bool:
+        if not self._target_not_found_failed():
+            return False
+        if not self._combat_screen_now():
+            return False
+        kinds = {str(row.get("kind") or "") for row in legal_intents}
+        return bool(kinds & {"play_card", "end_turn"})
+
+    def _replan_after_control_failure(
+        self,
+        snapshot: TurnSnapshot,
+        legal_intents: tuple[dict[str, Any], ...],
+    ) -> bool:
+        screen = str(snapshot.screen or "").strip().lower()
+        if screen not in {"map", "reward"}:
+            return False
+        rec = getattr(self, "_last_execution_failure", None) or {}
+        intent = rec.get("intent") if isinstance(rec, dict) else None
+        if not isinstance(intent, dict):
+            intent = getattr(self, "_last_intent", None) or {}
+        if str(intent.get("kind") or "") != "click_control":
+            return False
+        cid = str(intent.get("control_id") or "").strip()
+        if cid:
+            self._record_blocked_control_id(cid)
+        others = [
+            control.control_id
+            for control in snapshot.controls
+            if control.control_id and control.control_id != cid
+        ]
+        if others:
+            return True
+        for row in legal_intents:
+            if str(row.get("kind") or "") != "click_control":
+                continue
+            ids = [str(item) for item in (row.get("control_ids") or ()) if str(item) != cid]
+            if ids:
+                return True
+        return False
+
+    def _should_replan_unchanged_failure(
+        self,
+        snapshot: TurnSnapshot,
+        legal_intents: tuple[dict[str, Any], ...],
+    ) -> str:
+        if self._replan_after_source_failure(snapshot, legal_intents):
+            return "source-unconfirmed"
+        if self._replan_after_tnf(snapshot, legal_intents):
+            return "target-not-found"
+        if self._replan_after_control_failure(snapshot, legal_intents):
+            return "control-blocked"
+        return ""
+
     def _run_v2_act(self, snapshot: TurnSnapshot) -> tuple[dict[str, Any], float]:
         """Choose one typed intent, then deterministically bind it to this frame."""
         state_key = json.dumps({
@@ -4686,11 +4826,12 @@ class CollectAgent:
         if self._last_execution_failure and state_key == self._last_reason_state_key:
             self._unchanged_failure_count += 1
             if self._unchanged_failure_count >= 2:
-                if self._replan_after_source_failure(snapshot, legal_intents):
+                focus = self._should_replan_unchanged_failure(snapshot, legal_intents)
+                if focus:
                     self._unchanged_failure_count = 0
                     self._force_perceive = True
                     try:
-                        self._rescan_scene(focus="source-unconfirmed")
+                        self._rescan_scene(focus=focus)
                     except Exception:
                         pass
                 else:
@@ -6100,6 +6241,10 @@ class CollectAgent:
         self._decision_softlock = False
         self._blocked_sources = {}
         self._blocked_hand_signature = None
+        self._blocked_targets = set()
+        self._blocked_target_host_count = None
+        self._blocked_controls = set()
+        self._blocked_controls_screen = ""
         self._stale_source_plan = None
         self._force_inspect = False
         self._perception_recovery_steps = 0

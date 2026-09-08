@@ -542,3 +542,56 @@ def test_blocked_source_survives_snapshot_invalidation(tmp_path) -> None:
     )
     assert agent._is_blocked_source_retry(replayed, card) is False
     store.close()
+
+
+def test_blocked_target_dropped_from_snapshot(tmp_path) -> None:
+    import pytest
+    from loop.agent.decision import ActionIntentError, PlayCardIntent, validate_action_intent
+
+    marks = (
+        AimMark(id=1, x=0.31, y=0.95, x0=0.25, y0=0.85, x1=0.38, y1=1.0, label="Strike", role="card"),
+        AimMark(id=2, x=0.75, y=0.62, x0=0.68, y0=0.52, x1=0.82, y1=0.72, label="Nibbit", role="enemy"),
+        AimMark(id=3, x=0.89, y=0.82, x0=0.82, y0=0.74, x1=0.98, y1=0.90, label="End Turn", role="button"),
+    )
+    agent = CollectAgent.__new__(CollectAgent)
+    agent.fixture = SimpleNamespace(id="sts2")
+    agent.session_id = "r"
+    agent._step_id = 1
+    agent._host_stats = {"screen": "combat", "activity": "combat"}
+    agent._obs_metrics = {"screen": "combat"}
+    agent._last_obs_image = Image.new("RGB", (64, 48), (20, 20, 20))
+    agent._aim = AimGuide.from_marks(agent._last_obs_image, marks)
+    agent._screen_objects = ScreenObjectStore(tmp_path / "tnf.db")
+    agent._action_surface = None
+    agent._game_state = None
+    agent._entity_tracker = None
+    agent._reason_controls = []
+    agent._v2_control_objects = {}
+    agent._blocked_sources = {}
+    agent._blocked_targets = set()
+    agent._blocked_target_host_count = None
+    agent._blocked_controls = set()
+    agent._blocked_controls_screen = ""
+    agent._last_execution_failure = None
+    agent._screen_objects.save_frame(run_id="r", step_id=1, marks=marks, screen="combat")
+    scene = SimpleNamespace(
+        screen="combat", enemies=[], characters=[], controls=[], hand_cards=[], tutorial={},
+    )
+    try:
+        agent._record_blocked_target("enemy_2")
+        snapshot = agent._build_turn_snapshot(scene)
+        assert all(t.target_id != "enemy_2" for t in snapshot.targets)
+        if snapshot.cards:
+            with pytest.raises(ActionIntentError, match="unknown-target-id"):
+                validate_action_intent(
+                    snapshot,
+                    PlayCardIntent(card_id=snapshot.cards[0].card_id, target_id="enemy_2"),
+                )
+        agent._blocked_target_host_count = 1
+        agent._host_stats = {
+            "screen": "combat",
+            "enemies": [{"label": "Nibbit"}, {"label": "Louse"}],
+        }
+        assert agent._target_is_blocked("enemy_2") is False
+    finally:
+        agent._screen_objects.close()

@@ -963,3 +963,73 @@ def test_reward_inventory_has_no_combat_actions_after_combat_won(tmp_path: Path)
     assert "Strike" not in allowed
     assert targets == set()
     assert agent._selected is None
+
+
+def test_map_control_failure_replans_not_softlock(monkeypatch) -> None:
+    from loop.agent.decision import ActDecision, BoundingBox, ClickControlIntent, ControlSnapshot
+
+    snapshot = TurnSnapshot(
+        snapshot_id="map-1",
+        screen="map",
+        turn=None,
+        hp=73,
+        block=None,
+        energy=None,
+        controls=(
+            ControlSnapshot("control:node_0", "node_0", BoundingBox(0.22, 0.45, 0.32, 0.55)),
+            ControlSnapshot("control:node_3", "node_3", BoundingBox(0.50, 0.45, 0.60, 0.55)),
+        ),
+    )
+    agent = CollectAgent.__new__(CollectAgent)
+    agent.gateway = Mock(model="fake")
+    agent._action_surface = None
+    agent._last_execution_failure = {
+        "code": "blocked",
+        "dispatch": "ok",
+        "pixel_changed": False,
+        "intent": {"kind": "click_control", "control_id": "control:node_0"},
+    }
+    agent._last_intent = {"kind": "click_control", "control_id": "control:node_0"}
+    agent._last_reason_state_key = ""
+    agent._unchanged_failure_count = 0
+    agent._empty_action_surface_key = ""
+    agent._empty_action_surface_count = 0
+    agent._decision_softlock = False
+    agent._session_flags = []
+    agent._pending_exec_error = None
+    agent._force_perceive = False
+    agent._blocked_controls = set()
+    agent._blocked_controls_screen = "map"
+    agent._host_stats = {"screen": "map"}
+    agent._obs_metrics = {"screen": "map"}
+    agent._v2_control_objects = {
+        "control:node_0": SimpleNamespace(label="node_0", x=0.27, y=0.50, object_id="control:node_0"),
+        "control:node_3": SimpleNamespace(label="node_3", x=0.55, y=0.50, object_id="control:node_3"),
+    }
+    agent._screen_objects = SimpleNamespace()
+    agent.config = SimpleNamespace(reason_fallback_model=None)
+    monkeypatch.setattr(agent, "_rescan_scene", lambda **_k: 0.0)
+    monkeypatch.setattr(agent, "_combat_screen_now", lambda: False)
+
+    def _decide(self, snap):
+        return ActDecision(
+            snap.snapshot_id,
+            ClickControlIntent(control_id="control:node_3"),
+            "fake",
+            None,
+            1.0,
+        )
+
+    monkeypatch.setattr("loop.agent.loop.ActReasoner.decide", _decide)
+    monkeypatch.setattr("loop.agent.loop.ActReasoner.__init__", lambda self, **_k: None)
+    monkeypatch.setattr(
+        "loop.agent.loop.current_snapshot_identity",
+        lambda _store: {"snapshot_id": "f", "run_id": "r", "step_id": 1},
+    )
+
+    agent._run_v2_act(snapshot)
+    agent._run_v2_act(snapshot)
+    parsed, _ = agent._run_v2_act(snapshot)
+    assert agent._decision_softlock is False
+    assert "control:node_0" in agent._blocked_controls
+    assert parsed.get("action") == "click_control"

@@ -263,3 +263,28 @@ def test_unplayable_card_is_rejected_and_omitted_from_legal_ids() -> None:
             snapshot,
             PlayCardIntent(card_id="card_1", target_id="enemy_1"),
         )
+
+
+def test_unknown_blocked_target_id_is_rejected() -> None:
+    from loop.agent.decision import (
+        PlayCardIntent,
+        TargetSnapshot,
+        legal_intents_for_snapshot,
+        validate_action_intent,
+    )
+
+    snapshot = TurnSnapshot(
+        snapshot_id="s",
+        screen="combat",
+        turn="ours",
+        hp=80,
+        block=0,
+        energy=3,
+        cards=(CardSnapshot("card_1", "Strike", BoundingBox(0.25, 0.85, 0.35, 0.95), True, cost=1),),
+        targets=(TargetSnapshot("enemy_1", BoundingBox(0.70, 0.50, 0.80, 0.70), "Nibbit"),),
+    )
+    legal = legal_intents_for_snapshot(snapshot)
+    play = next(row for row in legal if row["kind"] == "play_card")
+    assert "enemy_2" not in play["target_ids"]
+    with pytest.raises(ActionIntentError, match="unknown-target-id"):
+        validate_action_intent(snapshot, PlayCardIntent(card_id="card_1", target_id="enemy_2"))
