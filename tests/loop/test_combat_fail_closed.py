@@ -503,3 +503,42 @@ def test_action_requires_enemy_excludes_hud_and_hand() -> None:
 
     assert agent._action_requires_enemy(ActionLog(click_x=0.5, click_y=0.05)) is False
     assert agent._action_requires_enemy(ActionLog(click_x=0.5, click_y=0.75)) is False
+
+
+def test_blocked_source_survives_snapshot_invalidation(tmp_path) -> None:
+    from loop.mcp.tools.targeting import invalidate_hand_snapshot
+    from loop.memory.screen_objects import ScreenObjectStore
+
+    agent = object.__new__(CollectAgent)
+    agent._blocked_sources = {}
+    agent._blocked_hand_signature = None
+    agent._stale_source_plan = None
+    agent._host_stats = {"screen": "combat", "energy": 3}
+    agent._obs_metrics = {"screen": "combat", "energy": 3}
+    store = ScreenObjectStore(tmp_path / "blocked.db")
+    agent._screen_objects = store
+    marks = (
+        AimMark(id=3, x=0.40, y=0.85, x0=0.30, y0=0.80, x1=0.50, y1=0.90, label="Strike", role="card"),
+    )
+    store.save_frame(run_id="r", step_id=1, marks=marks, screen="combat")
+    plan = {"source": {"object_id": "card_1", "point": {"x": 0.40, "y": 0.85}}}
+    card = AimMark(
+        3, 0.40, 0.85, 0.30, 0.80, 0.50, 0.90, "Strike", object_id="card_1", role="card",
+    )
+    agent._record_blocked_source(plan, card)
+    invalidate_hand_snapshot(store, reason="source-unconfirmed")
+    replayed = {
+        "source": {"object_id": "card_1", "point": {"x": 0.40, "y": 0.85}},
+        "snapshot": {"snapshot_id": "after-invalidate"},
+    }
+    assert agent._is_blocked_source_retry(replayed, card) is True
+    store.save_frame(
+        run_id="r",
+        step_id=2,
+        screen="combat",
+        marks=(
+            AimMark(id=3, x=0.55, y=0.85, x0=0.45, y0=0.80, x1=0.65, y1=0.90, label="Strike", role="card"),
+        ),
+    )
+    assert agent._is_blocked_source_retry(replayed, card) is False
+    store.close()

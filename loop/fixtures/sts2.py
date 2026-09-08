@@ -5,7 +5,6 @@ import time
 from dataclasses import replace
 from typing import Any, Literal
 
-import numpy as np
 from PIL import Image
 
 from loop.fixtures.base import FixtureBase
@@ -14,16 +13,22 @@ from loop.os.executor import OsController
 from loop.os.aim import HAND_Y, _copy_mark, _is_placeholder_label, is_menu_label, label_kind
 from loop.os.mouse import MENU_HOLD_S, MENU_HOVER_S
 from loop.os.primitives import MousePrimitive, mouse_click, mouse_move
+from loop.os.geometry import (
+    ContentBox as _ContentBox,
+    content_box_for,
+    crop_content,
+    format_geometry,
+    geometry_error,
+    geometry_from_image,
+    letterbox_frac,  # noqa: F401 — re-exported for tests
+    map_content_xy,
+)
 from loop.os.profile import CaptureProfile
 from loop.os.tables import resolve
 from loop.os.window import find_window
 from loop.reward.sts import combat_turn_gate, score_sts
 
 TITLES = ("Slay the Spire 2", "Slay the Spire II")
-_ContentBox = tuple[float, float, float, float]
-TARGET_ASPECT = 16 / 9
-# Relative |w/h - 16/9| / (16/9). 16:10 (~0.10) still plays; 1278x1360 (~0.47) does not.
-ASPECT_FAIL = 0.15
 
 
 def normalize_host_stats(stats: dict[str, Any]) -> dict[str, Any]:
@@ -55,93 +60,6 @@ def resolve_window_title() -> str:
     return TITLES[0]
 
 
-def letterbox_frac(image: Image.Image, *, threshold: float = 6.0) -> _ContentBox:
-    """Client-normalized (x0, y0, x1, y1) of the non-black game rect."""
-    gray = np.asarray(image.convert("L"), dtype=np.float32)
-    if gray.size == 0:
-        return (0.0, 0.0, 1.0, 1.0)
-    h, w = gray.shape
-    rows = gray.mean(axis=1) > threshold
-    cols = gray.mean(axis=0) > threshold
-    ys = np.flatnonzero(rows)
-    xs = np.flatnonzero(cols)
-    if ys.size == 0 or xs.size == 0:
-        return (0.0, 0.0, 1.0, 1.0)
-    x0, x1 = float(xs[0]) / w, float(xs[-1] + 1) / w
-    y0, y1 = float(ys[0]) / h, float(ys[-1] + 1) / h
-    if (x1 - x0) < 0.5 or (y1 - y0) < 0.5:
-        return (0.0, 0.0, 1.0, 1.0)
-    return (x0, y0, x1, y1)
-
-
-def _aspect(width: float, height: float) -> float:
-    return float(width) / max(float(height), 1e-6)
-
-
-def _aspect_error(width: float, height: float, *, target: float = TARGET_ASPECT) -> float:
-    return abs(_aspect(width, height) - target) / target
-
-
-def fit_aspect_box(
-    width: int,
-    height: int,
-    *,
-    aspect: float = TARGET_ASPECT,
-) -> _ContentBox:
-    """Largest centered `aspect` rectangle inside width×height, as client fractions."""
-    if width <= 0 or height <= 0:
-        return (0.0, 0.0, 1.0, 1.0)
-    have = _aspect(width, height)
-    if abs(have - aspect) / aspect < 1e-4:
-        return (0.0, 0.0, 1.0, 1.0)
-    if have > aspect:
-        content_w = height * aspect
-        pad = (width - content_w) / 2.0 / width
-        return (pad, 0.0, 1.0 - pad, 1.0)
-    content_h = width / aspect
-    pad = (height - content_h) / 2.0 / height
-    return (0.0, pad, 1.0, 1.0 - pad)
-
-
-def content_box_for(image: Image.Image) -> _ContentBox:
-    """Letterbox if black bars exist; else snap a full-frame grab to 16:9."""
-    letter = letterbox_frac(image)
-    full = letter[0] <= 0.01 and letter[1] <= 0.01 and letter[2] >= 0.99 and letter[3] >= 0.99
-    if not full:
-        return letter
-    w, h = image.size
-    return fit_aspect_box(w, h)
-
-
-def format_geometry(image: Image.Image, box: _ContentBox | None = None) -> str:
-    w, h = image.size
-    box = box if box is not None else content_box_for(image)
-    cw = (box[2] - box[0]) * w
-    ch = (box[3] - box[1]) * h
-    return (
-        f"client={w}x{h} aspect={_aspect(w, h):.3f} "
-        f"content={cw:.0f}x{ch:.0f} box={box[0]:.2f},{box[1]:.2f},{box[2]:.2f},{box[3]:.2f}"
-    )
-
-
-def geometry_error(image: Image.Image) -> str | None:
-    """None when the client is close to 16:9. Message otherwise."""
-    w, h = image.size
-    err = _aspect_error(w, h)
-    if err <= ASPECT_FAIL:
-        return None
-    return (
-        f"Client {w}x{h} aspect {_aspect(w, h):.3f} is not 16:9 "
-        f"(need ~{TARGET_ASPECT:.3f}). Clicks miss the letterbox. "
-        "Use borderless 1280x720 or 1920x1080."
-    )
-
-
-def map_content_xy(x: float, y: float, box: _ContentBox) -> tuple[float, float]:
-    x0, y0, x1, y1 = box
-    return (x0 + x * (x1 - x0), y0 + y * (y1 - y0))
-
-
 class Sts2Fixture(FixtureBase):
     """Turn-based mouse/key fixture. No pad, no chapel HUD."""
 
@@ -160,6 +78,8 @@ class Sts2Fixture(FixtureBase):
             obs_longest_side=1280,
         )
         self._content_box: _ContentBox = (0.0, 0.0, 1.0, 1.0)
+        self._geometry = geometry_from_image(Image.new("RGB", (16, 16), (0, 0, 0)))
+        self._grab_size: tuple[int, int] | None = None
         self.pending_aim_label = ""
 
     def enrich_frame_marks(
@@ -203,13 +123,28 @@ class Sts2Fixture(FixtureBase):
     def grab_image(self) -> Image.Image:
         image = super().grab_image()
         self._content_box = content_box_for(image)
+        self._geometry = geometry_from_image(image)
+        self._grab_size = image.size
         return image
 
     def observe_image(self, image: Image.Image) -> Image.Image:
-        x0, y0, x1, y1 = content_box_for(image)
-        self._content_box = (x0, y0, x1, y1)
-        w, h = image.size
-        return image.crop((int(x0 * w), int(y0 * h), int(x1 * w), int(y1 * h)))
+        incoming = content_box_for(image)
+        last = self._content_box
+        last_cropped = not (
+            last[0] <= 0.01 and last[1] <= 0.01 and last[2] >= 0.99 and last[3] >= 0.99
+        )
+        incoming_full = (
+            incoming[0] <= 0.01 and incoming[1] <= 0.01 and incoming[2] >= 0.99 and incoming[3] >= 0.99
+        )
+        grab_size = self._grab_size
+        already_content = last_cropped and incoming_full and (
+            grab_size is None or image.size != grab_size
+        )
+        if already_content:
+            return image
+        self._content_box = incoming
+        self._geometry = geometry_from_image(image)
+        return crop_content(image, self._content_box)
 
     def check_geometry(self, image: Image.Image) -> None:
         problem = geometry_error(image)

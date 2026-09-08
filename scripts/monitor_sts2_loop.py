@@ -110,6 +110,25 @@ def hygiene_line(rows: list[dict]) -> str:
     )
 
 
+def _combat_energy(row: dict) -> bool:
+    metrics = row.get("metrics") or {}
+    energy = metrics.get("energy")
+    screen = str(metrics.get("screen") or "").strip().lower()
+    return screen == "combat" and isinstance(energy, (int, float)) and float(energy) > 0
+
+
+def _unconfirmed_or_stale(row: dict) -> bool:
+    err = _result_error(row)
+    return "source-unconfirmed" in err or "stale-obs" in err or "stale-source-plan" in err
+
+
+def unconfirmed_bind_loop(rows: list[dict], *, window: int) -> bool:
+    if len(rows) < window:
+        return False
+    tail = rows[-window:]
+    return all(_unconfirmed_or_stale(row) for row in tail) and any(_combat_energy(row) for row in tail)
+
+
 def consecutive_target_not_found(rows: list[dict]) -> int:
     streak = 0
     for row in reversed(rows):
@@ -121,6 +140,8 @@ def consecutive_target_not_found(rows: list[dict]) -> int:
 
 
 def stuck_reason(rows: list[dict], *, window: int, min_no_change: int) -> str | None:
+    if unconfirmed_bind_loop(rows, window=window):
+        return None
     if len(rows) < window:
         return None
     tail = rows[-window:]
@@ -167,7 +188,10 @@ def _print_step(rows: list[dict]) -> None:
 
 
 def _poll_report(rows: list[dict], *, window: int, min_no_change: int) -> tuple[str | None, bool]:
+    counts = hygiene_counts(rows)
     print(hygiene_line(rows), flush=True)
+    if counts["source_unconfirmed"] >= 3:
+        print("BATCH5 fail: source-unconfirmed>=3", flush=True)
     bind_loop = consecutive_target_not_found(rows) >= TARGET_BIND_STREAK
     reason = stuck_reason(rows, window=window, min_no_change=min_no_change)
     return reason, bind_loop

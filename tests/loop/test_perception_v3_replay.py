@@ -84,6 +84,8 @@ def _agent_for_combat(tmp_path: Path, marks: list[AimMark], host: dict) -> Colle
     agent._last_frame_mad = 0.0
     agent._turn_transition = False
     agent._pending_exec_error = None
+    agent._blocked_sources = {}
+    agent._blocked_hand_signature = None
     return agent
 
 
@@ -625,3 +627,47 @@ def test_merge_cached_does_not_reattach_clustered_duplicate() -> None:
     if not enemy_band:
         enemy_band = [mark for mark in merged if in_combat_sprite_band(mark.y, mark.x)]
     assert len(enemy_band) == 1, [(m.object_id, m.label, m.y) for m in enemy_band]
+
+
+def test_b4_opening_strike_binds_in_hand_band(tmp_path: Path) -> None:
+    from loop.agent.decision import legal_intents_for_snapshot
+    from loop.os.aim import in_hand_band
+
+    marks = [
+        AimMark(id=1, x=0.312, y=0.95, x0=0.25, y0=0.85, x1=0.38, y1=1.0, label="Strike", role="card"),
+        AimMark(id=2, x=0.40, y=0.94, x0=0.34, y0=0.84, x1=0.47, y1=1.0, label="Defend", role="card"),
+        AimMark(id=3, x=0.50, y=0.93, x0=0.44, y0=0.83, x1=0.57, y1=1.0, label="Defend", role="card"),
+        AimMark(id=4, x=0.59, y=0.94, x0=0.53, y0=0.84, x1=0.66, y1=1.0, label="Defend", role="card"),
+        AimMark(id=5, x=0.69, y=0.95, x0=0.62, y0=0.85, x1=0.76, y1=1.0, label="Strike", role="card"),
+        AimMark(id=10, x=0.75, y=0.62, x0=0.68, y0=0.52, x1=0.82, y1=0.72, label="Jaw Worm", role="enemy"),
+        AimMark(id=12, x=0.90, y=0.82, x0=0.82, y0=0.74, x1=0.98, y1=0.90, label="End Turn", role="button"),
+    ]
+    host = {"screen": "combat", "energy": 3, "hp": 80, "player": {"hp": 80, "energy": 3}}
+    agent = _agent_for_combat(tmp_path, marks, host)
+    agent._screen_objects.save_frame(run_id="replay", step_id=1, marks=marks, screen="combat")
+    agent._aim = AimGuide.from_marks(agent._last_obs_image, marks)
+    scene = SimpleNamespace(
+        screen="combat", hand_cards=[], enemies=[], characters=[], controls=[], tutorial={},
+    )
+    try:
+        snapshot = agent._build_turn_snapshot(scene)
+        card = next(row for row in snapshot.cards if row.card_id == "card_1")
+        obj = agent._screen_objects.by_object_id("card_1")
+        mark = agent._hand_source_mark(agent._aim_mark_for_object(obj), [])
+        assert mark is not None
+        assert in_hand_band(mark.x, mark.y)
+        assert abs(card.bbox.x0 + card.bbox.x1) / 2 >= 0.18
+        agent._record_blocked_source(
+            {"source": {"object_id": "card_1", "point": {"x": 0.312, "y": 0.95}}},
+            mark,
+        )
+        snapshot2 = agent._build_turn_snapshot(scene)
+        blocked = next(row for row in snapshot2.cards if row.card_id == "card_1")
+        assert blocked.playable is False
+        legal = legal_intents_for_snapshot(snapshot2)
+        assert any(row["kind"] == "play_card" for row in legal)
+        agent._last_execution_failure = {"code": "source-unconfirmed:card_1"}
+        assert agent._replan_after_source_failure(snapshot2, legal) is True
+        assert agent._decision_softlock is False
+    finally:
+        agent._screen_objects.close()

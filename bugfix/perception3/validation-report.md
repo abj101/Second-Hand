@@ -12,7 +12,10 @@
 |---|---|---|---|---|---|---|---|---|---|---|
 | A title→combat | title → Singleplayer | `runs/20260907T212107Z_sts2_collect` | 42 | yes (reward) | **12** | **0** | **0** | **0** `object:N` | **yes** (step 40 `screen=reward`) | **partial** — TNF `enemy_N` ×4 |
 | B combat-start | first combat 80/80 3 energy | `runs/20260907T225552Z_sts2_collect` | 21 | yes (reward) | **8** | **0** | **0** | **0** `object:N` | **yes** (step 20 `screen=reward`) | **partial** — TNF `enemy_2` ×2 |
-| C combat-start | not started | — | — | — | — | — | — | — | — | fail (blocked: B TNF) |
+| B2 combat-start (2e) | first combat 80/80 3 energy | `runs/20260908T001121Z_sts2_collect` | 22 | no (monitor stop) | **5** | **0** | **0** | **0** `object:N` | no | **partial** — TNF **0**; `source-unconfirmed:card_1` ×12 |
+| B3 combat-start | first combat 80/80 3 energy | `runs/20260908T034711Z_sts2_collect` | 6 | no | **0** | **0** | **1** | **0** `object:N` | no | **fail** — `source-unconfirmed` + `decision_softlock`; window 1915×1080 |
+| B4 retry | first combat 80/80 3 energy | `runs/20260908T040110Z_sts2_collect` | 4 | no | **0** | **0** | **1** | **0** `object:N` | no | **fail** — same: `card_1` unconfirmed → empty intent → softlock |
+| C combat-start | not started | — | — | — | — | — | — | — | — | fail |
 
 ## Run A detail (`20260907T212107Z`)
 
@@ -42,6 +45,16 @@ LLM1 / perception: `forced_rescan` 19, `llm1` 2 (`forced_rescan/steps=0.90`, abo
 
 `inspect-run`: `noncanonical_target_ids=0`, `duplicate_target_bboxes=0`, `confidence_out_of_range=0`, `sft_n=0`, `dpo_n=0`. Artifacts: `turns.jsonl`, `journal.json`, `memory_grounded.json`, `objects.db`, `frames/`, `summary.json`.
 
+## Run B2 detail (`20260908T001121Z`, post-2e)
+
+Wall ~6.3 min. Terminal `alive`. `flush_completed=true`. `stop_requested=true` (monitor HUD-frozen, not operator).
+
+Comparable start: 80/80, energy 3, `screen=combat`. Step 1 Strike `target_id=enemy_1` landed (energy 3→2). All ACT binds used `enemy_1`. **Zero `target-not-found`.** Dual snapshot `enemy_1`+`enemy_2` still on 7/22 steps, but ACT did not bind `enemy_2`.
+
+Card txs: success 5, auto_resolved 1, effect_unverified 1, `source_unconfirmed` 12 (`card_1` at x≈0.09 — left-edge miss). Monitor: HUD frozen hp=72 for 12 steps → stop after stuck 3/3. Step 21 then landed Strike on `mk_5` (x=0.37, energy 1→0, enemy 15→6). Step 22 End Turn. Fight unfinished.
+
+`inspect-run`: `noncanonical_target_ids=0`, `confidence_out_of_range=0`, `forced_rescan` 21/22, `sft_n=0`, `dpo_n=0`. Monitor exit 0.
+
 ## Criteria
 
 | Criterion | Result |
@@ -50,41 +63,52 @@ LLM1 / perception: `forced_rescan` 19, `llm1` 2 (`forced_rescan/steps=0.90`, abo
 | Run A no transition `empty-action-surface` | **pass** (0) |
 | Run A no `decision_softlock` | **pass** (0) |
 | Run A zero `target-not-found` | **fail** (4) |
-| Run B combat-start win, zero TNF | **fail** — won, TNF `enemy_2` ×2 |
-| B+C two consecutive combat wins | **fail** — C blocked |
+| Run B combat-start win, zero TNF | **fail** — won, TNF `enemy_2` ×2 (pre-2e) |
+| Run B2 (2e) zero TNF | **pass** (0) |
+| Run B2 combat win | **fail** — monitor HUD-frozen during card bind loop |
+| B+C two consecutive combat wins | **fail** |
 | Zero stale-target / `object:N` dispatches | **pass** |
-| Loot on first stable post-victory frame | **pass** (A step 40, B step 20) |
 | `confidence_out_of_range = 0` | **pass** |
-| `forced_rescan / steps ≤ 0.3` | **fail** (A 24/42, B 19/21) |
-| Uncertain rows excluded from positive exports | **pass** (`dpo_n=0`) |
+| `forced_rescan / steps ≤ 0.3` | **fail** |
 | Graceful stop flushes artifacts | **pass** |
 
 ## Failure routing
 
-- `object:N` / `mark_N` in `card_id`/`target_id` → **closed** (A+B `noncanonical_target_ids=0`).
-- Two snapshot targets for one Nibbit (`enemy_1`+`enemy_2`) → **reopen Batch 2**. Live bind then logs `target-not-found:enemy_2` (A ×3, B ×2). B: 11/21 steps dual-published.
-- `target-not-found:enemy_1` while `enemy_1` is in the snapshot (A step 17) → **Batch 5**. Not seen on B.
-- `source-unconfirmed:card_1` ×2 on both A and B → under the Batch 5 threshold of 3; still a hover/confirm risk.
-- Transition empty-surface / softlock → **not seen**.
-- Monitor / inspect-run crash → **not seen**.
+- `object:N` / `mark_N` → **closed**.
+- Dual snapshot `enemy_1`+`enemy_2` → **reduced** (TNF 0 on B2) but still published 7/22 steps. Residual, not TNF.
+- `source-unconfirmed:card_1` ×12 → **Batch 5 landed** (hand-band gate + blocked-retry + replan). Live B/C still pending.
+- In-combat `decision_softlock` (B3/B4) → **Batch 5** (replan when energy>0 and legal intents remain).
+- Transition empty-surface / non-combat softlock → **not seen**.
 
 ## Remaining risks
 
-- Canonical ids still fork (`enemy_2` phantom) on many combat frames even after Batch 1 freeze replays.
-- Forced rescan after every combat transaction keeps LLM1 cost high.
-- `inspect-run` `duplicate_target_bboxes` is 0 because many `turn_snapshot.targets` rows have no bbox.
-- B `sft_n=0` vs A `sft_n=6` — short episode + cooperative stop; not a hygiene fail.
+- Snapshot can still list two `enemy_*` for one Nibbit; ACT happened to pick `enemy_1`.
+- Card hover/confirm on `card_1` loops until monitor kills the episode.
+- Forced rescan almost every step.
 
 ## `skill_on` A/B
 
-**Do not start.** Need Runs B+C consecutive combat-start wins with zero `target-not-found` after the duplicate-`enemy_N` bind is closed.
+**Do not start.** Need two consecutive combat-start wins with zero TNF after the card bind loop is closed.
 
 ## Batch 2 reopen (2e)
 
-Landed after Run B. Cluster collapse: IoU ≥ 0.20 or center ≤ 0.12 → one `enemy_*`. Far sprites (≥ 0.25) stay two. Snapshot last-defense + cache merge skip. `tests/loop` 809 passed.
+Landed `d0cbfff`. Live B2: TNF 0. Dual rows still appear in some snapshots.
 
 ## Next operator step
 
-Window is on the **map** (Run B skipped remaining loot). Do **not** treat leftover floor as Run C.
+B3 (`20260908T034711Z`) died in 6 steps: `source-unconfirmed:card_1` then `decision_softlock`. Client was **1915×1080** with content box 0.67 (prior wins used **1277×720** fill). TNF still 0.
 
-Patch is in. Abandon this Ironclad run, start a fresh one, stop on first combat's first player turn (80/80, 3 energy, 5 cards), then say go. That collect is the new Run B (TNF must be 0).
+Do **not** treat leftover combat as Run C.
+
+## Batch 5 (card-confirm) — code landed, live pending
+
+Product: hand-band gate, `_blocked_sources` keyed on object+coord (survives snapshot invalidation), cropped-vs-cropped `mid_mad` + raw `_carry_after`, blocked cards `playable=False`, replan instead of in-combat softlock, V2 hover-first probe, `geometry:` evidence, monitor skips HUD-frozen stop during unconfirmed bind loop.
+
+`tests/loop`: **824 passed**.
+
+| Run | Start | Dir | Steps | Combat won | `source-unconfirmed` | `decision_softlock` | TNF | Pass |
+|---|---|---|---|---|---|---|---|---|
+| B5-B combat-start | pending | — | — | — | — | — | — | pending |
+| B5-C combat-start | pending | — | — | — | — | — | — | pending |
+
+Operator: fresh Ironclad, first combat, first player turn (80/80, 3 energy, 5 cards). Same collect command; monitor in second terminal. Pass = fight won, TNF=0, `source-unconfirmed < 3`, no `decision_softlock`, `forced_rescan/steps <= 0.3`. If hover shows no lift at an in-band mark, **stop and report** — do not iterate live. Window size is not the bug; read `geometry:` on the first card play.

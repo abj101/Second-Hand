@@ -17,6 +17,7 @@ def _row(
     screen: str = "combat",
     hp: int = 68,
     floor=None,
+    energy: int | None = 3,
     cards: list | None = None,
     targets: list | None = None,
     error: str | None = None,
@@ -27,7 +28,7 @@ def _row(
     return {
         "step_id": step_id,
         "terminal": "alive",
-        "metrics": {"screen": screen, "hp": hp, "floor": floor},
+        "metrics": {"screen": screen, "hp": hp, "floor": floor, "energy": energy},
         "turn_snapshot": {"cards": cards or [], "targets": targets or []},
         "result": {"error": error, "pixel_changed": pixel_changed},
         "action": {"name": action_name},
@@ -142,3 +143,34 @@ def test_once_run_b_prints_counters(capsys) -> None:
     assert "source_unconfirmed=7" in captured.out
     assert "forced_rescan=25/28" in captured.out
     assert "STUCK: target bind loop" not in captured.out
+
+
+def test_stuck_reason_skips_hud_freeze_during_unconfirmed_bind_loop() -> None:
+    rows = [
+        _row(
+            step_id=i + 1,
+            error="source-unconfirmed:card_1" if i % 2 == 0 else "stale-obs:motion",
+            pixel_changed=False,
+            action_name="mk_2>mk_11",
+            energy=3,
+        )
+        for i in range(12)
+    ]
+    assert monitor.stuck_reason(rows, window=12, min_no_change=12) is None
+    assert monitor.unconfirmed_bind_loop(rows, window=12) is True
+
+
+def test_once_flags_batch5_unconfirmed_without_hud_stop(tmp_path: Path, capsys) -> None:
+    rows = [
+        _row(step_id=i, error="source-unconfirmed:card_1", pixel_changed=False, energy=3)
+        for i in range(1, 4)
+    ]
+    (tmp_path / "turns.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    code = monitor.main(["--run", str(tmp_path), "--once"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "BATCH5 fail: source-unconfirmed>=3" in captured.out
+    assert "HUD frozen" not in captured.out

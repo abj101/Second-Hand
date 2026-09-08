@@ -495,6 +495,12 @@ def in_combat_sprite_band(
     return adapter.in_combat_sprite_band(y, x)
 
 
+def in_hand_band(x: float, y: float, *, layout_adapter: LayoutAdapter | None = None) -> bool:
+    """True when a click sits on the combat hand, not the energy orb or board."""
+    adapter = layout_adapter or default_layout_adapter()
+    return _HAND_X0 <= float(x) <= _HAND_X1 and float(y) >= float(adapter.hand_y)
+
+
 def _is_unknown_entity_label(label: str) -> bool:
     raw = (label or "").strip().lower()
     if _UNKNOWN_ENTITY_RE.match(raw):

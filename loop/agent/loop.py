@@ -152,6 +152,7 @@ from loop.mcp.tools.targeting import (
 )
 from loop.model.gateway import VlmGateway
 from loop.os.capture import encode_image
+from loop.os.geometry import encode_observe, map_content_xy, perceive_longest_side
 from loop.os.frame_model import (
     ActionSurface,
     FrameContext,
@@ -194,6 +195,7 @@ from loop.os.aim import (
     dino_boxes_to_marks,
     fuse_dino_marks,
     in_combat_sprite_band,
+    in_hand_band,
     label_kind,
     needs_tooltip,
     number_spatial_nodes,
@@ -462,6 +464,7 @@ class _PostClickProbe:
     frames: tuple[Any, ...]
     deltas: tuple[float, ...]
     elapsed_ms: float
+    raw_frame: Any = None
 
 
 @dataclass
@@ -628,6 +631,8 @@ class CollectAgent:
         self._last_execution_plan: dict[str, Any] = {}
         self._planned_hand_signature: tuple[Any, ...] | None = None
         self._stale_source_plan: tuple[Any, ...] | None = None
+        self._blocked_sources: dict[tuple[str, float | None, float | None], int] = {}
+        self._blocked_hand_signature: tuple[Any, ...] | None = None
         self._last_reason_backend: str = ""
         self._last_reason_fallback: str = ""
         self._last_reason_call: dict[str, Any] = {}
@@ -743,6 +748,8 @@ class CollectAgent:
         self._pending_exec_error = None
         self._planned_hand_signature = None
         self._stale_source_plan = None
+        self._blocked_sources = {}
+        self._blocked_hand_signature = None
         self._last_intent = {}
         self._force_perceive = True
         self._combat_enter_logged = False
@@ -1666,29 +1673,82 @@ class CollectAgent:
             invalidate()
         return identity
 
-    def _source_plan_fingerprint(self, plan: dict[str, Any] | None, card: AimMark | None = None) -> tuple[Any, ...]:
+    def _source_block_coords(
+        self, plan: dict[str, Any] | None, card: AimMark | None = None
+    ) -> tuple[str, float | None, float | None]:
         payload = plan if isinstance(plan, dict) else {}
-        snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
         source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
         point = source.get("point") if isinstance(source.get("point"), dict) else {}
         x = point.get("x") if isinstance(point.get("x"), (int, float)) else (card.x if card is not None else None)
         y = point.get("y") if isinstance(point.get("y"), (int, float)) else (card.y if card is not None else None)
+        oid = str(source.get("object_id") or (card.object_id if card is not None else "") or "")
+        rx = round(float(x), 2) if isinstance(x, (int, float)) else None
+        ry = round(float(y), 2) if isinstance(y, (int, float)) else None
+        return oid, rx, ry
+
+    def _source_plan_fingerprint(self, plan: dict[str, Any] | None, card: AimMark | None = None) -> tuple[Any, ...]:
+        oid, x, y = self._source_block_coords(plan, card)
+        payload = plan if isinstance(plan, dict) else {}
+        source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
         mark_id = source.get("mark_id")
         if mark_id is None and card is not None:
             mark_id = card.id
         return (
-            str(snapshot.get("snapshot_id") or ""),
-            str(source.get("object_id") or (card.object_id if card is not None else "") or ""),
+            oid,
             int(mark_id) if isinstance(mark_id, (int, float)) else -1,
-            round(float(x), 3) if isinstance(x, (int, float)) else None,
-            round(float(y), 3) if isinstance(y, (int, float)) else None,
+            x,
+            y,
         )
 
-    def _is_blocked_source_retry(self, plan: dict[str, Any] | None, card: AimMark | None = None) -> bool:
-        stale = getattr(self, "_stale_source_plan", None)
-        if not stale:
+    def _prune_blocked_sources(self) -> None:
+        blocked = getattr(self, "_blocked_sources", None)
+        if not blocked:
+            return
+        prior = getattr(self, "_blocked_hand_signature", None)
+        current = self._hand_inventory_signature()
+        if prior is not None and current != prior:
+            self._blocked_sources = {}
+            self._blocked_hand_signature = None
+
+    def _record_blocked_source(self, plan: dict[str, Any] | None, card: AimMark | None = None) -> None:
+        self._prune_blocked_sources()
+        oid, x, y = self._source_block_coords(plan, card)
+        store = getattr(self, "_screen_objects", None)
+        generation = int(getattr(store, "_hand_generation", 0) or 0)
+        blocked = getattr(self, "_blocked_sources", None)
+        if blocked is None:
+            blocked = {}
+            self._blocked_sources = blocked
+        blocked[(oid, x, y)] = generation
+        if getattr(self, "_blocked_hand_signature", None) is None:
+            self._blocked_hand_signature = self._hand_inventory_signature()
+        self._stale_source_plan = self._source_plan_fingerprint(plan, card)
+
+    def _source_is_blocked(
+        self,
+        object_id: str = "",
+        x: float | None = None,
+        y: float | None = None,
+    ) -> bool:
+        self._prune_blocked_sources()
+        blocked = getattr(self, "_blocked_sources", None) or {}
+        if not blocked:
             return False
-        return self._source_plan_fingerprint(plan, card) == tuple(stale)
+        oid = str(object_id or "").strip()
+        rx = round(float(x), 2) if isinstance(x, (int, float)) else None
+        ry = round(float(y), 2) if isinstance(y, (int, float)) else None
+        for boid, bx, by in blocked:
+            if oid and boid and oid == boid:
+                return True
+            if rx is None or ry is None or bx is None or by is None:
+                continue
+            if abs(rx - bx) <= 0.02 and abs(ry - by) <= 0.02:
+                return True
+        return False
+
+    def _is_blocked_source_retry(self, plan: dict[str, Any] | None, card: AimMark | None = None) -> bool:
+        oid, x, y = self._source_block_coords(plan, card)
+        return self._source_is_blocked(oid, x, y)
 
     def _hand_inventory_mutated_since_plan(self) -> bool:
         planned = getattr(self, "_planned_hand_signature", None)
@@ -1739,6 +1799,14 @@ class CollectAgent:
             object_id=oid,
             role=str(getattr(obj, "role", "") or "card"),
         )
+
+    def _hand_source_mark(self, card: AimMark | None, evidence: list[str]) -> AimMark | None:
+        if card is None:
+            return None
+        if in_hand_band(float(card.x), float(card.y)):
+            return card
+        evidence.append(f"off-hand-source-mark:{float(card.x):.3f},{float(card.y):.3f}")
+        return None
 
     def _sync_selected_for_screen(self, screen: str | None) -> None:
         kind = (screen or "").strip().lower()
@@ -1914,6 +1982,7 @@ class CollectAgent:
         started = time.perf_counter()
         deadline = started + max(1, int(max_ms)) / 1000.0
         frames: list[Any] = []
+        raw_frames: list[Any] = []
         deltas: list[float] = []
         previous_thumb = roi_thumb(pre_frame, 64)
         quiet = 0
@@ -1923,6 +1992,7 @@ class CollectAgent:
             thumb = roi_thumb(fresh, 64)
             delta = mean_absdiff(previous_thumb, thumb)
             frames.append(fresh)
+            raw_frames.append(raw)
             deltas.append(delta)
             quiet = quiet + 1 if delta <= 0.012 else 0
             previous_thumb = thumb
@@ -1940,6 +2010,7 @@ class CollectAgent:
             frames=tuple(frames),
             deltas=tuple(deltas),
             elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            raw_frame=raw_frames[-1] if raw_frames else frames[-1],
         )
 
     def _classify_card_probe(
@@ -1985,6 +2056,74 @@ class CollectAgent:
             f"source movement:{min(source_diffs):.3f}",
             f"hand movement:{min(hand_diffs):.3f}",
         ]
+
+    def _source_roi_changed(
+        self,
+        card: AimMark,
+        probe: Any,
+        *,
+        threshold: float = 0.045,
+    ) -> bool:
+        frames = tuple(getattr(probe, "frames", ()) or ())
+        samples = frames[-2:] if len(frames) >= 2 else frames
+        if not samples:
+            return False
+        source_box = (
+            max(0.0, card.x0 - 0.025), max(0.0, card.y0 - 0.025),
+            min(1.0, card.x1 + 0.025), min(1.0, card.y1 + 0.025),
+        )
+        diffs = [self._roi_mad(probe.pre_frame, frame, source_box) for frame in samples]
+        return bool(diffs) and all(value >= threshold for value in diffs)
+
+    def _probe_after_frame(self, probe: Any) -> Any:
+        return getattr(probe, "raw_frame", None) or getattr(probe, "fresh_frame", None)
+
+    def _card_geometry_evidence(self, card: AimMark) -> str:
+        fx = self.fixture
+        box = tuple(getattr(fx, "_content_box", (0.0, 0.0, 1.0, 1.0)) or (0.0, 0.0, 1.0, 1.0))
+        if len(box) != 4:
+            box = (0.0, 0.0, 1.0, 1.0)
+        image = getattr(getattr(self, "_aim", None), "image", None) or getattr(self, "_last_obs_image", None)
+        geo = ""
+        line_fn = getattr(fx, "geometry_line", None)
+        if callable(line_fn) and image is not None:
+            try:
+                geo = str(line_fn(image))
+            except Exception:
+                geo = ""
+        try:
+            cx, cy = map_content_xy(float(card.x), float(card.y), box)  # type: ignore[arg-type]
+        except Exception:
+            cx, cy = float(card.x), float(card.y)
+        return f"geometry:{geo or 'n/a'} click_client={cx:.3f},{cy:.3f}"
+
+    def _fail_unconfirmed_source(
+        self,
+        *,
+        action: ActionLog,
+        executed: list[str],
+        primitives: list[PrimitiveLog],
+        transaction: CardTransaction,
+        card: AimMark,
+        plan: dict[str, Any] | None,
+        probe: Any,
+        error: str,
+    ) -> _CardExecution:
+        transaction.selection_state = "unconfirmed"
+        transaction.outcome = "source_unconfirmed"
+        transaction.error = error
+        identity = self._invalidate_hand_inventory(reason="source-unconfirmed")
+        self._record_blocked_source(plan, card)
+        self._planned_hand_signature = None
+        transaction.verification_evidence.append("source-snapshot-invalidated")
+        transaction.verification_evidence.append(
+            f"hand-generation:{identity.get('hand_generation')}"
+        )
+        self._clear_stale_target_state()
+        after = self._probe_after_frame(probe)
+        if after is None:
+            after = self.fixture.grab_image()
+        return _CardExecution(action, executed, after, primitives, transaction, transaction.error)
 
     def _card_lifted(self, before: AimMark, fresh: AimGuide | None) -> bool:
         """Selection proof from fresh geometry only: lift, enlargement, or highlight."""
@@ -2148,10 +2287,14 @@ class CollectAgent:
                     if reject_reason == "stale-snapshot":
                         self._invalidate_hand_inventory(reason="stale-snapshot")
                 else:
-                    card = self._aim_mark_for_object(resolved.get("source"))
+                    card = self._hand_source_mark(
+                        self._aim_mark_for_object(resolved.get("source")),
+                        evidence,
+                    )
                     if card is None:
                         reject_reason = "source-not-found"
-                        evidence.append("snapshot-scoped-object-missing")
+                        if not any(item.startswith("off-hand-source-mark:") for item in evidence):
+                            evidence.append("snapshot-scoped-object-missing")
         else:
             card = before_aim.by_id(int(action.mark)) if before_aim is not None and action.mark is not None else None
             if card is None:
@@ -2207,6 +2350,45 @@ class CollectAgent:
         )
         executed: list[str] = []
         primitives: list[PrimitiveLog] = []
+        transaction.verification_evidence.append(self._card_geometry_evidence(card))
+        self._aim_before_transaction = tuple(before_aim.marks) if before_aim is not None else ()
+        self._transaction_pre_image = before_aim.image if before_aim is not None else None
+        if v2_source and not direct_commit:
+            hover_action = card_action.model_copy(update={"hover": True})
+            hover_action.name = hover_action.derive_name()
+            try:
+                if hasattr(self.fixture, "pending_aim_label"):
+                    self.fixture.pending_aim_label = card.label
+                sent = self.fixture.execute_chord(hover_action, settle=False)
+                executed.extend(sent)
+                primitives.extend(
+                    PrimitiveLog(phase="card", name=name, x=hover_action.click_x, y=hover_action.click_y)
+                    for name in sent
+                )
+            except Exception as exc:
+                transaction.error = f"card-dispatch:{exc}"
+                transaction.outcome = "dispatch_failed"
+                return _CardExecution(
+                    action, executed, self.fixture.grab_image(), primitives, transaction, transaction.error
+                )
+            hover_probe = self._sample_card_post_click(
+                self._transaction_pre_image, max_ms=250, min_ms=80
+            )
+            transaction.probe_samples += len(hover_probe.frames)
+            transaction.probe_elapsed_ms += hover_probe.elapsed_ms
+            if not self._source_roi_changed(card, hover_probe):
+                transaction.verification_evidence.append("hover-no-lift")
+                return self._fail_unconfirmed_source(
+                    action=action,
+                    executed=executed,
+                    primitives=primitives,
+                    transaction=transaction,
+                    card=card,
+                    plan=plan if isinstance(plan, dict) else None,
+                    probe=hover_probe,
+                    error=f"source-unconfirmed:hover:{card.object_id or card.label or card.id}",
+                )
+            transaction.verification_evidence.append("hover-lift")
         try:
             if hasattr(self.fixture, "pending_aim_label"):
                 self.fixture.pending_aim_label = card.label
@@ -2225,34 +2407,27 @@ class CollectAgent:
             transaction.outcome = "dispatch_failed"
             return _CardExecution(action, executed, self.fixture.grab_image(), primitives, transaction, transaction.error)
 
-        self._aim_before_transaction = tuple(before_aim.marks) if before_aim is not None else ()
-        self._transaction_pre_image = before_aim.image if before_aim is not None else None
         probe = self._sample_card_post_click(self._transaction_pre_image, max_ms=750)
         transaction.probe_samples += len(probe.frames)
         transaction.probe_elapsed_ms += probe.elapsed_ms
-        state, evidence = self._classify_card_probe(card, target, probe)
-        transaction.verification_evidence.extend(evidence)
+        state, probe_evidence = self._classify_card_probe(card, target, probe)
+        transaction.verification_evidence.extend(probe_evidence)
         if state == "auto_resolved":
             transaction.selection_state = "not_applicable"
             transaction.source_verified = True
             transaction.effect_verified = True
             transaction.outcome = "auto_resolved"
-            return _CardExecution(action, executed, probe.fresh_frame, primitives, transaction)
+            return _CardExecution(action, executed, self._probe_after_frame(probe), primitives, transaction)
         if state != "selected":
-            transaction.selection_state = "unconfirmed"
-            transaction.outcome = "source_unconfirmed"
-            transaction.error = f"source-unconfirmed:{card.object_id or card.label or card.id}"
-            identity = self._invalidate_hand_inventory(reason="source-unconfirmed")
-            self._stale_source_plan = self._source_plan_fingerprint(plan, card)
-            self._planned_hand_signature = None
-            transaction.verification_evidence.append("source-snapshot-invalidated")
-            transaction.verification_evidence.append("blocked-same-coordinate-retry")
-            transaction.verification_evidence.append(
-                f"hand-generation:{identity.get('hand_generation')}"
-            )
-            self._clear_stale_target_state()
-            return _CardExecution(
-                action, executed, probe.fresh_frame, primitives, transaction, transaction.error
+            return self._fail_unconfirmed_source(
+                action=action,
+                executed=executed,
+                primitives=primitives,
+                transaction=transaction,
+                card=card,
+                plan=plan if isinstance(plan, dict) else None,
+                probe=probe,
+                error=f"source-unconfirmed:{card.object_id or card.label or card.id}",
             )
 
         transaction.selection_state = "confirmed"
@@ -2267,11 +2442,11 @@ class CollectAgent:
                 transaction.outcome = "effect_unverified"
                 transaction.verification_evidence.append("targetless commit gesture")
                 self._selected = None
-                return _CardExecution(action, executed, probe.fresh_frame, primitives, transaction)
+                return _CardExecution(action, executed, self._probe_after_frame(probe), primitives, transaction)
             transaction.outcome = "target_required"
             transaction.error = "target-required"
             return _CardExecution(
-                action, executed, probe.fresh_frame, primitives, transaction, transaction.error
+                action, executed, self._probe_after_frame(probe), primitives, transaction, transaction.error
             )
         refreshed_inventory = False
         if getattr(getattr(self, "config", None), "architecture", "") == "two_stage":
@@ -2311,7 +2486,7 @@ class CollectAgent:
             transaction.error = f"target-not-found:{missing}"
             transaction.verification_evidence.append("missing-stable-target")
             return _CardExecution(
-                action, executed, probe.fresh_frame, primitives, transaction, transaction.error
+                action, executed, self._probe_after_frame(probe), primitives, transaction, transaction.error
             )
         transaction.target_rebound = True
         transaction.rebound_target_mark = rebound.id
@@ -2338,7 +2513,7 @@ class CollectAgent:
             transaction.outcome = "dispatch_failed"
             transaction.error = f"target-dispatch:{exc}"
             return _CardExecution(
-                rebound_action, executed, probe.fresh_frame, primitives, transaction, transaction.error
+                rebound_action, executed, self._probe_after_frame(probe), primitives, transaction, transaction.error
             )
         target_probe = self._sample_card_post_click(
             probe.fresh_frame, max_ms=750, min_ms=500
@@ -2349,7 +2524,7 @@ class CollectAgent:
         transaction.outcome = "effect_unverified"
         transaction.error = None
         return _CardExecution(
-            rebound_action, executed, target_probe.fresh_frame, primitives, transaction
+            rebound_action, executed, self._probe_after_frame(target_probe), primitives, transaction
         )
 
     def _retrieved_facts(
@@ -3315,14 +3490,14 @@ class CollectAgent:
     def _rescan_scene(self, *, focus: str = "") -> float:
         """Harness-internal LLM1 rescan from the current frame, not the old candidate list."""
         from loop.agent.prompts import two_stage_system_for
-        from loop.os.capture import encode_image
 
         self._perception_cache.invalidate_enemies()
         image = self._last_obs_image
         perceive_gw = self._perceive_gw()
         if image is None or perceive_gw is None:
             return 0.0
-        frame = encode_image(image, longest_side=1280, jpeg_quality=90)
+        cap = int(getattr(self.fixture, "obs_longest_side", 1280) or 1280)
+        frame = encode_observe(image, cap=cap, jpeg_quality=90)
         perceive_system, _ = two_stage_system_for(arm=self.config.arm)
         fresh_ok = False
         try:
@@ -4311,6 +4486,8 @@ class CollectAgent:
                     playable = True
                 if isinstance(cost, (int, float)) and energy is not None and int(cost) > energy:
                     playable = False
+                if self._source_is_blocked(str(obj.object_id), float(obj.x), float(obj.y)):
+                    playable = False
                 cards.append(CardSnapshot(
                     card_id=str(obj.object_id), name=card_name, bbox=bbox,
                     playable=bool(playable),
@@ -4411,6 +4588,35 @@ class CollectAgent:
                 dark = False
         return dark or (hud_off and mad > 0.03)
 
+    def _source_confirm_failed(self) -> bool:
+        rec = getattr(self, "_last_execution_failure", None) or {}
+        if not isinstance(rec, dict):
+            return False
+        blob = " ".join(str(rec.get(key) or "") for key in ("code", "dispatch", "transaction_outcome"))
+        return any(
+            token in blob
+            for token in (
+                "source-unconfirmed",
+                "source-not-found",
+                "source_unconfirmed",
+                "stale-source-plan",
+            )
+        )
+
+    def _replan_after_source_failure(
+        self,
+        snapshot: TurnSnapshot,
+        legal_intents: tuple[dict[str, Any], ...],
+    ) -> bool:
+        if not self._source_confirm_failed():
+            return False
+        if not self._combat_screen_now():
+            return False
+        energy = snapshot.energy
+        if not isinstance(energy, (int, float)) or float(energy) <= 0:
+            return False
+        return bool(legal_intents)
+
     def _run_v2_act(self, snapshot: TurnSnapshot) -> tuple[dict[str, Any], float]:
         """Choose one typed intent, then deterministically bind it to this frame."""
         state_key = json.dumps({
@@ -4480,12 +4686,20 @@ class CollectAgent:
         if self._last_execution_failure and state_key == self._last_reason_state_key:
             self._unchanged_failure_count += 1
             if self._unchanged_failure_count >= 2:
-                self._pending_exec_error = "decision-softlock"
-                self._decision_softlock = True
-                self._last_decision_schema = "v2"
-                if "decision_softlock" not in self._session_flags:
-                    self._session_flags.append("decision_softlock")
-                return {}, 0.0
+                if self._replan_after_source_failure(snapshot, legal_intents):
+                    self._unchanged_failure_count = 0
+                    self._force_perceive = True
+                    try:
+                        self._rescan_scene(focus="source-unconfirmed")
+                    except Exception:
+                        pass
+                else:
+                    self._pending_exec_error = "decision-softlock"
+                    self._decision_softlock = True
+                    self._last_decision_schema = "v2"
+                    if "decision_softlock" not in self._session_flags:
+                        self._session_flags.append("decision_softlock")
+                    return {}, 0.0
         else:
             self._unchanged_failure_count = 0
         self._last_reason_state_key = state_key
@@ -5363,7 +5577,13 @@ class CollectAgent:
             painted = parked
             if self._aim is not None:
                 painted = paint_aim(parked, marks=self._aim.marks, last_xy=self._last_click)
-            self._reason_vlm_frames = [encode_image(painted, longest_side=1280, jpeg_quality=90)]
+            self._reason_vlm_frames = [
+                encode_observe(
+                    painted,
+                    cap=int(getattr(self.fixture, "obs_longest_side", 1280) or 1280),
+                    jpeg_quality=90,
+                )
+            ]
         except Exception:  # noqa: BLE001 — ACT can keep the pre-hover frame
             return
 
@@ -5878,6 +6098,9 @@ class CollectAgent:
         self._empty_action_surface_key = ""
         self._empty_action_surface_count = 0
         self._decision_softlock = False
+        self._blocked_sources = {}
+        self._blocked_hand_signature = None
+        self._stale_source_plan = None
         self._force_inspect = False
         self._perception_recovery_steps = 0
         self._card_action_attempts = 0
@@ -6049,7 +6272,6 @@ class CollectAgent:
                 journal_kind = None
                 journal_heading = None
                 locked_target = False
-                side = int(getattr(self.fixture, "obs_longest_side", 1280) or 1280)
                 t0 = time.perf_counter()
                 view = self.fixture.observe_image(before)
                 prev_obs = getattr(self, "_last_obs_image", None)
@@ -6060,7 +6282,11 @@ class CollectAgent:
                         )
                     except Exception:
                         pass
+                    if prev_obs.size != view.size:
+                        self._perception_cache.reset()
                 self._last_obs_image = view
+                cap = int(getattr(self.fixture, "obs_longest_side", 1280) or 1280)
+                side = perceive_longest_side(view, cap)
                 # Turn-based controls are visual objects too. DINO grounds a
                 # bounded UI query list before aim construction; fusion below
                 # still requires OCR/GUI support before a new mark is exposed.
@@ -7036,6 +7262,18 @@ class CollectAgent:
                             _say(f"  {tag} unresolved choice {choice!r} — no fallback click")
                     elif not self._allow_legacy_empty_fill():
                         _say(f"  {tag} empty typed intent — no legacy fill")
+                        energy = (self._obs_metrics or {}).get("energy")
+                        if energy is None:
+                            energy = (self._host_stats or {}).get("energy")
+                        if (
+                            self._source_confirm_failed()
+                            and self._combat_screen_now()
+                            and isinstance(energy, (int, float))
+                            and float(energy) > 0
+                        ):
+                            self._pending_exec_error = (
+                                self._pending_exec_error or "replan-after-unconfirmed"
+                            )
                     elif self._two_stage() and self._combat_screen_now():
                         _say(f"  {tag} empty JSON, no combat fill")
                     else:
@@ -7103,6 +7341,18 @@ class CollectAgent:
                     if is_empty_chord(action):
                         if not self._allow_legacy_empty_fill():
                             _say(f"  {tag} empty typed intent — no legacy fill")
+                            energy = (self._obs_metrics or {}).get("energy")
+                            if energy is None:
+                                energy = (self._host_stats or {}).get("energy")
+                            if (
+                                self._source_confirm_failed()
+                                and self._combat_screen_now()
+                                and isinstance(energy, (int, float))
+                                and float(energy) > 0
+                            ):
+                                self._pending_exec_error = (
+                                    self._pending_exec_error or "replan-after-unconfirmed"
+                                )
                         elif turn:
                             filled = fill_from_aim(
                                 self._aim,
@@ -7360,7 +7610,7 @@ class CollectAgent:
                         pass
             if turn and not skip_reason:
                 mid_view = self.fixture.observe_image(mid)
-                mid_mad = mean_absdiff(before_thumb, roi_thumb(mid, 64))
+                mid_mad = mean_absdiff(roi_thumb(view, 64), roi_thumb(mid_view, 64))
                 mid_gate = obs_gate if fast_v2_guard else self.fixture.act_gate(mid_view)
                 skip_reason = stale_to_act(
                     obs_gate=obs_gate, now_gate=mid_gate, mad=mid_mad

@@ -371,37 +371,49 @@ def test_letterbox_maps_clicks_into_content() -> None:
     assert cropped.size[1] == 100
 
 
-def test_content_box_snaps_tall_client_to_16x9() -> None:
-    from loop.fixtures.sts2 import (
-        content_box_for,
-        fit_aspect_box,
-        geometry_error,
-        map_content_xy,
-    )
+def test_observe_image_keeps_box_on_already_cropped_frame() -> None:
+    from loop.fixtures.sts2 import content_box_for
+    from loop.os.profile import mean_absdiff, roi_thumb
+
+    raw = Image.new("RGB", (300, 300), (0, 0, 0))
+    raw.paste(Image.new("RGB", (200, 200), (255, 255, 255)), (0, 0))
+    fx = Sts2Fixture(controller=None)
+    fx._grab_size = raw.size
+    fx._content_box = content_box_for(raw)
+    cropped = fx.observe_image(raw)
+    box = fx._content_box
+    assert box != (0.0, 0.0, 1.0, 1.0)
+    again = fx.observe_image(cropped)
+    assert fx._content_box == box
+    assert again.size == cropped.size
+    like = mean_absdiff(roi_thumb(cropped, 64), roi_thumb(again, 64))
+    mixed = mean_absdiff(roi_thumb(cropped, 64), roi_thumb(raw, 64))
+    assert like < 0.02
+    assert mixed > 0.08
+
+
+def test_content_box_keeps_any_client_aspect() -> None:
+    from loop.fixtures.sts2 import content_box_for, geometry_error
 
     wide = Image.new("RGB", (1280, 720), (40, 20, 20))
     assert content_box_for(wide) == (0.0, 0.0, 1.0, 1.0)
     assert geometry_error(wide) is None
     tall = Image.new("RGB", (1278, 1360), (40, 20, 20))
-    box = content_box_for(tall)
-    assert box[0] == 0.0 and box[2] == 1.0
-    assert 0.20 < box[1] < 0.28
-    assert 0.72 < box[3] < 0.80
-    _, y = map_content_xy(0.5, 1.0, box)
-    assert abs(y - box[3]) < 1e-6
+    assert content_box_for(tall) == (0.0, 0.0, 1.0, 1.0)
+    assert geometry_error(tall) is None
     cropped = Sts2Fixture(controller=None).observe_image(tall)
-    assert abs(cropped.size[0] / cropped.size[1] - 16 / 9) < 0.02
-    assert geometry_error(tall) is not None
-    assert "16:9" in geometry_error(tall)
+    assert cropped.size == (1278, 1360)
     fx = Sts2Fixture(controller=None)
-    try:
-        fx.check_geometry(tall)
-        raise AssertionError("expected RuntimeError")
-    except RuntimeError as exc:
-        assert "16:9" in str(exc)
+    fx.check_geometry(tall)
     fx.check_geometry(wide)
-    fitted = fit_aspect_box(1278, 1360)
-    assert fitted == box
+    ultrawide = Image.new("RGB", (2560, 1080), (40, 20, 20))
+    assert content_box_for(ultrawide) == (0.0, 0.0, 1.0, 1.0)
+    four_three = Image.new("RGB", (1024, 768), (40, 20, 20))
+    assert content_box_for(four_three) == (0.0, 0.0, 1.0, 1.0)
+    sixteen_ten = Image.new("RGB", (1920, 1200), (40, 20, 20))
+    assert content_box_for(sixteen_ten) == (0.0, 0.0, 1.0, 1.0)
+    tiny = Image.new("RGB", (4, 4), (40, 20, 20))
+    assert geometry_error(tiny) is not None
 
 
 def test_point_click_remaps_through_letterbox() -> None:

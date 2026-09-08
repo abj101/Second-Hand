@@ -32,6 +32,7 @@ def _raw_probe(image: Image.Image) -> SimpleNamespace:
         frames=(image, image),
         deltas=(0.1, 0.0),
         elapsed_ms=120.0,
+        raw_frame=image,
     )
 
 
@@ -112,6 +113,7 @@ def test_rescan_scene_applies_perceive_pipeline(monkeypatch) -> None:
     loop._aim = None
     loop._perception_cache = PerceptionCache()
     loop._perceive_gw = lambda: object()
+    loop.fixture = SimpleNamespace(obs_longest_side=64)
     desc = SceneDescription(screen="tutorial", controls=[{"label": "Got it", "role": "button"}])
     applied: list[SceneDescription] = []
 
@@ -926,7 +928,7 @@ def test_immediate_direct_energy_resolution_beats_card_lift_requirement() -> Non
     assert agent._auto_target_effect_verified(card)
 
 
-def _v2_card_agent(monkeypatch, tmp_path, marks, *, energy=3, architecture="two_stage"):
+def _v2_card_agent(monkeypatch, tmp_path, marks, *, energy=3, architecture="two_stage", hover_ok=True):
     from loop.agent.loop import CollectAgent, CollectConfig
     from loop.fixtures.sts2 import Sts2Fixture
     from loop.memory.screen_objects import ScreenObjectStore
@@ -963,8 +965,12 @@ def _v2_card_agent(monkeypatch, tmp_path, marks, *, energy=3, architecture="two_
     loop._last_decision_schema = "v2"
     loop._planned_hand_signature = None
     loop._stale_source_plan = None
+    loop._blocked_sources = {}
+    loop._blocked_hand_signature = None
     loop.session_id = "r"
     loop._step_id = 1
+    if hover_ok:
+        monkeypatch.setattr(loop, "_source_roi_changed", lambda *_a, **_k: True)
     return loop, store, controller, image, plan_card_by_id
 
 
@@ -1096,14 +1102,67 @@ def test_source_unconfirmed_blocks_identical_immediate_retry(monkeypatch, tmp_pa
     target = store.by_object_id("enemy_1")
     action = _play_action(source, target)
     first = loop._execute_card_transaction(action, prev_metrics={"screen": "combat"}, tag="t1")
-    assert len(controller.prims) == 1
+    assert len(controller.prims) == 2
     assert first.transaction.outcome == "source_unconfirmed"
     assert "source-snapshot-invalidated" in first.transaction.verification_evidence
     assert loop._force_perceive is True
+    from loop.mcp.tools.targeting import invalidate_hand_snapshot, plan_card_by_id as plan_again
+
+    invalidate_hand_snapshot(store, reason="source-unconfirmed")
+    replayed = plan_again(store, card_id="card_1", target_id="enemy_1", entity_targets_ok=True)
+    loop._last_execution_plan = replayed["transaction"]
     second = loop._execute_card_transaction(action, prev_metrics={"screen": "combat"}, tag="t1")
-    assert len(controller.prims) == 1
+    assert len(controller.prims) == 2
     assert second.transaction.outcome == "stale"
     assert "blocked-same-coordinate-retry" in second.transaction.verification_evidence
+    store.close()
+
+
+def test_hover_no_lift_does_not_click(monkeypatch, tmp_path) -> None:
+    marks = (
+        AimMark(id=3, x=0.40, y=0.85, x0=0.30, y0=0.80, x1=0.50, y1=0.90, label="Strike", role="card"),
+        AimMark(id=7, x=0.55, y=0.63, x0=0.48, y0=0.56, x1=0.62, y1=0.70, label="Cultist", role="enemy"),
+    )
+    loop, store, controller, image, plan_card_by_id = _v2_card_agent(
+        monkeypatch, tmp_path, marks, hover_ok=False
+    )
+    planned = plan_card_by_id(store, card_id="card_1", target_id="enemy_1", entity_targets_ok=True)
+    loop._last_execution_plan = planned["transaction"]
+    loop._planned_hand_signature = loop._hand_inventory_signature()
+    monkeypatch.setattr(loop, "_sample_card_post_click", lambda *_a, **_k: _raw_probe(image))
+    source = store.by_object_id("card_1")
+    target = store.by_object_id("enemy_1")
+    result = loop._execute_card_transaction(
+        _play_action(source, target),
+        prev_metrics={"screen": "combat"},
+        tag="t1",
+    )
+    assert len(controller.prims) == 1
+    assert getattr(controller.prims[0], "op", None) == "move"
+    assert result.transaction.outcome == "source_unconfirmed"
+    assert str(result.error or "").startswith("source-unconfirmed:hover:")
+    store.close()
+
+
+def test_off_hand_source_mark_rejected_before_click(monkeypatch, tmp_path) -> None:
+    marks = (
+        AimMark(id=1, x=0.085, y=0.79, x0=0.04, y0=0.73, x1=0.13, y1=0.84, label="Strike", role="card"),
+        AimMark(id=7, x=0.55, y=0.63, x0=0.48, y0=0.56, x1=0.62, y1=0.70, label="Cultist", role="enemy"),
+    )
+    loop, store, controller, _image, plan_card_by_id = _v2_card_agent(monkeypatch, tmp_path, marks)
+    planned = plan_card_by_id(store, card_id="card_1", target_id="enemy_1", entity_targets_ok=True)
+    loop._last_execution_plan = planned["transaction"]
+    loop._planned_hand_signature = loop._hand_inventory_signature()
+    source = store.by_object_id("card_1")
+    target = store.by_object_id("enemy_1")
+    result = loop._execute_card_transaction(
+        _play_action(source, target),
+        prev_metrics={"screen": "combat"},
+        tag="t1",
+    )
+    assert controller.prims == []
+    assert result.error == "source-not-found"
+    assert any(item.startswith("off-hand-source-mark:") for item in result.transaction.verification_evidence)
     store.close()
 
 
@@ -1152,9 +1211,9 @@ def test_selected_card_resolves_target_from_post_selection_inventory(monkeypatch
         prev_metrics={"screen": "combat"},
         tag="t1",
     )
-    assert len(controller.prims) == 2
-    assert [row.phase for row in result.primitives] == ["card", "target"]
-    assert result.primitives[1].x == 0.70
+    assert len(controller.prims) == 3
+    assert [row.phase for row in result.primitives] == ["card", "card", "target"]
+    assert result.primitives[2].x == 0.70
     assert result.action.target == 21
     assert reacquire_calls == ["enemy_1"]
     assert "post-selection-target:enemy_1" in result.transaction.verification_evidence
@@ -1231,7 +1290,7 @@ def test_missing_stable_target_never_clicks_stale_target(monkeypatch, tmp_path) 
         prev_metrics={"screen": "combat"},
         tag="t1",
     )
-    assert [row.phase for row in result.primitives] == ["card"]
+    assert [row.phase for row in result.primitives] == ["card", "card"]
     assert result.transaction.outcome == "target_not_found"
     assert result.transaction.target_dispatched is False
     assert "missing-stable-target" in result.transaction.verification_evidence
@@ -1273,7 +1332,7 @@ def test_hp_only_post_selection_fails_closed(monkeypatch, tmp_path) -> None:
         prev_metrics={"screen": "combat"},
         tag="t1",
     )
-    assert [row.phase for row in result.primitives] == ["card"]
+    assert [row.phase for row in result.primitives] == ["card", "card"]
     assert result.transaction.outcome == "target_not_found"
     assert result.transaction.target_dispatched is False
     store.close()
@@ -1317,7 +1376,7 @@ def test_planned_hp_plate_coords_are_not_clicked(monkeypatch, tmp_path) -> None:
         prev_metrics={"screen": "combat"},
         tag="t1",
     )
-    assert [row.phase for row in result.primitives] == ["card"]
+    assert [row.phase for row in result.primitives] == ["card", "card"]
     assert result.transaction.outcome == "target_not_found"
     store.close()
 
