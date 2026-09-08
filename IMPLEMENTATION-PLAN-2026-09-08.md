@@ -4,6 +4,8 @@
 
 Produce a reproducible checkpoint, close the target-poisoning and false-deduplication bugs, restore a one-command offline health check, and complete two clean live STS2 validations before enabling training export or `skill_on`.
 
+**Execution status:** Phases 0–4 completed at checkpoint `637cae4`. Clean-worktree validation passed (968 tests, 5 expected skips). Next gate is controlled live Run B, followed unchanged by Run C if clean.
+
 Estimated elapsed engineering effort: **2–4 working days**, excluding model downloads. Most bounded work is assigned to `gpt-5.6-luna`; the primary agent retains cross-module decisions, integration, and live-system authority.
 
 ## Non-negotiable invariants
