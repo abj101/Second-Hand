@@ -120,3 +120,38 @@ Product: HP/body column stack in `same_sprite_cluster`; `_blocked_targets` drop 
 `tests/loop`: **829 passed**.
 
 Operator: fresh Ironclad, first combat, first player turn (80/80, 3 energy, 5 cards). Same collect + monitor. Pass = fight won, TNF=0, `source-unconfirmed < 3`, no `decision_softlock`, loot on first stable reward. Dual `enemy_1`+`enemy_2` still publishing → stop and report.
+
+### Batch 6 live B result
+
+| Run | Start | Dir | Steps | Combat won | `source-unconfirmed` | `decision_softlock` | TNF | Dual snapshot | Pass |
+|---|---|---|---|---|---|---|---|---|---|
+| B6-B combat-start | first combat 80/80 3 energy | `runs/20260908T194352Z_sts2_collect` | 18 | reached loot, no clean exit | **0** | **1** (reward) | **1** `enemy_2` (step 6) | **6 steps** (2, 3, 4, 6, 10, 11) | **fail** — dual leak + reward stall |
+| B6-C combat-start | not started | — | — | — | — | — | — | — | pending |
+
+Audit flags: `decision_softlock`, `no_pixel_change`, `step_budget_timeout`. Terminal `timeout`.
+
+Held: `source-unconfirmed=0` (Batch 5 gate still good), zero `object:N` / `mark_N`.
+
+Failed:
+
+- **Dual snapshot still published.** Step 2 `enemy_1` Nibbit hp=38 + `enemy_2` Nibbit hp=38; step 3 both hp=32; step 4 both hp=26; step 6 hp=18 + hp=1 → `target-not-found:enemy_2`; step 11 `enemy_1` Nibbit hp=2 + `enemy_3` unknown enemy hp=1. Entity merge showed a single Nibbit bbox on the same steps. Batch 6's `hp_body_column_stack` was only reachable above `SEPARATED_SPRITE_CENTER`, and these pairs sat at centre distance 0.15–0.23 — a dead band with no stack test at all. Step 3 did reach it but had `|dx| = 0.139 > SAME_SPRITE_COLUMN`. Step 7 confirmed the TNF block works, but only *after* the leak.
+- **Reward stall.** 12 `inventory-inconsistent` (combat→reward) → 13 click `add_a_card_to_your_deck` (pixel yes) → 14 empty surface → 15 `skip` (pixel yes) → 16 click `12_gold` (pixel **no**) → 17 empty surface → 18 `empty-action-surface` → `decision_softlock` → budget timeout. Batch 6's control replan (6c) is only reachable when `legal_intents` is non-empty, so an *empty* loot surface skipped it entirely and went straight to the unconditional soft-lock.
+
+Run preserved; nothing copied into fixtures.
+
+## Batch 7 (dual collapse + loot recovery) — code landed, live pending
+
+Product: `vertical_sprite_stack` plus stack tests in the 0.12–0.25 band (opt-in via
+`stacked_duplicates`, publish path only); `collapse_duplicate_named_targets` as a
+snapshot-level last defense; `_merge_published_target` keeps the executable id and the
+resolved identity; `_recover_loot_surface` rescans a stalled `reward` / `map` screen
+instead of soft-locking, bounded by `LOOT_SURFACE_RECOVERY_LIMIT`.
+
+`SEPARATED_SPRITE_CENTER`, `SAME_SPRITE_COLUMN`, prompts, `skill_on`, window-size
+handling and `resolve_planned_target` aliasing are unchanged.
+
+`tests/loop`: **838 passed**.
+
+Operator: **do not start live B until the parent says so.** Pass = fight won, TNF=0, zero
+dual `enemy_*` rows, `source-unconfirmed < 3`, no `decision_softlock`, loot handled to a
+clean map transition.

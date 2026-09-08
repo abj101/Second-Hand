@@ -1,0 +1,25 @@
+{
+  "source_run": "20260905T192723Z_sts2_collect",
+  "source_step": 3,
+  "screen": "select",
+  "activity": "select",
+  "layout": "modal_dialog",
+  "blocking_overlay": true,
+  "marks": [
+    {
+      "id": 7,
+      "label": "Yes",
+      "role": "",
+      "bbox": [0.48, 0.80, 0.60, 0.91],
+      "source": "ocr",
+      "confidence": 0.9
+    }
+  ],
+  "scene_controls": [
+    {"label": "Yes", "role": "button", "confidence": "high"},
+    {"label": "No", "role": "button", "confidence": "high"}
+  ],
+  "must_include": ["Yes", "No"],
+  "must_not_include": ["End Turn"],
+  "must_dispatch_one_of": ["Yes", "No"]
+}

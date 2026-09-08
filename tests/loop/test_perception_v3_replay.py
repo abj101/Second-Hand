@@ -87,7 +87,7 @@ def _agent_for_combat(tmp_path: Path, marks: list[AimMark], host: dict) -> Colle
     agent._pending_exec_error = None
     agent._blocked_sources = {}
     agent._blocked_hand_signature = None
-    agent._blocked_targets = set()
+    agent._blocked_targets = {}
     agent._blocked_target_host_count = None
     agent._blocked_controls = set()
     agent._blocked_controls_screen = ""
@@ -764,5 +764,140 @@ def test_b5b_step1_hp_body_marks_publish_one_target(tmp_path: Path) -> None:
         from loop.agent.decision import legal_intents_for_snapshot
         legal = legal_intents_for_snapshot(snapshot2)
         assert agent._replan_after_tnf(snapshot2, legal) is True
+    finally:
+        agent._screen_objects.close()
+
+
+def _dual_sprite_agent(
+    tmp_path: Path,
+    upper: tuple[float, float],
+    lower: tuple[float, float],
+    *,
+    upper_label: str = "Nibbit",
+    lower_label: str = "Nibbit",
+) -> tuple[CollectAgent, SimpleNamespace]:
+    """Two enemy marks stacked in one column, host enemy count omitted."""
+
+    def _box(center: tuple[float, float]) -> list[float]:
+        cx, cy = center
+        return [cx - 0.06, cy - 0.05, cx + 0.06, cy + 0.05]
+
+    marks = [
+        _mark_from_row({
+            "id": 3, "label": "Strike", "role": "card",
+            "x": 0.312, "y": 0.95, "bbox": [0.25, 0.85, 0.38, 1.0],
+        }),
+        _mark_from_row({
+            "id": 6, "label": upper_label, "role": "enemy",
+            "x": upper[0], "y": upper[1], "bbox": _box(upper),
+        }),
+        _mark_from_row({
+            "id": 7, "label": lower_label, "role": "enemy",
+            "x": lower[0], "y": lower[1], "bbox": _box(lower),
+        }),
+        _mark_from_row({
+            "id": 10, "label": "End Turn", "role": "button",
+            "x": 0.89, "y": 0.82, "bbox": [0.82, 0.78, 0.96, 0.88],
+        }),
+    ]
+    agent = _agent_for_combat(tmp_path, marks, {"screen": "combat", "activity": "combat"})
+    scene = _combat_scene(
+        enemies=[{"label": upper_label, "role": "enemy", "confidence": "high"}],
+        hand_cards=[{"label": "Strike", "role": "card"}],
+        controls=[{"label": "End Turn", "role": "button"}],
+    )
+    return agent, scene
+
+
+def test_b6b_step2_dual_nibbit_dead_band_publishes_one(tmp_path: Path) -> None:
+    """20260908T194352Z step 2: two Nibbit rows 0.19 apart, host enemies omitted.
+
+    Batch 6 only ran a stack test above SEPARATED_SPRITE_CENTER, so this pair fell
+    through the 0.12-0.25 dead band and published enemy_1 plus enemy_2.
+    """
+    upper, lower = (0.639, 0.289), (0.748, 0.447)
+    dist = ((upper[0] - lower[0]) ** 2 + (upper[1] - lower[1]) ** 2) ** 0.5
+    assert 0.12 < dist < 0.25, dist
+    agent, scene = _dual_sprite_agent(tmp_path, upper, lower)
+    try:
+        assert agent._finalize_action_surface(scene) is not None
+        snapshot = agent._build_turn_snapshot(scene)
+        assert [t.target_id for t in snapshot.targets] == ["enemy_1"], [
+            t.target_id for t in snapshot.targets
+        ]
+    finally:
+        agent._screen_objects.close()
+
+
+def test_b6b_step10_dual_nibbit_same_column_publishes_one(tmp_path: Path) -> None:
+    """20260908T194352Z step 10: same column, still inside the dead band."""
+    upper, lower = (0.494, 0.353), (0.488, 0.500)
+    agent, scene = _dual_sprite_agent(tmp_path, upper, lower)
+    try:
+        assert agent._finalize_action_surface(scene) is not None
+        snapshot = agent._build_turn_snapshot(scene)
+        assert [t.target_id for t in snapshot.targets] == ["enemy_1"], [
+            t.target_id for t in snapshot.targets
+        ]
+    finally:
+        agent._screen_objects.close()
+
+
+def test_b6b_step6_split_hp_dual_never_publishes_enemy_2(tmp_path: Path) -> None:
+    """20260908T194352Z step 6 shape: the dual that produced target-not-found:enemy_2.
+
+    ACT must never see enemy_2, so the TNF block is not what saves the turn.
+    """
+    from loop.agent.decision import (
+        ActionIntentError,
+        PlayCardIntent,
+        validate_action_intent,
+    )
+
+    agent, scene = _dual_sprite_agent(tmp_path, (0.749, 0.347), (0.745, 0.622))
+    try:
+        assert agent._finalize_action_surface(scene) is not None
+        snapshot = agent._build_turn_snapshot(scene)
+        assert [t.target_id for t in snapshot.targets] == ["enemy_1"]
+        # Nothing was blocked: the collapse alone kept enemy_2 off the surface.
+        assert not agent._blocked_targets
+        with pytest.raises(ActionIntentError, match="unknown-target-id"):
+            validate_action_intent(
+                snapshot,
+                PlayCardIntent(card_id="card_1", target_id="enemy_2"),
+            )
+    finally:
+        agent._screen_objects.close()
+
+
+def test_b6b_step11_named_body_absorbs_anonymous_plate(tmp_path: Path) -> None:
+    """20260908T194352Z step 11: Nibbit body plus an unidentified plate above it."""
+    agent, scene = _dual_sprite_agent(
+        tmp_path,
+        (0.773, 0.414),
+        (0.795, 0.647),
+        upper_label="unknown enemy",
+        lower_label="Nibbit",
+    )
+    try:
+        assert agent._finalize_action_surface(scene) is not None
+        snapshot = agent._build_turn_snapshot(scene)
+        assert [t.target_id for t in snapshot.targets] == ["enemy_1"], [
+            t.target_id for t in snapshot.targets
+        ]
+        assert snapshot.targets[0].name == "Nibbit"
+    finally:
+        agent._screen_objects.close()
+
+
+def test_stacked_duplicate_collapse_keeps_side_by_side_same_name(tmp_path: Path) -> None:
+    """Two Nibbits standing side by side are two hostiles, not one tall sprite."""
+    agent, scene = _dual_sprite_agent(tmp_path, (0.45, 0.58), (0.80, 0.58))
+    try:
+        assert agent._finalize_action_surface(scene) is not None
+        snapshot = agent._build_turn_snapshot(scene)
+        assert {t.target_id for t in snapshot.targets} == {"enemy_1", "enemy_2"}, [
+            t.target_id for t in snapshot.targets
+        ]
     finally:
         agent._screen_objects.close()

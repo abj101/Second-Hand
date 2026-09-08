@@ -1,0 +1,9 @@
+Join equal numbers on a 4x4 grid. Arrow keys move every tile as far as it can go
+in that direction. When two tiles with the same value collide they merge into one
+tile with double the value. A new 2 (usually) or 4 (rarely) appears after each move.
+The advertised goal is creating a 2048 tile. The game ends when no legal swipe remains.
+You see only the screen; score is shown above the board.
+
+Keep the highest tile in one corner (prefer bottom-left). Prefer Down, then Left,
+so new tiles spawn on the opposite edge. Never repeat a swipe that just no-op'd.
+A legal swipe always moves at least one tile.

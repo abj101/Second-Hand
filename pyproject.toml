@@ -1,0 +1,72 @@
+[project]
+name = "avatar-harness"
+version = "0.1.0"
+description = "Screen-and-keys VLM harness: Phase 1 planner (L0–L4) plus Phase 2 Game Sense Modules (DINO/RL)."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "playwright>=1.49.0",
+    "mss>=9.0.1",
+    "vgamepad>=0.1.0",
+    "pillow>=10.4.0",
+    "openai>=1.55.0",
+    "pyyaml>=6.0.2",
+    "pydantic>=2.10.0",
+    "python-dotenv>=1.0.1",
+    "httpx>=0.27.0",
+    "matplotlib>=3.9.0",
+    "pytest>=8.3.0",
+    "numpy>=1.26.0",
+    "pytesseract>=0.3.13",
+    "rapidocr>=3.0.0",
+    "onnxruntime>=1.17.0",
+    "mcp>=1.0.0",
+    "ultralytics>=8.3.0",
+    "huggingface_hub>=0.23.0",
+    # Grounding DINO is a required production sensor.  Do not make a live
+    # collect silently downgrade to OCR/CV-only when this stack is absent.
+    "torch",
+    "transformers>=4.40.0",
+    "timm>=1.0.0",
+]
+
+[project.scripts]
+avatar-phase1 = "avatar.experiments.runbook:main"
+avatar-see = "avatar.experiments.see:main"
+avatar-understand = "avatar.experiments.understand:main"
+avatar-act = "avatar.experiments.act:main"
+avatar-tetris = "avatar.experiments.tetris_act:main"
+avatar-commercial = "avatar.experiments.commercial:main"
+avatar-analyze = "avatar.experiments.analyze:main"
+avatar-demo = "avatar.experiments.demo:main"
+avatar-quant = "avatar.experiments.quant_matrix:main"
+avatar-loop = "loop.__main__:main"
+
+[project.optional-dependencies]
+gsm = [
+    "gymnasium>=0.29.0",
+]
+gui = [
+    # Retained as a compatibility extra; YOLO is part of the core install above.
+    "ultralytics>=8.3.0",
+    "huggingface_hub>=0.23.0",
+]
+ocr = [
+    "rapidocr>=3.0.0",
+    "onnxruntime>=1.17.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["avatar*", "loop*"]
+
+[tool.setuptools.package-data]
+loop = [
+    "fixtures/*.yaml",
+    "fixtures/elden_hud/*.png",
+    "fixtures/elden_hud/*.jsonl",
+    "fixtures/elden_hud/labeled/*.png",
+]
+
+[tool.pytest.ini_options]
+addopts = ["--import-mode=importlib"]
+testpaths = ["tests"]

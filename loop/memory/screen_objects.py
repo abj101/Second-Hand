@@ -16,6 +16,12 @@ SAME_SPRITE_CENTER = 0.12
 SEPARATED_SPRITE_CENTER = 0.25
 # Live STS2 HP/intent (y≈0.35) stacked over the body (y≈0.62) is ~0.27 apart.
 SAME_SPRITE_COLUMN = 0.08
+# Vertical stack of one sprite's rows. Live 20260908T194352Z put the two halves
+# of a single Nibbit 0.11 apart in x, which the 0.08 column test rejected.
+STACK_COLUMN = 0.14
+# Same name and same hp is strong enough evidence to tolerate a wider column.
+STACK_COLUMN_NAMED = 0.20
+STACK_MAX_DIST = 0.45
 
 _T = TypeVar("_T")
 
@@ -81,20 +87,106 @@ def hp_body_column_stack(a: Any, b: Any) -> bool:
     )
 
 
-def same_sprite_cluster(a: Any, b: Any, *, host_enemies: int | None = None) -> bool:
+def sprite_name(item: Any) -> str:
+    """Normalized display name of a target row or aim mark."""
+    for attr in ("name", "label"):
+        raw = getattr(item, attr, None)
+        if raw:
+            return " ".join(str(raw).lower().replace("_", " ").split())
+    return ""
+
+
+def _sprite_hp(item: Any) -> int | None:
+    hp = getattr(item, "hp", None)
+    if isinstance(hp, bool) or not isinstance(hp, (int, float)):
+        return None
+    return int(hp)
+
+
+def _anonymous_sprite(name: str) -> bool:
+    from loop.agent.entities import is_anonymous_enemy_label
+
+    return not name or is_anonymous_enemy_label(name)
+
+
+def _columns_overlap(a: Any, b: Any) -> bool:
+    ax0, _, ax1, _ = _as_xyxy(a)
+    bx0, _, bx1, _ = _as_xyxy(b)
+    return min(ax1, bx1) - max(ax0, bx0) > 0.0
+
+
+def vertical_sprite_stack(a: Any, b: Any) -> bool:
+    """True when two rows are stacked halves of one sprite.
+
+    Generalizes ``hp_body_column_stack``: the y-band split it relied on does not
+    hold live (both halves of a Nibbit landed inside the HP band at
+    20260908T194352Z step 2). What does hold is that one sprite's rows share a
+    column and separate mostly vertically, while two hostiles sit side by side.
+    """
+    a_name, b_name = sprite_name(a), sprite_name(b)
+    a_anon, b_anon = _anonymous_sprite(a_name), _anonymous_sprite(b_name)
+    if not a_anon and not b_anon and a_name != b_name:
+        # Two differently named hostiles are never one sprite.
+        return False
+    ax, ay = _item_center(a)
+    bx, by = _item_center(b)
+    dx, dy = abs(ax - bx), abs(ay - by)
+    if dy <= dx:
+        # Side by side, not stacked.
+        return False
+    a_hp = _sprite_hp(a)
+    same_named = not a_anon and not b_anon and a_name == b_name
+    same_hp = a_hp is not None and a_hp == _sprite_hp(b)
+    column = STACK_COLUMN_NAMED if (same_named and same_hp) else STACK_COLUMN
+    if dx > column and not _columns_overlap(a, b):
+        return False
+    return (dx * dx + dy * dy) ** 0.5 <= STACK_MAX_DIST
+
+
+def same_sprite_cluster(
+    a: Any,
+    b: Any,
+    *,
+    host_enemies: int | None = None,
+    stacked_duplicates: bool = False,
+) -> bool:
     """True when two boxes are the same visible sprite (IoU≥0.20 or center≤0.12).
 
-    Centers ≥0.25 apart stay distinct unless host reports exactly one enemy,
-    or the pair is a vertical HP/body stack in the same column.
+    Centers ≥0.25 apart stay distinct unless the pair is a vertical HP/body
+    stack in the same column.  Host count is deliberately not evidence that
+    two arbitrary detections are one sprite: it is only a floor on the final
+    inventory in ``collapse_same_sprite_cluster``.
+
+    ``stacked_duplicates`` adds ``vertical_sprite_stack`` and extends both stack
+    tests into the 0.12–0.25 band. It is opt-in because frame-mark preparation
+    still wants the HP plate to survive as its own untargetable object; only the
+    published target list must be one row per sprite.
     """
+    a_name, b_name = sprite_name(a), sprite_name(b)
+    if (
+        not _anonymous_sprite(a_name)
+        and not _anonymous_sprite(b_name)
+        and a_name != b_name
+    ):
+        # Geometry alone cannot prove that two distinct, identified hostiles
+        # are duplicate detections.  Keep both rows even when their boxes are
+        # close or overlap; anonymous HP/intent rows may still merge with a
+        # named body through the normal geometry checks below.
+        return False
     dist = bbox_center_distance(a, b)
-    if dist >= SEPARATED_SPRITE_CENTER:
-        if host_enemies == 1:
+
+    def stacked() -> bool:
+        if hp_body_column_stack(a, b):
             return True
-        return hp_body_column_stack(a, b)
+        return stacked_duplicates and vertical_sprite_stack(a, b)
+
+    if dist >= SEPARATED_SPRITE_CENTER:
+        return stacked()
     if _bbox_iou(a, b) >= SAME_SPRITE_IOU:
         return True
-    return dist <= SAME_SPRITE_CENTER
+    if dist <= SAME_SPRITE_CENTER:
+        return True
+    return stacked_duplicates and stacked()
 
 
 def _context_host_enemy_count(context: Any | None) -> int | None:
@@ -121,8 +213,14 @@ def collapse_same_sprite_cluster(
     is_candidate: Callable[[_T], bool],
     prefer: Callable[[_T, _T], _T],
     host_enemies: int | None = None,
+    stacked_duplicates: bool = False,
 ) -> list[_T]:
-    """Greedy 2e collapse. Host enemies==1 caps remaining candidates to one."""
+    """Greedily collapse geometrically proven duplicates.
+
+    A host count is a lower bound on the resulting candidate inventory, never
+    a reason to merge otherwise distinct rows.
+    """
+    original = list(items)
     kept: list[_T] = []
     for item in items:
         if not is_candidate(item):
@@ -133,7 +231,12 @@ def collapse_same_sprite_cluster(
                 index
                 for index, other in enumerate(kept)
                 if is_candidate(other)
-                and same_sprite_cluster(item, other, host_enemies=host_enemies)
+                and same_sprite_cluster(
+                    item,
+                    other,
+                    host_enemies=host_enemies,
+                    stacked_duplicates=stacked_duplicates,
+                )
             ),
             None,
         )
@@ -141,25 +244,48 @@ def collapse_same_sprite_cluster(
             kept[dup_idx] = prefer(kept[dup_idx], item)
             continue
         kept.append(item)
-    if host_enemies != 1:
-        return kept
-    idxs = [index for index, item in enumerate(kept) if is_candidate(item)]
-    if len(idxs) <= 1:
-        return kept
-    winner = kept[idxs[0]]
-    for index in idxs[1:]:
-        winner = prefer(winner, kept[index])
-    out: list[_T] = []
-    placed = False
-    drop = set(idxs)
-    for index, item in enumerate(kept):
-        if index not in drop:
-            out.append(item)
+    if host_enemies is not None:
+        remaining = sum(1 for item in kept if is_candidate(item))
+        if remaining < host_enemies:
+            return original
+    return kept
+
+
+def collapse_duplicate_named_targets(
+    items: Sequence[_T],
+    *,
+    prefer: Callable[[_T, _T], _T],
+    host_enemies: int | None = None,
+) -> list[_T]:
+    """Last defense before publish, requiring name *and* sprite geometry.
+
+    A shared name is corroborating metadata, not a merge key.  This pass keeps
+    its historical API but uses the same strict geometry predicate as the main
+    collapse pass.
+    """
+    original = list(items)
+    kept: list[_T] = []
+    for item in items:
+        name = sprite_name(item)
+        if _anonymous_sprite(name):
+            kept.append(item)
             continue
-        if not placed:
-            out.append(winner)
-            placed = True
-    return out
+        dup_idx = next(
+            (
+                index
+                for index, other in enumerate(kept)
+                if sprite_name(other) == name
+                and same_sprite_cluster(item, other, stacked_duplicates=True)
+            ),
+            None,
+        )
+        if dup_idx is None:
+            kept.append(item)
+            continue
+        kept[dup_idx] = prefer(kept[dup_idx], item)
+    if host_enemies is not None and len(kept) < host_enemies:
+        return original
+    return kept
 
 
 def _is_mark_object_id(object_id: str) -> bool:

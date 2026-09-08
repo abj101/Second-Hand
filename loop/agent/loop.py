@@ -5,7 +5,7 @@ import json
 import random
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Literal, Sequence
 
@@ -133,7 +133,11 @@ from loop.memory.journal import (
 from loop.memory.lexicon import screen_from_labels
 from loop.memory.overlay_state import ControlSuppressionState, OverlayState
 from loop.memory.notebook import Notebook, avoid_devices, listing_has_dialog, overlay_screen
-from loop.memory.screen_objects import ScreenObjectStore, collapse_same_sprite_cluster
+from loop.memory.screen_objects import (
+    ScreenObjectStore,
+    collapse_duplicate_named_targets,
+    collapse_same_sprite_cluster,
+)
 from loop.memory.skills import Skill, SkillBank
 from loop.memory.store import MemoryStore
 from loop.memory.semantic import SemanticMemoryStore
@@ -321,6 +325,11 @@ def _one_line(text: str, limit: int = 280) -> str:
 
 _MAX_REASON_USER_CHARS = 6000
 _MAX_REASON_JOURNAL_CHARS = 3200
+
+# Screens where an empty action surface means "perception stalled", not "no legal
+# move": loot and map screens always have something clickable on them.
+LOOT_SCREENS = frozenset({"map", "reward"})
+LOOT_SURFACE_RECOVERY_LIMIT = 4
 
 
 def _bounded_reason_journal(parts: list[str]) -> str:
@@ -633,7 +642,7 @@ class CollectAgent:
         self._stale_source_plan: tuple[Any, ...] | None = None
         self._blocked_sources: dict[tuple[str, float | None, float | None], int] = {}
         self._blocked_hand_signature: tuple[Any, ...] | None = None
-        self._blocked_targets: set[str] = set()
+        self._blocked_targets: dict[str, str] = {}
         self._blocked_target_host_count: int | None = None
         self._blocked_controls: set[str] = set()
         self._blocked_controls_screen: str = ""
@@ -671,6 +680,8 @@ class CollectAgent:
         self._empty_action_surface_key: str = ""
         self._empty_action_surface_count: int = 0
         self._snapshot_dropped_noncanonical: int = 0
+        self._loot_surface_recoveries: int = 0
+        self._loot_surface_screen: str = ""
         self._decision_softlock: bool = False
         self._last_frame_mad: float = 0.0
         self._turn_transition: bool = False
@@ -754,7 +765,7 @@ class CollectAgent:
         self._stale_source_plan = None
         self._blocked_sources = {}
         self._blocked_hand_signature = None
-        self._blocked_targets = set()
+        self._blocked_targets = {}
         self._blocked_target_host_count = None
         self._blocked_controls = set()
         self._blocked_controls_screen = ""
@@ -1758,32 +1769,65 @@ class CollectAgent:
         oid, x, y = self._source_block_coords(plan, card)
         return self._source_is_blocked(oid, x, y)
 
-    def _prune_blocked_targets(self) -> None:
+    def _target_block_snapshot_id(self) -> str:
+        surface = getattr(self, "_action_surface", None)
+        if surface is not None and getattr(surface, "snapshot_id", None):
+            return str(surface.snapshot_id)
+        store = getattr(self, "_screen_objects", None)
+        if store is not None:
+            return str(current_snapshot_identity(store).get("snapshot_id") or "")
+        return str(getattr(self, "_last_snapshot_id", "") or "")
+
+    def _clear_blocked_targets(self, reason: str) -> None:
+        if getattr(self, "_blocked_targets", None):
+            _say(f"  target quarantine cleared reason={reason}")
+        self._blocked_targets = {}
+        self._blocked_target_host_count = None
+
+    def _prune_blocked_targets(self, snapshot_id: str | None = None) -> None:
+        current_snapshot = str(snapshot_id or self._target_block_snapshot_id() or "")
+        blocked = getattr(self, "_blocked_targets", None) or {}
+        if isinstance(blocked, set):
+            # Compatibility for saved/replay harnesses from before quarantine
+            # was snapshot scoped.  Unknown provenance expires immediately.
+            self._clear_blocked_targets("legacy-unscoped")
+            return
+        if blocked and (
+            not current_snapshot or any(recorded != current_snapshot for recorded in blocked.values())
+        ):
+            self._clear_blocked_targets("fresh-snapshot")
+            return
         current = _host_enemy_count(getattr(self, "_host_stats", None) or {})
         prior = getattr(self, "_blocked_target_host_count", None)
         if prior is not None and current != prior:
-            self._blocked_targets = set()
-            self._blocked_target_host_count = None
+            self._clear_blocked_targets("host-enemy-count-changed")
 
-    def _record_blocked_target(self, target_id: str) -> None:
+    def _record_blocked_target(self, target_id: str, *, snapshot_id: str | None = None) -> None:
         oid = str(target_id or "").strip()
         if not oid or oid in {"target", "none"}:
             return
-        self._prune_blocked_targets()
+        blocked_snapshot = str(snapshot_id or self._target_block_snapshot_id() or "")
+        if not blocked_snapshot:
+            # An unidentifiable observation must not poison a later one.
+            self._clear_blocked_targets("missing-snapshot-identity")
+            return
+        self._prune_blocked_targets(blocked_snapshot)
         blocked = getattr(self, "_blocked_targets", None)
-        if blocked is None:
-            blocked = set()
+        if not isinstance(blocked, dict):
+            blocked = {}
             self._blocked_targets = blocked
-        blocked.add(oid)
+        blocked[oid] = blocked_snapshot
         if getattr(self, "_blocked_target_host_count", None) is None:
             self._blocked_target_host_count = _host_enemy_count(getattr(self, "_host_stats", None) or {})
 
-    def _target_is_blocked(self, target_id: str) -> bool:
-        self._prune_blocked_targets()
+    def _target_is_blocked(self, target_id: str, *, snapshot_id: str | None = None) -> bool:
+        current_snapshot = str(snapshot_id or self._target_block_snapshot_id() or "")
+        self._prune_blocked_targets(current_snapshot)
         oid = str(target_id or "").strip()
         if not oid:
             return False
-        return oid in (getattr(self, "_blocked_targets", None) or set())
+        blocked = getattr(self, "_blocked_targets", None) or {}
+        return isinstance(blocked, dict) and blocked.get(oid) == current_snapshot
 
     def _prune_blocked_controls(self) -> None:
         screen = self._current_surface_screen()
@@ -4434,6 +4478,40 @@ class CollectAgent:
             return challenger if chall_c > kept_c else kept
         return kept
 
+    @classmethod
+    def _merge_published_target(
+        cls,
+        kept: TargetSnapshot,
+        challenger: TargetSnapshot,
+    ) -> TargetSnapshot:
+        """Collapse two rows of one sprite, keeping the better id and the better name.
+
+        The executable id wins on ``enemy_1`` precedence, but an anonymous winner
+        still adopts the identity and stats of the row it absorbed: at
+        20260908T194352Z step 11 the unnamed HP plate sorted ahead of the named
+        Nibbit body, and publishing "unknown enemy" would have thrown away a
+        resolved identity.
+        """
+        winner = cls._prefer_published_target(kept, challenger)
+        loser = challenger if winner is kept else kept
+
+        def identified(row: TargetSnapshot) -> bool:
+            raw = str(row.name or "").strip()
+            if not raw:
+                return False
+            compact = " ".join(raw.lower().replace("_", " ").split())
+            return not compact.startswith("unknown") and not is_anonymous_enemy_label(raw)
+
+        updates: dict[str, Any] = {}
+        if not identified(winner) and identified(loser):
+            updates["name"] = loser.name
+            updates["identity_confidence"] = loser.identity_confidence
+        if winner.hp is None and loser.hp is not None:
+            updates["hp"] = loser.hp
+        if winner.intent is None and loser.intent is not None:
+            updates["intent"] = loser.intent
+        return replace(winner, **updates) if updates else winner
+
     def _build_turn_snapshot(self, scene_desc: Any) -> TurnSnapshot:
         """Freeze the current typed object inventory for one v2 ACT call."""
         from loop.mcp.tools.targeting import bind_snapshot_target_ids
@@ -4592,7 +4670,7 @@ class CollectAgent:
                     target_name = "unknown enemy"
                     if identity_confidence is None or identity_confidence >= 0.75:
                         identity_confidence = 0.35
-                if self._target_is_blocked(target_id):
+                if self._target_is_blocked(target_id, snapshot_id=snapshot_id):
                     continue
                 targets.append(TargetSnapshot(
                     target_id=target_id, bbox=bbox, name=target_name or None,
@@ -4623,7 +4701,13 @@ class CollectAgent:
         targets = collapse_same_sprite_cluster(
             targets,
             is_candidate=lambda _row: True,
-            prefer=self._prefer_published_target,
+            prefer=self._merge_published_target,
+            host_enemies=_host_enemy_count(self._host_stats),
+            stacked_duplicates=True,
+        )
+        targets = collapse_duplicate_named_targets(
+            targets,
+            prefer=self._merge_published_target,
             host_enemies=_host_enemy_count(self._host_stats),
         )
         turn = self._field_value(getattr(game_state, "turn", None)) if game_state is not None else None
@@ -4744,6 +4828,46 @@ class CollectAgent:
                 return True
         return False
 
+    def _recover_loot_surface(self, snapshot: TurnSnapshot, *, reason: str) -> bool:
+        """Rescan instead of soft-locking when a reward/map screen goes quiet.
+
+        A loot screen whose action surface came back empty is a perception stall,
+        not a genuine "no legal move": at 20260908T194352Z steps 14/17/18 the
+        reward screen still had Skip and the card reward on it while the surface
+        published nothing, and the unconditional soft-lock burned the step budget.
+        Bounded so a screen that really is dead still terminates the episode.
+        """
+        screen = self._surface_key(snapshot.screen) or self._current_surface_screen()
+        if screen not in LOOT_SCREENS:
+            return False
+        if screen != self._loot_surface_screen:
+            self._loot_surface_screen = screen
+            self._loot_surface_recoveries = 0
+        if self._loot_surface_recoveries >= LOOT_SURFACE_RECOVERY_LIMIT:
+            return False
+        self._loot_surface_recoveries += 1
+        # A no-op click blocked its own control id; on a stalled loot screen that
+        # id may be the only way forward, so hand the whole screen back.
+        self._blocked_controls = set()
+        self._blocked_controls_screen = ""
+        self._empty_action_surface_key = ""
+        self._empty_action_surface_count = 0
+        self._pending_exec_error = reason
+        self._force_perceive = True
+        self._pending_inventory_rescan = True
+        cache = getattr(self, "_perception_cache", None)
+        if cache is not None:
+            cache.reset()
+        gw = getattr(self, "perceive_gateway", None) or getattr(self, "gateway", None)
+        if getattr(self, "_last_obs_image", None) is not None and gw is not None:
+            try:
+                self._rescan_scene(focus=reason)
+                self._pending_inventory_rescan = False
+            except Exception:  # noqa: BLE001 — recovery must never abort collect
+                pass
+        _say(f"  loot      {screen} stall recovery {self._loot_surface_recoveries} ({reason})")
+        return True
+
     def _should_replan_unchanged_failure(
         self,
         snapshot: TurnSnapshot,
@@ -4816,13 +4940,18 @@ class CollectAgent:
                         pass
             else:
                 self._pending_exec_error = "empty-action-surface"
-                if self._empty_action_surface_count >= 2:
+                if self._empty_action_surface_count >= 2 and not self._recover_loot_surface(
+                    snapshot, reason="loot-surface-stall"
+                ):
                     self._decision_softlock = True
                     if "decision_softlock" not in self._session_flags:
                         self._session_flags.append("decision_softlock")
             return {}, 0.0
         self._empty_action_surface_key = ""
         self._empty_action_surface_count = 0
+        if not self._last_execution_failure:
+            # A clean step is real progress; the loot screen earns a fresh budget.
+            self._loot_surface_recoveries = 0
         if self._last_execution_failure and state_key == self._last_reason_state_key:
             self._unchanged_failure_count += 1
             if self._unchanged_failure_count >= 2:
@@ -4834,6 +4963,8 @@ class CollectAgent:
                         self._rescan_scene(focus=focus)
                     except Exception:
                         pass
+                elif self._recover_loot_surface(snapshot, reason="loot-control-stall"):
+                    self._unchanged_failure_count = 0
                 else:
                     self._pending_exec_error = "decision-softlock"
                     self._decision_softlock = True
@@ -6238,10 +6369,12 @@ class CollectAgent:
         self._action_surface = None
         self._empty_action_surface_key = ""
         self._empty_action_surface_count = 0
+        self._loot_surface_recoveries = 0
+        self._loot_surface_screen = ""
         self._decision_softlock = False
         self._blocked_sources = {}
         self._blocked_hand_signature = None
-        self._blocked_targets = set()
+        self._blocked_targets = {}
         self._blocked_target_host_count = None
         self._blocked_controls = set()
         self._blocked_controls_screen = ""

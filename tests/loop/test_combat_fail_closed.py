@@ -568,7 +568,7 @@ def test_blocked_target_dropped_from_snapshot(tmp_path) -> None:
     agent._reason_controls = []
     agent._v2_control_objects = {}
     agent._blocked_sources = {}
-    agent._blocked_targets = set()
+    agent._blocked_targets = {}
     agent._blocked_target_host_count = None
     agent._blocked_controls = set()
     agent._blocked_controls_screen = ""
@@ -593,5 +593,43 @@ def test_blocked_target_dropped_from_snapshot(tmp_path) -> None:
             "enemies": [{"label": "Nibbit"}, {"label": "Louse"}],
         }
         assert agent._target_is_blocked("enemy_2") is False
+    finally:
+        agent._screen_objects.close()
+
+
+def test_target_quarantine_expires_on_fresh_snapshot(tmp_path) -> None:
+    """A failed rebound blocks only a retry against its exact stale inventory."""
+    marks = (
+        AimMark(id=2, x=0.75, y=0.62, x0=0.68, y0=0.52, x1=0.82, y1=0.72,
+                label="Nibbit", role="enemy", object_id="enemy_1"),
+    )
+    agent = CollectAgent.__new__(CollectAgent)
+    agent.fixture = SimpleNamespace(id="sts2")
+    agent.session_id = "r"
+    agent._step_id = 1
+    agent._host_stats = {"screen": "combat", "activity": "combat", "enemies": [{"label": "Nibbit"}]}
+    agent._obs_metrics = {"screen": "combat"}
+    agent._screen_objects = ScreenObjectStore(tmp_path / "fresh-target.db")
+    agent._action_surface = None
+    agent._game_state = None
+    agent._entity_tracker = None
+    agent._reason_controls = []
+    agent._v2_control_objects = {}
+    agent._blocked_sources = {}
+    agent._blocked_targets = {}
+    agent._blocked_target_host_count = None
+    agent._blocked_controls = set()
+    agent._blocked_controls_screen = ""
+    agent._last_execution_failure = None
+    scene = SimpleNamespace(screen="combat", enemies=[], characters=[], controls=[], hand_cards=[], tutorial={})
+    try:
+        agent._screen_objects.save_frame(run_id="r", step_id=1, marks=marks, screen="combat")
+        agent._record_blocked_target("enemy_1")
+        assert not agent._build_turn_snapshot(scene).targets
+
+        # The visible enemy is unchanged and the host count remains one, but
+        # this is a newly acquired observation and must be targetable again.
+        agent._screen_objects.save_frame(run_id="r", step_id=2, marks=marks, screen="combat")
+        assert [row.target_id for row in agent._build_turn_snapshot(scene).targets] == ["enemy_1"]
     finally:
         agent._screen_objects.close()

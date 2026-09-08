@@ -6,7 +6,11 @@ import sqlite3
 
 from PIL import Image, ImageDraw
 
-from loop.memory.screen_objects import ScreenObjectStore
+from loop.memory.screen_objects import (
+    ScreenObjectStore,
+    collapse_duplicate_named_targets,
+    collapse_same_sprite_cluster,
+)
 from loop.os.aim import AimMark, build_aim, build_marks, paint_aim
 
 _OBJECT_N = re.compile(r"^object:\d+$")
@@ -123,3 +127,62 @@ def test_save_frame_never_persists_object_ids_on_domain_roles(tmp_path: Path) ->
     assert enemy.object_id == "enemy_1"
     assert card.object_id == "card_1"
     store.close()
+
+
+def _target_mark(mark_id: int, label: str, bbox: tuple[float, float, float, float]) -> AimMark:
+    x0, y0, x1, y1 = bbox
+    return AimMark(mark_id, (x0 + x1) / 2, (y0 + y1) / 2, x0, y0, x1, y1, label, role="enemy")
+
+
+def test_same_name_column_overlap_is_not_sufficient_to_merge() -> None:
+    # Their x-ranges overlap, but these are distinct same-name hostiles rather
+    # than a vertically dominant HP/body pair.
+    rows = [
+        _target_mark(1, "Nibbit", (0.40, 0.20, 0.58, 0.36)),
+        _target_mark(2, "Nibbit", (0.52, 0.80, 0.70, 0.96)),
+    ]
+    merged = collapse_duplicate_named_targets(rows, prefer=lambda kept, _challenger: kept)
+    assert [row.id for row in merged] == [1, 2]
+
+
+def test_host_count_is_a_floor_not_a_merge_rule() -> None:
+    rows = [
+        _target_mark(1, "Nibbit", (0.40, 0.40, 0.58, 0.56)),
+        _target_mark(2, "Nibbit", (0.405, 0.405, 0.585, 0.565)),
+    ]
+    # Near-identical geometry normally proves a duplicate, but the host says
+    # there are two enemies, so publication cannot silently drop below two.
+    merged = collapse_same_sprite_cluster(
+        rows, is_candidate=lambda _row: True, prefer=lambda kept, _challenger: kept, host_enemies=2,
+    )
+    assert [row.id for row in merged] == [1, 2]
+
+
+def test_different_known_names_never_collapse_without_host_count() -> None:
+    rows = [
+        _target_mark(1, "Nibbit", (0.40, 0.40, 0.58, 0.56)),
+        # High IoU and a center distance inside SAME_SPRITE_CENTER: this used
+        # to collapse when no host inventory count was available.
+        _target_mark(2, "Louse", (0.405, 0.405, 0.585, 0.565)),
+    ]
+    merged = collapse_same_sprite_cluster(
+        rows,
+        is_candidate=lambda _row: True,
+        prefer=lambda kept, _challenger: kept,
+        host_enemies=None,
+    )
+    assert [row.id for row in merged] == [1, 2]
+
+
+def test_named_and_anonymous_overlaps_still_collapse_without_host_count() -> None:
+    rows = [
+        _target_mark(1, "Nibbit", (0.40, 0.40, 0.58, 0.56)),
+        _target_mark(2, "unknown enemy", (0.405, 0.405, 0.585, 0.565)),
+    ]
+    merged = collapse_same_sprite_cluster(
+        rows,
+        is_candidate=lambda _row: True,
+        prefer=lambda kept, challenger: challenger,
+        host_enemies=None,
+    )
+    assert [row.id for row in merged] == [2]

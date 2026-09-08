@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tetris</title>
+    <link rel="stylesheet" href="/styles/main.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <h1 class="title">Tetris</h1>
+        <p id="status" class="status" aria-live="polite">Press Enter to Start</p>
+      </header>
+
+      <main class="game-layout">
+        <aside class="panel panel-hold">
+          <h2 class="panel-title">Hold</h2>
+          <canvas id="hold-canvas" class="preview-canvas" width="168" height="84" aria-hidden="true"></canvas>
+          <div class="controls-wrap">
+            <h2 class="panel-title">Controls</h2>
+            <ul class="controls-list" aria-label="Keyboard controls">
+              <li>Enter Start</li>
+              <li>← → Move</li>
+              <li>↑ / W Rotate</li>
+              <li>↓ Soft drop</li>
+              <li>Space Hard drop</li>
+              <li>C Hold</li>
+              <li>P Pause</li>
+              <li>R Restart</li>
+              <li>?pause_and_decide=1 Avatar mode</li>
+            </ul>
+          </div>
+          <div class="panel-actions">
+            <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Change color theme" title="Change color theme">
+              <span class="theme-toggle-icon" aria-hidden="true">◇</span>
+              <span id="theme-label" class="theme-toggle-label">Cyan</span>
+            </button>
+            <button type="button" id="music-toggle" class="music-toggle" aria-pressed="true" aria-label="Toggle background music">
+              <span class="music-toggle-icon" aria-hidden="true">♪</span>
+              <span class="music-toggle-label">Music</span>
+            </button>
+          </div>
+        </aside>
+
+        <section class="board-wrap">
+          <canvas id="game-canvas" class="game-canvas" width="432" height="852" aria-label="Tetris playfield"></canvas>
+        </section>
+
+        <aside class="panel panel-next">
+          <h2 class="panel-title">Next</h2>
+          <canvas id="next-canvas" class="preview-canvas" width="168" height="84" aria-hidden="true"></canvas>
+          <div class="stats">
+            <div class="stat">
+              <span class="stat-label">Score</span>
+              <span id="score" class="stat-value">0</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Level</span>
+              <span id="level" class="stat-value">1</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Lines</span>
+              <span id="lines" class="stat-value">0</span>
+            </div>
+          </div>
+        </aside>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

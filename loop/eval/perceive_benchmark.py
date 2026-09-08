@@ -14,7 +14,7 @@ from loop.agent.perceive import SceneDescription, perceive_scene
 from loop.agent.prompts import PERCEIVE_PROMPTS
 from loop.config import project_root
 from loop.model.gateway import ModelCall, VlmGateway
-from loop.os.capture import encode_image
+from loop.os.geometry import encode_observe
 from loop.os.ocr import read_words
 from loop.os.sts_stats import extract_sts_stats
 
@@ -141,7 +141,7 @@ def run_benchmark(
             continue
         image = Image.open(path).convert("RGB")
         hud = extract_sts_stats(image)
-        frame = encode_image(image, longest_side=1280, jpeg_quality=90)
+        frame = encode_observe(image, cap=1280, jpeg_quality=90)
         for name in prompt_names:
             system = PERCEIVE_PROMPTS.get(name)
             if not system:

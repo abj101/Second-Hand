@@ -38,11 +38,13 @@ For each run record: start/end HUD, steps, wall time, intent counts, structured-
 |---|---|
 | Any `object:N` / `mark_N` in `card_id` / `target_id` | reopen Batch 1 |
 | More targets than visible enemies; `identity_confidence > 1`; `epistemic-blocker` on an anchored single enemy | reopen Batch 2 |
-| `target-not-found:enemy_N` with dual snapshot `enemy_1`+`enemy_2` | Batch 6 (`06-run-b-dual-target.md`) |
+| `target-not-found:enemy_N` with dual snapshot `enemy_1`+`enemy_2` | Batch 7 (`07-dual-snapshot-and-reward.md`) |
+| Dual `enemy_*` published for one sprite, no TNF | Batch 7 (publish-path collapse) |
 | In-combat TNF after collapse (rebound miss) | Batch 6 fail-closed |
 | `source-unconfirmed:card_N` ≥ 3 in one run | Batch 5 (`05-card-confirm.md`) |
 | In-combat `decision_softlock` with energy > 0 | Batch 5 (replan vs fail-closed) |
-| Map/reward `decision_softlock` after loot | Batch 6 |
+| Map/reward `decision_softlock` after loot, surface non-empty | Batch 6 control replan |
+| Map/reward `decision_softlock` after loot, surface **empty** | Batch 7 (`_recover_loot_surface`) |
 | Transition `empty-action-surface` | reopen V2 Batch 3 |
 | Monitor or `inspect-run` crash | reopen Batch 3 |
 

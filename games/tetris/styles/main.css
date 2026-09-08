@@ -1,0 +1,229 @@
+/**
+ * Tetris — main styles
+ * Modern aesthetic: CSS variables, spacing scale, typography.
+ */
+
+:root {
+  --bg: #0a0c12;
+  --surface: #11141c;
+  --surface-elevated: #1a1e28;
+  --text: #e2e8f0;
+  --text-muted: #64748b;
+  --accent: #22d3ee;
+  --radius: 14px;
+  --radius-sm: 8px;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --font-sans: 'DM Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  --shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  --shadow-glow: 0 0 40px rgba(34, 211, 238, 0.12);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: linear-gradient(160deg, #0a0c12 0%, #0d0f18 50%, #080a10 100%);
+  color: var(--text);
+  font-family: var(--font-sans);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-md);
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-lg);
+  max-width: 100%;
+}
+
+.header {
+  text-align: center;
+}
+
+.title {
+  margin: 0;
+  font-size: 2rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.status {
+  margin: var(--space-sm) 0 0;
+  font-size: 0.95rem;
+  color: var(--accent);
+  min-height: 1.5em;
+}
+
+.game-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-lg);
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.panel {
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: var(--space-md);
+  box-shadow: var(--shadow);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  min-width: 140px;
+}
+
+.panel-title {
+  margin: 0 0 var(--space-sm);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.preview-canvas {
+  display: block;
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  margin: 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.controls-wrap {
+  margin-top: var(--space-md);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--surface-elevated);
+}
+
+.controls-wrap .panel-title {
+  margin-bottom: var(--space-xs);
+}
+
+.controls-list {
+  margin: 0;
+  padding-left: 1.1em;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+  list-style: disc;
+}
+
+.controls-list li {
+  white-space: nowrap;
+}
+
+.panel-actions {
+  margin-top: var(--space-sm);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--surface-elevated);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+
+.board-wrap {
+  flex-shrink: 0;
+}
+
+.game-canvas {
+  display: block;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow), var(--shadow-glow);
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.stats {
+  margin-top: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.stat {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-sm);
+}
+
+.stat-label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.stat-value {
+  font-family: var(--font-mono);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.theme-toggle,
+.music-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  font-size: 0.8rem;
+  font-family: inherit;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--surface-elevated);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.theme-toggle:hover,
+.music-toggle:hover {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--surface-elevated);
+}
+
+.music-toggle[aria-pressed="false"] {
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.music-toggle[aria-pressed="false"] .music-toggle-icon {
+  opacity: 0.5;
+}
+
+.theme-toggle-icon,
+.music-toggle-icon {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+@media (max-width: 520px) {
+  .game-layout {
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .panel {
+    min-width: auto;
+    width: 100%;
+    max-width: 200px;
+  }
+}

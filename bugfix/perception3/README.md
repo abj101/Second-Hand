@@ -12,5 +12,6 @@ Follow-up to `bugfix/perception2/`. V2 closed empty combat inventory and transit
 | `04-live-validation.md` | 4 | Run A ≥1 card from title; B+C consecutive wins; zero `target-not-found` |
 | `05-card-confirm.md` | 5 | Hand-band gate, blocked-retry, like-for-like frames, replan vs softlock; then B+C |
 | `06-run-b-dual-target.md` | 6 | HP/body column stack, TNF fail-closed, map replan; then B+C |
+| `07-dual-snapshot-and-reward.md` | 7 | Stacked-duplicate collapse in the 0.12–0.25 band, named-duplicate last defense, loot-surface rescan instead of softlock; then B+C |
 
-Order: 1 → (2 ∥ 3) → 4. Batch 5 closed card-confirm. Batch 6 closes dual `enemy_2` TNF + post-loot map softlock. `skill_on` A/B blocked until Batch 4 B+C pass.
+Order: 1 → (2 ∥ 3) → 4. Batch 5 closed card-confirm. Batch 6 aimed at the dual `enemy_2` TNF + post-loot map softlock but live `20260908T194352Z` reproduced both; Batch 7 closes them. `skill_on` A/B blocked until Batch 4 B+C pass.

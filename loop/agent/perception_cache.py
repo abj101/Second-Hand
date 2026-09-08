@@ -31,6 +31,7 @@ _UNCERTAIN_OCR_REASONS = frozenset(
         "enemy-roster-change",
         "unknown-needs-inspect",
         "refresh",
+        "size-change",
     }
 )
 
@@ -100,6 +101,7 @@ class PerceptionCache:
     _last_thumb: Image.Image | None = field(default=None, repr=False)
     _last_enemy_thumb: Image.Image | None = field(default=None, repr=False)
     _last_roster_sig: tuple[tuple[Any, ...], ...] = field(default_factory=tuple, repr=False)
+    _last_size: tuple[int, int] | None = field(default=None, repr=False)
 
     def reset(self) -> None:
         self.last_screen = ""
@@ -110,6 +112,7 @@ class PerceptionCache:
         self._last_thumb = None
         self._last_enemy_thumb = None
         self._last_roster_sig = ()
+        self._last_size = None
         from loop.os.ocr import clear_ocr_region_cache
 
         clear_ocr_region_cache()
@@ -151,6 +154,9 @@ class PerceptionCache:
         screen_key = (screen or "").strip().lower()
         if not screen_key:
             return PerceptionReuse(reason="no-screen")
+
+        if self._last_size is not None and view.size != self._last_size:
+            return PerceptionReuse(reason="size-change")
 
         if screen_key != (self.last_screen or "").strip().lower():
             return PerceptionReuse(reason="screen-change")
@@ -212,3 +218,4 @@ class PerceptionCache:
         self._last_thumb = roi_thumb(view, 64)
         self._last_enemy_thumb = self._enemy_thumb(view, layout_adapter=layout_adapter)
         self._last_roster_sig = enemy_roster_signature(host_stats)
+        self._last_size = view.size

@@ -1,0 +1,7 @@
+Slay the Spire (how-to-play excerpt, not a replacement for the rulebook):
+You play cards by spending energy. Each turn you draw a hand, spend energy to play
+cards, then end the turn. Enemies show an intent icon (attack, defend, buff, unknown).
+Block lasts one turn. Exhaust removes a card for the rest of combat. After combat
+choose a card reward, then a map node (monster, elite, rest, shop, unknown, treasure, boss).
+Dense UI: energy, HP, intent, card text, potions, relics. Report anything a tester
+would file (unreadable text, stuck UI, impossible click targets).

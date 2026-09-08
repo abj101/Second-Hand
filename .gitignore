@@ -1,0 +1,73 @@
+# Experiment runs (screenshots, traces, costs)
+runs/
+
+# L2 persisted procedural memory (per-fixture action stats)
+data/memory/
+
+# GSM registry rewrites (labels / reward params; kinds stay in yaml)
+data/gsm/
+
+# Collect-loop session memory and start snapshots (never commit ER saves)
+data/loop/
+
+# Downloaded GGUFs for custom quant imports
+.cache/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Legal: never commit ROMs, BIOS, or rips
+*.nds
+*.gba
+*.gb
+*.nes
+*.cia
+*.3ds
+*.iso
+*.bin
+bios/
+roms/
+ROMs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+
+# Node (vendored games may have their own)
+node_modules/
+games/**/node_modules/
+
+# Nested git from vendored clones (we vendor as source, not submodules)
+games/**/.git/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Codegraph local index
+.codegraph/
+
+# Local agent/editor preferences
+.cursor/
+
+# Local operator diagnostics (preserved on disk, never committed)
+/.collect_monitor.json
+/collect_*.log
+/_tmp_*.py
+/scripts/_tmp_*.py
+/tests/fixtures/affordance/affordance/
+
+# Local reference copy; cite the canonical upstream paper in research.md
+/GSM-Paper.pdf

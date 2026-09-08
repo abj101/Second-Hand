@@ -209,8 +209,29 @@ def test_screen_change_invalidates_ocr_region_cache(monkeypatch) -> None:
     assert ocr.last_read_stats().get("ocr_mode") == "full"
 
 
+def test_size_change_invalidates_ocr() -> None:
+    cache = PerceptionCache()
+    view = _blank((960, 540))
+    cache.update(
+        view=view,
+        screen="combat",
+        ocr_words=[AimMark(id=1, x=0.5, y=0.5, x0=0.4, y0=0.4, x1=0.6, y1=0.6, label="Strike")],
+        marks=[],
+    )
+    reuse = cache.evaluate(
+        view=_blank((1920, 1080)),
+        screen="combat",
+        host_stats={"screen": "combat"},
+        prev_host_stats={"screen": "combat"},
+    )
+    assert not reuse.reuse_ocr
+    assert reuse.reason == "size-change"
+    assert ocr_uncertain_for_reuse(reuse)
+
+
 def test_ocr_uncertain_for_reuse() -> None:
     assert ocr_uncertain_for_reuse(PerceptionReuse(reason="refresh"))
     assert ocr_uncertain_for_reuse(PerceptionReuse(reason="screen-change"))
+    assert ocr_uncertain_for_reuse(PerceptionReuse(reason="size-change"))
     assert not ocr_uncertain_for_reuse(PerceptionReuse(reason="combat-enemies"))
     assert not ocr_uncertain_for_reuse(PerceptionReuse(reason="frame-stable"))
