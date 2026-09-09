@@ -1417,3 +1417,75 @@ def test_stamp_reason_controls_binds_unknown_character_to_store_enemy(monkeypatc
     assert plan["ok"] is True
     assert plan["transaction"]["target_candidate"]["object_id"] == "enemy_1"
     store.close()
+
+
+def test_rebound_matches_frozen_bounds_when_id_reminted(monkeypatch, tmp_path) -> None:
+    marks = (
+        AimMark(id=3, x=0.40, y=0.85, x0=0.30, y0=0.80, x1=0.50, y1=0.90, label="Strike", role="card"),
+        AimMark(id=7, x=0.55, y=0.62, x0=0.48, y0=0.55, x1=0.62, y1=0.69, label="Slime", role="enemy"),
+        AimMark(id=8, x=0.72, y=0.62, x0=0.65, y0=0.55, x1=0.79, y1=0.69, label="Slime", role="enemy"),
+        AimMark(id=9, x=0.90, y=0.64, x0=0.84, y0=0.57, x1=0.96, y1=0.71, label="Slime", role="enemy"),
+    )
+    loop, store, controller, image, plan_card_by_id = _v2_card_agent(monkeypatch, tmp_path, marks)
+    planned = plan_card_by_id(store, card_id="card_1", target_id="enemy_3", entity_targets_ok=True)
+    assert planned["ok"] is True
+    loop._last_execution_plan = planned["transaction"]
+    loop._planned_hand_signature = loop._hand_inventory_signature()
+    loop._last_obs_image = image
+    monkeypatch.setattr(loop, "_sample_card_post_click", lambda *_a, **_k: _raw_probe(image))
+    monkeypatch.setattr(loop, "_classify_card_probe", lambda *_a, **_k: ("selected", ["raw lift"]))
+
+    def refresh(_after, prev_metrics=None):  # type: ignore[no-untyped-def]
+        del prev_metrics
+        stamped = store.save_frame(
+            run_id="r",
+            step_id=1,
+            screen="combat",
+            marks=(
+                AimMark(id=13, x=0.40, y=0.85, x0=0.30, y0=0.80, x1=0.50, y1=0.90, label="Strike", object_id="card_1", role="card"),
+                AimMark(id=21, x=0.55, y=0.62, x0=0.48, y0=0.55, x1=0.62, y1=0.69, label="Slime", object_id="enemy_1", role="enemy"),
+                AimMark(id=22, x=0.90, y=0.64, x0=0.84, y0=0.57, x1=0.96, y1=0.71, label="End Turn", object_id="", role="unknown"),
+            ),
+        )
+        loop._aim = AimGuide.from_marks(image, stamped)
+        return {"screen": "combat"}
+
+    monkeypatch.setattr(loop, "_refresh_obs_after_action", refresh)
+    monkeypatch.setattr(loop, "_reacquire_current_target_surface", lambda *, target_id: True)
+    monkeypatch.setattr(
+        loop,
+        "_rebind_target",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("stale pre-click rebind")),
+    )
+    source = store.by_object_id("card_1")
+    target = store.by_object_id("enemy_3")
+    result = loop._execute_card_transaction(
+        _play_action(source, target),
+        prev_metrics={"screen": "combat"},
+        tag="t1",
+    )
+    assert result.transaction.outcome != "target_not_found"
+    assert result.transaction.target_dispatched is True
+    assert [row.phase for row in result.primitives][-1] == "target"
+    assert abs(float(result.primitives[-1].x) - 0.90) < 0.03
+    store.close()
+
+
+def test_aim_label_prefers_execution_plan_source(monkeypatch, tmp_path) -> None:
+    marks = (
+        AimMark(id=3, x=0.40, y=0.85, x0=0.30, y0=0.80, x1=0.50, y1=0.90, label="Strike", role="card"),
+        AimMark(id=7, x=0.55, y=0.63, x0=0.48, y0=0.56, x1=0.62, y1=0.70, label="Cultist", role="enemy"),
+    )
+    loop, store, _controller, image, plan_card_by_id = _v2_card_agent(monkeypatch, tmp_path, marks)
+    planned = plan_card_by_id(store, card_id="card_1", target_id="enemy_1", entity_targets_ok=True)
+    loop._last_execution_plan = planned["transaction"]
+    loop._aim = AimGuide.from_marks(
+        image,
+        (
+            AimMark(id=3, x=0.40, y=0.85, x0=0.30, y0=0.80, x1=0.50, y1=0.90, label="Back", role="button"),
+            AimMark(id=7, x=0.55, y=0.63, x0=0.48, y0=0.56, x1=0.62, y1=0.70, label="Cultist", role="enemy"),
+        ),
+    )
+    source = store.by_object_id("card_1")
+    assert loop._aim_label(_play_action(source)) == "Strike"
+    store.close()

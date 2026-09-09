@@ -81,6 +81,39 @@ def test_entity_tracker_merge_into_scene() -> None:
     assert "unknown_character_1" in labels
 
 
+def test_entity_tracker_keeps_stale_phantom_out_of_current_scene() -> None:
+    """A retained upper animation row must not become an ACT target next frame."""
+    tracker = EntityTracker()
+    tracker.update_rows([{
+        "label": "unidentified_enemy",
+        "role": "enemy",
+        "confidence": "low",
+        "bbox": [640, 195, 760, 355],
+    }])
+    stale_id = tracker.entities[0].entity_id
+
+    desc = SceneDescription(
+        screen="combat",
+        combat={"active": True},
+        enemies=[{
+            "label": "unknown_character",
+            "role": "unknown_character",
+            "confidence": "low",
+            "bbox": _ENEMY_BBOX_LIST,
+        }],
+        controls=[],
+    )
+    tracker.merge_into_scene(desc, {"screen": "combat"}, lexicon=None)
+
+    live_ids = {
+        ent.entity_id for ent in tracker.entities
+        if ent.last_seen_cycle == tracker._cycle
+    }
+    assert {row["entity_id"] for row in desc.enemies} == live_ids
+    assert stale_id not in {row["entity_id"] for row in desc.enemies}
+    assert stale_id in {ent.entity_id for ent in tracker.entities}
+
+
 def test_combat_validate_accepts_unknown_character_bbox() -> None:
     host = {"screen": "combat", "enemies": [{"hp": 44, "hp_max": 44, "label": None}]}
     desc = SceneDescription(

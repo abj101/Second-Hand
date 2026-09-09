@@ -332,6 +332,31 @@ def compact_act_prompt(snapshot: TurnSnapshot) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def _bbox_payload(bbox: BoundingBox) -> dict[str, float]:
+    return {"x0": float(bbox.x0), "y0": float(bbox.y0), "x1": float(bbox.x1), "y1": float(bbox.y1)}
+
+
+def turn_snapshot_for_log(snapshot: TurnSnapshot) -> dict[str, Any]:
+    """Compact ACT payload plus bboxes for hygiene / replay. Never sent to ACT."""
+    payload = json.loads(compact_act_prompt(snapshot))
+    payload.pop("response_schema", None)
+    cards = {card.card_id: card for card in snapshot.cards}
+    for row in payload.get("cards") or []:
+        if not isinstance(row, dict):
+            continue
+        card = cards.get(str(row.get("card_id") or ""))
+        if card is not None:
+            row["bbox"] = _bbox_payload(card.bbox)
+    targets = {target.target_id: target for target in snapshot.targets}
+    for row in payload.get("targets") or []:
+        if not isinstance(row, dict):
+            continue
+        target = targets.get(str(row.get("target_id") or ""))
+        if target is not None:
+            row["bbox"] = _bbox_payload(target.bbox)
+    return payload
+
+
 class _Gateway(Protocol):
     def complete_text(self, **kwargs: Any) -> ModelCall: ...
 

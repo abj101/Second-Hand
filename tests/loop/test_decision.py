@@ -10,9 +10,11 @@ from loop.agent.decision import (
     ActReasonerError,
     BoundingBox,
     CardSnapshot,
+    TargetSnapshot,
     TurnSnapshot,
     action_intent_from_dict,
     compact_act_prompt,
+    turn_snapshot_for_log,
 )
 from loop.model.gateway import ModelCall
 
@@ -32,6 +34,18 @@ def test_compact_prompt_exposes_stable_ids_but_no_geometry_or_legacy_fields() ->
     assert '"gx"' not in prompt
     assert '"thought"' not in prompt
     assert '"tool"' not in prompt
+
+
+def test_turn_snapshot_for_log_includes_bboxes() -> None:
+    snapshot = TurnSnapshot(
+        snapshot_id="frame-9", screen="combat", turn="ours", hp=80, block=0, energy=3,
+        cards=(CardSnapshot("card-strike", "Strike", BoundingBox(0.3, 0.8, 0.5, 0.95), True, cost=1),),
+        targets=(TargetSnapshot("enemy_1", BoundingBox(0.7, 0.55, 0.84, 0.70), name="Nibbit", hp=4),),
+    )
+    logged = turn_snapshot_for_log(snapshot)
+    assert logged["cards"][0]["bbox"] == {"x0": 0.3, "y0": 0.8, "x1": 0.5, "y1": 0.95}
+    assert logged["targets"][0]["bbox"] == {"x0": 0.7, "y0": 0.55, "x1": 0.84, "y1": 0.70}
+    assert "bbox" not in compact_act_prompt(snapshot)
 
 
 def test_snapshot_defensively_freezes_execution_result() -> None:

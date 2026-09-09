@@ -134,10 +134,10 @@ def vertical_sprite_stack(a: Any, b: Any) -> bool:
     if dy <= dx:
         # Side by side, not stacked.
         return False
-    a_hp = _sprite_hp(a)
     same_named = not a_anon and not b_anon and a_name == b_name
-    same_hp = a_hp is not None and a_hp == _sprite_hp(b)
-    column = STACK_COLUMN_NAMED if (same_named and same_hp) else STACK_COLUMN
+    # Same visible name is enough to use the wider column. OCR HP fragments
+    # (intent digits, Vulnerable stacks) must not keep a second stacked row.
+    column = STACK_COLUMN_NAMED if same_named else STACK_COLUMN
     if dx > column and not _columns_overlap(a, b):
         return False
     return (dx * dx + dy * dy) ** 0.5 <= STACK_MAX_DIST
@@ -344,6 +344,10 @@ def _prefer_target_row(kept_mark: AimMark, challenger: AimMark) -> AimMark:
         return kept_mark
     if chall_oid == "enemy_1" and kept_oid != "enemy_1":
         return challenger
+    kept_body = _in_body_sprite_band(float(kept_mark.y))
+    chall_body = _in_body_sprite_band(float(challenger.y))
+    if kept_body != chall_body:
+        return kept_mark if kept_body else challenger
     kept_conf = _mark_confidence(kept_mark)
     chall_conf = _mark_confidence(challenger)
     if chall_conf != kept_conf:
@@ -351,12 +355,13 @@ def _prefer_target_row(kept_mark: AimMark, challenger: AimMark) -> AimMark:
     return kept_mark
 
 
+def enemy_like(mark: Any) -> bool:
+    return (getattr(mark, "role", "") or "").strip().lower() in {"enemy", "target"}
+
+
 def _prepare_frame_marks(marks: list[AimMark], *, context: Any | None = None) -> list[AimMark]:
     from loop.os.aim import _copy_mark
     from loop.os.frame_model import _TARGET_ROLES
-
-    def enemy_like(mark: AimMark) -> bool:
-        return (mark.role or "").strip().lower() in {"enemy", "target"}
 
     def player_like(mark: AimMark) -> bool:
         return (mark.role or "").strip().lower() == "player"

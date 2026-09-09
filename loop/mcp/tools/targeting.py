@@ -48,6 +48,48 @@ def _is_end_turn(label: str) -> bool:
     return "end turn" in _compact(label)
 
 
+def _object_overlaps_bounds(obj: ScreenObject, x0: float, y0: float, x1: float, y1: float) -> bool:
+    overlap_x = max(0.0, min(x1, obj.x1) - max(x0, obj.x0))
+    overlap_y = max(0.0, min(y1, obj.y1) - max(y0, obj.y0))
+    if overlap_x > 0.0 and overlap_y > 0.0:
+        return True
+    return (
+        x0 <= obj.x <= x1 and y0 <= obj.y <= y1
+    ) or (
+        obj.x0 <= (x0 + x1) / 2 <= obj.x1
+        and obj.y0 <= (y0 + y1) / 2 <= obj.y1
+    )
+
+
+def _parse_bounds(bounds: Any) -> tuple[float, float, float, float] | None:
+    if isinstance(bounds, dict):
+        try:
+            x0, y0, x1, y1 = (float(bounds[key]) for key in ("x0", "y0", "x1", "y1"))
+        except (KeyError, TypeError, ValueError):
+            return None
+    elif isinstance(bounds, (list, tuple)) and len(bounds) >= 4:
+        try:
+            x0, y0, x1, y1 = (float(value) for value in bounds[:4])
+        except (TypeError, ValueError):
+            return None
+    else:
+        return None
+    if max(abs(x0), abs(y0), abs(x1), abs(y1)) > 1.5:
+        x0, y0, x1, y1 = (value / 1000.0 for value in (x0, y0, x1, y1))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x0, y0, x1, y1
+
+
+_TARGET_POINT_MATCH = 0.08
+
+
+def _body_sprite_band(y: float) -> bool:
+    from loop.os.layout_adapter import ENEMY_Y_MAX, HAND_Y
+
+    return ENEMY_Y_MAX < float(y) < HAND_Y
+
+
 def _is_menu_progress(obj: ScreenObject) -> bool:
     return label_kind(obj.label) == "progress"
 
@@ -188,22 +230,9 @@ def bind_snapshot_target_ids(
             x0, y0, x1, y1 = (value / 1000.0 for value in (x0, y0, x1, y1))
         if x1 <= x0 or y1 <= y0:
             continue
-
-        def overlaps_or_contains(obj: ScreenObject) -> bool:
-            overlap_x = max(0.0, min(x1, obj.x1) - max(x0, obj.x0))
-            overlap_y = max(0.0, min(y1, obj.y1) - max(y0, obj.y0))
-            if overlap_x > 0.0 and overlap_y > 0.0:
-                return True
-            return (
-                x0 <= obj.x <= x1 and y0 <= obj.y <= y1
-            ) or (
-                obj.x0 <= (x0 + x1) / 2 <= obj.x1
-                and obj.y0 <= (y0 + y1) / 2 <= obj.y1
-            )
-
         matches = [
             obj for obj in enemies
-            if obj.object_id not in used_objects and overlaps_or_contains(obj)
+            if obj.object_id not in used_objects and _object_overlaps_bounds(obj, x0, y0, x1, y1)
         ]
         # A perception row must identify exactly one canonical surface object.
         if len(matches) != 1:
@@ -238,6 +267,63 @@ def resolve_planned_target(
     if obj is None or object_role(obj, entity_targets_ok=entity_targets_ok) not in _COMBAT_TARGET_ROLES:
         return None
     return obj
+
+
+def resolve_target_by_bounds(
+    store: ScreenObjectStore,
+    bounds: Any = None,
+    *,
+    point: Any = None,
+    entity_targets_ok: bool = False,
+) -> ScreenObject | None:
+    """Match a frozen target box/point onto the current body-band inventory."""
+    box = _parse_bounds(bounds)
+    px = py = None
+    if isinstance(point, dict):
+        try:
+            px, py = float(point["x"]), float(point["y"])
+        except (KeyError, TypeError, ValueError):
+            px = py = None
+    if box is None and px is None:
+        return None
+    if px is None and box is not None:
+        px = (box[0] + box[2]) / 2.0
+        py = (box[1] + box[3]) / 2.0
+    if py is not None and not _body_sprite_band(py):
+        # Frozen HP/intent chrome is not a clickable target.
+        return None
+
+    candidates: list[tuple[float, ScreenObject]] = []
+    for obj in store.objects:
+        if not _body_sprite_band(obj.y):
+            continue
+        role = object_role(obj, entity_targets_ok=entity_targets_ok)
+        if role in {"card", "hud"}:
+            continue
+        if role == "button" and not _body_sprite_band(obj.y):
+            continue
+        dist = ((float(obj.x) - float(px)) ** 2 + (float(obj.y) - float(py)) ** 2) ** 0.5
+        overlapped = box is not None and _object_overlaps_bounds(obj, *box)
+        if not overlapped and dist > _TARGET_POINT_MATCH:
+            continue
+        candidates.append((dist, obj))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (
+        0 if object_role(item[1], entity_targets_ok=entity_targets_ok) == "enemy" else 1,
+        item[0],
+    ))
+    best_dist, best = candidates[0]
+    if len(candidates) > 1 and candidates[1][0] <= best_dist + 1e-9:
+        # Two equally close hits: only safe if exactly one is an enemy.
+        enemy_hits = [
+            obj for _dist, obj in candidates
+            if object_role(obj, entity_targets_ok=entity_targets_ok) == "enemy"
+        ]
+        if len(enemy_hits) == 1:
+            return enemy_hits[0]
+        return None
+    return best
 
 
 def _resolved_object(obj: ScreenObject, *, entity_targets_ok: bool = False) -> dict[str, Any]:

@@ -21,6 +21,7 @@ from loop.agent.decision import (
     CardSnapshot,
     ClickControlIntent,
     compact_act_prompt,
+    turn_snapshot_for_log,
     ControlSnapshot,
     EndTurnIntent,
     InspectIntent,
@@ -152,6 +153,7 @@ from loop.mcp.tools.targeting import (
     register_targeting_tools,
     resolve_planned_source,
     resolve_planned_target,
+    resolve_target_by_bounds,
     validate_stable_transaction,
 )
 from loop.model.gateway import VlmGateway
@@ -1095,6 +1097,14 @@ class CollectAgent:
         return action
 
     def _aim_label(self, action: ActionLog) -> str:
+        plan = getattr(self, "_last_execution_plan", None) or {}
+        source = plan.get("source") if isinstance(plan, dict) else None
+        if isinstance(source, dict):
+            planned_label = str(source.get("label") or "").strip()
+            planned_oid = str(source.get("object_id") or "").strip()
+            action_oid = str(getattr(action, "source_object_id", "") or "").strip()
+            if planned_label and planned_oid and planned_oid == action_oid:
+                return planned_label
         if action.mark is None or self._aim is None:
             return ""
         hit = self._aim.by_id(int(action.mark))
@@ -2568,12 +2578,21 @@ class CollectAgent:
             except Exception:
                 refreshed_inventory = False
         rebound = None
-        if refreshed_inventory and planned_target_id:
+        if planned_target_id:
             store = getattr(self, "_screen_objects", None)
             fresh_obj = (
                 resolve_planned_target(store, planned_target_id, entity_targets_ok=True)
                 if store is not None else None
             )
+            if fresh_obj is None and store is not None and isinstance(planned_target, dict):
+                fresh_obj = resolve_target_by_bounds(
+                    store,
+                    planned_target.get("bounds"),
+                    point=planned_target.get("point"),
+                    entity_targets_ok=True,
+                )
+                if fresh_obj is not None:
+                    transaction.verification_evidence.append("post-selection-bounds")
             if fresh_obj is not None:
                 rebound = self._aim_mark_for_object(fresh_obj)
                 if rebound is not None:
@@ -3678,7 +3697,7 @@ class CollectAgent:
         ):
             rows.extend(row for row in bucket if isinstance(row, dict))
         bind_snapshot_target_ids(self._screen_objects, rows, entity_targets_ok=True)
-        return self._screen_objects.by_object_id(str(target_id or "")) is not None
+        return True
 
     def _clickable_labels(self) -> list[str]:
         if self._frame_model is not None:
@@ -3782,7 +3801,7 @@ class CollectAgent:
         mark_role = self._surface_key(mark.role)
         if mark_role not in self._PROMOTE_ROLES:
             return False
-        if float(mark.y) < float(getattr(adapter, "hand_y", HAND_Y)):
+        if not in_hand_band(float(mark.x), float(mark.y), layout_adapter=adapter):
             return False
         if self._surface_key(mark.label) in {"end turn", "prev", "next", "back"}:
             return False
@@ -3930,11 +3949,28 @@ class CollectAgent:
                 ]
                 match = self._best_geometry_hit(hits, row)
             if match is None and row_role in {"enemy", "unknown_character", "character", "target"}:
-                hits = [
+                from loop.memory.screen_objects import enemy_like, same_sprite_cluster
+
+                existing_enemies = [other for other in marks if enemy_like(other)]
+                overlap_existing = [
                     (index, mark) for index, mark in enumerate(marks)
-                    if index not in used and self._llm1_can_promote_enemy(mark, row)
+                    if index not in used
+                    and enemy_like(mark)
+                    and self._llm1_geometry_match(mark, row)
                 ]
-                match = self._best_geometry_hit(hits, row)
+                if overlap_existing:
+                    match = self._best_geometry_hit(overlap_existing, row)
+                else:
+                    hits = [
+                        (index, mark) for index, mark in enumerate(marks)
+                        if index not in used
+                        and self._llm1_can_promote_enemy(mark, row)
+                        and not any(
+                            same_sprite_cluster(mark, other, stacked_duplicates=True)
+                            for other in existing_enemies
+                        )
+                    ]
+                    match = self._best_geometry_hit(hits, row)
             if match is None:
                 continue
             index, mark = match
@@ -4028,6 +4064,20 @@ class CollectAgent:
             else:
                 self._host_stats.pop("tutorial", None)
         reconciled = self._reconcile_scene_marks(scene_desc)
+        from loop.memory.screen_objects import (
+            _context_host_enemy_count,
+            _prefer_target_row,
+            collapse_same_sprite_cluster,
+            enemy_like,
+        )
+
+        reconciled = collapse_same_sprite_cluster(
+            reconciled,
+            is_candidate=enemy_like,
+            prefer=_prefer_target_row,
+            host_enemies=_context_host_enemy_count(self._host_stats),
+            stacked_duplicates=True,
+        )
         provisional = build_action_surface(
             reconciled,
             run_id=self.session_id,
@@ -4894,8 +4944,7 @@ class CollectAgent:
         if not legal_intents:
             self._last_decision_schema = "v2"
             self._last_snapshot_id = snapshot.snapshot_id
-            snapshot_payload = json.loads(compact_act_prompt(snapshot))
-            snapshot_payload.pop("response_schema", None)
+            snapshot_payload = turn_snapshot_for_log(snapshot)
             self._last_turn_snapshot = snapshot_payload
             self._last_intent = {}
             self._last_reason_raw = ""
@@ -4999,8 +5048,7 @@ class CollectAgent:
             reason_ms = (time.perf_counter() - started) * 1000
             self._last_decision_schema = "v2"
             self._last_snapshot_id = snapshot.snapshot_id
-            snapshot_payload = json.loads(compact_act_prompt(snapshot))
-            snapshot_payload.pop("response_schema", None)
+            snapshot_payload = turn_snapshot_for_log(snapshot)
             self._last_turn_snapshot = snapshot_payload
             self._last_intent = {}
             self._last_reason_backend = "none"
@@ -5023,8 +5071,7 @@ class CollectAgent:
         intent_dict = asdict(intent)
         self._last_decision_schema = "v2"
         self._last_snapshot_id = snapshot.snapshot_id
-        snapshot_payload = json.loads(compact_act_prompt(snapshot))
-        snapshot_payload.pop("response_schema", None)
+        snapshot_payload = turn_snapshot_for_log(snapshot)
         self._last_turn_snapshot = snapshot_payload
         self._last_intent = intent_dict
         self._last_reason_backend = decision.backend

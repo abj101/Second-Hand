@@ -834,10 +834,23 @@ def _box_iou(
     return inter / union if union else 0.0
 
 
+def _host_enemy_count_from_metrics(metrics: dict[str, Any] | None) -> int | None:
+    stats = metrics if isinstance(metrics, dict) else {}
+    enemies = stats.get("enemies")
+    if isinstance(enemies, (list, tuple)):
+        return len(enemies)
+    raw = stats.get("enemy_count")
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return int(raw)
+    return None
+
+
 def perception_hygiene_from_steps(steps: list[StepLog]) -> dict[str, Any]:
     """Id / bbox / confidence audits plus router and perception-source histograms."""
     noncanonical = 0
     duplicate_steps = 0
+    duplicate_named = 0
+    host_mismatch = 0
     conf_oor = 0
     router: dict[str, int] = {}
     sources: dict[str, int] = {}
@@ -850,6 +863,7 @@ def perception_hygiene_from_steps(steps: list[StepLog]) -> dict[str, Any]:
                 if isinstance(card, dict) and is_noncanonical_snapshot_id(str(card.get("card_id") or "")):
                     noncanonical += 1
         boxes: list[tuple[float, float, float, float]] = []
+        named: list[tuple[str, tuple[float, float, float, float]]] = []
         if isinstance(targets, list):
             for target in targets:
                 if not isinstance(target, dict):
@@ -862,12 +876,24 @@ def perception_hygiene_from_steps(steps: list[StepLog]) -> dict[str, Any]:
                 box = _snapshot_bbox(target)
                 if box is not None:
                     boxes.append(box)
+                    name = " ".join(str(target.get("name") or "").lower().split())
+                    if name:
+                        named.append((name, box))
         if any(
             _box_iou(boxes[i], boxes[j]) >= _DUPLICATE_TARGET_IOU
             for i in range(len(boxes))
             for j in range(i + 1, len(boxes))
         ):
             duplicate_steps += 1
+        if any(
+            named[i][0] == named[j][0] and _box_iou(named[i][1], named[j][1]) >= _DUPLICATE_TARGET_IOU
+            for i in range(len(named))
+            for j in range(i + 1, len(named))
+        ):
+            duplicate_named += 1
+        host_count = _host_enemy_count_from_metrics(step.metrics if isinstance(step.metrics, dict) else None)
+        if host_count is not None and isinstance(targets, list) and len(targets) != host_count:
+            host_mismatch += 1
         reason = str(step.router_reason or "")
         router[reason] = router.get(reason, 0) + 1
         src = str(step.perception_source or "")
@@ -875,6 +901,8 @@ def perception_hygiene_from_steps(steps: list[StepLog]) -> dict[str, Any]:
     return {
         "noncanonical_target_ids": noncanonical,
         "duplicate_target_bboxes": duplicate_steps,
+        "duplicate_named_targets": duplicate_named,
+        "host_count_mismatch": host_mismatch,
         "confidence_out_of_range": conf_oor,
         "router_reason": router,
         "perception_source": sources,

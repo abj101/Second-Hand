@@ -75,6 +75,43 @@ def test_perception_hygiene_synthetic_fields() -> None:
     assert report["perception_source"]["llm1"] == 1
 
 
+def test_perception_hygiene_flags_same_name_geometry_and_host_count() -> None:
+    overlap = {"x0": 0.70, "y0": 0.55, "x1": 0.84, "y1": 0.70}
+    steps = [
+        _step(
+            step_id=1,
+            cards=[{"card_id": "card_1", "bbox": {"x0": 0.30, "y0": 0.80, "x1": 0.50, "y1": 0.95}}],
+            targets=[
+                {"target_id": "enemy_1", "name": "Nibbit", "bbox": overlap},
+                {"target_id": "enemy_2", "name": "Nibbit", "bbox": overlap},
+            ],
+        ),
+        StepLog(
+            session_id="s",
+            episode_id="e",
+            step_id=2,
+            ts="2026-09-07T00:00:00+00:00",
+            fixture="sts2",
+            observation=Observation(screenshot_ref="obs.jpg"),
+            result=StepResult(pixel_changed=True),
+            metrics={"screen": "combat", "enemies": [{"hp": 4}, {"hp": 4}]},
+            turn_snapshot={
+                "cards": [],
+                "targets": [
+                    {"target_id": "enemy_1", "name": "Slime", "bbox": {"x0": 0.50, "y0": 0.55, "x1": 0.62, "y1": 0.70}},
+                    {"target_id": "enemy_2", "name": "Slime", "bbox": {"x0": 0.70, "y0": 0.55, "x1": 0.82, "y1": 0.70}},
+                    {"target_id": "enemy_3", "name": "Slime", "bbox": {"x0": 0.84, "y0": 0.55, "x1": 0.96, "y1": 0.70}},
+                ],
+            },
+            router_reason="",
+            perception_source="llm1",  # type: ignore[arg-type]
+        ),
+    ]
+    report = perception_hygiene_from_steps(steps)
+    assert report["duplicate_named_targets"] >= 1
+    assert report["host_count_mismatch"] >= 1
+
+
 def test_inspect_run_includes_hygiene_fields(tmp_path: Path) -> None:
     store = EpisodeStore(tmp_path)
     store.write_step(

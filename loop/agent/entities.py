@@ -760,6 +760,16 @@ class EntityTracker:
             lexicon=lexicon,
             screen=screen or str((host_stats or {}).get("screen") or getattr(desc, "screen", None) or ""),
         )
+        # Tracker retention is for identity continuity, not evidence that a
+        # sprite is still visible.  Publishing a one-cycle-old row into this
+        # frame creates a phantom ACT target when a combat animation was once
+        # misread as an enemy.
+        live_ids = {
+            ent.entity_id
+            for ent in self.entities
+            if ent.last_seen_cycle == self._cycle
+        }
+        merged = [row for row in merged if str(row.get("entity_id") or "") in live_ids]
         if not merged:
             return desc
 

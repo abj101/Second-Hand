@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 import re
 import sqlite3
 
@@ -172,6 +173,29 @@ def test_different_known_names_never_collapse_without_host_count() -> None:
         host_enemies=None,
     )
     assert [row.id for row in merged] == [1, 2]
+
+
+def test_same_name_different_hp_vertical_stack_collapses() -> None:
+    # Body vs HP plate, dx between STACK_COLUMN (0.14) and STACK_COLUMN_NAMED (0.20).
+    # Different OCR HP must not keep a second Nibbit row.
+    rows = [
+        SimpleNamespace(
+            id=1, label="Nibbit", name="Nibbit", hp=4, role="enemy",
+            x=0.47, y=0.62, x0=0.40, y0=0.52, x1=0.54, y1=0.72,
+        ),
+        SimpleNamespace(
+            id=2, label="Nibbit", name="Nibbit", hp=1, role="enemy",
+            x=0.63, y=0.35, x0=0.56, y0=0.28, x1=0.70, y1=0.42,
+        ),
+    ]
+    merged = collapse_same_sprite_cluster(
+        rows,
+        is_candidate=lambda _row: True,
+        prefer=lambda kept, _challenger: kept,
+        host_enemies=None,
+        stacked_duplicates=True,
+    )
+    assert [row.id for row in merged] == [1]
 
 
 def test_named_and_anonymous_overlaps_still_collapse_without_host_count() -> None:

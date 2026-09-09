@@ -161,6 +161,61 @@ def test_llm1_hand_cards_promote_unlabeled_hand_marks(tmp_path: Path) -> None:
         agent._screen_objects.close()
 
 
+def test_llm1_cannot_promote_left_orb_to_card(tmp_path: Path) -> None:
+    marks = [
+        AimMark(id=1, x=0.087, y=0.83, x0=0.05, y0=0.76, x1=0.13, y1=0.89, label="", role="unknown"),
+        AimMark(id=2, x=0.365, y=0.93, x0=0.30, y0=0.86, x1=0.44, y1=1.0, label="", role="unknown"),
+        AimMark(id=3, x=0.89, y=0.82, x0=0.82, y0=0.78, x1=0.96, y1=0.88, label="End Turn", role="button"),
+    ]
+    agent = _agent_for_combat(tmp_path, marks, {"screen": "combat", "activity": "combat"})
+    scene = SimpleNamespace(
+        screen="combat",
+        controls=[{"label": "End Turn", "role": "button"}],
+        hand_cards=[
+            {"label": "Strike", "role": "card", "bbox": [50, 760, 130, 890]},
+            {"label": "Defend", "role": "card", "bbox": [300, 860, 440, 1000]},
+        ],
+        enemies=[],
+        characters=[],
+    )
+    try:
+        surface = agent._finalize_action_surface(scene)
+        assert surface is not None
+        cards = [obj for obj in surface.objects if obj.role == "card"]
+        assert all(obj.x >= 0.18 for obj in cards)
+        assert any(abs(obj.x - 0.365) < 0.05 for obj in cards)
+    finally:
+        agent._screen_objects.close()
+
+
+def test_llm1_cannot_promote_overlapping_hp_plate_to_enemy(tmp_path: Path) -> None:
+    marks = [
+        AimMark(id=1, x=0.40, y=0.92, x0=0.34, y0=0.86, x1=0.46, y1=1.0, label="Strike", role="card"),
+        AimMark(id=2, x=0.75, y=0.62, x0=0.68, y0=0.54, x1=0.82, y1=0.70, label="Nibbit", role="enemy"),
+        AimMark(id=3, x=0.76, y=0.35, x0=0.70, y0=0.30, x1=0.82, y1=0.40, label="", role="unknown"),
+        AimMark(id=4, x=0.89, y=0.82, x0=0.82, y0=0.78, x1=0.96, y1=0.88, label="End Turn", role="button"),
+    ]
+    agent = _agent_for_combat(tmp_path, marks, {"screen": "combat", "activity": "combat"})
+    scene = SimpleNamespace(
+        screen="combat",
+        controls=[{"label": "End Turn", "role": "button"}],
+        hand_cards=[{"label": "Strike", "role": "card", "bbox": [340, 860, 460, 1000]}],
+        enemies=[
+            {"label": "Nibbit", "role": "enemy", "bbox": [680, 540, 820, 700], "id": "enemy_1"},
+            {"label": "Nibbit", "role": "enemy", "bbox": [700, 300, 820, 400], "id": "enemy_2"},
+        ],
+        characters=[],
+    )
+    try:
+        surface = agent._finalize_action_surface(scene)
+        assert surface is not None
+        enemies = [obj for obj in surface.objects if obj.role == "enemy"]
+        assert len(enemies) == 1
+        assert abs(enemies[0].y - 0.62) < 0.08
+    finally:
+        agent._screen_objects.close()
+
+
 def test_llm1_cannot_promote_button_to_card(tmp_path: Path) -> None:
     marks = [
         AimMark(id=1, x=0.50, y=0.92, x0=0.44, y0=0.86, x1=0.56, y1=1.0, label="Skip", role="button"),
