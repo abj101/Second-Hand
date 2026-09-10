@@ -10,7 +10,7 @@ _LOG = logging.getLogger("loop.perceive")
 
 from loop.agent.entities import is_discovery_role, is_unknown_entity_label
 from loop.agent.prompts import SCENE_PERCEIVE_SCHEMA, scene_perceive_system, scene_perceive_user
-from loop.model.gateway import ModelCall, VlmGateway
+from loop.model.gateway import EpisodeThread, ModelCall, VlmGateway
 from loop.os.affordance import AffordanceSignal, merge_legal_actions
 from loop.os.capture import EncodedFrame
 
@@ -168,6 +168,20 @@ def _explanatory_tutorial_overlay(
         return False
     step, total = tut.get("step"), tut.get("total")
     return isinstance(step, int) and isinstance(total, int) and 1 < step < total
+
+
+def _tutorial_overlay_chrome(controls: list[dict[str, Any]] | None) -> bool:
+    """True when typed chrome is a real dialog/page, not a leftover Next."""
+    labels = {
+        _compact(str(row.get("label") or ""))
+        for row in (controls or [])
+        if isinstance(row, dict)
+    }
+    if labels & {"yes", "no", "got it"}:
+        return True
+    return bool(labels & {"prev", "previous", "back"}) and "next" in labels
+
+
 _TUTORIAL_STEP_RE = re.compile(r"\((\d{1,2})\s+of\s+(\d{1,2})\)", re.I)
 _TOKEN_RE = re.compile(r"[a-z0-9+]+", re.I)
 
@@ -843,10 +857,11 @@ class SceneDescription:
             clickable_labels=clickable_labels,
             screen=screen,
         )
-        if tutorial.get("active") and screen not in {"", "tutorial"}:
+        real_tutorial = _tutorial_overlay_chrome(controls)
+        if tutorial.get("active") and real_tutorial and screen not in {"", "tutorial"}:
             if screen in {"combat", "map", "other"}:
                 screen = "tutorial"
-        if _explanatory_tutorial_overlay(tutorial, host_stats=host_stats):
+        if _explanatory_tutorial_overlay(tutorial, host_stats=host_stats) and real_tutorial:
             controls = [
                 row
                 for row in controls
@@ -1092,6 +1107,7 @@ def _call_perceive_json(
     frame: EncodedFrame,
     max_tokens: int | None,
     timeout_s: float | None = None,
+    history: list[dict[str, str]] | None = None,
 ) -> ModelCall:
     kwargs: dict[str, Any] = {
         "system": system,
@@ -1101,6 +1117,8 @@ def _call_perceive_json(
     }
     if timeout_s is not None:
         kwargs["timeout_s"] = timeout_s
+    if history:
+        kwargs["history"] = history
     try:
         return gateway.complete_json(**kwargs, json_schema=SCENE_PERCEIVE_SCHEMA)
     except TypeError:
@@ -1108,7 +1126,11 @@ def _call_perceive_json(
             return gateway.complete_json(**kwargs)
         except TypeError:
             kwargs.pop("timeout_s", None)
-            return gateway.complete_json(**kwargs)
+            try:
+                return gateway.complete_json(**kwargs)
+            except TypeError:
+                kwargs.pop("history", None)
+                return gateway.complete_json(**kwargs)
 
 
 def perceive_scene(
@@ -1125,6 +1147,7 @@ def perceive_scene(
     cv_verdicts: dict[str, AffordanceSignal] | None = None,
     max_schema_retries: int = 2,
     timeout_s: float | None = None,
+    thread: EpisodeThread | None = None,
 ) -> tuple[SceneDescription, ModelCall]:
     system = perceive_system or scene_perceive_system()
     user = perceive_user or scene_perceive_user(
@@ -1162,6 +1185,7 @@ def perceive_scene(
             frame=frame,
             max_tokens=attempt_max_tokens,
             timeout_s=timeout_s,
+            history=thread.messages(system=system, user=attempt_user) if thread is not None else None,
         )
         last_call = call
         candidate = (
@@ -1257,6 +1281,8 @@ def perceive_scene(
     desc.llm1_first_pass_valid = first_pass_valid
     desc.llm1_final_schema_valid = bool(parsed is not None and desc.schema_valid)
     desc.llm1_schema_attempts = len(attempts)
+    if thread is not None and parsed is not None and desc.schema_valid:
+        thread.commit("llm1", json.dumps(parsed, ensure_ascii=False, separators=(",", ":")))
     return desc, last_call
 
 

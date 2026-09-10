@@ -10,7 +10,7 @@ from loop.agent.perceive import (
     scene_from_ocr,
     should_run_llm1_perceive,
 )
-from loop.os.frame_model import FrameModel, FrameObject
+from loop.os.frame_model import ActionSurface, FrameContext, FrameModel, FrameObject
 
 
 def test_scene_change_runs_llm1() -> None:
@@ -470,6 +470,113 @@ def test_empty_snapshot_still_bounds_same_object_retry() -> None:
     assert first["effect"] == "unverified"
     assert second["cycle_repeat"] is True
     assert agent._effect_attempts[-1]["evidence_fingerprint"] == "map|obs"
+
+
+def _map_action_surface(
+    *, run_id: str, step_id: int, node_x: float = 0.42, extra: bool = False, mark_offset: int = 0,
+):
+    objects = [
+        FrameObject(
+            id=1 + mark_offset,
+            x=0.90,
+            y=0.18,
+            x0=0.86,
+            y0=0.14,
+            x1=0.94,
+            y1=0.22,
+            label="Legend",
+            role="button",
+            kind="interactive",
+        ),
+        FrameObject(
+            id=2 + mark_offset,
+            x=node_x,
+            y=0.38,
+            x0=node_x - 0.04,
+            y0=0.34,
+            x1=node_x + 0.04,
+            y1=0.42,
+            label="Node",
+            role="button",
+            kind="interactive",
+        ),
+    ]
+    if extra:
+        objects.append(
+            FrameObject(
+                id=3 + mark_offset,
+                x=0.62,
+                y=0.55,
+                x0=0.58,
+                y0=0.51,
+                x1=0.66,
+                y1=0.59,
+                label="Rest",
+                role="button",
+                kind="interactive",
+            )
+        )
+    return ActionSurface(
+        run_id=run_id,
+        step_id=step_id,
+        snapshot_id=f"snapshot-{run_id}-{step_id}",
+        context=FrameContext(screen="map", activity="map"),
+        objects=tuple(objects),
+    )
+
+
+def test_effect_fingerprint_ignores_snapshot_run_step_and_mark_ids() -> None:
+    agent = object.__new__(CollectAgent)
+    agent._action_surface = _map_action_surface(run_id="run-a", step_id=1)
+    agent._last_snapshot_id = "snapshot-a"
+    first_snapshot = agent._action_surface.snapshot_id
+    first = agent._evidence_fingerprint(screen="map")
+
+    agent._action_surface = _map_action_surface(run_id="run-b", step_id=2, mark_offset=10)
+    agent._last_snapshot_id = "snapshot-b"
+    second = agent._evidence_fingerprint(screen="map")
+
+    assert agent._action_surface.snapshot_id != first_snapshot
+    assert first == second
+    assert "snapshot" not in first
+    assert first.startswith("surf:map|")
+
+
+def test_effect_fingerprint_resets_noop_sequence_when_surface_changes() -> None:
+    agent = object.__new__(CollectAgent)
+    agent._last_intent = {}
+    agent._action_surface = _map_action_surface(run_id="run", step_id=1)
+    shared = dict(error=None, executed=["click"], pixel_changed=False, hover=False, screen="map")
+    first = agent._record_dispatch_effect(object_id="legend", bbox=[0.86, 0.14, 0.94, 0.22], **shared)
+
+    agent._action_surface = _map_action_surface(run_id="run", step_id=2, node_x=0.50)
+    second = agent._record_dispatch_effect(object_id="node", bbox=[0.46, 0.34, 0.54, 0.42], **shared)
+
+    assert first["effect"] == "unverified"
+    assert second["unresolved"] is False
+    assert len(agent._effect_attempts) == 1
+
+    agent._action_surface = _map_action_surface(run_id="run", step_id=3, node_x=0.50, extra=True)
+    third = agent._record_dispatch_effect(object_id="rest", bbox=[0.58, 0.51, 0.66, 0.59], **shared)
+
+    assert third["unresolved"] is False
+    assert len(agent._effect_attempts) == 1
+
+
+def test_distinct_noops_on_fresh_snapshot_of_same_surface_force_rescan() -> None:
+    agent = object.__new__(CollectAgent)
+    agent._last_intent = {}
+    agent._action_surface = _map_action_surface(run_id="run-a", step_id=1)
+    agent._last_snapshot_id = "snapshot-a"
+    shared = dict(error=None, executed=["click"], pixel_changed=False, hover=False, screen="map")
+    agent._record_dispatch_effect(object_id="legend", bbox=[0.86, 0.14, 0.94, 0.22], **shared)
+
+    agent._action_surface = _map_action_surface(run_id="run-b", step_id=2, mark_offset=10)
+    agent._last_snapshot_id = "snapshot-b"
+    second = agent._record_dispatch_effect(object_id="node", bbox=[0.38, 0.34, 0.46, 0.42], **shared)
+
+    assert second["unresolved"] is True
+    assert agent._pending_exec_error == "perception-unresolved"
 
 
 

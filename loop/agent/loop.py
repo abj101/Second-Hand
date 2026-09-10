@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 import random
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, replace
@@ -50,6 +51,7 @@ from loop.agent.discovery import (
     DiscoveryWorkflow,
     _pad,
     crop,
+    difference_box,
     inventory_unknowns,
     inspection_contract,
     rebind_unknowns,
@@ -156,9 +158,9 @@ from loop.mcp.tools.targeting import (
     resolve_target_by_bounds,
     validate_stable_transaction,
 )
-from loop.model.gateway import VlmGateway
+from loop.model.gateway import EpisodeThread, VlmGateway, stage_call_metrics
 from loop.os.capture import encode_image
-from loop.os.geometry import encode_observe, map_content_xy, perceive_longest_side
+from loop.os.geometry import boxes_close, encode_observe, map_content_xy, perceive_longest_side
 from loop.os.frame_model import (
     ActionSurface,
     FrameContext,
@@ -173,6 +175,19 @@ from loop.os.frame_model import (
     surface_fingerprint,
 )
 from loop.state.game_state import GameState, LegalAction, reconcile as reconcile_game_state
+from loop.os.overlay_escape import (
+    MAD_NOOP,
+    OverlayEscapeState,
+    overlay_looks_dimmed,
+    plan_overlay_escape,
+)
+from loop.os.pointer_hygiene import (
+    IN_CLIENT_FALLBACK,
+    PARK_DWELL_S,
+    PointerHygieneState,
+    hover_occlusion_from_scene,
+    should_park_after_pointer,
+)
 from loop.os.primitives import mouse_move
 from loop.os.layout_adapter import (
     HAND_Y,
@@ -199,6 +214,7 @@ from loop.os.aim import (
     ground_spatial_labels,
     gui_click_marks,
     dino_boxes_to_marks,
+    detect_marks,
     fuse_dino_marks,
     in_combat_sprite_band,
     in_hand_band,
@@ -533,6 +549,8 @@ class CollectConfig:
     memory_scope: Literal["run", "episode"] = "run"
     # Default LLM1 is cloud Gemma; CLI selects cloud ACT for STS2 v2.
     perceive_model: str = DEFAULT_CLOUD_MODEL
+    context_mode: Literal["cold", "threaded"] = "cold"
+    context_schedule: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.perceive_model:
@@ -614,6 +632,7 @@ class CollectAgent:
         self._interrupt_dino = 0
         self._last_interrupt_glyph: str | None = None
         self._last_click: tuple[float, float] | None = None
+        self._pointer_hygiene = PointerHygieneState()
         self._last_hover_key: object | None = None
         self._hovered_marks: set[int] = set()
         self._aim = None
@@ -632,6 +651,13 @@ class CollectAgent:
             max_rounds=self.config.max_tool_rounds,
             budget_s=self.config.tool_budget_s,
         )
+        self._llm1_thread = EpisodeThread(recent=1, max_chars=16_000)
+        self._act_thread = EpisodeThread(recent=2, max_chars=6_000)
+        if self.config.context_schedule:
+            self._session_flags.append("context:alternating")
+        elif self.config.context_mode == "threaded":
+            self._session_flags.append("context:threaded")
+        self._episode_context_mode: Literal["cold", "threaded"] = self.config.context_mode
         self._last_scene: str = ""
         self._last_tool_trace: list[str] = []
         self._last_tool_events: list[dict[str, Any]] = []
@@ -651,6 +677,7 @@ class CollectAgent:
         self._last_reason_backend: str = ""
         self._last_reason_fallback: str = ""
         self._last_reason_call: dict[str, Any] = {}
+        self._last_perceive_call: dict[str, Any] = {}
         self._last_execution_failure: dict[str, Any] | None = None
         self._last_unverified_effect: bool = False
         self._effect_attempts: list[dict[str, Any]] = []
@@ -692,7 +719,9 @@ class CollectAgent:
         self._last_state_action: LegalAction | None = None
         self._last_state_expected_effects: tuple[str, ...] = ()
         self._last_obs_image: Any = None
+        self._last_raw_obs_image: Any = None
         self._last_ocr_words: list[Any] = []
+        self._reward_phrase_roi: tuple[float, float, float, float] | None = None
         self._last_quiet_ms: float = 0.0
         self._last_quiet_polls: int = 0
         self._blocked_marks: set[str] = set()
@@ -708,6 +737,8 @@ class CollectAgent:
         self._last_targeting_opts: dict[str, Any] | None = None
         self._perceive_retry_reason: str | None = None
         self._overlay_state = OverlayState()
+        self._overlay_escape = OverlayEscapeState()
+        self._overlay_escape_action: ActionLog | None = None
         self._control_suppression = ControlSuppressionState()
         self._last_surface_screen: str = ""
         self._last_surface_membership: tuple[str, ...] = ()
@@ -774,6 +805,10 @@ class CollectAgent:
         self._last_intent = {}
         self._force_perceive = True
         self._combat_enter_logged = False
+        escape = getattr(self, "_overlay_escape", None)
+        if escape is not None:
+            escape.reset()
+        self._overlay_escape_action = None
         suppression = getattr(self, "_control_suppression", None)
         if suppression is not None:
             suppression.reset("")
@@ -888,9 +923,10 @@ class CollectAgent:
             source="reward-rebuild",
         )
         self._aim = AimGuide.from_marks(view, stamped, last_xy=self._last_click)
-        self._build_frame_model()
         if self._scene_desc is not None:
             self._finalize_action_surface(self._scene_desc, informational=[])
+        else:
+            self._build_frame_model()
 
     def _rebuild_current_reward_inventory(self) -> None:
         """Rebuild from the captured image, never the encoded model payload."""
@@ -1297,7 +1333,19 @@ class CollectAgent:
         tag: str = "",
     ) -> ActionLog:
         """Fail closed after every fill/steer fallback, immediately before dispatch."""
-        if not self._two_stage() or not self._combat_screen_now() or is_empty_chord(action):
+        plan = getattr(self, "_last_execution_plan", {})
+        plan_action = str(plan.get("action") or "") if isinstance(plan, dict) else ""
+        screen = str(
+            self._obs_metrics.get("screen")
+            or getattr(self, "_host_stats", {}).get("screen")
+            or ""
+        ).strip().lower()
+        guard_control = bool(
+            getattr(self, "_last_decision_schema", "") == "v2"
+            and plan_action == "click_control"
+            and screen in {"map", "reward"}
+        )
+        if not self._two_stage() or (not self._combat_screen_now() and not guard_control) or is_empty_chord(action):
             return action
         # Successful inspect_object is a hover, never a card click. Force hover
         # if fill/steer stripped it, then allow without targeting_validate.
@@ -1328,8 +1376,6 @@ class CollectAgent:
             return action
 
         if getattr(self, "_last_decision_schema", "") == "v2":
-            plan = getattr(self, "_last_execution_plan", {})
-            plan_action = str(plan.get("action") or "")
             if plan_action == "play_card":
                 if self._hand_inventory_mutated_since_plan():
                     self._invalidate_hand_inventory(reason="hand-reflow")
@@ -1365,6 +1411,61 @@ class CollectAgent:
                 self._last_execution_plan = {}
                 self._planned_hand_signature = None
                 self._force_perceive = True
+            elif guard_control:
+                # Map/reward controls are only executable as the exact current
+                # typed object selected by the reasoner.  ``bind_aim`` may
+                # reassign a stale mark after a fresh overlay, so validate its
+                # mark/role/point against both the plan and current guide.
+                expected_control = str(plan.get("control_id") or "").strip()
+                planned_object = str(plan.get("object_id") or expected_control).strip()
+                planned_mark = plan.get("mark_id")
+                planned_role = str(plan.get("role") or "").strip().lower()
+                planned_point = plan.get("point") if isinstance(plan.get("point"), dict) else {}
+                source_obj = (
+                    self._screen_objects.by_id(int(action.mark))
+                    if action.mark is not None else None
+                )
+                aim_mark = self._aim.by_id(int(action.mark)) if self._aim is not None and action.mark is not None else None
+                current_role = str(getattr(source_obj, "role", "") or "").strip().lower()
+                aim_role = str(getattr(aim_mark, "role", "") or "").strip().lower()
+                point_matches = bool(
+                    action.click_x is not None and action.click_y is not None
+                    and isinstance(planned_point.get("x"), (int, float))
+                    and isinstance(planned_point.get("y"), (int, float))
+                    and abs(float(action.click_x) - float(planned_point["x"])) <= 0.005
+                    and abs(float(action.click_y) - float(planned_point["y"])) <= 0.005
+                )
+                current_point_matches = bool(
+                    source_obj is not None and aim_mark is not None
+                    and action.click_x is not None and action.click_y is not None
+                    and abs(float(action.click_x) - float(source_obj.x)) <= 0.005
+                    and abs(float(action.click_y) - float(source_obj.y)) <= 0.005
+                    and abs(float(action.click_x) - float(aim_mark.x)) <= 0.005
+                    and abs(float(action.click_y) - float(aim_mark.y)) <= 0.005
+                )
+                mark_matches = bool(
+                    isinstance(planned_mark, int) and not isinstance(planned_mark, bool)
+                    and action.mark is not None and int(action.mark) == planned_mark
+                    and source_obj is not None and int(source_obj.mark_id) == planned_mark
+                    and aim_mark is not None and int(aim_mark.id) == planned_mark
+                )
+                identity_matches = bool(
+                    expected_control and planned_object == expected_control
+                    and source_obj is not None and aim_mark is not None
+                    and str(source_obj.object_id or "") == expected_control
+                    and str(aim_mark.object_id or "") == expected_control
+                    and str(action.source_object_id or "") == expected_control
+                    and current_role == planned_role == aim_role == str(action.source_role or "").strip().lower()
+                )
+                frame_matches = str(plan.get("snapshot_id") or "") == str(self._last_snapshot_id or "")
+                if frame_matches and mark_matches and identity_matches and point_matches and current_point_matches:
+                    return action
+                self._last_execution_plan = {}
+                self._force_perceive = True
+                self._pending_exec_error = "stale-control-binding"
+                self._last_legal_reason = "stale-control-binding"
+                _say(f"  {tag} transaction rejected: stale-control-binding")
+                return ActionLog(duration_ms=action.duration_ms or self.config.burst_ms)
             else:
                 # The canonical TurnSnapshot id is the control transaction's
                 # freshness token. The object store may be restamped by label
@@ -2175,6 +2276,233 @@ class CollectAgent:
             f"hand movement:{min(hand_diffs):.3f}",
         ]
 
+    def _commit_observation(self, image: Any) -> None:
+        """Bind fixture click map to the grab that publishes this step's marks."""
+        commit = getattr(self.fixture, "commit_observation", None)
+        if callable(commit) and image is not None:
+            commit(image)
+
+    def _click_geometry_disagree(self) -> bool:
+        """True when live capture integrity or click transform disagrees with the epoch."""
+        fx = self.fixture
+        grabbed = getattr(fx, "_grab_size", None) is not None
+        if grabbed:
+            live_integrity = str(getattr(fx, "_live_integrity", "trusted") or "trusted")
+            epoch_integrity = str(getattr(fx, "_integrity", "trusted") or "trusted")
+            ready = getattr(fx, "click_geometry_trusted", None)
+            if callable(ready) and not ready():
+                return True
+            if live_integrity != "trusted" or epoch_integrity != "trusted":
+                return True
+        frozen = getattr(fx, "_click_box", None)
+        if frozen is None:
+            frozen = getattr(fx, "_content_box", None)
+        live = getattr(fx, "_live_click_box", None)
+        if live is None:
+            live = getattr(fx, "_live_box", None)
+        if frozen is None or live is None:
+            return False
+        try:
+            return not boxes_close(tuple(frozen), tuple(live))
+        except (TypeError, ValueError):
+            return False
+
+    def _ensure_trusted_click_geometry(self) -> bool:
+        """One bounded reacquire when the epoch click map is not trusted yet."""
+        ready = getattr(self.fixture, "click_geometry_trusted", None)
+        if not callable(ready):
+            return True
+        if ready():
+            return True
+        grab = getattr(self.fixture, "grab_image", None)
+        if not callable(grab):
+            return False
+        try:
+            raw = grab()
+            self._last_raw_obs_image = raw
+            self._commit_observation(raw)
+            observe = getattr(self.fixture, "observe_image", None)
+            if callable(observe):
+                self._last_obs_image = observe(raw)
+        except Exception:
+            return False
+        return bool(ready())
+
+    def _click_box(self) -> tuple[float, float, float, float]:
+        fx = self.fixture
+        box = getattr(fx, "_click_box", None)
+        if box is None:
+            box = getattr(fx, "_content_box", None)
+        if box is None or len(tuple(box)) != 4:
+            return (0.0, 0.0, 1.0, 1.0)
+        return tuple(float(v) for v in box)
+
+    def _hygiene(self) -> PointerHygieneState:
+        state = getattr(self, "_pointer_hygiene", None)
+        if not isinstance(state, PointerHygieneState):
+            state = PointerHygieneState()
+            self._pointer_hygiene = state
+        return state
+
+    def _neutral_park_xy(self) -> tuple[float, float]:
+        override = getattr(self.fixture, "neutral_park_xy", None)
+        if callable(override):
+            try:
+                xy = override()
+                if isinstance(xy, (tuple, list)) and len(xy) == 2:
+                    return (float(xy[0]), float(xy[1]))
+            except Exception:
+                pass
+        from loop.os.pointer_hygiene import neutral_park_xy
+
+        return neutral_park_xy(self._click_box())
+
+    def _action_holds_combat_selection(self, action: ActionLog | None) -> bool:
+        if action is None or not self._combat_screen_now():
+            return False
+        if bool(getattr(action, "hover", False)):
+            return False
+        role = str(getattr(action, "source_role", "") or "").strip().lower()
+        if role == "card":
+            return True
+        plan = getattr(self, "_last_execution_plan", {}) or {}
+        return str(plan.get("action") or "") == "play_card"
+
+    def _should_park_after_action(
+        self,
+        action: ActionLog | None,
+        *,
+        mid_transaction: bool = False,
+        drag: bool = False,
+        park_after: bool | None = None,
+    ) -> bool:
+        has_click = bool(
+            action is not None
+            and action.click_x is not None
+            and action.click_y is not None
+        )
+        return should_park_after_pointer(
+            hover=bool(getattr(action, "hover", False)) if action is not None else False,
+            has_click=has_click,
+            mid_transaction=mid_transaction,
+            drag=drag,
+            combat_selection_held=self._action_holds_combat_selection(action) or self._hygiene().selection_held,
+            park_after=park_after,
+        )
+
+    def _park_pointer(self, *, trigger: str, dwell_s: float | None = None) -> bool:
+        """Move to a neutral client point. Best-effort; never raises into collect."""
+        controller = getattr(self.fixture, "controller", None)
+        if controller is None:
+            return False
+        xy = self._neutral_park_xy()
+        try:
+            self._discovery_hover_to(*xy)
+        except Exception:
+            return False
+        wait = PARK_DWELL_S if dwell_s is None else float(dwell_s)
+        if wait > 0:
+            time.sleep(wait)
+        state = self._hygiene()
+        state.parked = True
+        state.hover_intentional = False
+        state.selection_held = False
+        state.last_xy = xy
+        state.last_park_xy = xy
+        state.last_trigger = trigger
+        return True
+
+    def _note_pointer_action(self, action: ActionLog | None, *, parked: bool) -> None:
+        state = self._hygiene()
+        if action is None or action.click_x is None or action.click_y is None:
+            if parked:
+                state.parked = True
+            return
+        xy = (float(action.click_x), float(action.click_y))
+        state.last_xy = xy
+        state.last_action_xy = xy
+        state.hover_intentional = bool(getattr(action, "hover", False))
+        state.parked = bool(parked)
+        if self._action_holds_combat_selection(action) and not parked:
+            state.selection_held = True
+
+    def _ensure_clean_observation(self, image: Any, *, trigger: str) -> Any:
+        """Park leftover hover before using a frame as the next observation."""
+        state = self._hygiene()
+        if state.parked or state.hover_intentional or state.selection_held:
+            return image
+        if getattr(self.fixture, "controller", None) is None:
+            return image
+        pre = image
+        if not self._park_pointer(trigger=trigger):
+            return image
+        try:
+            raw = self.fixture.grab_image()
+            self._last_raw_obs_image = raw
+            self._commit_observation(raw)
+            observe = getattr(self.fixture, "observe_image", None)
+            fresh = observe(raw) if callable(observe) else raw
+        except Exception:
+            return image
+        try:
+            state.last_probe_delta = mean_absdiff(roi_thumb(pre, 64), roi_thumb(fresh, 64))
+        except Exception:
+            state.last_probe_delta = 0.0
+        self._last_obs_image = fresh
+        return fresh
+
+    def _maybe_park_after_action(
+        self,
+        action: ActionLog | None,
+        *,
+        mid_transaction: bool = False,
+        drag: bool = False,
+        park_after: bool | None = None,
+    ) -> bool:
+        if not self._should_park_after_action(
+            action, mid_transaction=mid_transaction, drag=drag, park_after=park_after
+        ):
+            self._note_pointer_action(action, parked=False)
+            return False
+        parked = self._park_pointer(trigger="post-action")
+        self._note_pointer_action(action, parked=parked)
+        return parked
+
+    def _maybe_recapture_occluded_scene(self, scene: Any) -> bool:
+        """One park-probe + rescan when a leftover tooltip occludes the frame."""
+        state = self._hygiene()
+        if state.recapture_used >= 1 or state.parked or state.hover_intentional:
+            return False
+        if not hover_occlusion_from_scene(
+            scene, pointer=state.last_xy, last_click=state.last_action_xy or self._last_click
+        ):
+            return False
+        if getattr(self.fixture, "controller", None) is None:
+            return False
+        state.recapture_used += 1
+        pre = getattr(self, "_last_obs_image", None)
+        if not self._park_pointer(trigger="occlusion-recapture"):
+            return False
+        try:
+            self._rescan_scene(focus="hover-occlusion")
+        except Exception:
+            return False
+        fresh = getattr(self, "_last_obs_image", None)
+        if pre is not None and fresh is not None:
+            try:
+                state.last_probe_delta = mean_absdiff(roi_thumb(pre, 64), roi_thumb(fresh, 64))
+            except Exception:
+                pass
+        return True
+
+    def _map_click_client(self, x: float | None, y: float | None) -> tuple[float | None, float | None]:
+        if x is None or y is None:
+            return None, None
+        try:
+            return map_content_xy(float(x), float(y), self._click_box())
+        except Exception:
+            return float(x), float(y)
+
     def _source_roi_changed(
         self,
         card: AimMark,
@@ -2198,10 +2526,15 @@ class CollectAgent:
 
     def _card_geometry_evidence(self, card: AimMark) -> str:
         fx = self.fixture
-        box = tuple(getattr(fx, "_content_box", (0.0, 0.0, 1.0, 1.0)) or (0.0, 0.0, 1.0, 1.0))
-        if len(box) != 4:
-            box = (0.0, 0.0, 1.0, 1.0)
-        image = getattr(getattr(self, "_aim", None), "image", None) or getattr(self, "_last_obs_image", None)
+        click = self._click_box()
+        vision = getattr(fx, "_vision_box", None)
+        if vision is None or len(tuple(vision)) != 4:
+            vision = click
+        else:
+            vision = tuple(float(v) for v in vision)
+        image = getattr(self, "_last_raw_obs_image", None)
+        if image is None:
+            image = getattr(getattr(self, "_aim", None), "image", None) or getattr(self, "_last_obs_image", None)
         geo = ""
         line_fn = getattr(fx, "geometry_line", None)
         if callable(line_fn) and image is not None:
@@ -2210,10 +2543,30 @@ class CollectAgent:
             except Exception:
                 geo = ""
         try:
-            cx, cy = map_content_xy(float(card.x), float(card.y), box)  # type: ignore[arg-type]
+            cx, cy = map_content_xy(float(card.x), float(card.y), click)
         except Exception:
             cx, cy = float(card.x), float(card.y)
-        return f"geometry:{geo or 'n/a'} click_client={cx:.3f},{cy:.3f}"
+        source = str(getattr(fx, "_capture_source", "") or "")
+        live = getattr(fx, "_live_click_box", None)
+        if live is None:
+            live = getattr(fx, "_live_box", None)
+        live_integrity = str(getattr(fx, "_live_integrity", "") or "")
+        line = (
+            f"geometry:{geo or 'n/a'} source={source or '?'} "
+            f"vision={vision[0]:.2f},{vision[1]:.2f},{vision[2]:.2f},{vision[3]:.2f} "
+            f"click={click[0]:.2f},{click[1]:.2f},{click[2]:.2f},{click[3]:.2f} "
+            f"click_client={cx:.3f},{cy:.3f}"
+        )
+        if live is not None:
+            try:
+                live_box = tuple(float(v) for v in live)
+                line += (
+                    f" live_box={live_box[0]:.2f},{live_box[1]:.2f},"
+                    f"{live_box[2]:.2f},{live_box[3]:.2f} live_integrity={live_integrity or '?'}"
+                )
+            except (TypeError, ValueError):
+                pass
+        return line
 
     def _fail_unconfirmed_source(
         self,
@@ -2449,6 +2802,12 @@ class CollectAgent:
                 transaction.verification_evidence.append(transaction.error)
             self._clear_stale_target_state()
             return _CardExecution(action, [], self.fixture.grab_image(), [], transaction, transaction.error)
+        if not self._ensure_trusted_click_geometry():
+            transaction.outcome = "dispatch_failed"
+            transaction.error = "untrusted-click-geometry"
+            transaction.verification_evidence.append("untrusted-click-geometry")
+            self._clear_stale_target_state()
+            return _CardExecution(action, [], self.fixture.grab_image(), [], transaction, transaction.error)
 
         card_action = action.model_copy(
             update={
@@ -2495,18 +2854,22 @@ class CollectAgent:
             transaction.probe_samples += len(hover_probe.frames)
             transaction.probe_elapsed_ms += hover_probe.elapsed_ms
             if not self._source_roi_changed(card, hover_probe):
-                transaction.verification_evidence.append("hover-no-lift")
-                return self._fail_unconfirmed_source(
-                    action=action,
-                    executed=executed,
-                    primitives=primitives,
-                    transaction=transaction,
-                    card=card,
-                    plan=plan if isinstance(plan, dict) else None,
-                    probe=hover_probe,
-                    error=f"source-unconfirmed:hover:{card.object_id or card.label or card.id}",
-                )
-            transaction.verification_evidence.append("hover-lift")
+                if self._click_geometry_disagree():
+                    transaction.verification_evidence.append("hover-geometry-mismatch")
+                else:
+                    transaction.verification_evidence.append("hover-no-lift")
+                    return self._fail_unconfirmed_source(
+                        action=action,
+                        executed=executed,
+                        primitives=primitives,
+                        transaction=transaction,
+                        card=card,
+                        plan=plan if isinstance(plan, dict) else None,
+                        probe=hover_probe,
+                        error=f"source-unconfirmed:hover:{card.object_id or card.label or card.id}",
+                    )
+            else:
+                transaction.verification_evidence.append("hover-lift")
         try:
             if hasattr(self.fixture, "pending_aim_label"):
                 self.fixture.pending_aim_label = card.label
@@ -2537,16 +2900,20 @@ class CollectAgent:
             transaction.outcome = "auto_resolved"
             return _CardExecution(action, executed, self._probe_after_frame(probe), primitives, transaction)
         if state != "selected":
-            return self._fail_unconfirmed_source(
-                action=action,
-                executed=executed,
-                primitives=primitives,
-                transaction=transaction,
-                card=card,
-                plan=plan if isinstance(plan, dict) else None,
-                probe=probe,
-                error=f"source-unconfirmed:{card.object_id or card.label or card.id}",
-            )
+            if self._click_geometry_disagree():
+                transaction.verification_evidence.append("probe-geometry-mismatch")
+                state = "selected"
+            else:
+                return self._fail_unconfirmed_source(
+                    action=action,
+                    executed=executed,
+                    primitives=primitives,
+                    transaction=transaction,
+                    card=card,
+                    plan=plan if isinstance(plan, dict) else None,
+                    probe=probe,
+                    error=f"source-unconfirmed:{card.object_id or card.label or card.id}",
+                )
 
         transaction.selection_state = "confirmed"
         transaction.source_verified = True
@@ -2700,6 +3067,29 @@ class CollectAgent:
 
     def _two_stage(self) -> bool:
         return self._turn_based() and self.config.architecture == "two_stage"
+
+    def _model_thread(self, role: Literal["perceive", "act"]) -> EpisodeThread | None:
+        if self._active_context_mode() != "threaded" or not self._two_stage():
+            return None
+        return self._llm1_thread if role == "perceive" else self._act_thread
+
+    def _active_context_mode(self) -> Literal["cold", "threaded"]:
+        schedule = getattr(self.config, "context_schedule", None)
+        if schedule:
+            idx = max(0, getattr(self, "_episode_n", 1) - 1)
+            mode = schedule[idx] if idx < len(schedule) else schedule[-1]
+            if mode in ("cold", "threaded"):
+                return mode  # type: ignore[return-value]
+        mode = getattr(self.config, "context_mode", "cold")
+        return mode if mode in ("cold", "threaded") else "cold"
+
+    def _remember_perceive_call(self, call: Any) -> None:
+        if call is None:
+            self._last_perceive_call = {}
+            return
+        gw = self._perceive_gw()
+        num_ctx = int(getattr(gw, "num_ctx", 8192) or 8192) if gw is not None else 8192
+        self._last_perceive_call = stage_call_metrics(call, num_ctx=num_ctx)
 
     def _identify_before_act(self) -> bool:
         cfg = getattr(self, "config", None)
@@ -3313,14 +3703,22 @@ class CollectAgent:
         return None
 
     def _evidence_fingerprint(self, *, screen: str = "") -> str:
-        """Stable observation id so empty snapshot cannot skip bounded retry."""
+        """Identity for no-op recovery, stable across fresh snapshot ids."""
         screen_key = str(screen or "").strip().lower()
-        snap = str(getattr(self, "_last_snapshot_id", "") or "").strip()
-        if snap:
-            return f"{screen_key}|snap:{snap}"
-        membership = "|".join(getattr(self, "_last_surface_membership", ()) or ())
-        if membership:
-            return f"{screen_key}|surf:{membership}"
+        surface = getattr(self, "_action_surface", None)
+        interactive = getattr(surface, "interactive", None)
+        if callable(interactive):
+            rows = [
+                obj.to_dict()
+                for obj in interactive()
+                if str(getattr(obj, "role", "") or "").strip().lower()
+                in GENERIC_CONTROL_ROLES | {"card", "enemy", "player", "target"}
+            ]
+            if rows:
+                surface_screen = str(
+                    screen_key or getattr(getattr(surface, "context", None), "screen", "") or ""
+                ).strip().lower()
+                return f"surf:{surface_fingerprint(screen=surface_screen, rows=rows)}"
         cache = getattr(self, "_perception_cache", None)
         view = getattr(self, "_last_obs_image", None)
         hasher = getattr(cache, "compute_frame_hash", None)
@@ -3468,7 +3866,7 @@ class CollectAgent:
         if row is None:
             row = probe
         key = suppression.key_for_row(row, screen=screen, prior_rows=controls)
-        suppression.record_no_change(fingerprint, key)
+        count = suppression.record_no_change(fingerprint, key)
         cid = str(
             oid
             or (row.get("object_id") if isinstance(row, dict) else "")
@@ -3476,6 +3874,155 @@ class CollectAgent:
         ).strip()
         if cid:
             self._record_blocked_control_id(cid)
+        if count >= 2:
+            self._maybe_arm_overlay_escape()
+
+    def _overlay_blocking_now(self) -> bool:
+        surface = getattr(self, "_action_surface", None)
+        if surface is not None and bool(getattr(surface.context, "blocking_overlay", False)):
+            return True
+        host = getattr(self, "_host_stats", None) or {}
+        activity = str(
+            getattr(getattr(surface, "context", None), "activity", None)
+            or host.get("activity")
+            or ""
+        ).strip().lower()
+        screen = ""
+        try:
+            screen = self._current_surface_screen()
+        except Exception:
+            screen = str(host.get("screen") or "").strip().lower()
+        if activity == "combat" or screen == "combat":
+            return overlay_looks_dimmed(getattr(self, "_last_obs_image", None))
+        return False
+
+    def _maybe_arm_overlay_escape(self) -> None:
+        state = getattr(self, "_overlay_escape", None)
+        if state is None:
+            return
+        if self._overlay_blocking_now():
+            state.arm(trigger="blocked-twice")
+
+    def _apply_overlay_escape(self, snapshot: TurnSnapshot) -> dict[str, Any] | None:
+        """Skip ACT and take the next overlay-leave rung. None falls through to ACT."""
+        state = self._overlay_escape
+        if not state.armed:
+            return None
+        surface = getattr(self, "_action_surface", None)
+        bboxes = (
+            [(obj.x0, obj.y0, obj.x1, obj.y1) for obj in surface.interactive()]
+            if surface is not None
+            else []
+        )
+        fixture = getattr(self, "fixture", None)
+        key_fn = getattr(fixture, "overlay_dismiss_key", None) if fixture is not None else None
+        key = key_fn() if callable(key_fn) else None
+        planned = plan_overlay_escape(
+            state,
+            controls=snapshot.controls,
+            image=getattr(self, "_last_obs_image", None),
+            interactive_bboxes=bboxes,
+            dismiss_key=key,
+            skip_ids=getattr(self, "_blocked_controls", None) or (),
+        )
+        if planned is None:
+            state.armed = False
+            state.exhausted = True
+            self._overlay_escape_action = None
+            return None
+        state.last_rung = planned.rung
+        state.rung = planned.rung
+        self._last_decision_schema = "v2"
+        self._last_snapshot_id = snapshot.snapshot_id
+        self._last_turn_snapshot = turn_snapshot_for_log(snapshot)
+        self._last_reason_backend = "overlay-escape"
+        self._last_reason_fallback = ""
+        self._last_reason_raw = ""
+        self._last_reason_call = {"backend": "overlay-escape", "rung": planned.rung}
+        self.last_user_prompt = compact_act_prompt(snapshot)
+        burst = int(getattr(getattr(self, "config", None), "burst_ms", 400) or 400)
+        parsed: dict[str, Any]
+        if planned.kind == "click_control":
+            obj = (getattr(self, "_v2_control_objects", None) or {}).get(planned.control_id)
+            if obj is None:
+                state.rung = planned.rung + 1
+                return self._apply_overlay_escape(snapshot)
+            self._overlay_escape_action = None
+            self._last_intent = {"kind": "click_control", "control_id": planned.control_id}
+            frame_identity = current_snapshot_identity(self._screen_objects)
+            self._last_execution_plan = {
+                "decision_schema": "v2",
+                "snapshot_id": snapshot.snapshot_id,
+                "frame_snapshot_id": frame_identity["snapshot_id"],
+                "frame_run_id": frame_identity["run_id"],
+                "frame_step_id": frame_identity["step_id"],
+                "action": "click_control",
+                "control_id": planned.control_id,
+                "object_id": obj.object_id or planned.control_id,
+                "mark_id": getattr(obj, "mark_id", None),
+                "role": getattr(obj, "role", ""),
+                "label": obj.label,
+                "point": {"x": obj.x, "y": obj.y},
+            }
+            parsed = {"action": "click_control", "choice": obj.label}
+        elif planned.kind == "scrim":
+            action = ActionLog(
+                name="dismiss_overlay",
+                click_x=float(planned.x),
+                click_y=float(planned.y),
+                duration_ms=burst,
+            )
+            self._overlay_escape_action = action
+            self._last_intent = {}
+            self._last_execution_plan = {
+                "decision_schema": "v2",
+                "snapshot_id": snapshot.snapshot_id,
+                "action": "dismiss_overlay",
+                "point": {"x": planned.x, "y": planned.y},
+            }
+            parsed = {"action": "dismiss_overlay", "choice": "scrim"}
+        else:
+            action = ActionLog(name=str(planned.key), duration_ms=burst)
+            self._overlay_escape_action = action
+            self._last_intent = {}
+            self._last_execution_plan = {
+                "decision_schema": "v2",
+                "snapshot_id": snapshot.snapshot_id,
+                "action": str(planned.key),
+            }
+            parsed = {"action": str(planned.key), "choice": str(planned.key)}
+        _say(f"  overlay   escape rung {planned.rung} ({planned.kind})")
+        self._log_combat_decision(parsed)
+        return parsed
+
+    def _finish_overlay_escape(
+        self,
+        *,
+        mad: float,
+        pixel_changed: bool,
+        executed: bool,
+    ) -> None:
+        state = getattr(self, "_overlay_escape", None)
+        if state is None or not state.last_rung:
+            return
+        if getattr(self, "_last_reason_backend", "") != "overlay-escape":
+            return
+        if not executed:
+            return
+        rung = state.last_rung
+        used_scrim = rung == 2
+        if pixel_changed or mad >= MAD_NOOP:
+            tut = self._host_stats.get("tutorial") if isinstance(self._host_stats.get("tutorial"), dict) else {}
+            title = str((tut or {}).get("title") or "overlay")
+            overlay = getattr(self, "_overlay_state", None)
+            if overlay is not None:
+                overlay.record_dismissal(title=title, step_id=int(self._step_id or 0))
+            state.note_success(mad)
+            self._overlay_escape_action = None
+            _say(f"  overlay   dismissed (rung {rung})")
+            return
+        state.note_failure(mad, used_scrim=used_scrim)
+        self._overlay_escape_action = None
 
     def _finalize_reason_controls(self, controls: list[dict[str, Any]]) -> list[dict[str, Any]]:
         stamped = self._stamp_reason_control_ids(controls)
@@ -3626,11 +4173,28 @@ class CollectAgent:
         """Harness-internal LLM1 rescan from the current frame, not the old candidate list."""
         from loop.agent.prompts import two_stage_system_for
 
+        if not self._hygiene().hover_intentional:
+            current = getattr(self, "_last_obs_image", None)
+            if current is not None:
+                self._ensure_clean_observation(current, trigger=focus or "rescan")
         self._perception_cache.invalidate_enemies()
-        image = self._last_obs_image
         perceive_gw = self._perceive_gw()
-        if image is None or perceive_gw is None:
+        raw = getattr(self, "_last_raw_obs_image", None)
+        grab = getattr(self.fixture, "grab_image", None)
+        if callable(grab):
+            try:
+                raw = grab()
+                self._last_raw_obs_image = raw
+            except Exception:
+                pass
+        if raw is None:
+            raw = self._last_obs_image
+        if raw is None or perceive_gw is None:
             return 0.0
+        self._commit_observation(raw)
+        observe = getattr(self.fixture, "observe_image", None)
+        image = observe(raw) if callable(observe) else raw
+        self._last_obs_image = image
         cap = int(getattr(self.fixture, "obs_longest_side", 1280) or 1280)
         frame = encode_observe(image, cap=cap, jpeg_quality=90)
         perceive_system, _ = two_stage_system_for(arm=self.config.arm)
@@ -3659,7 +4223,9 @@ class CollectAgent:
                 detector_candidates=candidates,
             ),
             cv_verdicts=getattr(self, "_affordance_verdicts", None) or None,
+            thread=self._model_thread("perceive"),
         )
+        self._remember_perceive_call(call)
         self._capture_perception_audit(desc)
         reason_controls = self._apply_perceive_scene(desc)
         if str(desc.screen or "").strip().lower() == "combat":
@@ -3730,6 +4296,45 @@ class CollectAgent:
     @staticmethod
     def _surface_key(value: Any) -> str:
         return " ".join(str(value or "").casefold().replace("_", " ").replace("-", " ").split())
+
+    @staticmethod
+    def _ocr_phrase_key(value: Any) -> str:
+        """Normalize OCR/control copy without accepting fuzzy text matches."""
+        return " ".join(re.sub(r"[^\w\s]", " ", str(value or "").casefold()).split())
+
+    @classmethod
+    def _ocr_phrase_lines(cls, words: Sequence[Any]) -> list[tuple[str, tuple[float, float, float, float], Any]]:
+        """Group current OCR words into the same visual lines used by crop OCR."""
+        rows: list[list[Any]] = []
+        for word in sorted(words, key=lambda item: (float(item.y), float(item.x))):
+            target = next(
+                (
+                    row for row in rows
+                    if abs(sum(float(item.y) for item in row) / len(row) - float(word.y)) <= 0.035
+                ),
+                None,
+            )
+            if target is None:
+                rows.append([word])
+            else:
+                target.append(word)
+        lines: list[tuple[str, tuple[float, float, float, float], Any]] = []
+        for row in rows:
+            ordered = sorted(row, key=lambda item: float(item.x))
+            text = " ".join(str(getattr(item, "text", getattr(item, "label", "")) or "") for item in ordered)
+            if not cls._ocr_phrase_key(text):
+                continue
+            lines.append((
+                text,
+                (
+                    min(float(item.x0) for item in ordered),
+                    min(float(item.y0) for item in ordered),
+                    max(float(item.x1) for item in ordered),
+                    max(float(item.y1) for item in ordered),
+                ),
+                ordered[0],
+            ))
+        return lines
 
     @staticmethod
     def _scene_bbox(value: Any) -> tuple[float, float, float, float] | None:
@@ -3846,6 +4451,12 @@ class CollectAgent:
         used: set[int] = set()
         generic = {"button", "control", "dialog", "menu", "nav_prev", "nav_next", "next", "prev", "previous"}
         domain = {"card", "enemy", "player", "target", "character", "unknown_character"}
+        screen = str(
+            getattr(scene_desc, "screen", None)
+            or (getattr(self, "_host_stats", None) or {}).get("screen")
+            or (getattr(self, "_obs_metrics", None) or {}).get("screen")
+            or ""
+        ).strip().lower()
 
         def compatible(mark: AimMark, row_role: str) -> bool:
             mark_role = self._surface_key(mark.role)
@@ -3875,6 +4486,11 @@ class CollectAgent:
             if is_frame_mark_token(row_id):
                 row_id = ""
             row_role = self._surface_key(row.get("role") or row.get("kind") or "other")
+            if screen == "reward" and row_role == "card":
+                # Reward offers are choices, not combat hand cards. Treat them
+                # as generic controls so unique-bbox/OCR grounding can bind
+                # unlabeled icon marks. Combat promotion stays combat-only.
+                row_role = "button"
             ocr_bound = False
             candidates = [
                 (index, mark) for index, mark in enumerate(marks)
@@ -3906,6 +4522,61 @@ class CollectAgent:
                     ]
                     if len(contained) == 1:
                         match = contained[0]
+            if match is None and row_role in generic and label:
+                # Reward controls often arrive as a model-typed label while
+                # OCR exposes its individual words. Bind only one exact,
+                # current-frame phrase and only on the reward screen.
+                phrase_key = self._ocr_phrase_key(label)
+                if (
+                    screen == "reward"
+                    and self._scene_bbox(row.get("bbox")) is None
+                    and len(phrase_key.split()) > 1
+                ):
+                    phrase_words = list(getattr(self, "_last_ocr_words", ()) or ())
+                    phrase_roi = getattr(self, "_reward_phrase_roi", None)
+                    if phrase_roi is not None:
+                        phrase_words = [
+                            word for word in phrase_words
+                            if self._boxes_intersect(
+                                (float(word.x0), float(word.y0), float(word.x1), float(word.y1)),
+                                phrase_roi,
+                            )
+                        ]
+                    phrase_matches = [
+                        line for line in self._ocr_phrase_lines(phrase_words)
+                        if self._ocr_phrase_key(line[0]) == phrase_key
+                    ]
+                    if len(phrase_matches) == 1:
+                        _, (x0, y0, x1, y1), anchor = phrase_matches[0]
+                        phrase_hits = [
+                            (index, mark) for index, mark in candidates
+                            if not (
+                                float(mark.x1) < x0 or x1 < float(mark.x0)
+                                or float(mark.y1) < y0 or y1 < float(mark.y0)
+                            )
+                        ]
+                        if len(phrase_hits) == 1:
+                            match = phrase_hits[0]
+                            ocr_bound = True
+                        elif not phrase_hits:
+                            index = len(marks)
+                            mark = _copy_mark(
+                                anchor,
+                                mid=max((int(item.id) for item in marks), default=0) + 1,
+                                x=(x0 + x1) / 2.0,
+                                y=(y0 + y1) / 2.0,
+                                x0=x0,
+                                y0=y0,
+                                x1=x1,
+                                y1=y1,
+                                label=label,
+                                role=str(row.get("role") or "button").strip().lower(),
+                                source="+".join(dict.fromkeys(filter(None, (str(getattr(anchor, "source", "") or ""), "ocr-control")))),
+                                confidence=max(float(getattr(anchor, "confidence", 0.0) or getattr(anchor, "score", 0.0) or 0.0), 0.75),
+                            )
+                            marks.append(mark)
+                            match = (index, mark)
+                            ocr_bound = True
             if match is None and row_role in generic and label:
                 # OCR words are current-frame evidence even when aim merging
                 # excludes an otherwise unknown control label. Materialize it
@@ -3976,6 +4647,8 @@ class CollectAgent:
             index, mark = match
             used.add(index)
             role = str(row.get("role") or "").strip().lower()
+            if screen == "reward" and role == "card":
+                role = "button"
             if role in {"next"}:
                 role = "nav_next"
             elif role in {"prev", "previous"}:
@@ -4038,6 +4711,11 @@ class CollectAgent:
             host_stats=self._host_stats,
             screen=screen,
         )
+        dimmed = False
+        if activity == "combat":
+            dimmed = overlay_looks_dimmed(getattr(self, "_last_obs_image", None))
+            if dimmed and not isinstance(self._host_stats.get("blocking_overlay"), bool):
+                self._host_stats["blocking_overlay"] = True
         overlay = getattr(self, "_overlay_state", None)
         if overlay is not None and scene_desc is not None:
             dialog_raw = getattr(scene_desc, "dialog", None)
@@ -4063,6 +4741,15 @@ class CollectAgent:
                 self._host_stats["tutorial"] = resolved_tut
             else:
                 self._host_stats.pop("tutorial", None)
+                host_screen = str(self._host_stats.get("screen") or "").strip().lower()
+                scene_screen = str(getattr(scene_desc, "screen", "") or "").strip().lower()
+                if (
+                    scene_screen == "tutorial"
+                    and host_screen in {"combat", "map"}
+                    and not dialog_open
+                ):
+                    scene_desc.screen = host_screen
+                    screen = host_screen
         reconciled = self._reconcile_scene_marks(scene_desc)
         from loop.memory.screen_objects import (
             _context_host_enemy_count,
@@ -4130,6 +4817,9 @@ class CollectAgent:
         )
         self._action_surface = surface
         self._frame_model = surface.frame_model()
+        escape = getattr(self, "_overlay_escape", None)
+        if escape is not None and not surface.context.blocking_overlay and not dimmed:
+            escape.reset()
         return surface
 
     def _reason_controls_from_surface(self, scene_desc: Any) -> list[dict[str, Any]]:
@@ -4860,6 +5550,12 @@ class CollectAgent:
             intent = getattr(self, "_last_intent", None) or {}
         if str(intent.get("kind") or "") != "click_control":
             return False
+        failure_text = " ".join(
+            str(rec.get(key) or "")
+            for key in ("code", "dispatch", "error", "transaction_outcome")
+        )
+        if "stale-control-binding" in failure_text:
+            return False
         cid = str(intent.get("control_id") or "").strip()
         if cid:
             self._record_blocked_control_id(cid)
@@ -4941,6 +5637,12 @@ class CollectAgent:
             "controls": [(c.control_id, c.label) for c in snapshot.controls],
         }, sort_keys=True, separators=(",", ":"))
         legal_intents = legal_intents_for_snapshot(snapshot)
+        if getattr(self, "_overlay_escape", None) is not None and self._overlay_escape.armed:
+            escaped = self._apply_overlay_escape(snapshot)
+            if escaped is not None:
+                self._empty_action_surface_key = ""
+                self._empty_action_surface_count = 0
+                return escaped, 0.0
         if not legal_intents:
             self._last_decision_schema = "v2"
             self._last_snapshot_id = snapshot.snapshot_id
@@ -5039,6 +5741,7 @@ class CollectAgent:
             gateway_factory=_gateway_factory,
             primary_model=primary_model,
             fallback_model=self.config.reason_fallback_model,
+            thread=self._model_thread("act"),
         )
         started = time.perf_counter()
         self._turn_reasoner_called = True
@@ -5124,6 +5827,9 @@ class CollectAgent:
                     "frame_run_id": frame_identity["run_id"],
                     "frame_step_id": frame_identity["step_id"],
                     "action": intent.kind, "control_id": intent.control_id,
+                    "object_id": obj.object_id or intent.control_id,
+                    "mark_id": getattr(obj, "mark_id", None),
+                    "role": getattr(obj, "role", ""),
                     "label": obj.label,
                     "point": {"x": obj.x, "y": obj.y},
                 }
@@ -5240,15 +5946,18 @@ class CollectAgent:
                     cv_verdicts=getattr(self, "_affordance_verdicts", None) or None,
                     max_schema_retries=0,
                     timeout_s=self.config.perceive_timeout_s,
+                    thread=self._model_thread("perceive"),
                 )
                 perceive_ms = perceive_call.latency_ms
                 self._capture_perception_audit(scene_desc)
                 if not getattr(scene_desc, "schema_valid", True):
                     raise ValueError("malformed perception output")
+                self._remember_perceive_call(perceive_call)
                 _say(f"  perceive   llm1 ({gate_reason})")
             except Exception as exc:  # cloud timeout/HTTP/schema -> canonical sensors
                 perceive_ms = (time.perf_counter() - perceive_started) * 1000
                 perceive_call = None
+                self._remember_perceive_call(None)
                 scene_desc = scene_from_ocr(
                     hud=self._obs_metrics,
                     host_stats=self._host_stats,
@@ -5318,6 +6027,9 @@ class CollectAgent:
             scene_desc = self._scene_desc or scene_desc
             reason_controls = self._reason_controls_from_surface(scene_desc)
             self._reason_controls = reason_controls
+        if self._maybe_recapture_occluded_scene(scene_desc):
+            scene_desc = self._scene_desc or scene_desc
+            reason_controls = list(getattr(self, "_reason_controls", None) or reason_controls)
         reason_route, route_reason = self._two_stage_reason_route(scene_desc)
         self._last_epistemic_blockers = self._two_stage_epistemic_blockers(scene_desc)
         self._route_before_discovery = f"{reason_route} ({route_reason})"
@@ -5604,7 +6316,35 @@ class CollectAgent:
             self._live(phase="waiting", message="enemy turn", thought="")
         return image, gate
 
-    def _confirm_after_action(self, *, tag: str = "", max_ms: int | None = None) -> Any:
+    def _sts2_reward_reflow_roi(
+        self, action: ActionLog
+    ) -> tuple[float, float, float, float] | None:
+        """Return the movable Loot suffix for one current V2 reward control."""
+        if (
+            getattr(self.fixture, "id", "") != "sts2"
+            or action.hover
+            or getattr(self, "_last_decision_schema", "") != "v2"
+            or str(getattr(self, "_last_execution_plan", {}).get("action") or "") != "click_control"
+            or str(self._host_stats.get("screen") or self._obs_metrics.get("screen") or "").lower() != "reward"
+        ):
+            return None
+        reflow = getattr(self.fixture, "_reward_reflow_roi", None)
+        mark = self._aim.by_id(int(action.mark)) if self._aim is not None and action.mark is not None else None
+        if not callable(reflow):
+            return None
+        if mark is not None:
+            return reflow((float(mark.x0), float(mark.y0), float(mark.x1), float(mark.y1)))
+        if action.click_x is not None and action.click_y is not None:
+            return reflow(clicked_point=(float(action.click_x), float(action.click_y)))
+        return None
+
+    def _confirm_after_action(
+        self,
+        *,
+        tag: str = "",
+        max_ms: int | None = None,
+        roi: tuple[float, float, float, float] | None = None,
+    ) -> Any:
         """Wait for post-click animation to settle, then grab a confirmation frame."""
         timeout_ms = int(getattr(self.fixture, "quiet_timeout_ms", 8000) or 8000)
         confirm_cap_ms = int(getattr(self.fixture, "confirm_timeout_ms", 3000) or 3000)
@@ -5614,9 +6354,16 @@ class CollectAgent:
         threshold = float(getattr(profile, "diff_threshold", 0.02) or 0.02)
         quiet_threshold = max(threshold, 0.04)
         quiet_ms = int(getattr(self.fixture, "confirm_quiet_ms", 400) or 400)
+        if roi is not None:
+            # Loot compaction is spatially small.  Its regional change must
+            # not be diluted by the otherwise stationary game frame.
+            quiet_threshold = 0.012
+            quiet_ms = 160
+            confirm_cap_ms = min(confirm_cap_ms, 1100)
 
         def grab_thumb() -> Any:
-            return roi_thumb(self.fixture.grab_image(), 64)
+            image = self.fixture.grab_image()
+            return roi_thumb(crop(image, roi) if roi is not None else image, 64)
 
         result = wait_until_quiet(
             grab_thumb,
@@ -5630,16 +6377,190 @@ class CollectAgent:
             _say(f"  {tag} confirm  quiet={result.elapsed_ms:.0f}ms polls={result.polls}")
         return self.fixture.grab_image()
 
-    def _refresh_obs_after_action(self, after: Any, *, prev_metrics: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _boxes_intersect(
+        left: tuple[float, float, float, float], right: tuple[float, float, float, float]
+    ) -> bool:
+        return not (left[2] < right[0] or right[2] < left[0] or left[3] < right[1] or right[3] < left[1])
+
+    @staticmethod
+    def _remap_crop_marks(
+        marks: Sequence[AimMark], box: tuple[float, float, float, float]
+    ) -> list[AimMark]:
+        x0, y0, x1, y1 = box
+        width, height = x1 - x0, y1 - y0
+        return [
+            _copy_mark(
+                mark,
+                x=x0 + float(mark.x) * width,
+                y=y0 + float(mark.y) * height,
+                x0=x0 + float(mark.x0) * width,
+                y0=y0 + float(mark.y0) * height,
+                x1=x0 + float(mark.x1) * width,
+                y1=y0 + float(mark.y1) * height,
+            )
+            for mark in marks
+        ]
+
+    def _refresh_sts2_reward_reflow(
+        self,
+        before: Any,
+        view: Any,
+        *,
+        action: ActionLog,
+        reflow_roi: tuple[float, float, float, float],
+    ) -> bool:
+        """Publish a fresh Loot surface from the changed suffix only.
+
+        Returning false deliberately pays for the normal full reconstruction;
+        a local frame never inherits uncertain reward geometry.
+        """
+        if before is None:
+            return False
+        changed = difference_box(before, view, roi=reflow_roi, union=True)
+        if changed is None:
+            return True  # A rejected/no-op click leaves the current surface valid.
+
+        def reject_local_reflow() -> bool:
+            # A partially rebuilt reward surface must never be a decision
+            # source.  The normal mark rebuild below is intentionally not
+            # finalized against stale model controls; fresh perception owns
+            # the next executable inventory.
+            self._action_surface = None
+            self._frame_model = None
+            self._force_perceive = True
+            return False
+
+        if self._aim is None or self._scene_desc is None:
+            return reject_local_reflow()
+        rx0, ry0, rx1, ry1 = reflow_roi
+        cx0, cy0, cx1, cy1 = changed
+        roi_area = max(1e-6, (rx1 - rx0) * (ry1 - ry0))
+        if (cx1 - cx0) * (cy1 - cy0) > roi_area * 0.90:
+            return reject_local_reflow()
+        stack_roi = getattr(self.fixture, "_reward_stack_roi", None)
+        scan_bounds = stack_roi() if callable(stack_roi) else reflow_roi
+        sx0, sy0, sx1, sy1 = (float(value) for value in scan_bounds)
+        affected = (
+            max(sx0, cx0 - 0.08), max(sy0, cy0 - 0.08),
+            min(sx1, cx1 + 0.08), min(sy1, cy1 + 0.08),
+        )
+        if affected[2] <= affected[0] or affected[3] <= affected[1]:
+            return reject_local_reflow()
+
+        old_marks = list(self._aim.marks)
+        kept = [
+            mark for mark in old_marks
+            if not self._boxes_intersect(
+                (float(mark.x0), float(mark.y0), float(mark.x1), float(mark.y1)), affected
+            )
+            and self._roi_mad(before, view, (float(mark.x0), float(mark.y0), float(mark.x1), float(mark.y1))) <= 0.012
+        ]
+        # OCR and compact CV run on the affected crop only.  In particular,
+        # do not call the optional GUI detector on this fast path.
+        patch = crop(view, affected)
+        local_words = ocr_click_marks(patch)
+        local_marks = build_marks(
+            patch,
+            words=local_words,
+            cv_marks=detect_marks(patch),
+            gui_marks=[],
+            lexicon=self.journal.lexicon,
+            screen="reward",
+            layout_adapter=self._layout_adapter(),
+        )
+        fresh_words = self._remap_crop_marks(local_words, affected)
+        local = self._remap_crop_marks(local_marks, affected)
+        old_words = list(getattr(self, "_last_ocr_words", ()) or ())
+        current_words = [
+            word for word in old_words
+            if not self._boxes_intersect(
+                (float(word.x0), float(word.y0), float(word.x1), float(word.y1)), affected
+            )
+            and self._roi_mad(before, view, (float(word.x0), float(word.y0), float(word.x1), float(word.y1))) <= 0.012
+        ] + fresh_words
+        combined = [
+            _copy_mark(mark, mid=index)
+            for index, mark in enumerate([*kept, *local], start=1)
+        ]
+        clicked_label = self._surface_key(
+            getattr(self, "_last_execution_plan", {}).get("label") or self._aim_label(action)
+        )
+        if not clicked_label or any(self._surface_key(mark.label) == clicked_label for mark in combined):
+            return reject_local_reflow()
+        sanitized_controls: list[dict[str, Any]] = []
+        for row in getattr(self._scene_desc, "controls", []) or []:
+            if not isinstance(row, dict):
+                continue
+            label = self._surface_key(row.get("label") or row.get("name"))
+            if label == clicked_label:
+                continue
+            copy = dict(row)
+            if self._surface_key(copy.get("role") or copy.get("kind")) in GENERIC_CONTROL_ROLES:
+                copy.pop("bbox", None)
+            sanitized_controls.append(copy)
+        sanitized_scene = replace(self._scene_desc, controls=sanitized_controls)
+        self._last_ocr_words = current_words
+        self._aim = AimGuide.from_marks(view, combined, last_xy=self._last_click)
+        self._reward_phrase_roi = affected
+        try:
+            surface = self._finalize_action_surface(sanitized_scene, informational=[])
+        finally:
+            self._reward_phrase_roi = None
+        if surface is None:
+            return reject_local_reflow()
+        expected = [
+            self._surface_key(row.get("label") or row.get("name"))
+            for row in sanitized_controls
+            if isinstance(row, dict)
+            and self._surface_key(row.get("role") or row.get("kind")) in GENERIC_CONTROL_ROLES
+        ]
+        actual = [self._surface_key(obj.label) for obj in surface.interactive()]
+        if clicked_label in actual or any(not label or actual.count(label) != 1 for label in expected):
+            return reject_local_reflow()
+        self._scene_desc = sanitized_scene
+        entity_rows = [
+            ent.to_row() for ent in getattr(self._entity_tracker, "entities", []) or []
+        ]
+        self._perception_cache.update(
+            view=view,
+            screen="reward",
+            ocr_words=current_words,
+            marks=list(self._aim.marks),
+            entity_rows=entity_rows,
+            host_stats=self._host_stats,
+            layout_adapter=self._layout_adapter(),
+        )
+        self._cached_perceive_scene = sanitized_scene
+        self._cached_perceive_scene_step = int(self._step_id or 0)
+        self._force_perceive = False
+        return True
+
+    def _refresh_obs_after_action(
+        self,
+        after: Any,
+        *,
+        prev_metrics: dict[str, Any],
+        execution_frame: Any | None = None,
+        action: ActionLog | None = None,
+        reflow_roi: tuple[float, float, float, float] | None = None,
+    ) -> dict[str, Any]:
         """Sync _last_obs_image and aim from a post-action confirmation frame."""
+        self._last_raw_obs_image = after
         view = self.fixture.observe_image(after)
         self._last_obs_image = view
         if self._two_stage():
             self._prev_host_stats = dict(self._host_stats) if self._host_stats else {}
             self._host_stats = self._read_host_stats(view)
+            reward_reflow_metrics = bool(
+                reflow_roi is not None
+                and action is not None
+                and str(prev_metrics.get("screen") or "").strip().lower() == "reward"
+                and str(self._host_stats.get("screen") or "").strip().lower() == "reward"
+            )
             self._obs_metrics = (
                 stats_to_score_metrics(self._host_stats)
-                if str(self._host_stats.get("screen") or "") == "combat"
+                if reward_reflow_metrics or str(self._host_stats.get("screen") or "") == "combat"
                 else self.fixture.scorer(view)
             )
         else:
@@ -5647,11 +6568,34 @@ class CollectAgent:
         aim_screen = (
             str(self._obs_metrics.get("screen") or prev_metrics.get("screen") or "") or None
         )
-        reuse = self._perception_reuse(view, aim_screen=aim_screen)
-        words, marks, gui_marks, _ = self._build_turn_marks(
-            view, aim_screen=aim_screen, reuse=reuse
-        )
+        local_reward_refresh = False
+        if (
+            reflow_roi is not None
+            and action is not None
+            and str(prev_metrics.get("screen") or "").strip().lower() == "reward"
+            and str(self._host_stats.get("screen") or "").strip().lower() == "reward"
+            and execution_frame is not None
+        ):
+            before_view = self.fixture.observe_image(execution_frame)
+            local_reward_refresh = self._refresh_sts2_reward_reflow(
+                before_view, view, action=action, reflow_roi=reflow_roi
+            )
+        if local_reward_refresh:
+            words: list[Any] = list(getattr(self, "_last_ocr_words", ()) or ())
+            marks: list[Any] = list(self._aim.marks) if self._aim is not None else []
+            gui_marks: list[Any] = []
+        else:
+            reuse = self._perception_reuse(view, aim_screen=aim_screen)
+            words, marks, gui_marks, _ = self._build_turn_marks(
+                view, aim_screen=aim_screen, reuse=reuse
+            )
+            self._last_ocr_words = list(words)
         if self._two_stage():
+            if local_reward_refresh:
+                # The local path already published a canonical, frame-stamped
+                # surface.  A second full rebuild would defeat the fast path.
+                self._track_combat_index()
+                return dict(self._obs_metrics)
             # A card transaction changes mark ids and coordinates. Publish the
             # refreshed inventory before target rebinding.
             stamped = self._screen_objects.save_frame(
@@ -5767,7 +6711,7 @@ class CollectAgent:
 
     _DISCOVERY_BUDGET = 6
     _DISCOVERY_SETTLE_MS = 220
-    _DISCOVERY_PARK = (0.50, 0.92)
+    _DISCOVERY_PARK = IN_CLIENT_FALLBACK
 
     def _discovery_hover_to(self, nx: float, ny: float) -> None:
         """Buttonless move. Bypass affordance/legal-chord; CV brands hand cards illegal."""
@@ -5886,7 +6830,7 @@ class CollectAgent:
         self._route_after_discovery = f"act ({reason})"
 
     def _park_discovery_cursor(self) -> None:
-        self._discovery_hover_to(*self._DISCOVERY_PARK)
+        self._park_pointer(trigger="discovery")
         try:
             parked = self.fixture.observe_image(self.fixture.grab_image())
         except Exception:  # noqa: BLE001 — park is best-effort
@@ -6228,6 +7172,9 @@ class CollectAgent:
                 episode = self.run_episode()
                 if self._stopped:
                     break
+                if self.config.context_schedule and episode.steps == 0:
+                    self._stopped = True
+                    break
                 if self.config.until_fail and episode.terminal in {"fail", "win"}:
                     break
         finally:
@@ -6262,6 +7209,8 @@ class CollectAgent:
             f"pad={pad}  pace={getattr(self.fixture, 'pace', 'realtime')}"
         )
         _say(f"window={window!r}{size}")
+        if self.config.context_schedule:
+            _say(f"context-ablation  schedule={','.join(self.config.context_schedule)}")
         if self.config.until_fail:
             _say(
                 f"until-fail  max_steps={self.config.max_steps}  "
@@ -6393,6 +7342,7 @@ class CollectAgent:
         self._skill_on_flags.append(skill_on)
         dump_all = self._dump_all()
         self._episode_n += 1
+        self._episode_context_mode = self._active_context_mode()
         recent_chords: list[str] = []
         last_pixels_changed: bool | None = None
         last_mad: float | None = None
@@ -6401,6 +7351,9 @@ class CollectAgent:
         lock_note = ""
         self._last_stall = False
         self._last_click = None
+        self._pointer_hygiene = PointerHygieneState()
+        self._overlay_escape = OverlayEscapeState()
+        self._overlay_escape_action = None
         self._last_hover_key = None
         self._hovered_marks = set()
         self._discovery_attempts = {}
@@ -6410,6 +7363,8 @@ class CollectAgent:
         self._cached_perceive_scene = None
         self._cached_perceive_scene_step = None
         self._force_perceive = False
+        self._llm1_thread.reset()
+        self._act_thread.reset()
         self._last_unverified_effect = False
         self._effect_attempts = []
         self._perception_cache.reset()
@@ -6444,7 +7399,7 @@ class CollectAgent:
         self._survey_done = False
         dino_prompt_streak = 0
         skill_note = f"skill={active_skill_id}" if skill_on else "skill=off"
-        _say(f"episode {self._episode_n}/{self.config.lives}  {skill_note}")
+        _say(f"episode {self._episode_n}/{self.config.lives}  {skill_note}  context={self._episode_context_mode}")
         from loop.os import ocr as ocr_mod
 
         ocr_mod.set_debug_dir(self.store.run_dir / "ocr_debug")
@@ -6478,6 +7433,7 @@ class CollectAgent:
             t_step = time.perf_counter()
             t0 = t_step
             self._step_id = step_id
+            self._hygiene().recapture_used = 0
             tag = f"{self._episode_n}.{step_id}"
             self._step_recheck_count = 0
             self._step_recheck_image = None
@@ -6495,9 +7451,11 @@ class CollectAgent:
             self._last_turn_snapshot = {}
             self._last_intent = {}
             self._last_execution_plan = {}
+            self._overlay_escape_action = None
             self._last_reason_backend = ""
             self._last_reason_fallback = ""
             self._last_reason_call = {}
+            self._last_perceive_call = {}
             self._v2_control_objects = {}
             self._action_surface = None
             self._last_perceive_raw = ""
@@ -6557,9 +7515,8 @@ class CollectAgent:
                 if self.fixture.controller is not None:
                     source = getattr(self.fixture.controller.capture, "last_source", "client")
                 _say(f"  grab {before.size[0]}x{before.size[1]}  source={source}  (game client, not desktop)")
-                geo = getattr(self.fixture, "geometry_line", None)
-                if callable(geo):
-                    _say(f"  view    {geo(before)}")
+            if turn:
+                before = self._ensure_clean_observation(before, trigger="pre-observe")
             t0 = time.perf_counter()
             if turn:
                 patches = []
@@ -6598,7 +7555,13 @@ class CollectAgent:
                 journal_heading = None
                 locked_target = False
                 t0 = time.perf_counter()
+                self._last_raw_obs_image = before
+                self._commit_observation(before)
                 view = self.fixture.observe_image(before)
+                if step_id == 1:
+                    geo = getattr(self.fixture, "geometry_line", None)
+                    if callable(geo):
+                        _say(f"  view    {geo(before)}")
                 prev_obs = getattr(self, "_last_obs_image", None)
                 if prev_obs is not None:
                     try:
@@ -6671,6 +7634,7 @@ class CollectAgent:
                             dino_marks,
                             ocr_words=words,
                             gui_marks=gui_marks,
+                            screen=aim_screen,
                         )
                         marks = list(fused.marks)
                     screen_key = screen_from_labels(
@@ -6717,6 +7681,7 @@ class CollectAgent:
                             dino_marks,
                             ocr_words=words,
                             gui_marks=gui_marks,
+                            screen=aim_screen,
                         )
                         self._aim = AimGuide.from_marks(
                             paint_aim(view, marks=fused.marks, last_xy=self._last_click),
@@ -6734,6 +7699,12 @@ class CollectAgent:
                 obs_frame = encode_image(view, longest_side=side, jpeg_quality=90)
                 obs_path = self.store.frame_path(episode_id, step_id, "obs")
                 obs_path.write_bytes(obs_frame.data)
+                raw_path = None
+                raw_img = getattr(self, "_last_raw_obs_image", None)
+                if raw_img is not None:
+                    raw_frame = encode_image(raw_img, longest_side=side, jpeg_quality=90)
+                    raw_path = self.store.frame_path(episode_id, step_id, "raw")
+                    raw_path.write_bytes(raw_frame.data)
                 if dino_ok and (self.config.debug_frames or dino_boxes):
                     dino_frame = encode_image(
                         paint_boxes(view, dino_boxes), longest_side=side, jpeg_quality=90
@@ -6875,6 +7846,7 @@ class CollectAgent:
                 obs_frame = encode_image(before, longest_side=768, jpeg_quality=85)
                 obs_path = self.store.frame_path(episode_id, step_id, "obs")
                 obs_path.write_bytes(obs_frame.data)
+                raw_path = None
                 if dino_ok and labels and (self.config.debug_frames or dino_boxes):
                     painted = paint_boxes(before, dino_boxes)
                     dino_frame = encode_image(painted, longest_side=768, jpeg_quality=85)
@@ -7348,12 +8320,16 @@ class CollectAgent:
                     # v2 controls were resolved from the current snapshot;
                     # legacy LLM1 label lists are not an additional authority.
                     allowed_choice = True
+                if getattr(self, "_overlay_escape_action", None) is not None:
+                    allowed_choice = True
                 # Reasoner prose can propose only state-legal combat actions.
                 # In particular, an unlabeled :Icon must never be converted
                 # into a hand card merely because its geometry looks plausible.
                 if (
                     self._two_stage()
                     and not is_tool
+                    and getattr(self, "_overlay_escape_action", None) is None
+                    and getattr(self, "_last_reason_backend", "") != "overlay-escape"
                     and self._game_state is not None
                     and self._game_state.underlying_activity.value == "combat"
                     and not self._state_allows_combat_action(choice, target_label)
@@ -7372,7 +8348,9 @@ class CollectAgent:
                 from loop.mcp.tools.targeting import object_role as _object_role
 
                 v2_kind = str(self._last_intent.get("kind") or "")
-                if self._last_decision_schema == "v2" and v2_kind in {
+                if getattr(self, "_overlay_escape_action", None) is not None:
+                    semantic = self._overlay_escape_action
+                elif self._last_decision_schema == "v2" and v2_kind in {
                     "end_turn", "click_control", "inspect"
                 }:
                     object_key = str(
@@ -7526,9 +8504,12 @@ class CollectAgent:
                 if choice:
                     vlm_hud["choice"] = choice
                 before_bind = self._attach_action_identity(action)
-                action = bind_aim(action, self._aim)
-                action = clamp_to_overlay(action, self._aim)
-                action = self._preserve_steered_identity(before_bind, action)
+                if getattr(self, "_overlay_escape_action", None) is not None:
+                    action = self._overlay_escape_action
+                else:
+                    action = bind_aim(action, self._aim)
+                    action = clamp_to_overlay(action, self._aim)
+                    action = self._preserve_steered_identity(before_bind, action)
                 if (
                     tool_inspection_contract is not None
                     and action.mark is not None
@@ -7953,6 +8934,7 @@ class CollectAgent:
             after = before
             peak = before
             discovery_contract = None
+            reward_reflow_roi: tuple[float, float, float, float] | None = None
             want_act = (
                 (is_chord(action) or (action.name and action.name not in {"idle", "end"}))
                 and terminal == "alive"
@@ -8010,6 +8992,12 @@ class CollectAgent:
                                 primitive_logs = transaction.primitives
                                 card_transaction = transaction.transaction
                                 error = transaction.error
+                                if self._maybe_park_after_action(action, park_after=True):
+                                    executed = list(executed) + ["pk"]
+                                    try:
+                                        after = self.fixture.observe_image(self.fixture.grab_image())
+                                    except Exception:
+                                        pass
                         else:
                             transaction = self._execute_card_transaction(
                                 action, prev_metrics=prev_metrics, tag=tag
@@ -8020,19 +9008,33 @@ class CollectAgent:
                             primitive_logs = transaction.primitives
                             card_transaction = transaction.transaction
                             error = transaction.error
+                            if self._maybe_park_after_action(action, park_after=True):
+                                executed = list(executed) + ["pk"]
+                                try:
+                                    after = self.fixture.observe_image(self.fixture.grab_image())
+                                except Exception:
+                                    pass
                     else:
-                        if hasattr(self.fixture, "pending_aim_label"):
-                            self.fixture.pending_aim_label = self._aim_label(action)
-                        executed = self.fixture.execute_chord(action)
-                        primitive_logs = [
-                            PrimitiveLog(
-                                phase="action",
-                                name=name,
-                                x=action.click_x,
-                                y=action.click_y,
-                            )
-                            for name in executed
-                        ]
+                        if not self._ensure_trusted_click_geometry():
+                            error = "untrusted-click-geometry"
+                            executed = []
+                            primitive_logs = []
+                        else:
+                            if hasattr(self.fixture, "pending_aim_label"):
+                                self.fixture.pending_aim_label = self._aim_label(action)
+                            reward_reflow_roi = self._sts2_reward_reflow_roi(action) if turn else None
+                            executed = self.fixture.execute_chord(action, settle=False)
+                            primitive_logs = [
+                                PrimitiveLog(
+                                    phase="action",
+                                    name=name,
+                                    x=action.click_x,
+                                    y=action.click_y,
+                                )
+                                for name in executed
+                            ]
+                            if self._maybe_park_after_action(action):
+                                executed = list(executed) + ["pk"]
                     self._all_actions.update(executed)
                     if action.click_x is not None and action.click_y is not None:
                         self._last_click = (float(action.click_x), float(action.click_y))
@@ -8050,7 +9052,7 @@ class CollectAgent:
                 else:
                     try:
                         if turn and card_transaction is None:
-                            after = self._confirm_after_action(tag=tag)
+                            after = self._confirm_after_action(tag=tag, roi=reward_reflow_roi)
                         elif not turn:
                             after = self.fixture.grab_image()
                     except RuntimeError as exc:
@@ -8115,7 +9117,13 @@ class CollectAgent:
                 turn and self._two_stage() and want_act and not skip_reason
             )
             metrics = (
-                self._refresh_obs_after_action(after, prev_metrics=prev_metrics)
+                self._refresh_obs_after_action(
+                    after,
+                    prev_metrics=prev_metrics,
+                    execution_frame=exec_img if want_act else None,
+                    action=action if want_act else None,
+                    reflow_roi=reward_reflow_roi,
+                )
                 if rich_turn_refresh
                 else self.fixture.scorer(after)
             )
@@ -8190,10 +9198,20 @@ class CollectAgent:
                         }
                 if self._aim is not None:
                     metrics["aim_marks"] = self._aim.listing()
+                metrics.update(self._hygiene().metrics())
+                escape = getattr(self, "_overlay_escape", None)
+                if escape is not None:
+                    metrics.update(escape.metrics())
                 metrics["perception"] = {
                     "transition": bool(getattr(self, "_turn_transition", False)),
                 }
                 if self._two_stage():
+                    metrics["context_mode"] = self._episode_context_mode
+                    metrics["thread_perceive"] = self._llm1_thread.telemetry()
+                    metrics["thread_act"] = self._act_thread.telemetry()
+                    metrics["llm1"] = dict(self._last_perceive_call)
+                    act_ctx = int(self._last_reason_call.get("num_ctx") or 2048)
+                    metrics["act"] = stage_call_metrics(self._last_reason_call, num_ctx=act_ctx)
                     metrics["illegal_chord"] = bool(self._step_illegal_blocked)
                     metrics["recheck_count"] = int(self._step_recheck_count)
                     if verify_retries:
@@ -8294,6 +9312,11 @@ class CollectAgent:
                     tut = self._host_stats.get("tutorial") or {}
                     title = str(tut.get("title") or "tutorial")
                     self._overlay_state.record_dismissal(title=title, step_id=step_id)
+                self._finish_overlay_escape(
+                    mad=float(pixel_mad),
+                    pixel_changed=bool(pixel_changed),
+                    executed=bool(executed) and not skip_reason,
+                )
                 if (
                     str(metrics.get("screen") or "") == "combat"
                     and executed
@@ -8472,11 +9495,46 @@ class CollectAgent:
                     vlm_screenshot_ref=str(vlm_path.relative_to(self.store.run_dir)),
                     layout_source=("sts2-content-box" if turn and self.fixture.id == "sts2" else None),
                     layout_crop=(
-                        tuple(float(v) for v in getattr(self.fixture, "_content_box", ()))
+                        tuple(float(v) for v in getattr(self.fixture, "_vision_box", ()) or getattr(self.fixture, "_content_box", ()))
                         if turn
                         and self.fixture.id == "sts2"
-                        and len(getattr(self.fixture, "_content_box", ())) == 4
+                        and len(getattr(self.fixture, "_vision_box", None) or getattr(self.fixture, "_content_box", ())) == 4
                         else None
+                    ),
+                    capture_source=str(getattr(self.fixture, "_capture_source", "") or "") or None,
+                    integrity_reason=str(getattr(self.fixture, "_epoch_reason", "") or "") or None,
+                    raw_client_w=(
+                        int(getattr(self.fixture, "_grab_size", (0, 0))[0])
+                        if getattr(self.fixture, "_grab_size", None)
+                        else None
+                    ),
+                    raw_client_h=(
+                        int(getattr(self.fixture, "_grab_size", (0, 0))[1])
+                        if getattr(self.fixture, "_grab_size", None)
+                        else None
+                    ),
+                    vision_box=(
+                        tuple(float(v) for v in getattr(self.fixture, "_vision_box", ()))
+                        if len(getattr(self.fixture, "_vision_box", ()) or ()) == 4
+                        else None
+                    ),
+                    click_box=(
+                        tuple(float(v) for v in getattr(self.fixture, "_click_box", ()))
+                        if len(getattr(self.fixture, "_click_box", ()) or ()) == 4
+                        else None
+                    ),
+                    epoch_reason=str(getattr(self.fixture, "_epoch_reason", "") or "") or None,
+                    epoch_step=int(step_id) if getattr(self.fixture, "_geometry_ready", False) else None,
+                    logical_x=action.click_x,
+                    logical_y=action.click_y,
+                    logical_x2=action.click_x2,
+                    logical_y2=action.click_y2,
+                    click_client_x=self._map_click_client(action.click_x, action.click_y)[0],
+                    click_client_y=self._map_click_client(action.click_x, action.click_y)[1],
+                    click_client_x2=self._map_click_client(action.click_x2, action.click_y2)[0],
+                    click_client_y2=self._map_click_client(action.click_x2, action.click_y2)[1],
+                    raw_screenshot_ref=(
+                        str(raw_path.relative_to(self.store.run_dir)) if raw_path else None
                     ),
                 ),
                 dino=boxes_payload(dino_boxes),
@@ -8824,6 +9882,7 @@ class CollectAgent:
         memory_carry["lessons_end"] = len(self.notebook.grounded.lessons)
         fill_return_to_go(steps)
         ep_flags = audit_episode(steps=steps)
+        ep_flags.append(f"context:{self._episode_context_mode}")
         if wall_timeout:
             ep_flags.append("wall_clock_timeout")
         elif terminal == "timeout" and "hud_identity_stuck" not in ep_flags:

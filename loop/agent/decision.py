@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Callable, Literal, Mapping, Protocol, TypeAlias
 
-from loop.model.gateway import ModelCall, VlmGateway
+from loop.model.gateway import EpisodeThread, ModelCall, VlmGateway
 
 ACT_PRIMARY_MODEL = "gemma4:31b-cloud"
 ACT_FALLBACK_MODEL = "qwen3.5:4b-instruct-q4_K_M"
@@ -386,10 +386,12 @@ class ActReasoner:
     def __init__(
         self, *, gateway_factory: GatewayFactory = VlmGateway,
         primary_model: str = ACT_PRIMARY_MODEL, fallback_model: str = ACT_FALLBACK_MODEL,
+        thread: EpisodeThread | None = None,
     ) -> None:
         self.gateway_factory = gateway_factory
         self.primary_model = primary_model
         self.fallback_model = fallback_model
+        self.thread = thread
 
     def decide(self, snapshot: TurnSnapshot) -> ActDecision:
         if not legal_intents_for_snapshot(snapshot):
@@ -401,11 +403,15 @@ class ActReasoner:
             )
         prompt = compact_act_prompt(snapshot)
         try:
-            return self._call(snapshot, prompt, self.primary_model, ACT_PRIMARY_TIMEOUT_S, None)
+            return self._call(
+                snapshot, prompt, self.primary_model, ACT_PRIMARY_TIMEOUT_S, None, thread=self.thread,
+            )
         except Exception as primary_exc:  # The fallback boundary intentionally includes HTTP and parsing failures.
             reason = _failure_reason(primary_exc)
         try:
-            return self._call(snapshot, prompt, self.fallback_model, ACT_FALLBACK_TIMEOUT_S, reason)
+            return self._call(
+                snapshot, prompt, self.fallback_model, ACT_FALLBACK_TIMEOUT_S, reason, thread=None,
+            )
         except Exception as fallback_exc:
             raise ActReasonerError(
                 (
@@ -417,15 +423,21 @@ class ActReasoner:
             ) from fallback_exc
 
     def _call(self, snapshot: TurnSnapshot, prompt: str, model: str, timeout_s: float,
-              fallback_reason: str | None) -> ActDecision:
+              fallback_reason: str | None, *, thread: EpisodeThread | None = None) -> ActDecision:
         gateway = self.gateway_factory(
             model=model, temperature=0.1, max_tokens=ACT_MAX_TOKENS, num_ctx=ACT_NUM_CTX,
         )
-        call = gateway.complete_text(
-            system=ACT_SYSTEM_PROMPT, user=prompt, json_mode=True,
-            max_tokens=ACT_MAX_TOKENS, timeout_s=timeout_s,
-        )
+        kwargs: dict[str, Any] = {
+            "system": ACT_SYSTEM_PROMPT, "user": prompt, "json_mode": True,
+            "max_tokens": ACT_MAX_TOKENS, "timeout_s": timeout_s,
+        }
+        if thread is not None:
+            kwargs["history"] = thread.messages(system=ACT_SYSTEM_PROMPT, user=prompt)
+        call = gateway.complete_text(**kwargs)
         intent = validate_action_intent(snapshot, action_intent_from_dict(call.parsed))
+        if thread is not None:
+            accepted = call.parsed if isinstance(call.parsed, dict) else call.text
+            thread.commit("act", json.dumps(accepted, ensure_ascii=False, separators=(",", ":")))
         metrics = dict(getattr(call, "metrics", {}) or {})
         for key in (
             "prompt_tokens", "output_tokens", "load_duration_ns",
@@ -438,6 +450,8 @@ class ActReasoner:
             "prompt_chars": len(prompt), "max_tokens": ACT_MAX_TOKENS,
             "num_ctx": ACT_NUM_CTX, "temperature": 0.1,
         })
+        if thread is not None:
+            metrics.update({f"thread_{key}": value for key, value in thread.telemetry().items()})
         return ActDecision(snapshot.snapshot_id, intent, model, fallback_reason, call.latency_ms, metrics)
 
 

@@ -1,4 +1,5 @@
 from PIL import Image, ImageDraw
+import numpy as np
 
 from loop.agent.discovery import (
     DiscoveryObject,
@@ -41,6 +42,36 @@ def test_difference_box_finds_changed_tooltip() -> None:
     ImageDraw.Draw(after).rectangle((130, 10, 190, 45), fill="white")
     box = difference_box(before, after)
     assert box is not None and box[0] > .5 and box[1] < .3
+
+
+def test_difference_box_roi_union_finds_shifted_rows_despite_low_global_change() -> None:
+    before = Image.new("RGB", (640, 360), "black")
+    after = before.copy()
+    before_draw, after_draw = ImageDraw.Draw(before), ImageDraw.Draw(after)
+    for y in (145, 215):
+        before_draw.rectangle((240, y, 340, y + 10), fill="white")
+        after_draw.rectangle((240, y - 30, 340, y - 20), fill="white")
+
+    global_mad = abs(np.asarray(before, dtype="int16") - np.asarray(after, dtype="int16")).mean() / 255
+    assert global_mad < .02
+
+    box = difference_box(before, after, roi=(.30, .25, .60, .70), union=True)
+    assert box is not None
+    assert .36 < box[0] < .39 and .52 < box[2] < .55
+    assert .30 < box[1] < .33 and .62 < box[3] < .64
+
+
+def test_difference_box_roi_excludes_meaningful_change_outside_region() -> None:
+    before = Image.new("RGB", (640, 360), "black")
+    after = before.copy()
+    draw = ImageDraw.Draw(after)
+    draw.rectangle((20, 20, 180, 70), fill="white")
+    draw.rectangle((250, 160, 350, 190), fill="white")
+
+    box = difference_box(before, after, roi=(.30, .35, .60, .70), union=True)
+    assert box is not None
+    assert .38 < box[0] < .40 and .54 < box[2] < .56
+    assert .44 < box[1] < .46 and .53 < box[3] < .55
 
 
 def test_discovery_binds_crop_ocr_to_active_contract(tmp_path) -> None:

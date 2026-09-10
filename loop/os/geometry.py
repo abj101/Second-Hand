@@ -99,11 +99,42 @@ def fit_aspect_box(
     return (0.0, pad, 1.0, 1.0 - pad)
 
 
+def box_is_full(box: ContentBox, *, slack: float = 0.01) -> bool:
+    """True when *box* covers the client within *slack* on each edge."""
+    return box[0] <= slack and box[1] <= slack and box[2] >= 1.0 - slack and box[3] >= 1.0 - slack
+
+
+def boxes_close(left: ContentBox, right: ContentBox, *, slack: float = 0.02) -> bool:
+    """True when two content boxes agree within *slack* per edge."""
+    return all(abs(a - b) <= slack for a, b in zip(left, right, strict=True))
+
+
+def is_top_left_scaled_capture(image: Image.Image, *, threshold: float = 6.0) -> bool:
+    """True for PrintWindow-style corruption: game scaled into the top-left.
+
+    Signature: non-black bounds anchored at the origin, substantial black on
+    both the right and bottom, and similar x/y scale loss. Centered letterbox
+    and full-client frames return False. Does not change ``letterbox_frac``.
+    """
+    box = letterbox_frac(image, threshold=threshold)
+    x0, y0, x1, y1 = box
+    if x0 > 0.02 or y0 > 0.02:
+        return False
+    if x1 > 0.85 or y1 > 0.85:
+        return False
+    width = x1 - x0
+    height = y1 - y0
+    if width < 0.5 or height < 0.5:
+        return False
+    if abs(width - height) > 0.08:
+        return False
+    return True
+
+
 def content_box_for(image: Image.Image) -> ContentBox:
     """Letterbox if black bars exist; otherwise the full client is content."""
     letter = letterbox_frac(image)
-    full = letter[0] <= 0.01 and letter[1] <= 0.01 and letter[2] >= 0.99 and letter[3] >= 0.99
-    if not full:
+    if not box_is_full(letter):
         return letter
     return (0.0, 0.0, 1.0, 1.0)
 
@@ -198,6 +229,8 @@ __all__ = [
     "MIN_CLIENT_PX",
     "ScreenGeometry",
     "TARGET_ASPECT",
+    "box_is_full",
+    "boxes_close",
     "content_box_for",
     "crop_content",
     "encode_observe",
@@ -205,6 +238,7 @@ __all__ = [
     "format_geometry",
     "geometry_error",
     "geometry_from_image",
+    "is_top_left_scaled_capture",
     "letterbox_frac",
     "map_content_xy",
     "perceive_longest_side",

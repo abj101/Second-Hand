@@ -16,7 +16,7 @@ from loop.agent.decision import (
     compact_act_prompt,
     turn_snapshot_for_log,
 )
-from loop.model.gateway import ModelCall
+from loop.model.gateway import EpisodeThread, ModelCall
 
 
 def _snapshot() -> TurnSnapshot:
@@ -245,6 +245,62 @@ def test_empty_snapshot_skips_gateway_entirely() -> None:
     assert str(caught.value) == "no-legal-intents"
     assert getattr(caught.value, "primary_error") == "no-legal-intents"
     assert constructions == 0
+
+
+def test_reasoner_thread_skips_invalid_primary_and_keeps_fallback_cold() -> None:
+    thread = EpisodeThread()
+    thread.commit("prior", '{"kind":"inspect","object_id":"card-strike"}')
+    calls: list[tuple[str, object]] = []
+
+    class FakeGateway:
+        def __init__(self, **kwargs: object) -> None:
+            self.model = str(kwargs["model"])
+
+        def complete_text(self, **kwargs: object) -> ModelCall:
+            calls.append((self.model, kwargs.get("history")))
+            if self.model == ACT_PRIMARY_MODEL:
+                return ModelCall("not json", None, 1.0, self.model)
+            return ModelCall(
+                '{"kind":"inspect","object_id":"card-strike"}',
+                {"kind": "inspect", "object_id": "card-strike"},
+                2.0,
+                self.model,
+            )
+
+    result = ActReasoner(gateway_factory=FakeGateway, thread=thread).decide(_snapshot())
+    assert result.backend == ACT_FALLBACK_MODEL
+    assert calls[0][0] == ACT_PRIMARY_MODEL
+    assert calls[1][0] == ACT_FALLBACK_MODEL
+    assert calls[0][1]  # primary still sees the episode lineage
+    assert calls[1][1] is None
+    assert thread.telemetry()["turn_count"] == 1
+
+
+def test_reasoner_thread_commits_only_validated_primary() -> None:
+    thread = EpisodeThread()
+    calls: list[object] = []
+
+    class FakeGateway:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def complete_text(self, **kwargs: object) -> ModelCall:
+            calls.append(kwargs.get("history"))
+            return ModelCall(
+                '{"kind":"play_card","card_id":"card-strike"}',
+                {"kind": "play_card", "card_id": "card-strike"},
+                1.0,
+                "fake",
+            )
+
+    ActReasoner(gateway_factory=FakeGateway, thread=thread).decide(_snapshot())
+    assert not calls[0]
+    assert thread.telemetry()["turn_count"] == 1
+    ActReasoner(gateway_factory=FakeGateway, thread=thread).decide(_snapshot())
+    replay = calls[1]
+    assert isinstance(replay, list) and replay[0]["role"] == "user"
+    assert replay[0]["content"] == "act"
+    assert replay[1]["role"] == "assistant"
 
 
 def test_unplayable_card_is_rejected_and_omitted_from_legal_ids() -> None:

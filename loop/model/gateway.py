@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -37,6 +38,141 @@ class ModelCall:
     metrics: dict[str, Any] = field(default_factory=dict)
 
 
+def stage_call_metrics(
+    call: ModelCall | Mapping[str, Any] | None,
+    *,
+    num_ctx: int,
+) -> dict[str, Any]:
+    """Prompt/output tokens, latency, num_ctx, and prompt-token utilization."""
+    prompt: int | None
+    output: int | None
+    latency: float | None
+    if isinstance(call, ModelCall):
+        prompt, output, latency = call.prompt_tokens, call.output_tokens, call.latency_ms
+    elif isinstance(call, Mapping):
+        raw_prompt, raw_output, raw_latency = (
+            call.get("prompt_tokens"), call.get("output_tokens"), call.get("latency_ms"),
+        )
+        prompt = raw_prompt if isinstance(raw_prompt, int) else None
+        output = raw_output if isinstance(raw_output, int) else None
+        latency = float(raw_latency) if isinstance(raw_latency, (int, float)) else None
+    else:
+        prompt = output = latency = None
+    utilization = (prompt / num_ctx) if isinstance(prompt, int) and num_ctx > 0 else None
+    return {
+        "prompt_tokens": prompt,
+        "output_tokens": output,
+        "latency_ms": latency,
+        "num_ctx": int(num_ctx),
+        "utilization": utilization,
+    }
+
+
+_SUMMARY_PREFIX = "Compacted prior accepted state: "
+
+
+@dataclass
+class EpisodeThread:
+    """Bounded text-only episode history for one model role.
+
+    Callers commit only after their own schema/intent checks succeed.
+    Images stay off the stored turns so later calls send the current frame only.
+    """
+
+    recent: int = 3
+    max_chars: int = 12_000
+    _turns: list[tuple[str, str]] = field(default_factory=list, repr=False)
+    _summary: str | None = None
+    _committed: int = 0
+    compaction_count: int = 0
+    _last_sent_chars: int = 0
+
+    def reset(self) -> None:
+        self._turns.clear()
+        self._summary = None
+        self._committed = 0
+        self.compaction_count = 0
+        self._last_sent_chars = 0
+
+    def messages(self, *, system: str = "", user: str = "") -> list[dict[str, str]]:
+        budget = self.max_chars - len(system) - len(user)
+        if budget <= 0:
+            self._last_sent_chars = 0
+            return []
+        turns = list(self._turns)
+        summary = self._summary
+        while True:
+            packed = self._history_messages(turns, summary)
+            sent = sum(len(row["content"]) for row in packed)
+            if sent <= budget:
+                self._last_sent_chars = sent
+                return packed
+            if summary:
+                summary = None
+                continue
+            if len(turns) > 1:
+                turns = turns[1:]
+                continue
+            self._last_sent_chars = 0
+            return []
+
+    def commit(self, user: str, assistant: str) -> None:
+        self._turns.append((user, assistant))
+        self._committed += 1
+        self._compact()
+
+    def context_chars(self) -> int:
+        return sum(len(message["content"]) for message in self._history_messages(self._turns, self._summary))
+
+    def telemetry(self) -> dict[str, int]:
+        return {
+            "turn_count": self._committed,
+            "context_chars": self.context_chars(),
+            "sent_chars": self._last_sent_chars,
+            "compaction_count": self.compaction_count,
+        }
+
+    def _history_messages(
+        self, turns: list[tuple[str, str]], summary: str | None,
+    ) -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        if summary:
+            out.append({"role": "user", "content": summary})
+        for user, assistant in turns:
+            out.append({"role": "user", "content": user})
+            out.append({"role": "assistant", "content": assistant})
+        return out
+
+    def _compact(self) -> None:
+        # ponytail: last-N fold; send-time char budget in messages() if ctx overflows
+        if len(self._turns) <= self.recent:
+            return
+        older, self._turns = self._turns[: -self.recent], self._turns[-self.recent :]
+        self._fold(older)
+
+    def _fold(self, older: list[tuple[str, str]]) -> None:
+        if not older:
+            return
+        latest = older[-1][1]
+        try:
+            state: Any = json.loads(latest)
+        except json.JSONDecodeError:
+            state = latest
+        dropped = len(older)
+        if self._summary and self._summary.startswith(_SUMMARY_PREFIX):
+            try:
+                prev = json.loads(self._summary[len(_SUMMARY_PREFIX) :])
+                dropped += int(prev.get("dropped_turns") or 0)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+        self._summary = _SUMMARY_PREFIX + json.dumps(
+            {"prior_state": state, "dropped_turns": dropped},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        self.compaction_count += 1
+
+
 class VlmGateway:
     """Slim Ollama JSON + image client. No dual-brain, no OpenRouter sprawl."""
 
@@ -66,23 +202,11 @@ class VlmGateway:
         max_tokens: int | None = None,
         json_schema: dict[str, Any] | None = None,
         timeout_s: float | None = None,
+        history: Sequence[Mapping[str, Any]] | None = None,
     ) -> ModelCall:
-        import base64
-
-        content: list[dict[str, Any]] = [{"type": "text", "text": user}]
-        images: list[str] = []
-        for frame in frames or []:
-            images.append(base64.b64encode(frame.data).decode("ascii"))
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{frame.mime};base64,{images[-1]}"},
-                }
-            )
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": [{"type": "text", "text": user}, *content[1:]]},
-        ]
+        messages, images = _chat_messages(
+            system=system, user=user, frames=frames, history=history, list_user=True,
+        )
         payload = {
             "model": self.model,
             "messages": _to_ollama(messages, images),
@@ -129,26 +253,11 @@ class VlmGateway:
         max_tokens: int | None = None,
         frames: list[EncodedFrame] | None = None,
         timeout_s: float | None = None,
+        history: Sequence[Mapping[str, Any]] | None = None,
     ) -> ModelCall:
-        import base64
-
-        images: list[str] = []
-        user_content: list[dict[str, Any]] = [{"type": "text", "text": user}]
-        for frame in frames or []:
-            images.append(base64.b64encode(frame.data).decode("ascii"))
-            user_content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{frame.mime};base64,{images[-1]}"},
-                }
-            )
-        messages = [
-            {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": user if not frames else user_content,
-            },
-        ]
+        messages, images = _chat_messages(
+            system=system, user=user, frames=frames, history=history, list_user=False,
+        )
         payload = {
             "model": self.model,
             "messages": _to_ollama(messages, images),
@@ -205,23 +314,63 @@ class VlmGateway:
         return urlunparse((parsed.scheme, parsed.netloc, path or "", "", "", "")).rstrip("/")
 
 
+def _chat_messages(
+    *,
+    system: str,
+    user: str,
+    frames: list[EncodedFrame] | None,
+    history: Sequence[Mapping[str, Any]] | None,
+    list_user: bool,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    import base64
+
+    images: list[str] = []
+    user_content: list[dict[str, Any]] = [{"type": "text", "text": user}]
+    for frame in frames or []:
+        images.append(base64.b64encode(frame.data).decode("ascii"))
+        user_content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{frame.mime};base64,{images[-1]}"},
+            }
+        )
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+    for item in history or ():
+        role = str(item.get("role") or "user")
+        content = item.get("content")
+        if isinstance(content, str):
+            messages.append({"role": role, "content": content})
+        elif isinstance(content, list):
+            messages.append({"role": role, "content": content})
+        else:
+            messages.append({"role": role, "content": str(content or "")})
+    messages.append({
+        "role": "user",
+        "content": user_content if (frames or list_user) else user,
+    })
+    return messages, images
+
+
 def _to_ollama(messages: list[dict[str, Any]], images: list[str]) -> list[dict[str, Any]]:
     native: list[dict[str, Any]] = []
+    last_user: dict[str, Any] | None = None
     for message in messages:
         role = str(message.get("role") or "user")
         content = message.get("content")
         if isinstance(content, str):
-            native.append({"role": role, "content": content})
-            continue
-        texts: list[str] = []
-        if isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    texts.append(str(part.get("text") or ""))
-        item: dict[str, Any] = {"role": role, "content": "\n".join(t for t in texts if t)}
-        if role == "user" and images:
-            item["images"] = images
+            item = {"role": role, "content": content}
+        else:
+            texts: list[str] = []
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        texts.append(str(part.get("text") or ""))
+            item = {"role": role, "content": "\n".join(t for t in texts if t)}
+        if role == "user":
+            last_user = item
         native.append(item)
+    if images and last_user is not None:
+        last_user["images"] = images
     return native
 
 
@@ -282,6 +431,8 @@ def _model_call_from_response(
         eval_duration_ns=metrics["eval_duration_ns"], total_duration_ns=metrics["total_duration_ns"],
         image_supplied=image_supplied, metrics=metrics,
     )
+
+
 def _raise_for_status(response: httpx.Response) -> None:
     """Keep Ollama's diagnostic when a model/tag rejects a capability."""
     try:

@@ -177,10 +177,18 @@ class FixtureBase:
         """Frame sent to the VLM. Default is the raw grab."""
         return image
 
+    def commit_observation(self, image: Image.Image) -> None:
+        """Bind click map to this observation epoch. Default: identity (no remap)."""
+        del image
+
     def act_gate(self, image: Image.Image) -> Literal["ours", "theirs", "unknown"]:
         """Whether the player may legally act on this still. Unknown = quiet is enough."""
         del image
         return "unknown"
+
+    def overlay_dismiss_key(self) -> str | None:
+        """Named table slot that dismisses a blocking overlay, if the fixture has one."""
+        return None
 
     def enrich_frame_marks(
         self,
@@ -206,6 +214,15 @@ class FixtureBase:
         name = self.controller.execute_chord(self.action_table, action)
         self.executed.append(name)
         return [name]
+
+    def neutral_park_xy(self) -> tuple[float, float]:
+        """Safe client-normalized point for harness pointer parking. Override geometry only."""
+        from loop.os.pointer_hygiene import neutral_park_xy
+
+        box = getattr(self, "_click_box", None)
+        if box is None:
+            box = getattr(self, "_content_box", None)
+        return neutral_park_xy(box)
 
     def success(self, steps: list[StepLog], terminal: Terminal) -> bool:
         return chapel_success(steps, terminal, min_survived_steps=self.min_survived_steps)

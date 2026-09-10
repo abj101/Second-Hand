@@ -420,6 +420,91 @@ def test_midboard_unknown_inspect_hover_is_safe_and_dispatchable(tmp_path) -> No
     store.close()
 
 
+def test_v2_map_and_reward_controls_require_current_binding_before_dispatch(tmp_path) -> None:
+    """Typed non-combat controls may execute only from their planned overlay mark."""
+    for screen, label in (("map", "Next"), ("reward", "Skip")):
+        store = ScreenObjectStore(tmp_path / f"{screen}.db")
+        initial = store.save_frame(
+            run_id="r", step_id=1, screen=screen,
+            marks=(AimMark(id=1, x=.50, y=.70, x0=.42, y0=.64, x1=.58, y1=.76,
+                           label=label, role="button"),),
+        )
+        obj = store.by_id(1)
+        assert obj is not None and obj.object_id and obj.role
+        agent = object.__new__(CollectAgent)
+        agent._screen_objects = store
+        agent._obs_metrics = {"screen": screen}
+        agent._host_stats = {"screen": screen}
+        agent._aim = AimGuide.from_marks(Image.new("RGB", (64, 64)), initial)
+        agent._last_decision_schema = "v2"
+        agent._last_snapshot_id = "snapshot"
+        agent._last_execution_plan = {
+            "action": "click_control", "control_id": obj.object_id,
+            "object_id": obj.object_id, "mark_id": 1, "role": obj.role,
+            "point": {"x": obj.x, "y": obj.y}, "snapshot_id": "snapshot",
+        }
+        agent._pending_exec_error = None
+        agent._last_legal_reason = None
+        agent._force_perceive = False
+        agent.config = SimpleNamespace(burst_ms=10)
+        agent._two_stage = lambda: True
+        valid = ActionLog(
+            mark=1, click_x=obj.x, click_y=obj.y, source_role=obj.role,
+            source_object_id=obj.object_id, duration_ms=10,
+        )
+        assert agent._final_combat_dispatch_gate(valid, inspect_requested=False) == valid
+        store.close()
+
+
+def test_v2_reordered_noncombat_mark_is_stale_binding_and_never_dispatches(tmp_path) -> None:
+    for screen, label in (("map", "Next"), ("reward", "Skip")):
+        store = ScreenObjectStore(tmp_path / f"reordered-{screen}.db")
+        store.save_frame(
+            run_id="r", step_id=1, screen=screen,
+            marks=(AimMark(id=1, x=.50, y=.70, x0=.42, y0=.64, x1=.58, y1=.76,
+                           label=label, role="button"),),
+        )
+        planned = store.by_id(1)
+        assert planned is not None
+        current = store.save_frame(
+            run_id="r", step_id=2, screen=screen,
+            marks=(AimMark(id=9, x=.50, y=.70, x0=.42, y0=.64, x1=.58, y1=.76,
+                           label=label, role="button"),),
+        )
+        rebound = store.by_id(9)
+        assert rebound is not None
+        agent = object.__new__(CollectAgent)
+        agent._screen_objects = store
+        agent._obs_metrics = {"screen": screen}
+        agent._host_stats = {"screen": screen}
+        agent._aim = AimGuide.from_marks(Image.new("RGB", (64, 64)), current)
+        agent._last_decision_schema = "v2"
+        agent._last_snapshot_id = "snapshot"
+        agent._last_execution_plan = {
+            "action": "click_control", "control_id": planned.object_id,
+            "object_id": planned.object_id, "mark_id": 1, "role": planned.role,
+            "point": {"x": planned.x, "y": planned.y}, "snapshot_id": "snapshot",
+        }
+        agent._pending_exec_error = None
+        agent._last_legal_reason = None
+        agent._force_perceive = False
+        agent.config = SimpleNamespace(burst_ms=10)
+        agent._two_stage = lambda: True
+        rebound_action = ActionLog(
+            mark=9, click_x=rebound.x, click_y=rebound.y, source_role=rebound.role,
+            source_object_id=rebound.object_id, duration_ms=10,
+        )
+        blocked = agent._final_combat_dispatch_gate(rebound_action, inspect_requested=False)
+        received: list[ActionLog] = []
+        if not is_empty_chord(blocked):
+            received.append(blocked)
+        assert received == []
+        assert agent._pending_exec_error == "stale-control-binding"
+        assert agent._last_execution_plan == {}
+        assert agent._force_perceive is True
+        store.close()
+
+
 def test_recheck_handler_skips_identical_frame_second_call(tmp_path) -> None:
     from loop.memory.journal import FactJournal
     from loop.memory.notebook import Notebook

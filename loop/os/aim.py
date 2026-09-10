@@ -1436,12 +1436,24 @@ def _needs_ocr_proof(label: str) -> bool:
     return compact in _OCR_GATED_LABELS
 
 
-def _corner_heuristic_ok(mark: AimMark, label: str) -> bool:
+def _corner_heuristic_ok(
+    mark: AimMark,
+    label: str,
+    *,
+    screen: str | None = None,
+) -> bool:
     """Icon-only pennants labeled without OCR — allowed only in corner bands."""
     compact = _compact_label(label)
     if compact == "confirm" and mark.x >= _CORNER_CONFIRM_X and mark.y >= _CORNER_CONFIRM_Y:
         return True
-    if compact == "back" and mark.x <= 0.12 and mark.y >= 0.80:
+    # The map toolbar occupies this corner in STS2.  It is not a Back affordance
+    # unless OCR independently verifies the label below.
+    if (
+        compact == "back"
+        and (screen or "").strip().lower() != "map"
+        and mark.x <= 0.12
+        and mark.y >= 0.80
+    ):
         return True
     return False
 
@@ -1459,6 +1471,8 @@ def _lateral_nav_ok(mark: AimMark, label: str) -> bool:
 def _strip_unverified_menu_labels(
     marks: list[AimMark],
     ocr: Sequence[AimMark],
+    *,
+    screen: str | None = None,
 ) -> list[AimMark]:
     """Drop lexicon/heuristic menu labels that OCR did not read near this frame."""
     out: list[AimMark] = []
@@ -1466,7 +1480,7 @@ def _strip_unverified_menu_labels(
         if not _needs_ocr_proof(mark.label):
             out.append(mark)
             continue
-        if _corner_heuristic_ok(mark, mark.label):
+        if _corner_heuristic_ok(mark, mark.label, screen=screen):
             out.append(mark)
             continue
         if _lateral_nav_ok(mark, mark.label):
@@ -1583,7 +1597,7 @@ def build_marks(
     region_ok = _strip_region_invalid_labels(
         list(relabeled), screen=screen, layout_adapter=adapter
     )
-    return tuple(_strip_unverified_menu_labels(region_ok, ocr))
+    return tuple(_strip_unverified_menu_labels(region_ok, ocr, screen=screen))
 
 
 def dino_boxes_to_marks(boxes: Sequence[Any], *, cap: int = 12) -> list[AimMark]:
@@ -1676,6 +1690,7 @@ def fuse_dino_marks(
     ocr_words: Sequence[AimMark] | None = None,
     gui_marks: Sequence[AimMark] | None = None,
     allowed_controls: set[str] | None = None,
+    screen: str | None = None,
 ) -> AimGuide:
     """Merge DINO boxes into aim marks; never keep lexicon-only menu labels."""
     ocr = list(ocr_words or ())
@@ -1709,7 +1724,11 @@ def fuse_dino_marks(
         if allowed and compact not in allowed and _needs_ocr_proof(lab):
             cleaned.append(_copy_mark(mark, label=""))
             continue
-        if _needs_ocr_proof(lab) and not _corner_heuristic_ok(mark, lab) and not _lateral_nav_ok(mark, lab):
+        if (
+            _needs_ocr_proof(lab)
+            and not _corner_heuristic_ok(mark, lab, screen=screen)
+            and not _lateral_nav_ok(mark, lab)
+        ):
             if not _ocr_supports_label(ocr, lab, mark.x, mark.y) and not _dino_mark_verified(
                 mark, ocr=ocr, gui=gui, existing=()
             ):
@@ -2041,8 +2060,10 @@ def _relabel_from_lexicon(
         ):
             out.append(mark)
             continue
-        if _needs_ocr_proof(learned) and not _corner_heuristic_ok(mark, learned) and not _ocr_supports_label(
-            ocr_marks, learned, mark.x, mark.y
+        if (
+            _needs_ocr_proof(learned)
+            and not _corner_heuristic_ok(mark, learned, screen=screen)
+            and not _ocr_supports_label(ocr_marks, learned, mark.x, mark.y)
         ):
             out.append(mark)
             continue
@@ -2291,12 +2312,13 @@ def _label_corner_icons(
             pool=[m for m in labeled if m.x >= _CORNER_CONFIRM_X and m.y >= _CORNER_CONFIRM_Y],
             already=any(_is_corner_confirm(m.label) for m in labeled),
         )
-    labeled = _label_unlabeled_corner(
-        labeled,
-        label="Back",
-        pool=[m for m in labeled if m.x <= 0.12 and m.y >= 0.80],
-        already=any(_compact_label(m.label) == "back" for m in labeled),
-    )
+    if screen_key != "map":
+        labeled = _label_unlabeled_corner(
+            labeled,
+            label="Back",
+            pool=[m for m in labeled if m.x <= 0.12 and m.y >= 0.80],
+            already=any(_compact_label(m.label) == "back" for m in labeled),
+        )
     labeled = _label_dialog_buttons(labeled, dialog=dialog)
     return [_tighten_corner_control(m) for m in labeled]
 

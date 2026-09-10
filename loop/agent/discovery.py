@@ -251,8 +251,21 @@ def crop(image: Image.Image, box: Box) -> Image.Image:
     return image.convert("RGB").crop(_pixel_box(box, image))
 
 
-def difference_box(before: Image.Image, after: Image.Image, *, ignore: Sequence[Box] = ()) -> Box | None:
-    """Largest non-cursor changed region. Iterative flood fill avoids recursion."""
+def difference_box(
+    before: Image.Image,
+    after: Image.Image,
+    *,
+    ignore: Sequence[Box] = (),
+    roi: Box | None = None,
+    union: bool = False,
+) -> Box | None:
+    """Return a changed region, optionally limited to an ROI.
+
+    The default remains the largest meaningful component.  ``union=True``
+    returns the enclosing box of every meaningful component, which is useful
+    when a compacting control stack moves in several disconnected rows.  ROI
+    and returned coordinates are normalized against the full frame.
+    """
     a = np.asarray(before.convert("L").resize((320, 180)), dtype=np.int16)
     b = np.asarray(after.convert("L").resize((320, 180)), dtype=np.int16)
     mask = np.abs(a - b) >= 22
@@ -260,9 +273,15 @@ def difference_box(before: Image.Image, after: Image.Image, *, ignore: Sequence[
     for box in ignore:
         x0, y0, x1, y1 = _pixel_box(box, Image.new("L", (w, h)))
         mask[y0:y1, x0:x1] = False
+    if roi is not None:
+        x0, y0, x1, y1 = _pixel_box(roi, Image.new("L", (w, h)))
+        inside = np.zeros_like(mask, dtype=bool)
+        inside[y0:y1, x0:x1] = True
+        mask &= inside
     # Tiny components are cursor antialiasing/noise; retain panel-like change.
     visited = np.zeros_like(mask, dtype=bool)
     best: tuple[int, int, int, int, int] | None = None
+    envelope: tuple[int, int, int, int] | None = None
     for sy, sx in zip(*np.nonzero(mask)):
         if visited[sy, sx]:
             continue
@@ -281,6 +300,18 @@ def difference_box(before: Image.Image, after: Image.Image, *, ignore: Sequence[
                     stack.append((ny, nx))
         if count >= 36 and (best is None or count > best[4]):
             best = (x0, y0, x1 + 1, y1 + 1, count)
+        if count >= 36 and union:
+            component = (x0, y0, x1 + 1, y1 + 1)
+            if envelope is None:
+                envelope = component
+            else:
+                envelope = (
+                    min(envelope[0], component[0]), min(envelope[1], component[1]),
+                    max(envelope[2], component[2]), max(envelope[3], component[3]),
+                )
+    if union and envelope is not None:
+        x0, y0, x1, y1 = envelope
+        return (x0 / w, y0 / h, x1 / w, y1 / h)
     if best is None:
         return None
     x0, y0, x1, y1, _ = best

@@ -19,7 +19,7 @@ from loop.agent.prompts import (
     strip_mark_leaks,
     validate_choice,
 )
-from loop.model.gateway import ModelCall, VlmGateway
+from loop.model.gateway import EpisodeThread, ModelCall, VlmGateway
 from loop.os.aim import AimMark, action_from_labels
 from loop.os.capture import EncodedFrame
 
@@ -121,6 +121,56 @@ def test_perceive_scene_expands_token_budget_after_truncation() -> None:
 
     assert desc.schema_valid
     assert gateway.budgets == [1536, 3072]
+
+
+_VALID_SCENE = {
+    "screen": "combat",
+    "controls": [],
+    "visible_text": [],
+    "legal_actions": [],
+    "unresolved": [],
+    "hand_cards": [],
+    "characters": [],
+    "enemies": [],
+}
+
+
+def test_perceive_scene_commits_only_schema_valid_output_to_thread() -> None:
+    class _RecordingGateway:
+        def __init__(self) -> None:
+            self.history: list[object] = []
+
+        def complete_json(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.history.append(kwargs.get("history"))
+            return ModelCall("{}", _VALID_SCENE, 1.0, "fake")
+
+    thread = EpisodeThread()
+    gateway = _RecordingGateway()
+    desc, _ = perceive_scene(gateway, _frame(), thread=thread, max_schema_retries=0)  # type: ignore[arg-type]
+    assert desc.schema_valid
+    assert thread.telemetry()["turn_count"] == 1
+    assert gateway.history[0] is None
+
+    perceive_scene(gateway, _frame(), thread=thread, max_schema_retries=0)  # type: ignore[arg-type]
+    replay = gateway.history[1]
+    assert isinstance(replay, list) and len(replay) == 2
+    assert replay[0]["role"] == "user"
+    assert replay[0]["content"] == "llm1"
+    assert replay[1]["role"] == "assistant"
+    assert '"screen"' in replay[1]["content"]
+    assert all("images" not in row for row in replay)
+
+
+def test_perceive_scene_does_not_commit_invalid_schema() -> None:
+    class _BadGateway:
+        def complete_json(self, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            return ModelCall("not json", None, 1.0, "fake")
+
+    thread = EpisodeThread()
+    desc, _ = perceive_scene(_BadGateway(), _frame(), thread=thread, max_schema_retries=0)  # type: ignore[arg-type]
+    assert desc.schema_valid is False
+    assert thread.telemetry()["turn_count"] == 0
 
 
 def test_scene_description_controls() -> None:
@@ -393,6 +443,23 @@ def test_two_stage_prompt_id_includes_both_reason_phases() -> None:
     text += "\n# notebook_schema=" + NOTEBOOK_SCHEMA_VERSION
     expected = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
     assert prompt_id(arm="no_skill", pace="turn", architecture="two_stage") == expected
+
+
+def test_leftover_next_does_not_remap_combat_to_tutorial() -> None:
+    parsed = {
+        "screen": "combat",
+        "tutorial": {"active": True, "title": "Combat Basics", "step": 2, "total": 3},
+        "controls": [
+            {"label": "Next", "role": "button", "confidence": "high"},
+            {"label": "Arrow", "role": "nav_prev", "confidence": "high"},
+            {"label": "Strike", "role": "card", "confidence": "high"},
+        ],
+    }
+    desc = SceneDescription.from_parsed(parsed)
+    labels = [row["label"] for row in desc.controls]
+    assert desc.screen == "combat"
+    assert "Arrow" in labels
+    assert "Strike" in labels
 
 
 def test_perceive_strips_dimmed_controls_on_paginated_tutorial() -> None:

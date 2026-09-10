@@ -195,7 +195,7 @@ def test_sts2_success_uses_terminal_evidence_not_target_error_counts() -> None:
         )
         for i in range(1, 5)
     ]
-    assert fx.success(steps, "timeout") is True
+    assert fx.success(steps, "timeout") is False
     progress = [
         StepLog(
             session_id="s",
@@ -218,7 +218,7 @@ def test_sts2_success_uses_terminal_evidence_not_target_error_counts() -> None:
             metrics={"screen": "combat", "floor": 1, "energy": 3},
         ),
     ]
-    assert fx.success(progress, "timeout") is True
+    assert fx.success(progress, "timeout") is False
 
 
 def test_stable_object_id_rejects_object_prefixed_ids() -> None:

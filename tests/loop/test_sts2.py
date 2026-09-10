@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from PIL import Image
 
 from loop.agent.prompts import system_for, turn_user_prompt
@@ -147,7 +148,133 @@ def test_sts2_success_on_pixel_change() -> None:
         metrics={"screen": "combat", "floor": 1},
     )
     title = step.model_copy(update={"metrics": {"screen": "title", "floor": 0}})
-    assert fx.success([title, combat], "timeout") is True
+    assert fx.success([title, combat], "timeout") is False
+
+
+def test_sts2_success_requires_combat_reward_map_and_verified_progress() -> None:
+    fx = Sts2Fixture()
+
+    def step(
+        step_id: int,
+        screen: str,
+        *,
+        floor: int | None = None,
+        combat_won: bool = False,
+        intent: dict | None = None,
+        pixel_changed: bool = False,
+        executed: bool = False,
+    ) -> StepLog:
+        metrics = {"screen": screen}
+        if floor is not None:
+            metrics["floor"] = floor
+        if combat_won:
+            metrics["combat_won"] = True
+        return StepLog(
+            session_id="s",
+            episode_id="e",
+            step_id=step_id,
+            ts="t",
+            fixture="sts2",
+            observation=Observation(screenshot_ref="a"),
+            metrics=metrics,
+            intent=intent or {},
+            result=StepResult(
+                executed=["click"] if executed else [],
+                pixel_changed=pixel_changed,
+            ),
+        )
+
+    won_reward = step(1, "reward", floor=1, combat_won=True)
+    returned_to_map = step(2, "map", floor=1)
+    assert fx.success([won_reward, returned_to_map, step(3, "map", floor=2)], "timeout") is True
+    assert fx.success([won_reward, returned_to_map], "timeout") is False
+    assert fx.success(
+        [step(1, "combat", floor=1, combat_won=True), step(2, "map", floor=2)],
+        "timeout",
+    ) is False
+    # The completion signal is emitted on the reward frame.  A combat-local
+    # flag must not be paired with an unrelated later reward to claim success.
+    assert fx.success(
+        [
+            step(1, "combat", floor=1, combat_won=True),
+            step(2, "reward", floor=1),
+            step(3, "map", floor=1),
+            step(4, "map", floor=2),
+        ],
+        "timeout",
+    ) is False
+
+    node_transition = step(
+        3,
+        "combat",
+        floor=1,
+        intent={"kind": "click_control", "control_id": "control:node_3"},
+        pixel_changed=True,
+        executed=True,
+    )
+    assert fx.success([won_reward, returned_to_map, node_transition], "timeout") is True
+    assert fx.success(
+        [
+            won_reward,
+            returned_to_map,
+            step(
+                3,
+                "",
+                floor=1,
+                intent={"kind": "click_control", "control_id": "control:node_0"},
+                pixel_changed=True,
+                executed=True,
+            ),
+            step(
+                4,
+                "combat",
+                floor=1,
+                intent={"kind": "click_control", "control_id": "control:confirm"},
+                pixel_changed=True,
+                executed=True,
+            ),
+        ],
+        "timeout",
+    ) is True
+    assert fx.success(
+        [
+            won_reward,
+            returned_to_map,
+            step(
+                3,
+                "map",
+                floor=1,
+                intent={"kind": "click_control", "control_id": "control:back"},
+                pixel_changed=True,
+                executed=True,
+            ),
+        ],
+        "timeout",
+    ) is False
+    assert fx.success(
+        [
+            won_reward,
+            returned_to_map,
+            step(3, "combat", floor=1),
+            step(4, "reward", floor=1, combat_won=True),
+            step(5, "map", floor=1),
+            step(6, "map", floor=2),
+        ],
+        "timeout",
+    ) is True
+    assert fx.success(
+        [
+            won_reward,
+            returned_to_map,
+            step(
+                3,
+                "combat",
+                floor=1,
+                intent={"kind": "click_control", "control_id": "control:node_3"},
+            ),
+        ],
+        "timeout",
+    ) is False
 
 
 def test_turn_prompts_ask_for_named_action() -> None:
@@ -367,7 +494,10 @@ def test_letterbox_maps_clicks_into_content() -> None:
     assert abs(y - 0.75) < 1e-6
     _, y0 = map_content_xy(0.5, 0.0, box)
     assert abs(y0 - 0.25) < 1e-6
-    cropped = Sts2Fixture(controller=None).observe_image(frame)
+    fx = Sts2Fixture(controller=None)
+    fx._grab_size = frame.size
+    fx.commit_observation(frame)
+    cropped = fx.observe_image(frame)
     assert cropped.size[1] == 100
 
 
@@ -437,6 +567,189 @@ def test_point_click_remaps_through_letterbox() -> None:
     moved = fx._remap(mouse_move(0.5, 1.0))
     assert moved.op == "move"
     assert moved.y is not None and abs(moved.y - 0.75) < 1e-6
+
+
+def _letterbox_top_left(size: tuple[int, int], frac: float = 2 / 3) -> Image.Image:
+    frame = Image.new("RGB", size, (0, 0, 0))
+    inner = (max(1, int(size[0] * frac)), max(1, int(size[1] * frac)))
+    frame.paste(Image.new("RGB", inner, (80, 40, 20)), (0, 0))
+    return frame
+
+
+def test_frozen_content_box_ignores_later_letterbox_grab() -> None:
+    from loop.os.geometry import content_box_for
+    from loop.os.primitives import mouse_click
+
+    fx = Sts2Fixture(controller=None)
+    full = Image.new("RGB", (300, 300), (40, 20, 20))
+    fx._grab_size = full.size
+    fx.commit_observation(full)
+    assert fx._content_box == (0.0, 0.0, 1.0, 1.0)
+
+    poisoned = _letterbox_top_left((300, 300))
+    fx._live_box = content_box_for(poisoned)
+    fx._grab_size = poisoned.size
+    viewed = fx.observe_image(poisoned)
+    fx.commit_observation(poisoned)
+    assert fx._content_box == (0.0, 0.0, 1.0, 1.0)
+    assert viewed.size == (300, 300)
+    remapped = fx._remap(mouse_click(0.406, 0.926))
+    assert remapped.x is not None and abs(remapped.x - 0.406) < 1e-6
+    assert remapped.y is not None and abs(remapped.y - 0.926) < 1e-6
+
+
+def test_observe_encoded_thumb_does_not_rebind_content_box() -> None:
+    fx = Sts2Fixture(controller=None)
+    full = Image.new("RGB", (1277, 718), (40, 20, 20))
+    fx._grab_size = full.size
+    fx.commit_observation(full)
+    thumb = _letterbox_top_left((768, 432))
+    fx.observe_image(thumb)
+    fx.commit_observation(thumb)
+    assert fx._content_box == (0.0, 0.0, 1.0, 1.0)
+
+
+def test_commit_observation_letterbox_epoch_still_remaps() -> None:
+    from loop.os.primitives import mouse_click
+
+    fx = Sts2Fixture(controller=None)
+    frame = Image.new("RGB", (400, 400), (0, 0, 0))
+    frame.paste(Image.new("RGB", (400, 200), (80, 40, 20)), (0, 100))
+    fx._grab_size = frame.size
+    fx.commit_observation(frame)
+    remapped = fx._remap(mouse_click(0.5, 1.0))
+    assert remapped.x is not None and abs(remapped.x - 0.5) < 1e-6
+    assert remapped.y is not None and abs(remapped.y - 0.75) < 1e-6
+
+
+def test_commit_observation_rebinds_on_client_resize() -> None:
+    fx = Sts2Fixture(controller=None)
+    small = Image.new("RGB", (1280, 720), (40, 20, 20))
+    fx._grab_size = small.size
+    fx.commit_observation(small)
+    assert fx._epoch_client_size == (1280, 720)
+    big = Image.new("RGB", (1920, 1080), (40, 20, 20))
+    fx._grab_size = big.size
+    fx.commit_observation(big)
+    assert fx._epoch_client_size == (1920, 1080)
+    assert fx._content_box == (0.0, 0.0, 1.0, 1.0)
+
+
+def test_click_geometry_disagree_when_live_letterbox_shrinks() -> None:
+    from loop.agent.loop import CollectAgent
+    from loop.os.geometry import content_box_for
+
+    agent = CollectAgent.__new__(CollectAgent)
+    fx = Sts2Fixture(controller=None)
+    full = Image.new("RGB", (300, 300), (40, 20, 20))
+    fx._grab_size = full.size
+    fx.commit_observation(full)
+    poisoned = _letterbox_top_left((300, 300))
+    fx._live_box = content_box_for(poisoned)
+    agent.fixture = fx
+    assert agent._click_geometry_disagree()
+
+
+def test_poisoned_first_commit_does_not_bind_click_box() -> None:
+    from loop.os.primitives import mouse_click
+
+    fx = Sts2Fixture(controller=None)
+    poisoned = _letterbox_top_left((1915, 1078))
+    fx._record_grab(poisoned)
+    fx.commit_observation(poisoned)
+    assert fx.click_geometry_trusted() is False
+    assert fx._click_box == (0.0, 0.0, 1.0, 1.0)
+    remapped = fx._remap(mouse_click(0.406, 0.926))
+    assert remapped.x is not None and abs(remapped.x - 0.406) < 1e-6
+    assert remapped.y is not None and abs(remapped.y - 0.926) < 1e-6
+
+
+def test_poisoned_first_hwnd_healthy_mss_identity_click() -> None:
+    from PIL import Image
+
+    from loop.os.primitives import mouse_click
+    from loop.os.window import select_client_capture
+
+    poisoned = _letterbox_top_left((1915, 1078))
+    healthy = Image.new("RGB", (1915, 1078), (40, 20, 20))
+    chosen, provenance = select_client_capture(poisoned, healthy, client_size=(1915, 1078))
+    assert chosen is healthy
+    assert provenance.source == "mss-client-integrity"
+    fx = Sts2Fixture(controller=None)
+    fx._record_grab(chosen, provenance)
+    fx.commit_observation(chosen)
+    assert fx.click_geometry_trusted() is True
+    remapped = fx._remap(mouse_click(0.406, 0.926))
+    assert remapped.x is not None and abs(remapped.x - 0.406) < 1e-6
+    assert remapped.y is not None and abs(remapped.y - 0.926) < 1e-6
+
+
+def test_execute_chord_blocks_untrusted_geometry() -> None:
+    from loop.log.schema import ActionLog
+
+    class FakeController:
+        def __init__(self) -> None:
+            self.prims: list[object] = []
+
+        def execute(self, prims) -> None:
+            self.prims.extend(prims)
+
+        def release_all(self) -> None:
+            return None
+
+    fx = Sts2Fixture(controller=FakeController())  # type: ignore[arg-type]
+    poisoned = _letterbox_top_left((300, 300))
+    fx._record_grab(poisoned)
+    fx.commit_observation(poisoned)
+    with pytest.raises(RuntimeError, match="untrusted-click-geometry"):
+        fx.execute_chord(ActionLog(mark=1, click_x=0.406, click_y=0.926))
+    assert fx.controller.prims == []  # type: ignore[attr-defined]
+
+
+def test_trusted_like_for_like_probe_does_not_disagree() -> None:
+    from loop.agent.loop import CollectAgent
+
+    agent = CollectAgent.__new__(CollectAgent)
+    fx = Sts2Fixture(controller=None)
+    full = Image.new("RGB", (300, 300), (40, 20, 20))
+    fx._record_grab(full)
+    fx.commit_observation(full)
+    agent.fixture = fx
+    assert fx.click_geometry_trusted()
+    assert agent._click_geometry_disagree() is False
+
+
+def test_uncertain_live_probe_disagrees_even_when_boxes_match() -> None:
+    from loop.agent.loop import CollectAgent
+
+    agent = CollectAgent.__new__(CollectAgent)
+    fx = Sts2Fixture(controller=None)
+    full = Image.new("RGB", (300, 300), (40, 20, 20))
+    fx._record_grab(full)
+    fx.commit_observation(full)
+    poisoned = _letterbox_top_left((300, 300))
+    fx._record_grab(poisoned)
+    agent.fixture = fx
+    assert fx._click_box == (0.0, 0.0, 1.0, 1.0)
+    assert agent._click_geometry_disagree()
+
+
+def test_reward_reflow_roi_covers_clicked_stack_suffix_only() -> None:
+    fx = Sts2Fixture(controller=None)
+
+    assert fx._reward_stack_roi() == (0.18, 0.20, 0.82, 0.78)
+    assert fx._reward_reflow_roi((0.30, 0.42, 0.70, 0.50)) == (0.18, 0.42, 0.82, 0.78)
+    assert fx._reward_reflow_roi(clicked_point=(0.50, 0.64)) == (0.18, 0.64, 0.82, 0.78)
+
+
+def test_reward_reflow_roi_rejects_fixed_skip_hud_and_outside_clicks() -> None:
+    fx = Sts2Fixture(controller=None)
+
+    # Skip is deliberately outside the movable Loot stack, as is the HUD.
+    assert fx._reward_reflow_roi((0.84, 0.84, 0.96, 0.92)) is None
+    assert fx._reward_reflow_roi((0.30, 0.04, 0.70, 0.12)) is None
+    assert fx._reward_reflow_roi(clicked_point=(0.10, 0.50)) is None
+    assert fx._reward_reflow_roi() is None
 
 
 def test_two_click_execute_with_settle(monkeypatch) -> None:

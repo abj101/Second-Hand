@@ -325,7 +325,7 @@ def test_steps_flush_during_episode(tmp_path: Path) -> None:
     seen: list[int] = []
     orig = fixture.execute_chord
 
-    def wrapped(action):
+    def wrapped(action, **_kwargs):
         seen.append(len(store.read_steps()))
         return orig(action)
 
@@ -608,7 +608,7 @@ def test_stop_after_action_persists_completed_row_once(tmp_path: Path) -> None:
     stop_after = 2
     orig = fixture.execute_chord
 
-    def wrapped(action):
+    def wrapped(action, **_kwargs):
         result = orig(action)
         if len(fixture.executed) >= stop_after:
             request_stop(tmp_path)
@@ -680,3 +680,111 @@ def test_stop_before_decision_writes_no_step_rows(tmp_path: Path) -> None:
     assert store.read_steps() == []
     assert summary.stop_requested is True
     assert summary.flush_completed is True
+
+
+def test_context_threads_are_isolated_and_reset_per_episode(tmp_path: Path) -> None:
+    fixture = FakeFixture(steps_until_fail=2)
+    store = EpisodeStore(tmp_path)
+    agent = CollectAgent(
+        fixture,
+        store,
+        config=CollectConfig(
+            lives=2,
+            max_steps=4,
+            skip_models=True,
+            arm="no_skill",
+            context_mode="threaded",
+            architecture="two_stage",
+        ),
+    )
+    assert agent.config.context_mode == "threaded"
+    assert "context:threaded" in agent._session_flags
+    assert agent._model_thread("perceive") is None
+    fixture.pace = "turn"
+    assert agent._model_thread("perceive") is agent._llm1_thread
+    assert agent._model_thread("act") is agent._act_thread
+    assert agent._llm1_thread is not agent._act_thread
+    agent._llm1_thread.commit("see", '{"screen":"combat"}')
+    agent._act_thread.commit("act", '{"kind":"inspect","object_id":"card-strike"}')
+    assert "see" not in [row["content"] for row in agent._act_thread.messages()]
+    fixture.pace = "realtime"
+    agent.run_session()
+    assert agent._llm1_thread.telemetry()["turn_count"] == 0
+    assert agent._act_thread.telemetry()["turn_count"] == 0
+
+
+def test_context_schedule_alternates_and_resets(tmp_path: Path) -> None:
+    fixture = FakeFixture(steps_until_fail=2)
+    store = EpisodeStore(tmp_path)
+    agent = CollectAgent(
+        fixture,
+        store,
+        config=CollectConfig(
+            lives=3,
+            max_steps=4,
+            skip_models=True,
+            arm="no_skill",
+            architecture="two_stage",
+            context_schedule=("cold", "threaded", "cold", "threaded"),
+        ),
+    )
+    assert "context:alternating" in agent._session_flags
+    fixture.pace = "turn"
+    agent._episode_n = 1
+    assert agent._active_context_mode() == "cold"
+    assert agent._model_thread("perceive") is None
+    agent._episode_n = 2
+    assert agent._active_context_mode() == "threaded"
+    assert agent._model_thread("perceive") is agent._llm1_thread
+    assert agent._model_thread("act") is agent._act_thread
+    agent._llm1_thread.commit("llm1", '{"screen":"combat"}')
+    agent._act_thread.commit("act", '{"kind":"inspect"}')
+    agent._episode_n = 0
+    fixture.pace = "realtime"
+    agent.run_session()
+    flags = [row["audit_flags"] for row in store.read_episodes()]
+    modes = [
+        next(flag.split(":", 1)[1] for flag in row if flag.startswith("context:"))
+        for row in flags
+    ]
+    assert modes == ["cold", "threaded", "cold"]
+    assert agent._llm1_thread.telemetry()["turn_count"] == 0
+
+
+def test_context_ablation_command_builds_alternating_collect(monkeypatch) -> None:
+    captured: dict[str, list[str]] = {}
+
+    def fake_collect(argv: list[str] | None = None) -> int:
+        captured["argv"] = list(argv or [])
+        return 0
+
+    monkeypatch.setattr("loop.__main__.cmd_collect", fake_collect)
+    from loop.__main__ import cmd_context_ablation
+
+    assert cmd_context_ablation(["--pairs", "2", "--countdown", "0"]) == 0
+    argv = captured["argv"]
+    assert argv[argv.index("--lives") + 1] == "4"
+    assert argv[argv.index("--context-schedule") + 1] == "cold,threaded,cold,threaded"
+    assert "--no-learn" in argv
+    assert "--architecture" in argv
+
+
+def test_remember_perceive_call_accounts_llm1_tokens(tmp_path: Path) -> None:
+    from loop.model.gateway import ModelCall
+
+    fixture = FakeFixture(steps_until_fail=1)
+    agent = CollectAgent(
+        fixture,
+        EpisodeStore(tmp_path),
+        config=CollectConfig(lives=1, max_steps=1, skip_models=True),
+    )
+    agent._remember_perceive_call(
+        ModelCall("{}", {}, 11.0, "fake", prompt_tokens=4096, output_tokens=8)
+    )
+    row = agent._last_perceive_call
+    assert row["prompt_tokens"] == 4096
+    assert row["output_tokens"] == 8
+    assert row["num_ctx"] == 8192
+    assert row["utilization"] == 0.5
+    agent._remember_perceive_call(None)
+    assert agent._last_perceive_call == {}

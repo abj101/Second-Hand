@@ -9,7 +9,14 @@ from dataclasses import dataclass
 from PIL import Image, ImageStat
 
 from loop.os.capture import EncodedFrame, FrameEncoder
-from loop.os.geometry import ScreenGeometry, geometry_from_image, perceive_longest_side
+from loop.os.geometry import (
+    ContentBox,
+    ScreenGeometry,
+    content_box_for,
+    geometry_from_image,
+    is_top_left_scaled_capture,
+    perceive_longest_side,
+)
 from loop.os.profile import (
     CaptureProfile,
     GrabMeta,
@@ -78,6 +85,7 @@ SRCCOPY = 0x00CC0020
 DIB_RGB_COLORS = 0
 BI_RGB = 0
 _BLACK_LUMA = 5.0
+_IDENTITY_BOX: ContentBox = (0.0, 0.0, 1.0, 1.0)
 
 
 class BITMAPINFOHEADER(ctypes.Structure):
@@ -334,6 +342,109 @@ def _luma_mean(image: Image.Image) -> float:
     return float(ImageStat.Stat(image.convert("L")).mean[0])
 
 
+@dataclass(frozen=True)
+class CaptureProvenance:
+    """How a raw client grab was sourced and whether it may bind click geometry."""
+
+    source: str
+    client_size: tuple[int, int]
+    content_box: ContentBox
+    integrity: str
+    reason: str
+    hwnd_box: ContentBox | None = None
+    mss_box: ContentBox | None = None
+
+
+def classify_frame_integrity(image: Image.Image | None) -> tuple[str, str, ContentBox]:
+    """Classify a raw client bitmap: trusted, suspect (top-left scaled), or empty."""
+    if image is None:
+        return "empty", "no-frame", _IDENTITY_BOX
+    if min(image.size) <= 0:
+        return "empty", "empty-size", _IDENTITY_BOX
+    box = content_box_for(image)
+    if _luma_mean(image) <= _BLACK_LUMA:
+        return "empty", "black", box
+    if is_top_left_scaled_capture(image):
+        return "suspect", "top-left-scaled", box
+    return "trusted", "ok", box
+
+
+def _size_matches(image: Image.Image, client_size: tuple[int, int], *, slack: int = 2) -> bool:
+    return abs(image.size[0] - client_size[0]) <= slack and abs(image.size[1] - client_size[1]) <= slack
+
+
+def select_client_capture(
+    hwnd_image: Image.Image | None,
+    mss_image: Image.Image | None,
+    *,
+    client_size: tuple[int, int],
+) -> tuple[Image.Image, CaptureProvenance]:
+    """Prefer a healthy HWND frame; fall back to MSS for black or top-left-scaled HWND."""
+    hwnd_state, hwnd_reason, hwnd_box = classify_frame_integrity(hwnd_image)
+    mss_state, mss_reason, mss_box = classify_frame_integrity(mss_image)
+    mss_ok = (
+        mss_image is not None
+        and mss_state == "trusted"
+        and _size_matches(mss_image, client_size)
+    )
+    if hwnd_image is not None and hwnd_state == "trusted":
+        return hwnd_image, CaptureProvenance(
+            source="hwnd",
+            client_size=client_size,
+            content_box=hwnd_box,
+            integrity="trusted",
+            reason=hwnd_reason,
+            hwnd_box=hwnd_box,
+            mss_box=mss_box if mss_image is not None else None,
+        )
+    if hwnd_image is None or hwnd_state == "empty":
+        if mss_ok and mss_image is not None:
+            return mss_image, CaptureProvenance(
+                source="mss-client",
+                client_size=client_size,
+                content_box=mss_box,
+                integrity="trusted",
+                reason=f"hwnd-{hwnd_reason}",
+                hwnd_box=hwnd_box if hwnd_image is not None else None,
+                mss_box=mss_box,
+            )
+        fallback = hwnd_image if hwnd_image is not None else mss_image
+        if fallback is None:
+            raise RuntimeError("Client grab is empty; restore the windowed game.")
+        return fallback, CaptureProvenance(
+            source="uncertain",
+            client_size=client_size,
+            content_box=content_box_for(fallback),
+            integrity="uncertain",
+            reason=f"hwnd-{hwnd_reason};mss-{mss_reason}",
+            hwnd_box=hwnd_box if hwnd_image is not None else None,
+            mss_box=mss_box if mss_image is not None else None,
+        )
+    # hwnd is suspect (top-left scaled PrintWindow)
+    if mss_ok and mss_image is not None:
+        return mss_image, CaptureProvenance(
+            source="mss-client-integrity",
+            client_size=client_size,
+            content_box=mss_box,
+            integrity="trusted",
+            reason="hwnd-top-left-scaled",
+            hwnd_box=hwnd_box,
+            mss_box=mss_box,
+        )
+    fallback = hwnd_image if hwnd_image is not None else mss_image
+    if fallback is None:
+        raise RuntimeError("Client grab is empty; restore the windowed game.")
+    return fallback, CaptureProvenance(
+        source="uncertain",
+        client_size=client_size,
+        content_box=content_box_for(fallback),
+        integrity="uncertain",
+        reason=f"hwnd-{hwnd_reason};mss-{mss_reason}",
+        hwnd_box=hwnd_box,
+        mss_box=mss_box if mss_image is not None else None,
+    )
+
+
 def _sync_client(target: WindowTarget) -> WindowTarget:
     """Re-read client rect from hwnd so windowed resize never becomes a monitor grab."""
     if not target.hwnd or not user32.IsWindow(target.hwnd):
@@ -400,17 +511,29 @@ def _grab_mss_client(target: WindowTarget, sct=None) -> Image.Image:
 
 
 def grab_client(target: WindowTarget, sct=None) -> Image.Image:
-    image, _source = grab_client_tracked(target, sct)
+    image, _prov = grab_client_capture(target, sct)
     return image
+
+
+def grab_client_capture(target: WindowTarget, sct=None) -> tuple[Image.Image, CaptureProvenance]:
+    """Client of this HWND only. Prefer PrintWindow; reject top-left-scaled bitmaps."""
+    target = _sync_client(target)
+    client_size = (int(target.width), int(target.height))
+    hwnd_image = grab_hwnd_client(target)
+    hwnd_state, _, _ = classify_frame_integrity(hwnd_image)
+    mss_image = None
+    if hwnd_image is None or hwnd_state != "trusted":
+        try:
+            mss_image = _grab_mss_client(target, sct)
+        except RuntimeError:
+            mss_image = None
+    return select_client_capture(hwnd_image, mss_image, client_size=client_size)
 
 
 def grab_client_tracked(target: WindowTarget, sct=None) -> tuple[Image.Image, str]:
     """Client of this HWND only. Prefer PrintWindow so overlays on the desktop are not in the crop."""
-    target = _sync_client(target)
-    image = grab_hwnd_client(target)
-    if image is not None and _luma_mean(image) > _BLACK_LUMA:
-        return image, "hwnd"
-    return _grab_mss_client(target, sct), "mss-client"
+    image, provenance = grab_client_capture(target, sct)
+    return image, provenance.source
 
 
 class WindowCapture:
@@ -444,6 +567,7 @@ class WindowCapture:
         self.last_meta = GrabMeta()
         self.last_settle: SettleResult | None = None
         self.last_source = "hwnd"
+        self.last_provenance: CaptureProvenance | None = None
         self.last_geometry: ScreenGeometry | None = None
         self._grab_lock = threading.Lock()
 
@@ -472,8 +596,9 @@ class WindowCapture:
                 self._target = _client_target(self._pinned_hwnd, self._target.title)
             else:
                 self.refresh()
-            image, source = grab_client_tracked(self._target, self._sct)
-            self.last_source = source
+            image, provenance = grab_client_capture(self._target, self._sct)
+            self.last_source = provenance.source
+            self.last_provenance = provenance
             self._target = _sync_client(self._target)
             self.last_geometry = geometry_from_image(
                 image,

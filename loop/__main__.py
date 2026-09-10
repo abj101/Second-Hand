@@ -268,6 +268,13 @@ def cmd_collect(argv: list[str] | None = None) -> int:
         help="Notebook Known/Lessons scope: run (default) or episode",
     )
     parser.add_argument(
+        "--context-mode",
+        choices=("cold", "threaded"),
+        default="cold",
+        help="sts2 two_stage: cold rebuilds each call; threaded keeps per-role episode history",
+    )
+    parser.add_argument("--context-schedule", default="", help=argparse.SUPPRESS)
+    parser.add_argument(
         "--architecture",
         choices=("overlay", "two_stage"),
         default=None,
@@ -362,18 +369,21 @@ def cmd_collect(argv: list[str] | None = None) -> int:
         if not skip_models and architecture == "two_stage":
             perceive_gateway = VlmGateway(model=perceive_model, num_ctx=8192)
             print(
-                f"  llm1={perceive_model} ctx=8192  reasoner={reasoner_model}",
+                f"  llm1={perceive_model} ctx=8192  reasoner={reasoner_model}  "
+                f"context_mode={args.context_mode}",
                 flush=True,
             )
         elif not skip_models and perceive_model != reasoner_model:
             perceive_gateway = VlmGateway(model=perceive_model)
             print(
-                f"  llm1={perceive_model}  reasoner={reasoner_model}",
+                f"  llm1={perceive_model}  reasoner={reasoner_model}  "
+                f"context_mode={args.context_mode}",
                 flush=True,
             )
         elif not skip_models and args.cloud:
             print(
-                f"  llm1={perceive_model} (cloud)  reasoner={reasoner_model}",
+                f"  llm1={perceive_model} (cloud)  reasoner={reasoner_model}  "
+                f"context_mode={args.context_mode}",
                 flush=True,
             )
         agent = CollectAgent(
@@ -412,12 +422,21 @@ def cmd_collect(argv: list[str] | None = None) -> int:
                 perceive_model=perceive_model,
                 reason_fallback_model=DEFAULT_ACT_FALLBACK_MODEL,
                 memory_scope=args.memory_scope,
+                context_mode=args.context_mode,
+                context_schedule=tuple(
+                    part for part in str(args.context_schedule or "").split(",")
+                    if part in {"cold", "threaded"}
+                ),
             ),
         )
         try:
             summary = agent.run_session()
             print(summary.model_dump_json(indent=2), flush=True)
             print(f"run_dir={run_dir}", flush=True)
+            if getattr(args, "context_schedule", ""):
+                from loop.eval.context_ablation import summarize_mixed_run
+
+                print(json.dumps(summarize_mixed_run(run_dir), indent=2), flush=True)
             if fixture.controller is not None:
                 fixture.controller.release_all()
             defocus_to_console()
@@ -1001,6 +1020,22 @@ def cmd_clear_memory(argv: list[str] | None = None) -> int:
     return 0
 
 
+def cmd_context_ablation(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="STS2 cold vs threaded alternating A/B")
+    parser.add_argument("--pairs", type=int, default=10)
+    args, rest = parser.parse_known_args(argv)
+    pairs = max(1, int(args.pairs))
+    schedule = ",".join(["cold", "threaded"] * pairs)
+    return cmd_collect([
+        "--fixture", "sts2",
+        "--architecture", "two_stage",
+        "--no-learn",
+        "--lives", str(pairs * 2),
+        "--context-schedule", schedule,
+        *rest,
+    ])
+
+
 def cmd_ui(argv: list[str] | None = None) -> int:
     from loop.ui import main as ui_main
 
@@ -1011,7 +1046,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in {"-h", "--help"}:
         print(
-            "usage: python -m loop {perceive,collect,curate,clear-memory,status,analyze,"
+            "usage: python -m loop {perceive,collect,context-ablation,curate,clear-memory,status,analyze,"
             "calibrate-view,inspect-run,benchmark-perceive,benchmark-proposals,"
             "benchmark-effects,benchmark-perception-cost,eval,cycle,export-sft,export-dpo,export-frames,"
             "train-sft,train-dpo,vram-probe,train-grpo,train-rl,smoke,ui} ..."
@@ -1024,6 +1059,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_perceive(rest)
     if cmd == "collect":
         return cmd_collect(rest)
+    if cmd in {"context-ablation", "context_ablation"}:
+        return cmd_context_ablation(rest)
     if cmd == "curate":
         return cmd_curate(rest)
     if cmd in {"clear-memory", "clear_memory"}:

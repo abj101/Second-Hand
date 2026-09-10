@@ -29,6 +29,23 @@ class Observation(BaseModel):
     # Capture provenance is essential when diagnosing cropped/letterboxed UI.
     layout_source: str | None = None
     layout_crop: tuple[float, float, float, float] | None = None
+    capture_source: str | None = None
+    integrity_reason: str | None = None
+    raw_client_w: int | None = None
+    raw_client_h: int | None = None
+    vision_box: tuple[float, float, float, float] | None = None
+    click_box: tuple[float, float, float, float] | None = None
+    epoch_reason: str | None = None
+    epoch_step: int | None = None
+    logical_x: float | None = None
+    logical_y: float | None = None
+    logical_x2: float | None = None
+    logical_y2: float | None = None
+    click_client_x: float | None = None
+    click_client_y: float | None = None
+    click_client_x2: float | None = None
+    click_client_y2: float | None = None
+    raw_screenshot_ref: str | None = None
 
 
 class ActionLog(BaseModel):

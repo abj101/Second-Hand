@@ -9,7 +9,7 @@ import pytest
 from PIL import Image
 
 from loop.agent.loop import CollectAgent
-from loop.agent.decision import TurnSnapshot
+from loop.agent.decision import TurnSnapshot, legal_intents_for_snapshot
 from loop.fixtures.sts2 import Sts2Fixture
 from loop.memory.screen_objects import ScreenObjectStore
 from loop.mcp.tools.targeting import object_role
@@ -99,6 +99,47 @@ def test_explicit_button_role_beats_hand_band_geometry() -> None:
     assert button.role == "button"
     assert button.object_id == "control:accept"
     assert surface.legal_intents == ("click_control",)
+
+
+def test_reward_card_choice_becomes_click_control_with_skip() -> None:
+    fixture = Sts2Fixture()
+    context = FrameContext(screen="reward", activity="reward")
+    enriched = fixture.enrich_frame_marks(
+        [
+            _mark(1, "Add a card", x=0.50, y=0.59, role="card", object_id="card_1"),
+            _mark(2, "Skip", x=0.89, y=0.92, role="button"),
+        ],
+        context,
+        {"screen": "reward", "activity": "reward"},
+    )
+    surface = build_action_surface(
+        enriched, run_id="r", step_id=1, screen="reward", activity="reward",
+    )
+    assert [(obj.label, obj.role) for obj in surface.interactive()] == [
+        ("Add a card", "button"), ("Skip", "button"),
+    ]
+    assert surface.legal_intents == ("click_control",)
+
+    snapshot = TurnSnapshot.from_action_surface(surface)
+    assert [(control.control_id, control.label) for control in snapshot.controls] == [
+        ("control:add_a_card", "Add a card"), ("control:skip", "Skip"),
+    ]
+
+
+@pytest.mark.parametrize("screen", ["map", "select"])
+def test_card_marks_remain_suppressed_on_noncombat_screens(screen: str) -> None:
+    fixture = Sts2Fixture()
+    context = FrameContext(screen=screen, activity=screen)
+    enriched = fixture.enrich_frame_marks(
+        [_mark(1, "Add a card", x=0.50, y=0.59, role="card")],
+        context,
+        {"screen": screen, "activity": screen},
+    )
+    surface = build_action_surface(
+        enriched, run_id="r", step_id=1, screen=screen, activity=screen,
+    )
+    assert surface.objects[0].role == "suppressed"
+    assert "click_control" not in surface.legal_intents
 
 
 def test_next_label_is_nav_next() -> None:
@@ -441,6 +482,148 @@ def test_collect_agent_publishes_typed_reward_controls_from_unique_current_bboxe
         agent._screen_objects.close()
 
 
+def test_collect_agent_publishes_reward_card_choices_from_hand_cards(tmp_path: Path) -> None:
+    """Choose-a-Card LLM1 hand_cards bind current-frame icons as click_control."""
+    image = Image.new("RGB", (128, 96))
+    agent = CollectAgent.__new__(CollectAgent)
+    agent.fixture = Sts2Fixture()
+    agent.session_id = "run"
+    agent._step_id = 2
+    agent._host_stats = {"screen": "reward", "activity": "reward"}
+    agent._obs_metrics = {"screen": "reward", "activity": "reward"}
+    agent._last_obs_image = image
+    # Distilled from 20260909T200030Z: three unlabeled card marks + Skip.
+    agent._aim = AimGuide.from_marks(image, [
+        _mark(12, "icon", x=0.31, y=0.68),
+        _mark(15, "icon", x=0.50, y=0.62),
+        _mark(2, "icon", x=0.67, y=0.67),
+        _mark(9, "Skip", x=0.50, y=0.92, role="button"),
+    ])
+    agent._screen_objects = ScreenObjectStore(tmp_path / "choose-card.db")
+    agent._action_surface = None
+    agent._frame_model = None
+    scene = SimpleNamespace(
+        screen="reward",
+        controls=[{"label": "Skip", "role": "button", "bbox": "400,850,600,990"}],
+        hand_cards=[
+            {"label": "Setup Strike", "role": "card", "bbox": [245, 480, 385, 880]},
+            {"label": "Tremble", "role": "card", "bbox": [405, 450, 565, 930]},
+            {"label": "Blood Wall", "role": "card", "bbox": [605, 475, 735, 860]},
+        ],
+        enemies=[],
+        characters=[],
+    )
+    try:
+        surface = agent._finalize_action_surface(scene)
+        assert surface is not None
+        labels = [(obj.label, obj.role) for obj in surface.interactive()]
+        assert ("Setup Strike", "button") in labels
+        assert ("Tremble", "button") in labels
+        assert ("Blood Wall", "button") in labels
+        assert ("Skip", "button") in labels
+        assert surface.legal_intents == ("click_control",)
+        agent._game_state = None
+        agent._entity_tracker = None
+        agent._reason_controls = []
+        agent._last_execution_failure = None
+        agent._v2_control_objects = {}
+        snapshot = agent._build_turn_snapshot(scene)
+        assert snapshot.cards == ()
+        assert snapshot.legal_intents == ("click_control",)
+        names = {control.label for control in snapshot.controls}
+        assert {"Setup Strike", "Tremble", "Blood Wall", "Skip"} <= names
+        assert all(control.control_id.startswith("control:") for control in snapshot.controls)
+        kinds = {row["kind"] for row in legal_intents_for_snapshot(snapshot)}
+        assert "click_control" in kinds
+        assert kinds <= {"click_control", "inspect"}
+        assert "play_card" not in kinds
+    finally:
+        agent._screen_objects.close()
+
+
+def test_reward_hand_card_reconcile_requires_unique_bbox(tmp_path: Path) -> None:
+    image = Image.new("RGB", (128, 96))
+    agent = CollectAgent.__new__(CollectAgent)
+    agent.fixture = Sts2Fixture()
+    agent.session_id = "run"
+    agent._step_id = 2
+    agent._host_stats = {"screen": "reward", "activity": "reward"}
+    agent._obs_metrics = {"screen": "reward", "activity": "reward"}
+    agent._last_obs_image = image
+    agent._aim = AimGuide.from_marks(image, [
+        _mark(1, "icon", x=0.40, y=0.60),
+        _mark(2, "icon", x=0.45, y=0.62),
+    ])
+    agent._screen_objects = ScreenObjectStore(tmp_path / "ambiguous-reward.db")
+    agent._action_surface = None
+    agent._frame_model = None
+    scene = SimpleNamespace(
+        screen="reward",
+        controls=[],
+        hand_cards=[
+            {"label": "Tremble", "role": "card", "bbox": [300, 450, 600, 900]},
+            {"label": "Setup Strike", "role": "card", "bbox": [300, 450, 600, 900]},
+        ],
+        enemies=[],
+        characters=[],
+    )
+    try:
+        surface = agent._finalize_action_surface(scene)
+        assert surface is not None
+        labels = [(obj.label, obj.role) for obj in surface.interactive()]
+        assert ("Tremble", "button") not in labels
+        assert ("Setup Strike", "button") not in labels
+        assert not any(obj.role == "button" for obj in surface.interactive())
+        assert "click_control" not in surface.legal_intents
+    finally:
+        agent._screen_objects.close()
+
+
+def test_combat_hand_cards_still_reconcile_as_cards(tmp_path: Path) -> None:
+    image = Image.new("RGB", (128, 96))
+    agent = CollectAgent.__new__(CollectAgent)
+    agent.fixture = Sts2Fixture()
+    agent.session_id = "run"
+    agent._step_id = 3
+    agent._host_stats = {"screen": "combat", "activity": "combat"}
+    agent._obs_metrics = {"screen": "combat", "activity": "combat"}
+    agent._last_obs_image = image
+    agent._aim = AimGuide.from_marks(image, [
+        _mark(1, "icon", x=0.31, y=0.92, role="unknown"),
+        _mark(2, "icon", x=0.50, y=0.92, role="icon"),
+        _mark(3, "End Turn", x=0.89, y=0.82, role="button"),
+    ])
+    agent._screen_objects = ScreenObjectStore(tmp_path / "combat-hand.db")
+    agent._action_surface = None
+    agent._frame_model = None
+    scene = SimpleNamespace(
+        screen="combat",
+        controls=[{"label": "End Turn", "role": "button"}],
+        hand_cards=[
+            {"label": "Defend", "role": "card", "bbox": [250, 860, 370, 1000]},
+            {"label": "Strike", "role": "card", "bbox": [440, 860, 560, 1000]},
+        ],
+        enemies=[],
+        characters=[],
+    )
+    try:
+        surface = agent._finalize_action_surface(scene)
+        assert surface is not None
+        agent._game_state = None
+        agent._entity_tracker = None
+        agent._reason_controls = []
+        agent._last_execution_failure = None
+        agent._v2_control_objects = {}
+        snapshot = agent._build_turn_snapshot(scene)
+        assert [card.name for card in snapshot.cards] == ["Defend", "Strike"]
+        assert "play_card" in snapshot.legal_intents
+        kinds = {row["kind"] for row in legal_intents_for_snapshot(snapshot)}
+        assert "play_card" in kinds
+        assert all(obj.role == "card" for obj in surface.objects if obj.label in {"Defend", "Strike"})
+    finally:
+        agent._screen_objects.close()
+
+
 def test_collect_agent_publishes_typed_control_from_unique_current_ocr_word(tmp_path: Path) -> None:
     """A typed control can use one exact OCR word when its scene has no bbox."""
     image = Image.new("RGB", (128, 96))
@@ -480,6 +663,81 @@ def test_collect_agent_publishes_typed_control_from_unique_current_ocr_word(tmp_
         ]
     finally:
         agent._screen_objects.close()
+
+
+def _reward_phrase_agent(*, screen: str = "reward") -> CollectAgent:
+    image = Image.new("RGB", (128, 96))
+    agent = CollectAgent.__new__(CollectAgent)
+    agent._aim = AimGuide.from_marks(image, [_mark(9, "icon", x=0.50, y=0.59)])
+    agent._host_stats = {"screen": screen, "activity": screen}
+    agent._obs_metrics = {"screen": screen, "activity": screen}
+    return agent
+
+
+def _phrase_scene(*, screen: str = "reward") -> SimpleNamespace:
+    return SimpleNamespace(
+        screen=screen,
+        controls=[{"label": "Add a card to your deck", "role": "button"}],
+        hand_cards=[], enemies=[], characters=[],
+    )
+
+
+def test_reward_phrase_grounding_joins_split_current_ocr_words() -> None:
+    agent = _reward_phrase_agent()
+    agent._last_ocr_words = [
+        _mark(1, "Add", x=.34, y=.59),
+        _mark(2, "a", x=.42, y=.59),
+        _mark(3, "card", x=.50, y=.59),
+        _mark(4, "to", x=.58, y=.59),
+        _mark(5, "your", x=.66, y=.59),
+        _mark(6, "deck", x=.74, y=.59),
+    ]
+
+    reconciled = agent._reconcile_scene_marks(_phrase_scene())
+
+    assert [(mark.label, mark.role) for mark in reconciled] == [
+        ("Add a card to your deck", "button")
+    ]
+    assert "ocr-control" in reconciled[0].source
+
+
+def test_reward_phrase_grounding_fails_closed_for_duplicate_current_lines() -> None:
+    agent = _reward_phrase_agent()
+    agent._last_ocr_words = [
+        _mark(1, "Add", x=.42, y=.48),
+        _mark(2, "a", x=.50, y=.48),
+        _mark(3, "card", x=.58, y=.48),
+        _mark(4, "to", x=.66, y=.48),
+        _mark(5, "your", x=.74, y=.48),
+        _mark(6, "deck", x=.82, y=.48),
+        # The duplicate is a complete second OCR line, not a second word.
+        _mark(7, "Add", x=.42, y=.74),
+        _mark(8, "a", x=.50, y=.74),
+        _mark(9, "card", x=.58, y=.74),
+        _mark(10, "to", x=.66, y=.74),
+        _mark(11, "your", x=.74, y=.74),
+        _mark(12, "deck", x=.82, y=.74),
+    ]
+
+    reconciled = agent._reconcile_scene_marks(_phrase_scene())
+
+    assert [(mark.label, mark.role) for mark in reconciled] == [("icon", "")]
+
+
+def test_phrase_grounding_is_reward_only() -> None:
+    agent = _reward_phrase_agent(screen="map")
+    agent._last_ocr_words = [
+        _mark(1, "Add", x=.34, y=.59),
+        _mark(2, "a", x=.42, y=.59),
+        _mark(3, "card", x=.50, y=.59),
+        _mark(4, "to", x=.58, y=.59),
+        _mark(5, "your", x=.66, y=.59),
+        _mark(6, "deck", x=.74, y=.59),
+    ]
+
+    reconciled = agent._reconcile_scene_marks(_phrase_scene(screen="map"))
+
+    assert [(mark.label, mark.role) for mark in reconciled] == [("icon", "")]
 
 
 def test_turn_snapshot_keeps_canonical_card_name_when_scene_rows_reflow(tmp_path: Path) -> None:
@@ -1033,3 +1291,24 @@ def test_map_control_failure_replans_not_softlock(monkeypatch) -> None:
     assert agent._decision_softlock is False
     assert "control:node_0" in agent._blocked_controls
     assert parsed.get("action") == "click_control"
+
+
+def test_stale_control_binding_does_not_blacklist_unexecuted_control(monkeypatch) -> None:
+    from loop.agent.decision import BoundingBox, ControlSnapshot
+
+    snapshot = TurnSnapshot(
+        snapshot_id="map-1", screen="map", turn=None, hp=73, block=None, energy=None,
+        controls=(ControlSnapshot("control:node_0", "node_0", BoundingBox(.2, .4, .3, .5)),),
+    )
+    agent = CollectAgent.__new__(CollectAgent)
+    agent._last_execution_failure = {
+        "code": "stale-control-binding",
+        "intent": {"kind": "click_control", "control_id": "control:node_0"},
+    }
+    agent._last_intent = {"kind": "click_control", "control_id": "control:node_0"}
+    agent._blocked_controls = set()
+    agent._blocked_controls_screen = "map"
+    monkeypatch.setattr(agent, "_current_surface_screen", lambda: "map")
+
+    assert agent._replan_after_control_failure(snapshot, ()) is False
+    assert agent._blocked_controls == set()

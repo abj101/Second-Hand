@@ -738,6 +738,52 @@ def test_merge_labels_corner_back() -> None:
     assert labels["Back"].x <= 0.12
 
 
+def test_map_toolbar_corner_is_not_labeled_back() -> None:
+    from loop.os.aim import AimMark, _merge_aim_marks
+
+    # STS2's map toolbar has an unlabeled bottom-left icon at the same location
+    # as menu Back.  It must remain a non-actionable icon on the map.
+    toolbar = AimMark(id=2, x=0.08, y=0.88, x0=0.04, y0=0.82, x1=0.12, y1=0.94, score=70.0)
+    merged = _merge_aim_marks([], [toolbar], cap=8, screen="map")
+    assert not any(mark.label == "Back" for mark in merged)
+    assert merged[0].label == ""
+
+
+def test_build_marks_map_toolbar_corner_is_not_back() -> None:
+    from loop.os.aim import AimMark, build_marks
+
+    toolbar = AimMark(
+        id=2, x=0.08, y=0.88, x0=0.04, y0=0.82, x1=0.12, y1=0.94, label="Back", score=70.0
+    )
+    marks = build_marks(
+        Image.new("RGB", (64, 64)), cv_marks=[toolbar], words=[], gui_marks=[], screen="map"
+    )
+    assert not any(mark.label == "Back" for mark in marks)
+
+
+def test_map_corner_back_heuristics_require_ocr() -> None:
+    from loop.os.aim import AimMark, _relabel_from_lexicon, _strip_unverified_menu_labels, fuse_dino_marks, AimGuide
+
+    corner_back = AimMark(
+        id=2, x=0.08, y=0.88, x0=0.04, y0=0.82, x1=0.12, y1=0.94, label="Back", score=0.8
+    )
+    assert _strip_unverified_menu_labels([corner_back], [], screen="map")[0].label == ""
+    assert _strip_unverified_menu_labels([corner_back], [], screen="title")[0].label == "Back"
+
+    guide = AimGuide.from_marks(Image.new("RGB", (32, 32)), [corner_back])
+    assert fuse_dino_marks(guide, [], screen="map").marks[0].label == ""
+
+    class _Lexicon:
+        def label_for(self, screen, x, y):  # type: ignore[no-untyped-def]
+            return "Back"
+
+    unlabeled = AimMark(
+        id=3, x=0.08, y=0.88, x0=0.04, y0=0.82, x1=0.12, y1=0.94, label="icon", score=0.8
+    )
+    assert _relabel_from_lexicon([unlabeled], _Lexicon(), "map", ocr=[])[0].label == "icon"
+    assert _relabel_from_lexicon([unlabeled], _Lexicon(), "title", ocr=[])[0].label == "Back"
+
+
 def test_badge_centered_on_click() -> None:
     from loop.os.aim import AimMark, badge_box
 

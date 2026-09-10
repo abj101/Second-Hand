@@ -3,12 +3,15 @@ from __future__ import annotations
 from PIL import Image
 
 from loop.os.geometry import (
+    box_is_full,
+    boxes_close,
     content_box_for,
     crop_content,
     encode_observe,
     fit_aspect_box,
     geometry_error,
     geometry_from_image,
+    is_top_left_scaled_capture,
     letterbox_frac,
     perceive_longest_side,
 )
@@ -67,3 +70,31 @@ def test_cropped_vs_raw_thumbs_are_not_like_for_like() -> None:
     like = mean_absdiff(roi_thumb(cropped, 64), roi_thumb(cropped, 64))
     assert like < 0.01
     assert mixed > 0.08
+
+
+def test_box_is_full_and_boxes_close() -> None:
+    assert box_is_full((0.0, 0.0, 1.0, 1.0))
+    assert box_is_full((0.005, 0.0, 0.995, 1.0))
+    assert not box_is_full((0.0, 0.0, 0.67, 0.67))
+    assert boxes_close((0.0, 0.0, 1.0, 1.0), (0.01, 0.01, 0.99, 0.99))
+    assert not boxes_close((0.0, 0.0, 1.0, 1.0), (0.0, 0.0, 0.67, 0.67))
+
+
+def test_printwindow_scaled_frame_is_suspect_not_letterbox() -> None:
+    frame = Image.new("RGB", (1915, 1078), (0, 0, 0))
+    frame.paste(Image.new("RGB", (1277, 718), (80, 40, 20)), (0, 0))
+    box = letterbox_frac(frame)
+    assert abs(box[2] - 1277 / 1915) < 0.01
+    assert abs(box[3] - 718 / 1078) < 0.01
+    assert box[0] == 0.0 and box[1] == 0.0
+    assert is_top_left_scaled_capture(frame)
+
+
+def test_centered_letterbox_is_not_top_left_scaled() -> None:
+    frame = Image.new("RGB", (400, 400), (0, 0, 0))
+    frame.paste(Image.new("RGB", (400, 200), (80, 40, 20)), (0, 100))
+    box = letterbox_frac(frame)
+    assert abs(box[1] - 0.25) < 1e-6
+    assert abs(box[3] - 0.75) < 1e-6
+    assert not is_top_left_scaled_capture(frame)
+    assert not is_top_left_scaled_capture(Image.new("RGB", (1915, 1078), (40, 20, 20)))
