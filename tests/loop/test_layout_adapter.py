@@ -82,7 +82,7 @@ def test_legacy_adapter_preserves_combat_hand_and_sprite_rules() -> None:
     adapter = legacy_combat_layout_adapter()
     cards = propose_hand_cards(words, screen="combat", layout_adapter=adapter)
     assert len(cards) == 2
-    assert all(card.role == "card" for card in cards)
+    assert all(card.role == "hand_candidate" and not card.object_id for card in cards)
 
     image = Image.new("RGB", (640, 400), (20, 20, 30))
     marks = build_marks(
@@ -94,7 +94,8 @@ def test_legacy_adapter_preserves_combat_hand_and_sprite_rules() -> None:
         layout_adapter=adapter,
     )
     assert any(m.role == "board_candidate" for m in marks)
-    assert any(m.role == "card" for m in marks)
+    assert any(m.role == "hand_candidate" for m in marks)
+    assert not any(m.role == "card" for m in marks)
 
 
 def test_generic_adapter_skips_enemy_seeding_from_host() -> None:

@@ -24,7 +24,7 @@ _OCCLUSION_TOKENS = (
 
 @dataclass
 class PointerHygieneState:
-    parked: bool = True
+    parked: bool = False
     hover_intentional: bool = False
     selection_held: bool = False
     last_xy: tuple[float, float] | None = None
@@ -37,6 +37,7 @@ class PointerHygieneState:
     def metrics(self) -> dict[str, Any]:
         return {
             "pointer_parked": bool(self.parked),
+            "pointer_park_xy": self.last_park_xy,
             "pointer_park_trigger": self.last_trigger or None,
             "pointer_park_probe_delta": round(float(self.last_probe_delta), 6),
             "pointer_park_recapture": int(self.recapture_used),
@@ -79,7 +80,10 @@ def should_park_after_pointer(
     if hover or mid_transaction or drag:
         return False
     if park_after is True:
-        return bool(has_click)
+        # The outer completed-action boundary also covers key-only actions.
+        # ``park_after`` is the runtime's explicit observation barrier, not an
+        # inference that a pointer primitive happened in this chord.
+        return True
     if combat_selection_held:
         return False
     return bool(has_click)

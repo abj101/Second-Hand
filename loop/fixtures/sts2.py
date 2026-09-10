@@ -10,7 +10,7 @@ from PIL import Image
 from loop.fixtures.base import FixtureBase
 from loop.log.schema import ActionLog, StepLog, Terminal
 from loop.os.executor import OsController
-from loop.os.aim import HAND_Y, _copy_mark, _is_placeholder_label, is_menu_label, label_kind
+from loop.os.aim import _copy_mark, is_menu_label
 from loop.os.mouse import MENU_HOLD_S, MENU_HOVER_S
 from loop.os.primitives import MousePrimitive, mouse_click, mouse_move
 from loop.os.geometry import (
@@ -132,6 +132,9 @@ class Sts2Fixture(FixtureBase):
         """Return the normalized STS2 Loot column eligible for local refresh."""
         return _REWARD_STACK_ROI
 
+    def neutral_park_xy(self) -> tuple[float, float]:
+        return (0.02, 0.50)
+
     def _reward_reflow_roi(
         self,
         clicked_bbox: tuple[float, float, float, float] | None = None,
@@ -193,14 +196,6 @@ class Sts2Fixture(FixtureBase):
                 continue
             if role == "target":
                 mark = _copy_mark(mark, role="enemy")
-            elif role not in {"enemy", "player", "card"} and (
-                float(mark.y) >= HAND_Y
-                and label
-                and "end turn" not in label
-                and not _is_placeholder_label(mark.label)
-                and label_kind(mark.label) not in {"progress", "danger"}
-            ):
-                mark = _copy_mark(mark, role="card")
             out.append(mark)
         return out
 

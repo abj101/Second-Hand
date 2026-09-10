@@ -195,8 +195,8 @@ def test_confirmed_combat_retains_hand_and_end_turn() -> None:
         blocking_overlay=False,
     )
     marks = [
-        _mark(1, "Strike", x=0.36, y=0.88),
-        _mark(2, "Defend", x=0.50, y=0.88),
+        _mark(1, "Strike", x=0.36, y=0.88, role="card"),
+        _mark(2, "Defend", x=0.50, y=0.88, role="card"),
         _mark(3, "Cultist", x=0.72, y=0.61, role="enemy"),
         _mark(4, "End Turn", x=0.90, y=0.82, role="button"),
     ]
@@ -225,15 +225,25 @@ def test_confirmed_combat_retains_hand_and_end_turn() -> None:
     assert {"play_card", "end_turn"} <= set(surface.legal_intents)
 
 
+def test_untyped_lower_band_labels_are_not_promoted_to_cards() -> None:
+    fixture = Sts2Fixture()
+    context = FrameContext(screen="combat", activity="combat")
+    enriched = fixture.enrich_frame_marks(
+        [_mark(1, "Unknown Label", x=0.36, y=0.88)], context,
+        {"screen": "combat", "activity": "combat"},
+    )
+    assert enriched[0].role == ""
+
+
 def test_combat_ghost_next_does_not_paginate_or_strip_hand() -> None:
     """Live 20260907T191012Z: leftover Prev/Next/Back on combat must not empty ACT."""
     fixture = Sts2Fixture()
     marks = [
         _mark(1, "Prev", x=0.08, y=0.47),
         _mark(2, "Back", x=0.09, y=0.81),
-        _mark(3, "Defend", x=0.31, y=0.95),
-        _mark(4, "Strike", x=0.41, y=0.92),
-        _mark(5, "Bash", x=0.59, y=0.92),
+            _mark(3, "Defend", x=0.31, y=0.95, role="card"),
+            _mark(4, "Strike", x=0.41, y=0.92, role="card"),
+            _mark(5, "Bash", x=0.59, y=0.92, role="card"),
         _mark(6, "End Turn", x=0.89, y=0.82, role="button"),
         _mark(7, "Next", x=0.96, y=0.50),
         _mark(8, "Cultist", x=0.75, y=0.35, role="enemy"),
@@ -589,8 +599,8 @@ def test_combat_hand_cards_still_reconcile_as_cards(tmp_path: Path) -> None:
     agent._obs_metrics = {"screen": "combat", "activity": "combat"}
     agent._last_obs_image = image
     agent._aim = AimGuide.from_marks(image, [
-        _mark(1, "icon", x=0.31, y=0.92, role="unknown"),
-        _mark(2, "icon", x=0.50, y=0.92, role="icon"),
+        _mark(1, "Defend", x=0.31, y=0.92, role="hand_candidate"),
+        _mark(2, "Strike", x=0.50, y=0.92, role="hand_candidate"),
         _mark(3, "End Turn", x=0.89, y=0.82, role="button"),
     ])
     agent._screen_objects = ScreenObjectStore(tmp_path / "combat-hand.db")
@@ -620,6 +630,73 @@ def test_combat_hand_cards_still_reconcile_as_cards(tmp_path: Path) -> None:
         kinds = {row["kind"] for row in legal_intents_for_snapshot(snapshot)}
         assert "play_card" in kinds
         assert all(obj.role == "card" for obj in surface.objects if obj.label in {"Defend", "Strike"})
+    finally:
+        agent._screen_objects.close()
+
+
+def test_combat_typed_hand_bboxes_mint_cards_without_candidates(tmp_path: Path) -> None:
+    image = Image.new("RGB", (128, 96))
+    agent = CollectAgent.__new__(CollectAgent)
+    agent.fixture = Sts2Fixture()
+    agent.session_id = "run"
+    agent._step_id = 3
+    agent._host_stats = {"screen": "combat", "activity": "combat"}
+    agent._obs_metrics = {"screen": "combat", "activity": "combat"}
+    agent._last_obs_image = image
+    agent._aim = AimGuide.from_marks(image, [
+        _mark(1, "icon", x=0.30, y=0.93, role="icon"),
+        _mark(2, "icon", x=0.43, y=0.93, role="icon"),
+        _mark(3, "icon", x=0.55, y=0.93, role="icon"),
+        _mark(4, "icon", x=0.68, y=0.93, role="icon"),
+        _mark(5, "icon", x=0.77, y=0.93, role="icon"),
+        _mark(6, "End Turn", x=0.89, y=0.82, role="button"),
+    ])
+    agent._screen_objects = ScreenObjectStore(tmp_path / "combat-typed-hand.db")
+    agent._action_surface = None
+    agent._frame_model = None
+    scene = SimpleNamespace(
+        screen="combat",
+        controls=[
+            {"label": "Strike", "role": "card", "bbox": None},
+            {"label": "Bash", "role": "card", "bbox": None},
+            {"label": "Defend", "role": "card", "bbox": None},
+            {"label": "Defend", "role": "card", "bbox": None},
+            {"label": "Defend", "role": "card", "bbox": None},
+            {"label": "End Turn", "role": "button"},
+        ],
+        hand_cards=[
+            {"label": "Strike", "role": "card", "bbox": [246, 857, 363, 994], "id": "card_1"},
+            {"label": "Bash", "role": "card", "bbox": [370, 857, 487, 994], "id": "card_2"},
+            {"label": "Defend", "role": "card", "bbox": [494, 857, 611, 994], "id": "card_3"},
+            {"label": "Defend", "role": "card", "bbox": [618, 857, 735, 994], "id": "card_4"},
+            {"label": "Defend", "role": "card", "bbox": [718, 857, 820, 994], "id": "card_5"},
+        ],
+        enemies=[],
+        characters=[],
+    )
+    try:
+        agent._ground_aim_from_scene(scene)
+        surface = agent._finalize_action_surface(scene)
+        assert surface is not None
+        agent._game_state = None
+        agent._entity_tracker = None
+        agent._reason_controls = []
+        agent._last_execution_failure = None
+        agent._v2_control_objects = {}
+        snapshot = agent._build_turn_snapshot(scene)
+        names = [card.name for card in sorted(snapshot.cards, key=lambda card: card.bbox.x0)]
+        assert names == ["Strike", "Bash", "Defend", "Defend", "Defend"]
+        assert "play_card" in snapshot.legal_intents
+        kinds = {row["kind"] for row in legal_intents_for_snapshot(snapshot)}
+        assert "play_card" in kinds
+        named = [obj for obj in surface.interactive() if obj.label in {"Strike", "Bash", "Defend"}]
+        assert named
+        assert all(obj.role == "card" for obj in named)
+        assert all(
+            obj.role != "card"
+            for obj in surface.objects
+            if (obj.label or "").strip().lower() == "icon"
+        )
     finally:
         agent._screen_objects.close()
 

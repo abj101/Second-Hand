@@ -282,7 +282,7 @@ def _role_for_label(
     explicit = _compact_label(str(mark.role or ""))
     overlay_nav = infer_overlay_nav(context, host_stats=host_stats)
 
-    if explicit in {"suppressed", "background"}:
+    if explicit in {"suppressed", "background", "hand candidate"}:
         return "suppressed"
     # Grounded generic semantics beat every positional or fixture hint.
     if explicit in {"nav_next", "next"}:

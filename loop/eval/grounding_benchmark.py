@@ -15,7 +15,16 @@ from typing import Any, Sequence
 from PIL import Image
 
 from loop.config import project_root
-from loop.os.aim import AimMark, _merge_aim_marks, apply_enemy_bboxes, build_marks, detect_marks, ocr_click_marks, paint_aim
+from loop.os.aim import (
+    AimMark,
+    _merge_aim_marks,
+    apply_enemy_bboxes,
+    apply_hand_bboxes,
+    build_marks,
+    detect_marks,
+    ocr_click_marks,
+    paint_aim,
+)
 
 
 def box_iou(a: Sequence[float], b: Sequence[float]) -> float:
@@ -368,7 +377,8 @@ def run_grounding_benchmark(
         words = ocr_click_marks(image)
         raw_marks = list(build_marks(image, screen=str(row.get("screen") or "combat"), words=words, gui_marks=[]))
         enemy_rows = [obj for obj in row.get("objects", []) if obj.get("role") == "enemy"]
-        marks = apply_enemy_bboxes(raw_marks, enemy_rows)
+        hand_rows = [obj for obj in row.get("objects", []) if obj.get("role") == "card"]
+        marks = apply_hand_bboxes(apply_enemy_bboxes(raw_marks, enemy_rows), hand_rows)
         score = score_grounding(marks, row.get("objects", []))
         results.append({"file": str(path), **score})
         if debug_dir is not None:
@@ -389,6 +399,7 @@ def run_grounding_benchmark(
     return {
         "path": "oracle_assisted",
         "oracle_enemy_bboxes": True,
+        "oracle_hand_bboxes": True,
         "forced_empty_gui": True,
         "rows": results,
         "missing": len(results) - len(valid),

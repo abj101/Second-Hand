@@ -545,12 +545,13 @@ def propose_hand_cards(
     cap: int = 10,
     layout_adapter: LayoutAdapter | None = None,
 ) -> list[AimMark]:
-    """Turn one OCR title per visible card into pixel-backed hand geometry.
+    """Turn one OCR title per visible card into non-executable hand candidates.
 
     STS cards fan and overlap, so a generic connected-component detector tends
     to fuse the whole hand.  The title remains visible once per physical card;
-    use it as an anchor inside a strict hand crop.  This preserves duplicate
-    names and cannot absorb the right-side End Turn button.
+    use it as an anchor inside a strict hand crop.  These are *candidates*,
+    not cards: only current-frame typed geometry can promote one to an
+    executable card with an object id.
     """
     adapter = layout_adapter or default_layout_adapter()
     if not adapter.enables_hand_card_proposals(screen):
@@ -562,6 +563,19 @@ def propose_hand_cards(
         if not (_HAND_X0 <= word.x <= _HAND_X1 and _HAND_TITLE_Y0 <= word.y <= _HAND_TITLE_Y1):
             continue
         if not compact or _ocr_junk(label) or _looks_like_stat_label(label):
+            continue
+        # Body copy and OCR fragments are not card titles.  In particular,
+        # never turn "Deal 6 damage" or "Apply" into a clickable card.
+        if any(part in _OCR_BODY for part in compact.split()) or any(
+            part.isdigit() for part in compact.split()
+        ):
+            continue
+        if any(
+            compact != name
+            and len(compact) >= 4
+            and (name.startswith(compact) or name.endswith(compact))
+            for name in _CARD_NAME_HINTS
+        ):
             continue
         if _is_end_turn_label(label) or compact in _HAND_FORBIDDEN:
             continue
@@ -590,16 +604,13 @@ def propose_hand_cards(
                 y1=y1,
                 label=label,
                 score=max(float(word.score), 0.75),
-                role="card",
+                role="hand_candidate",
                 source="ocr-hand",
-                confidence=max(float(word.score), 0.75),
+                confidence=0.0,
             )
         )
     candidates.sort(key=lambda mark: mark.x)
-    return [
-        _copy_mark(mark, object_id=f"card_{i}")
-        for i, mark in enumerate(candidates[: max(0, cap)], start=1)
-    ]
+    return candidates[: max(0, cap)]
 
 
 def _looks_like_stat_label(label: str) -> bool:
@@ -895,9 +906,36 @@ def apply_hand_bboxes(
     *,
     cap: int = _MAX_MARKS,
 ) -> list[AimMark]:
-    """Bind LLM1 card geometry without downgrading grounded OCR card names."""
+    """Promote uniquely matched, current-frame hand candidates to cards.
+
+    Typed in-hand geometry may create a click target only when there is no
+    current-frame candidate to bind. Unique-match still fail-closes when
+    candidates exist but are missing, ambiguous, or not 1:1.
+    """
     out = list(marks or ())
-    claimed: set[int] = set()
+
+    def in_full_hand(mark: AimMark) -> bool:
+        return (
+            _HAND_X0 <= mark.x0 <= mark.x1 <= _HAND_X1
+            and HAND_Y <= mark.y0 <= mark.y1 <= 1.0
+            and in_hand_band(mark.x, mark.y)
+        )
+
+    def current_card_candidate(mark: AimMark) -> bool:
+        if not in_full_hand(mark):
+            return False
+        if (mark.role or "").strip().lower() not in {"hand_candidate", "card"}:
+            return False
+        # Cached cards must be re-observed before they are executable again.
+        return "cache" not in str(mark.source or "").lower()
+
+    def geometry_matches(mark: AimMark, proposal: AimMark) -> bool:
+        # Fanned cards physically overlap their neighbours. Require substantial
+        # agreement rather than any intersection, then enforce a one-to-one
+        # match across the whole typed hand below.
+        return _mark_iou(mark, proposal) >= 0.30 and abs(mark.x - proposal.x) <= 0.10
+
+    proposals: list[tuple[int, AimMark]] = []
     for card_index, row in enumerate(hand_rows or (), start=1):
         if not isinstance(row, dict):
             continue
@@ -917,7 +955,11 @@ def apply_hand_bboxes(
         if max(x0, y0, x1, y1) > 1.0:
             x0, y0, x1, y1 = x0 / GRID, y0 / GRID, x1 / GRID, y1 / GRID
         x, y = (x0 + x1) * 0.5, (y0 + y1) * 0.5
-        if y < HAND_Y or x > _HAND_X1 or _is_end_turn_label(label):
+        if not (
+            _HAND_X0 <= x0 <= x1 <= _HAND_X1
+            and HAND_Y <= y0 <= y1 <= 1.0
+            and in_hand_band(x, y)
+        ) or _is_end_turn_label(label):
             continue
         proposal = AimMark(
             id=0, x=x, y=y, x0=x0, y0=max(HAND_Y, y0), x1=x1, y1=min(1.0, y1),
@@ -925,44 +967,49 @@ def apply_hand_bboxes(
             object_id=str(row.get("entity_id") or row.get("id") or f"card_{card_index}"),
             role="card", source=str(row.get("source") or "llm1-bbox"), confidence=0.8,
         )
-        card_marks = [
-            mark for mark in out
-            if mark.id not in claimed
-            and mark.y >= HAND_Y
-            and not _is_end_turn_label(mark.label)
-            and (mark.role == "card" or "ocr-hand" in str(mark.source or ""))
+        proposals.append((card_index, proposal))
+
+    candidate_indices = [
+        index for index, mark in enumerate(out) if current_card_candidate(mark)
+    ]
+    row_hits: dict[int, list[int]] = {
+        row_index: [
+            index for index in candidate_indices
+            if geometry_matches(out[index], proposal)
         ]
-        match = max(
-            card_marks,
-            key=lambda mark: (_mark_iou(mark, proposal), -abs(mark.x - proposal.x)),
-            default=None,
+        for row_index, proposal in proposals
+    }
+    candidate_hits: dict[int, list[int]] = {
+        index: [
+            row_index for row_index, proposal in proposals
+            if geometry_matches(out[index], proposal)
+        ]
+        for index in candidate_indices
+    }
+    for row_index, proposal in proposals:
+        hits = row_hits[row_index]
+        if len(hits) != 1 or len(candidate_hits[hits[0]]) != 1:
+            continue
+        index = hits[0]
+        match = out[index]
+        incoming_unknown = _compact_label(proposal.label) in {
+            "unknown", "unknown card", "unknown_card", "icon", "card"
+        }
+        grounded_ocr = (
+            "ocr-hand" in str(match.source or "")
+            and not _is_placeholder_label(match.label)
+            and _compact_label(match.label) not in {"unknown", "unknown card", "unknown_card"}
         )
-        overlap = _mark_iou(match, proposal) if match is not None else 0.0
-        horizontally_aligned = bool(
-            match is not None
-            and abs(match.x - proposal.x) <= 0.09
-            and min(match.x1, proposal.x1) > max(match.x0, proposal.x0)
+        resolved_label = match.label if incoming_unknown or grounded_ocr else proposal.label
+        out[index] = _copy_mark(
+            match, label=resolved_label, object_id=proposal.object_id, role="card",
+            source=f"{match.source}+llm1-bbox" if match.source else "llm1-bbox",
+            confidence=max(match.confidence, 0.8),
         )
-        if match is not None and (overlap >= 0.03 or horizontally_aligned):
-            claimed.add(match.id)
-            incoming_unknown = _compact_label(label) in {
-                "unknown", "unknown card", "unknown_card", "icon", "card"
-            }
-            grounded_ocr = (
-                "ocr-hand" in str(match.source or "")
-                and not _is_placeholder_label(match.label)
-                and _compact_label(match.label) not in {"unknown", "unknown card", "unknown_card"}
-            )
-            resolved_label = match.label if incoming_unknown or grounded_ocr else label
-            out = [
-                _copy_mark(
-                    mark, label=resolved_label, object_id=proposal.object_id, role="card",
-                    source=f"{mark.source}+llm1-bbox" if mark.source else "llm1-bbox",
-                    confidence=max(mark.confidence, 0.8),
-                ) if mark.id == match.id else mark
-                for mark in out
-            ]
-        elif len(out) < cap:
+    if not candidate_indices:
+        for _, proposal in proposals:
+            if len(out) >= cap:
+                break
             out.append(proposal)
     return [_copy_mark(mark, mid=i) for i, mark in enumerate(out[:cap], start=1)]
 
@@ -997,7 +1044,13 @@ def _claimable_enemy_slot(mark: AimMark, claimed: set[int]) -> bool:
 def _claimable_hand_slot(mark: AimMark, claimed: set[int]) -> bool:
     if mark.id in claimed:
         return False
-    if mark.y < HAND_Y:
+    if (mark.role or "").strip().lower() != "card" or not mark.object_id:
+        return False
+    if not (
+        _HAND_X0 <= mark.x0 <= mark.x1 <= _HAND_X1
+        and HAND_Y <= mark.y0 <= mark.y1 <= 1.0
+        and in_hand_band(mark.x, mark.y)
+    ):
         return False
     if _is_end_turn_label(mark.label) or label_kind(mark.label) in {"progress", "danger"}:
         return False
@@ -1044,7 +1097,7 @@ def ground_combat_labels(
                     mark for mark in out
                     if mark.id not in claimed
                     and _compact_label(mark.label) == _compact_label(name)
-                    and ((role == "card" and mark.y >= HAND_Y) or
+                    and ((role == "card" and _claimable_hand_slot(mark, claimed)) or
                          (role == "enemy" and in_combat_sprite_band(mark.y, mark.x)))
                 ),
                 None,

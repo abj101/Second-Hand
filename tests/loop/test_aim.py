@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from PIL import Image, ImageDraw
 import pytest
 
@@ -1014,7 +1016,10 @@ def test_ground_combat_labels_binds_only_observed_geometry() -> None:
     )
 
     end = AimMark(id=1, x=0.93, y=0.04, x0=0.9, y0=0.02, x1=0.96, y1=0.06, label="End Turn")
-    strike = AimMark(id=2, x=0.69, y=0.88, x0=0.64, y0=0.84, x1=0.74, y1=0.92, label="Strike")
+    strike = AimMark(
+        id=2, x=0.69, y=0.88, x0=0.64, y0=0.84, x1=0.74, y1=0.92,
+        label="Strike", object_id="card_1", role="card", source="typed",
+    )
     icon = AimMark(id=3, x=0.55, y=0.30, x0=0.48, y0=0.22, x1=0.62, y1=0.38, label="icon")
     hand_icon = AimMark(id=4, x=0.45, y=0.88, x0=0.38, y0=0.78, x1=0.52, y1=1.0, label="icon")
     grounded = ground_combat_labels(
@@ -1026,7 +1031,9 @@ def test_ground_combat_labels_binds_only_observed_geometry() -> None:
     labels = {m.label for m in grounded}
     assert "Jaw Worm" in labels
     assert "Strike" in labels
-    assert "Defend" in labels
+    # Semantic hand lists may not turn an arbitrary lower-band icon into a card.
+    assert "Defend" not in labels
+    assert next(m for m in grounded if abs(m.x - .45) < .001).label == "icon"
     jaw = next(m for m in grounded if m.label == "Jaw Worm")
     assert in_enemy_band(jaw.y, jaw.x)
     guide = AimGuide.from_marks(Image.new("RGB", (64, 64)), grounded)
@@ -1263,8 +1270,27 @@ def test_hand_proposals_preserve_duplicate_card_instances() -> None:
     words.append(AimMark(9, .90, .83, .85, .80, .95, .86, "End Turn 3", .99))
     cards = propose_hand_cards(words, screen="combat")
     assert [card.label for card in cards] == ["Defend", "Strike", "Strike", "Defend", "Strike"]
-    assert [card.object_id for card in cards] == [f"card_{i}" for i in range(1, 6)]
-    assert all(card.role == "card" and card.source == "ocr-hand" for card in cards)
+    assert all(card.object_id == "" for card in cards)
+    assert all(card.role == "hand_candidate" and card.source == "ocr-hand" for card in cards)
+
+
+def test_hand_proposals_reject_descriptions_and_ocr_fragments() -> None:
+    from loop.os.aim import AimMark, propose_hand_cards
+
+    words = [
+        AimMark(1, .35, .84, .30, .82, .40, .86, "Strike", .99),
+        AimMark(2, .46, .84, .40, .80, .52, .88, "Deal 6 damage", .99),
+        AimMark(3, .56, .84, .52, .82, .60, .86, "Apply", .99),
+        AimMark(4, .66, .84, .62, .82, .70, .86, "damage", .99),
+        AimMark(5, .70, .84, .67, .82, .73, .86, "trike", .99),
+        AimMark(6, .74, .84, .71, .82, .77, .86, "Defe", .99),
+        AimMark(7, .58, .84, .52, .80, .64, .88, "Gain 3 Strength this turn.", .99),
+        AimMark(8, .62, .84, .56, .80, .68, .88, "Deal 7 damage.", .99),
+    ]
+    cards = propose_hand_cards(words, screen="combat")
+    assert [card.label for card in cards] == ["Strike"]
+    assert cards[0].role == "hand_candidate"
+    assert cards[0].object_id == ""
 
 
 def test_unknown_vlm_hand_bboxes_preserve_ocr_card_names_and_instances() -> None:
@@ -1292,6 +1318,111 @@ def test_unknown_vlm_hand_bboxes_preserve_ocr_card_names_and_instances() -> None
     assert [card.label for card in cards] == ["Defend", "Strike", "Strike", "Defend"]
     assert [card.object_id for card in cards] == [f"card_{i}" for i in range(1, 5)]
     assert len(cards) == 4
+
+
+def test_hand_bboxes_fail_closed_for_missing_or_ambiguous_geometry() -> None:
+    from loop.os.aim import AimMark, apply_hand_bboxes
+
+    candidates = [
+        AimMark(1, .45, .90, .38, .79, .52, 1.0, "Strike", role="hand_candidate", source="ocr-hand"),
+        AimMark(2, .46, .90, .39, .79, .53, 1.0, "Strike", role="hand_candidate", source="ocr-hand"),
+    ]
+    rows = [
+        {"id": "card_missing", "label": "Defend"},
+        {"id": "card_ambiguous", "label": "Strike", "bbox": [390, 795, 520, 997]},
+    ]
+    out = apply_hand_bboxes(candidates, rows)
+    assert [mark.role for mark in out] == ["hand_candidate", "hand_candidate"]
+    assert all(mark.object_id == "" for mark in out)
+
+
+def test_hand_bbox_promotion_requires_one_to_one_overlap() -> None:
+    from loop.os.aim import AimMark, apply_hand_bboxes
+
+    broad = AimMark(
+        1, .45, .90, .30, .79, .60, 1.0, "Strike",
+        role="hand_candidate", source="ocr-hand",
+    )
+    rows = [
+        {"id": "card_1", "label": "Strike", "bbox": [320, 795, 470, 997]},
+        {"id": "card_2", "label": "Defend", "bbox": [430, 795, 580, 997]},
+    ]
+
+    out = apply_hand_bboxes([broad], rows)
+
+    assert len(out) == 1
+    assert out[0].role == "hand_candidate"
+    assert out[0].object_id == ""
+
+
+def test_hand_bboxes_do_not_promote_left_energy_orb() -> None:
+    from loop.os.aim import AimMark, apply_hand_bboxes
+
+    orb = AimMark(1, .10, .88, .04, .76, .16, 1.0, "Strike", role="hand_candidate", source="ocr-hand")
+    out = apply_hand_bboxes(
+        [orb], [{"id": "card_1", "label": "Strike", "bbox": [40, 760, 160, 998]}]
+    )
+    assert len(out) == 1
+    assert out[0].role == "hand_candidate"
+    assert out[0].object_id == ""
+
+
+def test_typed_hand_bboxes_promote_exact_strike_defend_cardinality() -> None:
+    from loop.os.aim import AimMark, apply_hand_bboxes
+
+    candidates = [
+        AimMark(i, x, .90, x - .06, .79, x + .06, 1.0, label, role="hand_candidate", source="ocr-hand")
+        for i, (x, label) in enumerate(((.34, "Strike"), (.48, "Defend"), (.62, "Strike")), start=1)
+    ]
+    rows = [
+        {"id": f"card_{i}", "label": label, "bbox": [int((x - .05) * 1000), 795, int((x + .05) * 1000), 997]}
+        for i, (x, label) in enumerate(((.34, "Strike"), (.48, "Defend"), (.62, "Strike")), start=1)
+    ] + [{"id": "card_unmatched", "label": "Defend", "bbox": [700, 795, 780, 997]}]
+    out = apply_hand_bboxes(candidates, rows)
+    cards = [mark for mark in out if mark.role == "card"]
+    assert [mark.label for mark in cards] == ["Strike", "Defend", "Strike"]
+    assert [mark.object_id for mark in cards] == ["card_1", "card_2", "card_3"]
+    assert len(out) == 3
+
+
+def test_hand_bboxes_mint_typed_geometry_when_no_candidates() -> None:
+    from loop.os.aim import apply_hand_bboxes
+
+    rows = [
+        {"id": "card_1", "label": "Strike", "bbox": [246, 857, 363, 994]},
+        {"id": "card_2", "label": "Bash", "bbox": [340, 857, 457, 994]},
+        {"id": "card_3", "label": "Defend", "bbox": [434, 857, 551, 994]},
+        {"id": "card_4", "label": "Defend", "bbox": [528, 857, 645, 994]},
+        {"id": "card_5", "label": "Defend", "bbox": [622, 857, 739, 994]},
+    ]
+    out = apply_hand_bboxes([], rows)
+    cards = [mark for mark in out if mark.role == "card"]
+    assert [card.object_id for card in cards] == [f"card_{i}" for i in range(1, 6)]
+    assert [card.label for card in cards] == ["Strike", "Bash", "Defend", "Defend", "Defend"]
+    assert len(cards) == 5
+
+
+def test_hand_bboxes_mint_typed_geometry_beside_gui_icons() -> None:
+    from loop.os.aim import AimMark, apply_hand_bboxes
+
+    icons = [
+        AimMark(i, x, .90, x - .04, .80, x + .04, 1.0, "", role="icon", source="gui")
+        for i, x in enumerate((.30, .45, .60), start=1)
+    ]
+    rows = [
+        {"id": "card_1", "label": "Strike", "bbox": [246, 857, 363, 994]},
+        {"id": "card_2", "label": "Bash", "bbox": [340, 857, 457, 994]},
+        {"id": "card_3", "label": "Defend", "bbox": [434, 857, 551, 994]},
+        {"id": "card_4", "label": "Defend", "bbox": [528, 857, 645, 994]},
+        {"id": "card_5", "label": "Defend", "bbox": [622, 857, 739, 994]},
+    ]
+    out = apply_hand_bboxes(icons, rows)
+    cards = [mark for mark in out if mark.role == "card"]
+    leftover_icons = [mark for mark in out if mark.role == "icon"]
+    assert [card.object_id for card in cards] == [f"card_{i}" for i in range(1, 6)]
+    assert [card.label for card in cards] == ["Strike", "Bash", "Defend", "Defend", "Defend"]
+    assert leftover_icons
+    assert all(mark.role == "icon" and mark.object_id == "" for mark in leftover_icons)
 
 
 def test_duplicate_card_label_requires_instance_id_path() -> None:
@@ -1329,11 +1460,44 @@ def test_real_failed_run_frame_has_five_cards_and_no_end_turn_card(monkeypatch) 
     monkeypatch.setenv("AVATAR_OCR", "auto")
     image = Image.open(path).convert("RGB")
     marks = build_marks(image, screen="combat", words=ocr_click_marks(image), gui_marks=[])
-    cards = [mark for mark in marks if mark.role == "card"]
-    assert len(cards) == 5
-    assert [card.label for card in cards].count("Strike") == 3
-    assert [card.label for card in cards].count("Defend") == 2
-    assert all("end turn" not in card.label.lower() for card in cards)
+    candidates = [mark for mark in marks if mark.role == "hand_candidate"]
+    assert len(candidates) == 5
+    assert [card.label for card in candidates].count("Strike") == 3
+    assert [card.label for card in candidates].count("Defend") == 2
+    assert all(card.object_id == "" for card in candidates)
+    assert all("end turn" not in card.label.lower() for card in candidates)
+
+
+def test_step20_enlarged_card_replay_has_no_executable_description_cards(
+    monkeypatch,
+) -> None:
+    from loop.os.aim import build_marks, ocr_click_marks
+    from loop.os.frame_model import build_action_surface
+
+    root = Path(__file__).resolve().parents[2]
+    path = (
+        root / "runs" / "20260910T024029Z_sts2_collect" / "frames"
+        / "6f3efd017c" / "000020_obs.jpg"
+    )
+    if not path.exists():
+        pytest.skip("local diagnosed run artifact is not packaged")
+    monkeypatch.setenv("AVATAR_OCR", "auto")
+    image = Image.open(path).convert("RGB")
+    marks = build_marks(
+        image, screen="combat", words=ocr_click_marks(image), gui_marks=[]
+    )
+    forbidden = {"gain 3 strength this turn", "deal 7 damage", "trike", "defe"}
+    candidates = {
+        " ".join(str(mark.label or "").casefold().rstrip(".").split())
+        for mark in marks if mark.role == "hand_candidate"
+    }
+    assert not candidates & forbidden
+
+    surface = build_action_surface(
+        marks, run_id="replay", step_id=20, screen="combat", activity="combat",
+    )
+    assert not any(obj.role == "card" for obj in surface.interactive())
+    assert "play_card" not in surface.legal_intents
 
 
 def test_heuristic_targets_midboard_anonymous_enemy() -> None:

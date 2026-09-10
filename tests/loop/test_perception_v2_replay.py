@@ -113,6 +113,7 @@ def test_replay_191012z_combat_inventory_reaches_act(tmp_path: Path) -> None:
     agent = _agent_for_combat(tmp_path, marks, data["host_stats"])
     scene = _scene_from_llm1(data)
     try:
+        agent._ground_aim_from_scene(scene)
         surface = agent._finalize_action_surface(scene)
         assert surface is not None
         snapshot = agent._build_turn_snapshot(scene)
@@ -128,11 +129,19 @@ def test_replay_191012z_combat_inventory_reaches_act(tmp_path: Path) -> None:
         assert not target.target_id.startswith("unknown_character")
         assert (target.identity_confidence or 0) < 0.75
         assert (target.name or "").lower() in {"unknown enemy", "unknown_enemy"}
+
+        first_cards = tuple(
+            (card.card_id, card.name, card.bbox) for card in snapshot.cards
+        )
+        agent._ground_aim_from_scene(scene)
+        agent._finalize_action_surface(scene)
+        repeated = agent._build_turn_snapshot(scene)
+        assert tuple((card.card_id, card.name, card.bbox) for card in repeated.cards) == first_cards
     finally:
         agent._screen_objects.close()
 
 
-def test_llm1_hand_cards_promote_unlabeled_hand_marks(tmp_path: Path) -> None:
+def test_llm1_hand_cards_do_not_promote_unlabeled_hand_marks(tmp_path: Path) -> None:
     image = Image.new("RGB", (64, 48))
     marks = [
         AimMark(id=1, x=0.31, y=0.92, x0=0.25, y0=0.86, x1=0.37, y1=1.0, label="", role="unknown"),
@@ -154,9 +163,35 @@ def test_llm1_hand_cards_promote_unlabeled_hand_marks(tmp_path: Path) -> None:
         surface = agent._finalize_action_surface(scene)
         assert surface is not None
         snapshot = agent._build_turn_snapshot(scene)
-        assert [card.name for card in snapshot.cards] == ["Defend", "Strike"]
-        assert all(card.card_id.startswith("card_") for card in snapshot.cards)
-        assert all("llm1-current-frame" in (obj.provenance or "") for obj in surface.objects if obj.role == "card")
+        assert snapshot.cards == ()
+        assert not any(obj.role == "card" for obj in surface.objects)
+    finally:
+        agent._screen_objects.close()
+
+
+def test_control_rows_cannot_increase_executable_hand_cardinality(tmp_path: Path) -> None:
+    mark = AimMark(
+        id=1, x=0.40, y=0.92, x0=0.34, y0=0.82, x1=0.46, y1=1.0,
+        label="Strike", role="hand_candidate", source="ocr-hand",
+    )
+    agent = _agent_for_combat(
+        tmp_path, [mark], {"screen": "combat", "activity": "combat"},
+    )
+    scene = SimpleNamespace(
+        screen="combat",
+        controls=[{
+            "id": "control-card", "label": "Strike", "role": "card",
+            "bbox": [340, 820, 460, 1000],
+        }],
+        hand_cards=[], enemies=[], characters=[],
+    )
+    try:
+        agent._ground_aim_from_scene(scene)
+        surface = agent._finalize_action_surface(scene)
+
+        assert surface is not None
+        assert not any(obj.role == "card" for obj in surface.interactive())
+        assert scene.controls == []
     finally:
         agent._screen_objects.close()
 
@@ -164,7 +199,10 @@ def test_llm1_hand_cards_promote_unlabeled_hand_marks(tmp_path: Path) -> None:
 def test_llm1_cannot_promote_left_orb_to_card(tmp_path: Path) -> None:
     marks = [
         AimMark(id=1, x=0.087, y=0.83, x0=0.05, y0=0.76, x1=0.13, y1=0.89, label="", role="unknown"),
-        AimMark(id=2, x=0.365, y=0.93, x0=0.30, y0=0.86, x1=0.44, y1=1.0, label="", role="unknown"),
+        AimMark(
+            id=2, x=0.365, y=0.93, x0=0.30, y0=0.86, x1=0.44, y1=1.0,
+            label="Defend", role="hand_candidate", source="ocr-hand",
+        ),
         AimMark(id=3, x=0.89, y=0.82, x0=0.82, y0=0.78, x1=0.96, y1=0.88, label="End Turn", role="button"),
     ]
     agent = _agent_for_combat(tmp_path, marks, {"screen": "combat", "activity": "combat"})

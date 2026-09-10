@@ -31,6 +31,14 @@ def test_neutral_park_xy_prefers_letterbox_margins() -> None:
     assert neutral_park_xy(None) == IN_CLIENT_FALLBACK
 
 
+def test_pointer_hygiene_starts_unparked_and_reports_last_park() -> None:
+    state = PointerHygieneState()
+    assert not state.parked
+    assert state.metrics()["pointer_park_xy"] is None
+    state.last_park_xy = (0.02, 0.50)
+    assert state.metrics()["pointer_park_xy"] == (0.02, 0.50)
+
+
 def test_should_park_after_pointer_exemptions() -> None:
     assert should_park_after_pointer(hover=False, has_click=True)
     assert not should_park_after_pointer(hover=True, has_click=True)
@@ -42,6 +50,19 @@ def test_should_park_after_pointer_exemptions() -> None:
     )
     assert not should_park_after_pointer(hover=False, has_click=True, park_after=False)
     assert not should_park_after_pointer(hover=False, has_click=False)
+    assert should_park_after_pointer(hover=False, has_click=False, park_after=True)
+
+
+def test_collect_agent_explicitly_parks_after_key_only_action(monkeypatch) -> None:
+    agent = _agent_with_mouse(monkeypatch, screen="combat")
+    action = ActionLog(tapped=["escape"], source_role="control")
+
+    assert agent._maybe_park_after_action(action, park_after=True)
+    moves = [
+        primitive for primitive in agent.fixture.controller.prims
+        if isinstance(primitive, MousePrimitive) and primitive.op == "move"
+    ]
+    assert (moves[-1].x, moves[-1].y) == (0.02, 0.50)
 
 
 def test_hover_occlusion_from_tooltip_glossary() -> None:
@@ -94,7 +115,7 @@ def test_collect_agent_parks_after_reward_click(monkeypatch) -> None:
     assert agent._maybe_park_after_action(action)
     moves = [p for p in agent.fixture.controller.prims if isinstance(p, MousePrimitive) and p.op == "move"]
     assert moves
-    assert (moves[-1].x, moves[-1].y) == IN_CLIENT_FALLBACK
+    assert (moves[-1].x, moves[-1].y) == (0.02, 0.50)
     assert agent._hygiene().parked
     assert agent._hygiene().last_trigger == "post-action"
 
@@ -106,6 +127,23 @@ def test_collect_agent_skips_park_on_intentional_hover(monkeypatch) -> None:
     assert agent.fixture.controller.prims == []
     assert agent._hygiene().hover_intentional
     assert not agent._hygiene().parked
+
+
+def test_normal_observation_after_intentional_hover_is_post_park(monkeypatch) -> None:
+    agent = _agent_with_mouse(monkeypatch, screen="combat")
+    hover = ActionLog(click_x=0.50, click_y=0.59, hover=True, source_role="enemy")
+    assert not agent._maybe_park_after_action(hover)
+    tooltip = Image.new("RGB", (32, 32), (20, 20, 20))
+    clean = Image.new("RGB", (32, 32), (40, 40, 40))
+    agent.fixture.grab_image = lambda: clean  # type: ignore[method-assign]
+    agent.fixture.observe_image = lambda image: image  # type: ignore[method-assign]
+    agent.fixture.commit_observation = lambda _image: None  # type: ignore[attr-defined]
+
+    observed = agent._ensure_clean_observation(tooltip, trigger="pre-observe")
+
+    assert observed is clean
+    assert agent._hygiene().parked
+    assert not agent._hygiene().hover_intentional
 
 
 def test_collect_agent_skips_park_on_combat_card_until_commit(monkeypatch) -> None:
