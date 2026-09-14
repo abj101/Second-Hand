@@ -2,9 +2,9 @@
 
 This branch teaches a **vision-language model to play turn-based games from pixels**, starting with Slay the Spire 2 (`sts2`). Screenshot in, mouse/key out. No game API. The chapel / pad / Elden path stays in the tree but is **not** this branch's driver.
 
-**Operator status — 8 Sep 2026:** the active STS2 path is `two_stage` with snapshot-bound ActionIntent v2. Checkpoint `637cae4` is reproducible from a clean worktree and fresh environment, but the system is **not live-qualified**: Batch 7 has unit coverage but no completed clean live validation, and the incomplete run `20260908T202041Z_sts2_collect` shows target loss plus repeated unverified actions. Do not enable `skill_on`, export training data from this run, or claim the perception-v3 gate is closed. See the [`system audit`](AUDIT-2026-09-08.md), [`implementation plan`](IMPLEMENTATION-PLAN-2026-09-08.md), and [`perception-v3 validation report`](bugfix/perception3/validation-report.md).
+**Operator status:** the active STS2 path is `two_stage` with snapshot-bound ActionIntent v2. The system is **not live-qualified**. Do not enable `skill_on` or export training data from failed validation runs.
 
-Chapel-era design (pad, explore GSM, Ratchet librarian): [`loop/DESIGN.md`](loop/DESIGN.md).
+Offline gate: `pytest tests/loop -q` runs frozen screenshots in `loop/fixtures/sts2_screens/` through OCR/GUI/CV → `build_action_surface`. A live bug becomes a regression by copying `obs.jpg` (and `after.jpg` if needed) into that folder and adding a `labels.jsonl` line.
 
 ## Philosophy
 
@@ -35,9 +35,10 @@ Out of scope on this branch: Elden explore DQN / `train-rl`, Qwen3-VL training, 
 
 The 2 Sep overlay smoke is historical evidence only. The current contract is perception-v3 plus ActionIntent v2, and its live qualification remains open.
 
-- **Offline:** plain `pytest -q` passes 972 tests with 1 guarded live-input skip in the working environment. Checkpoint `637cae4` passes 968 tests with 5 expected skips in a clean worktree/fresh environment; four extra skips require ignored historical run artifacts. Dependency integrity, imports, compilation, and all 10 installed entry points pass.
+- **Offline:** `pytest tests/loop -q` is the collect gate. It runs OCR/GUI/CV on frozen jpgs in `loop/fixtures/sts2_screens/` (see `labels.jsonl`), plus a thin unit core. It does not mock `CollectAgent`. Live-input tests stay behind `AVATAR_LIVE_INPUT=1`.
+- **Current screenshot replay:** most frames pass. Two stay red on purpose until the harness matches the pixels: `combat_turn.jpg` (OCR sees Defend, action surface does not) and `combat_runb_000001.jpg` (hand names present, no enemy objects, `play_card` not legal).
 - **Last completed Batch 6 run:** `20260908T194352Z_sts2_collect` reached reward but reproduced one `target-not-found:enemy_2`, duplicate target rows on six steps, and a reward-screen `decision_softlock`. It is a failed validation run, not training data.
-- **Batch 7 code:** adds stacked-target collapse, named-target deduplication, size-aware perception-cache invalidation, and bounded reward/map surface recovery. Unit tests cover the recorded failure shapes.
+- **Batch 7 code:** stacked-target collapse, named-target deduplication, size-aware perception-cache invalidation, and bounded reward/map surface recovery. Screenshot replay is the regression lock, not mock unit tests.
 - **Latest incomplete live signal:** `20260908T202041Z_sts2_collect` has 16 logged steps and no finalized episode/summary. At the audit snapshot it had two target-not-found errors, no targets in 14/16 snapshots, 12 `effect-unverified` transactions, 14/16 forced rescans, zero reward, and zero SFT/DPO yield. Treat the run as provisional but blocking.
 
 **Release gate:** finish a fresh, controlled combat-start run with zero noncanonical or duplicate targets, zero target/source-not-found loops, verified card effects, no decision softlock, clean reward→map handling, and complete artifact finalization. Then repeat for two consecutive combat wins. Only after that may `skill_on`, training export, or perception-v3 completion be reconsidered. Forced-rescan rate remains an efficiency gate (target ≤ 0.30), not a reason to relax correctness.
@@ -168,7 +169,7 @@ When prose and runtime disagree, use this order:
 
 1. `loop/__main__.py`, `loop/config.py`, and the current schemas/tests define actual CLI behavior.
 2. This file is the operator contract and should be corrected whenever behavior intentionally changes.
-3. `bugfix/perception3/validation-report.md` records dated live evidence; a code-landed batch is not a passed gate.
+3. Dated `runs/<stamp>_sts2_collect/` artifacts are live evidence; a code-landed batch is not a passed gate.
 4. `configs/experiment.yaml` configures the separate `avatar/` experiment path and does not set `python -m loop collect` defaults.
 
 ### Readiness checks
@@ -177,12 +178,12 @@ Safe offline check (does not send live mouse/keyboard input):
 
 ```powershell
 $env:AVATAR_LIVE_INPUT='0'
-python -m pytest -q --import-mode=importlib
+python -m pytest tests/loop -q
 python -m pip check
-python -m compileall -q avatar loop tests scripts eval bugfix
+python -m compileall -q avatar loop tests scripts eval
 ```
 
-Pytest importlib mode is configured in `pyproject.toml`, so plain `pytest -q` is the valid health check despite duplicate `test_memory.py` basenames. Live-input tests require an explicit `AVATAR_LIVE_INPUT=1` and are never part of unattended regression checks.
+The collect health check is `pytest tests/loop -q` (screenshot replay). `pytest -q` also runs leftover Phase 1 `tests/test_*.py` and is not the STS2 gate. Live-input tests require `AVATAR_LIVE_INPUT=1` and are never part of unattended checks.
 
 Before a live qualification run: use a fresh known combat state, keep the client at the validated 16:9 size, record architecture/models/sensor flags, confirm the stop file is absent, and run the monitor. A qualifying run must end with `episodes.jsonl` and `summary.json`; an orphaned `turns.jsonl` is diagnostic evidence only.
 

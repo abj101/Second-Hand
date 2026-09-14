@@ -2,7 +2,7 @@
 
 Last updated: 2026-08-28
 
-**Doc map:** operator quick start → [`README.md`](README.md). Collect-loop philosophy + STS2 features → [`system.md`](system.md). Next gates → [`STS2-NEXT.md`](STS2-NEXT.md). GameSense distill → [`research.md`](research.md). Phase 2 GSM plan → [`writeups/08-gsm.md`](writeups/08-gsm.md). Chapel appendix → [`loop/DESIGN.md`](loop/DESIGN.md).
+**Doc map:** operator quick start → [`README.md`](README.md). Collect-loop philosophy + STS2 features → [`system.md`](system.md). GameSense distill → [`research.md`](research.md).
 
 ## Status: three live pipelines on one harness
 
@@ -16,7 +16,7 @@ Cloud toggle: `gemma4:31b-cloud` via `--model`. No second text brain on the defa
 
 Phase 1 (L0–L4) proved pause-and-plan: named actions, last-10 memory, bounded constructor, L4 reflection. Kept for ablations (`scripts/run_phase1.py`), not the runner default.
 
-G0 handoff is wired. G1 tags live `detector_family` (grounding-dino or unavailable); do not claim extracted from pixel-blob. Collect contract: `pytest tests/loop` green; live VLM corpus + `--execute` train are the open gates ([`STS2-NEXT.md`](STS2-NEXT.md)).
+G0 handoff is wired. G1 tags live `detector_family` (grounding-dino or unavailable); do not claim extracted from pixel-blob. Collect contract: `pytest tests/loop` on frozen screenshots in `loop/fixtures/sts2_screens/`; live VLM corpus + `--execute` train are the open gates.
 
 ---
 
@@ -235,13 +235,11 @@ call that out. Platinum is the long-horizon / memory fixture (SIMA’s
 - **Collect driver:** on `feat/collect-loop`, STS2 is the live collect
   fixture. One VLM chord per step; `turn_reward` from HUD OCR; Notebook +
   journal in the prompt. Operator contract: [`system.md`](system.md).
-  Next gates: [`STS2-NEXT.md`](STS2-NEXT.md).
 
 ### Tier 5 — Elden Ring (chapel appendix)
 
 - Chapel collect (pad, explore GSM, Ratchet librarian) is frozen on
-  `feat/collect-loop`. In-tree as appendix only — [`loop/DESIGN.md`](loop/DESIGN.md).
-  Combat bosses stay stretch G2+.
+  `feat/collect-loop`. Combat bosses stay stretch G2+.
 - Score navigation and verified heading (`view_changed`), not survive-K. A
   combat GSM is stretch, same kinds as Wukong, no teleport reset.
 
@@ -342,8 +340,8 @@ isolate, then use on purpose.
 
 ## 5.2 Game Sense Modules — Phase 2 (VLM backbone + DINO + RL)
 
-Full modification map: [`writeups/08-gsm.md`](writeups/08-gsm.md). Rubric:
-[`eval/rubrics/gsm.md`](eval/rubrics/gsm.md).
+Full modification map: [`research.md`](research.md). Rubric:
+[`research.md`](research.md).
 
 The high-level agent stays the Phase 1 loop (See, 3-way reflect, memory,
 task/action plan). When the task is reactive, it **invokes a GSM** and
@@ -409,8 +407,7 @@ encoder, vision LoRA off, 4-bit). Merge + GGUF `q4_K_M` back onto the
 same Ollama instruct tag. Never `Qwen3.5-4B-Base`. Never Qwen3-VL for
 STS2 SFT/DPO.
 
-**Legacy Phase 1 ablation:** `qwen3-vl:4b-instruct-q4_K_M` (quant matrix
-in [`writeups/07-quant-matrix.md`](writeups/07-quant-matrix.md)) and
+**Legacy Phase 1 ablation:** `qwen3-vl:4b-instruct-q4_K_M` and
 `--dual-brain` with `qwen3.5:4b` / `phi4-mini` text brain. Not the
 default runner.
 
@@ -487,13 +484,13 @@ Goal: cheapest frame that still lets the model See.
 - [x] Vendor 2048; Playwright (or raw screenshot) capture
 - [x] Feed frames to local VLMs: "what is the board / score / status?"
 - [x] Human-score perception; start a resolution/compression sweep
-- [x] **Output:** report — "Can cheap VLMs read this game?" (`writeups/01-see.md`)
+- [x] **Output:** report — "Can cheap VLMs read this game?"
 
 ### Understand experiment
 - [x] Same captures: ask for goal + next move (**pixels-only**)
 - [x] Classify UI vs gameplay (GameSense prompt shape)
 - [x] Still human-scored; optional backend oracle for later automation
-- [x] **Output:** report — can it understand without a manual? (`writeups/02-understand.md`)
+- [x] **Output:** report — can it understand without a manual?
 
 ### Act experiment (2048 + paused Tetris)
 - [ ] L1: named action table + JSON actions on 2048 (Playwright ok)
@@ -503,11 +500,11 @@ Goal: cheapest frame that still lets the model See.
 - [ ] Real harness (OS capture/input) on at least one fixture
 - [x] L2: last-task + last-10 memory; eyes/brain split; no-op bans; compare to L1 (first harness-lift table)
 - [ ] Local model sweep: latency — descriptive, not a gate
-- [x] **Output:** report — L0 vs L1 vs L2 (see `writeups/03-act.md`, `writeups/05-final.md`)
+- [x] **Output:** report — L0 vs L1 vs L2
 
 ### Commercial experiment (Platinum / StS 2 + constructor)
 - [ ] Pokémon Platinum through the real harness (long-horizon / L2)
-- [x] Slay the Spire 2 collect harness wired (`loop/fixtures/sts2.py`); live VLM corpus + train gates open ([`STS2-NEXT.md`](STS2-NEXT.md))
+- [x] Slay the Spire 2 collect harness wired (`loop/fixtures/sts2.py`); live VLM corpus + train gates open ([`system.md`](system.md))
 - [x] **L3 constructor** on traces: propose/merge skills; cap 3 rewrites;
       log reuse vs duplicate-spawn (2048 traces; Platinum/StS windows missing)
 - [ ] **Output:** report — fixtures + did skills get reused?
@@ -521,7 +518,7 @@ Goal: cheapest frame that still lets the model See.
 - [ ] **Output:** harness-lift table + sample QA reports + manual delta
 
 ### GSM experiment (Phase 2 — in scope)
-Plan: [`writeups/08-gsm.md`](writeups/08-gsm.md). Rubric: [`eval/rubrics/gsm.md`](eval/rubrics/gsm.md).
+Plan: [`research.md`](research.md). Rubric: [`research.md`](research.md).
 - [ ] **G0** stub `invoke_gsm` on unpaused Tetris; no eyes/brain during GSM
 - [ ] **G1** rule GSM + open-vocab detector; VLM label-list edits ≤3
 - [ ] **G2** DoubleDQN + reward JSON + train-analyze-optimize ≤3 + sandbox
@@ -531,10 +528,10 @@ Plan: [`writeups/08-gsm.md`](writeups/08-gsm.md). Rubric: [`eval/rubrics/gsm.md`
 - [ ] **Output:** GSM vs L2-realtime vs pause-and-plan table + cost
 
 ### Collect-loop experiment (`loop/`, `feat/collect-loop`)
-Operator runbook: [`STS2-NEXT.md`](STS2-NEXT.md). Contract: [`system.md`](system.md).
+Operator runbook: [`system.md`](system.md). Contract: [`system.md`](system.md).
 - [x] STS2 fixture: aim overlay, two-click chords, `turn_reward`, notebook, journal
 - [x] SFT/DPO export + train scaffolding; `prompt_id` hash gate
-- [x] `pytest tests/loop` green (215+)
+- [x] Collect pytest is frozen screenshot replay (`loop/fixtures/sts2_screens/` + `labels.jsonl`)
 - [ ] Live VLM collect corpus on STS2
 - [ ] `--execute` SFT then DPO on 4060; GGUF back onto instruct tag
 - [ ] Held-out eval delta (`loop eval --baseline … --candidate …`)
@@ -624,7 +621,7 @@ Wukong 60% as a Tetris target.
 | 2026-08-18 | VLM is planner + constructor; skills from play traces, not pretrained DINO/RL | GameSense loop, human-like learning. Their unfixed spawn failed — we merge, cap 3 rewrites, run constructor on traces not every turn |
 | 2026-08-18 | Pixels-only first; official game description/instructions as a late measured boost | Isolates discovery vs “read the manual.” GameSense gave the bible at init; that’s a confound we delay on purpose |
 | 2026-08-18 | Steal GameSense planner (named actions, last-10, 3-level reflection, screenshot cadence). Keep QA metric they omitted. | Address our shortcoming (no constructor/feedback) without inheriting theirs (per-game forks, teleports, eval()) |
-| 2026-08-20 | Phase 2 in scope: VLM backbone + Grounding DINO rule GSMs + DoubleDQN RL GSMs. Frozen kinds, retrieve, sandbox, cost, no teleports. Tetris-rt first; mixed-pacing fixtures keep empty GSM registries. Pixels vs extracted is a measured ablation, not a silent drop of vision-only. | GameSense report as backbone. Handoff is the lift; we iterate toward play. See `writeups/08-gsm.md`. |
+| 2026-08-20 | Phase 2 in scope: VLM backbone + Grounding DINO rule GSMs + DoubleDQN RL GSMs. Frozen kinds, retrieve, sandbox, cost, no teleports. Tetris-rt first; mixed-pacing fixtures keep empty GSM registries. Pixels vs extracted is a measured ablation, not a silent drop of vision-only. | GameSense report as backbone. Handoff is the lift; we iterate toward play. See [`research.md`](research.md). |
 | 2026-08-28 | Default planner → `qwen3.5:4b-instruct-q4_K_M` (single VLM, no dual-brain). Collect driver → StS 2 (`sts2`) on `feat/collect-loop`. Train on `unsloth/Qwen3.5-4B`, not Qwen3-VL. Elden chapel frozen; operator contract in `system.md`. | Qwen3.5 instruct is the production tag; collect loop is a separate learn path from Phase 2 GSM. |
 
 ---
@@ -637,7 +634,7 @@ Wukong 60% as a Tetris target.
 - [x] Scoring philosophy — human first, automate later
 - [x] Prompt contract — pixels-only first; manual is a **late** boost, not an Understand-experiment A/B
 - [x] Constructor in Phase 1 (bounded skill library) — GameSense loop, their spawn bug fixed
-- [ ] Skill schema (recognize / do / end / provenance) — draft when L1 logs exist → **GSM spec** in G0 (`writeups/08-gsm.md`)
+- [ ] Skill schema (recognize / do / end / provenance) — draft when L1 logs exist → **GSM spec** in G0 ([`research.md`](research.md))
 - [x] Cloud posture — cheap VLMs, not locked to mainstream
 - [ ] Confirm Tetris fork is easy to pause / expose board state; swap to sen-ltd/tetris only if LICENSE is clean and fkucukkara is awkward
 - [ ] Confirm real VRAM footprint of local VLMs on 8GB
@@ -653,13 +650,13 @@ Wukong 60% as a Tetris target.
 
 ## 13. Next Action
 
-**Collect loop (branch `feat/collect-loop`).** Follow [`STS2-NEXT.md`](STS2-NEXT.md)
+**Collect loop (branch `feat/collect-loop`).** Follow [`system.md`](system.md)
 in order. Open gates: live VLM collect on STS2 → `--execute` SFT → DPO →
 held-out eval delta. Do not skip to train without corpus; do not declare
 win from loss or dry-run JSONL.
 
 **Phase 2 GSM (`avatar/`).** G0 stub is wired; continue G1 rule/DINO and
-G2 RL on unpaused Tetris per [`writeups/08-gsm.md`](writeups/08-gsm.md).
+G2 RL on unpaused Tetris per [`research.md`](research.md).
 
 Phase 1 remaining fill-ins (Platinum window, manual-boost A/B, L4 QA notes)
 stay useful; they do not block collect or GSM iteration.
@@ -674,7 +671,7 @@ planner invokes**, not Qwen on every frame.
 
 This is no longer “own project after Phase 1.” It is the current
 iteration target. Sequence, VRAM schedule, and file map:
-[`writeups/08-gsm.md`](writeups/08-gsm.md).
+[`research.md`](research.md).
 
 - G0 stub handoff → G1 rule/DINO → G2 RL/DQN → G3 retrieve/sandbox/$ →
   G4 mixed pacing → G5 pixels vs extracted

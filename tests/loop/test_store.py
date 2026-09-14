@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from loop.log.schema import Observation, StepLog
+from loop.log.schema import EpisodeLog, Observation, StepLog
 from loop.log.store import EpisodeStore, registry_tool_names
 
 
@@ -58,6 +58,19 @@ def test_replace_episode_steps_keeps_other_episodes(tmp_path: Path) -> None:
     assert rows[0]["thought"] == "first"
     assert rows[1]["thought"] == "updated"
     assert rows[1]["return_to_go"] == 1.5
+
+
+def test_replace_episode_updates_post_write_telemetry(tmp_path: Path) -> None:
+    store = EpisodeStore(tmp_path)
+    first = EpisodeLog(session_id="s1", episode_id="e1", fixture="sts2")
+    other = EpisodeLog(session_id="s1", episode_id="e2", fixture="sts2")
+    store.write_episode(first)
+    store.write_episode(other)
+    first.memory_carry = {"knowledge": {"inserted": 1}}
+    store.replace_episode(first)
+    rows = store.read_episodes()
+    assert [row["episode_id"] for row in rows] == ["e2", "e1"]
+    assert rows[1]["memory_carry"]["knowledge"]["inserted"] == 1
 
 
 def test_resolve_run_dirs_latest_and_all(tmp_path: Path) -> None:
@@ -119,3 +132,4 @@ def test_session_summary_stop_flush_defaults_and_legacy_load() -> None:
     loaded = SessionSummary.model_validate(legacy)
     assert loaded.stop_requested is False
     assert loaded.flush_completed is False
+    assert loaded.knowledge_size == 0

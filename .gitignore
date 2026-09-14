@@ -59,13 +59,18 @@ Thumbs.db
 # Codegraph local index
 .codegraph/
 
+# Local scratch (audits, crops, preflight dumps, operator collect logs)
+.tmp/
+
 # Local agent/editor preferences
 .cursor/
 
-# Local operator diagnostics (preserved on disk, never committed)
+# Local operator diagnostics — write these under .tmp/operator/, not repo root
 /.collect_monitor.json
 /collect_*.log
 /_tmp_*.py
+/_tmp_*.json
+/inspect_*.txt
 /scripts/_tmp_*.py
 /tests/fixtures/affordance/affordance/
 

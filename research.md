@@ -3,7 +3,7 @@
 Source: [GameSense (ACL 2025)](https://aclanthology.org/2025.acl-long.643/)  
 Lu, He, Zhang, Guo, Zang. *Cultivating Game Sense for Yourself: Making VLMs Gaming Experts.* ACL 2025 (Long).  
 https://arxiv.org/pdf/2503.21263 · Code: https://github.com/ipsss2/GameSense  
-Indexed: PDF is **not** in Codegraph. This file is the working distill. Implementation plan: [`writeups/08-gsm.md`](writeups/08-gsm.md).
+Indexed: PDF is **not** in Codegraph. This file is the working distill.
 
 ---
 
@@ -11,7 +11,7 @@ Indexed: PDF is **not** in Codegraph. This file is the working distill. Implemen
 
 Pause-and-plan VLMs (Cradle) can click menus. They **cannot** fight. GameSense keeps the VLM as a **slow planner/developer** and ships **fast execution modules** (GSMs) for shoot/combat/reflex. Same GPU class as us: **Qwen-VL on a 4060**.
 
-**Avatar take (locked in `Reference.md`, plan in `writeups/08-gsm.md`):** Phase 1 stole the planner + constructor + feedback loop and kept DINO/RL out. **Phase 2 puts them in.** The VLM stays the backbone (See, 3-way reflection, memory, task/action plan, GSM authoring). Rule GSMs use Grounding DINO; RL GSMs use a shared DoubleDQN scaffold the VLM parameterizes. We do **not** copy teleports, game APIs, `eval()`, or unbounded spawn. We **do** add retrieval, sandbox, cost logs, mixed-pacing fixtures, and a pixels-vs-extracted ablation they never ran.
+**Avatar take (locked in `Reference.md`):** Phase 1 stole the planner + constructor + feedback loop and kept DINO/RL out. **Phase 2 puts them in.** The VLM stays the backbone (See, 3-way reflection, memory, task/action plan, GSM authoring). Rule GSMs use Grounding DINO; RL GSMs use a shared DoubleDQN scaffold the VLM parameterizes. We do **not** copy teleports, game APIs, `eval()`, or unbounded spawn. We **do** add retrieval, sandbox, cost logs, mixed-pacing fixtures, and a pixels-vs-extracted ablation they never ran.
 
 ---
 
