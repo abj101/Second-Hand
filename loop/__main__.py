@@ -268,6 +268,11 @@ def cmd_collect(argv: list[str] | None = None) -> int:
         help="Notebook Known/Lessons scope: run (default) or episode",
     )
     parser.add_argument(
+        "--no-knowledge",
+        action="store_true",
+        help="disable persistent semantic recall and preserve the ACT-v2 prompt contract",
+    )
+    parser.add_argument(
         "--context-mode",
         choices=("cold", "threaded"),
         default="cold",
@@ -349,6 +354,7 @@ def cmd_collect(argv: list[str] | None = None) -> int:
         store = EpisodeStore(run_dir)
         memory = None
         skills = None
+        knowledge = None
         if arm == "dump_all" and getattr(fixture, "pace", "realtime") != "turn":
             memory = MemoryStore(project_root() / "data" / "loop" / fixture.id / "memory.sqlite")
         if arm == "ratchet":
@@ -358,6 +364,17 @@ def cmd_collect(argv: list[str] | None = None) -> int:
                 n_min=spec["n_min"],
                 tau=spec["tau"],
                 cap=spec["cap"],
+            )
+        knowledge_enabled = bool(
+            fixture.id == "sts2" and architecture == "two_stage"
+            and not args.no_knowledge and not skip_models
+        )
+        if knowledge_enabled:
+            from loop.memory.knowledge import KnowledgeStore
+
+            knowledge = KnowledgeStore(
+                project_root() / "data" / "loop" / fixture.id / "knowledge.lancedb",
+                fixture.id,
             )
         gateway = None if skip_models else VlmGateway(
             model=reasoner_model,
@@ -393,6 +410,7 @@ def cmd_collect(argv: list[str] | None = None) -> int:
             skills=skills,
             gateway=gateway,
             perceive_gateway=perceive_gateway,
+            knowledge=knowledge,
             config=CollectConfig(
                 lives=args.lives,
                 max_steps=max_steps,
@@ -427,6 +445,8 @@ def cmd_collect(argv: list[str] | None = None) -> int:
                     part for part in str(args.context_schedule or "").split(",")
                     if part in {"cold", "threaded"}
                 ),
+                knowledge=knowledge_enabled,
+                knowledge_learn=not args.no_learn,
             ),
         )
         try:
@@ -460,6 +480,8 @@ def cmd_collect(argv: list[str] | None = None) -> int:
             fixture.close()
             if memory is not None:
                 memory.close()
+            if knowledge is not None:
+                knowledge.close()
             if gateway is not None:
                 gateway.unload()
             if perceive_gateway is not None:

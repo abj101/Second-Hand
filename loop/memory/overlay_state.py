@@ -101,6 +101,8 @@ class OverlayState:
     def resolved_screen(self, *, host_screen: str, perceive_screen: str) -> str:
         host = (host_screen or "").strip().lower()
         perceive = (perceive_screen or "").strip().lower()
+        if host == "tutorial" and perceive and perceive not in {"", "other", "tutorial"}:
+            return perceive
         if host and host not in {"", "other"}:
             return host
         return perceive or host or "other"
@@ -113,12 +115,14 @@ class ControlSuppressionState:
     fingerprint: str = ""
     attempts: dict[str, int] = field(default_factory=dict)
     suppressed: set[str] = field(default_factory=set)
+    quarantined: set[str] = field(default_factory=set)
     last_log_reason: str = ""
 
     def reset(self, fingerprint: str) -> None:
         self.fingerprint = fingerprint
         self.attempts.clear()
         self.suppressed.clear()
+        self.quarantined.clear()
         self.last_log_reason = ""
 
     def maybe_reset(
@@ -145,12 +149,21 @@ class ControlSuppressionState:
             self.last_log_reason = "suppressed:blocked-twice"
         return count
 
+    def quarantine(self, control_key: str) -> None:
+        """First verified no-op: hide this physical object from ACT on this surface."""
+        if control_key:
+            self.quarantined.add(control_key)
+
     def is_suppressed(self, control_key: str) -> bool:
         return control_key in self.suppressed
+
+    def is_quarantined(self, control_key: str) -> bool:
+        return control_key in self.quarantined or control_key in self.suppressed
 
     def clear_key(self, control_key: str) -> None:
         self.attempts.pop(control_key, None)
         self.suppressed.discard(control_key)
+        self.quarantined.discard(control_key)
 
     def key_for_row(
         self,

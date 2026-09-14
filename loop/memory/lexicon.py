@@ -12,7 +12,8 @@ from typing import Any, Iterable
 from loop.labels import bind_verb_ok
 
 _SLOT_CAP = 48
-_SOURCE_RANK = {"ocr": 3, "hover": 2, "transit": 1}
+_SOURCE_RANK = {"ocr": 3, "llm1": 3, "hover": 2, "transit": 1}
+_GROUNDED_INGEST = frozenset({"ocr", "ocr-gui", "ocr-hand", "hover", "llm1", "model"})
 _PLACEHOLDER = frozenset(
     {
         "icon",
@@ -56,6 +57,9 @@ _CANON = {
     "yes": "Yes",
     "no": "No",
     "deck": "Deck",
+    "draw pile": "Draw Pile",
+    "discard pile": "Discard Pile",
+    "exhaust pile": "Exhaust Pile",
     "settings": "Settings",
 }
 _TRANSIT = {
@@ -242,7 +246,14 @@ class MarkLexicon:
                 y = float(getattr(mark, "y"))
             except (TypeError, ValueError, AttributeError):
                 continue
-            self.remember(screen, x, y, label, source="ocr")
+            raw_source = str(getattr(mark, "source", "") or "").strip().lower()
+            if raw_source.startswith("ocr"):
+                source = "ocr"
+            elif raw_source in _GROUNDED_INGEST:
+                source = "llm1" if raw_source in {"llm1", "model"} else raw_source
+            else:
+                continue
+            self.remember(screen, x, y, label, source=source)
 
     def discover_click(
         self,

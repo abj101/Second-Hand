@@ -97,10 +97,30 @@ def hud_identity_stuck(steps: list[StepLog], *, window: int = 24) -> bool:
     return populated
 
 
+def rejected_actionless_streak(steps: list[StepLog]) -> int:
+    """Count the rejected, undispatched, pixel-static tail."""
+    count = 0
+    for row in reversed(steps):
+        result = row.result
+        if (
+            result.execution_disposition != "rejected_pre_dispatch"
+            or result.executed
+            or result.pixel_changed
+        ):
+            break
+        count += 1
+    return count
+
+
 def audit_episode(*, steps: list[StepLog], stuck_steps: int = 8) -> list[str]:
     flags: list[str] = []
-    if steps and all(not row.result.pixel_changed for row in steps[-stuck_steps:]):
+    if len(steps) >= stuck_steps and all(
+        not row.result.pixel_changed for row in steps[-stuck_steps:]
+    ):
         flags.append("stuck_no_pixel_change")
+    rejected_streak = rejected_actionless_streak(steps)
+    if rejected_streak >= 3:
+        flags.append(f"stuck_rejected_actionless:{rejected_streak}")
     if hud_identity_stuck(steps, window=max(stuck_steps, 24)):
         flags.append("hud_identity_stuck")
     if any(row.failed_while_thinking for row in steps):

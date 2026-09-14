@@ -19,5 +19,6 @@ mcp>=1.0.0
 ultralytics>=8.3.0
 huggingface_hub>=0.23.0
 torch
-transformers>=4.40.0
+transformers>=4.51.0
+lancedb==0.38.0
 timm>=1.0.0

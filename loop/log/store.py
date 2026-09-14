@@ -81,6 +81,24 @@ class EpisodeStore:
         with path.open("a", encoding="utf-8") as fh:
             fh.write(record.model_dump_json() + "\n")
 
+    def replace_episode(self, record: EpisodeLog) -> None:
+        """Replace one durable episode row after non-fatal post-write work."""
+        path = self.run_dir / "episodes.jsonl"
+        pending = self.run_dir / "episodes.jsonl.pending"
+        rows = [
+            EpisodeLog.model_validate(row)
+            for row in self.read_episodes()
+            if str(row.get("episode_id") or "") != record.episode_id
+        ]
+        try:
+            with pending.open("w", encoding="utf-8") as fh:
+                for row in (*rows, record):
+                    fh.write(row.model_dump_json() + "\n")
+            pending.replace(path)
+        finally:
+            if pending.exists():
+                pending.unlink()
+
     def write_summary(self, summary: SessionSummary) -> Path:
         path = self.run_dir / "summary.json"
         path.write_text(summary.model_dump_json(indent=2) + "\n", encoding="utf-8")

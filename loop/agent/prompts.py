@@ -179,6 +179,7 @@ SCENE_PERCEIVE_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
+                    "candidate_id": {"type": "string", "pattern": "^candidate:\\d+$"},
                     "label": {"type": "string"},
                     "role": {
                         "type": "string",
@@ -186,6 +187,12 @@ SCENE_PERCEIVE_SCHEMA = {
                     },
                     "confidence": {"type": "string", "enum": ["high", "low"]},
                     "source": {"type": "string", "enum": ["detector", "ocr", "model"]},
+                    "bbox": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "minItems": 4,
+                        "maxItems": 4,
+                    },
                 },
                 "required": ["label", "role", "confidence"],
             },
@@ -250,6 +257,7 @@ SCENE_PERCEIVE_SCHEMA = {
                     "confidence": {"type": "string", "enum": ["high", "low"]},
                     "source": {"type": "string", "enum": ["detector", "ocr", "model"]},
                     "playable": {"type": "boolean"},
+                    "candidate_id": {"type": "string", "pattern": "^candidate:\\d+$"},
                     "bbox": {
                         "type": "array",
                         "items": {"type": "number"},
@@ -277,6 +285,7 @@ SCENE_PERCEIVE_SCHEMA = {
                     },
                     "confidence": {"type": "string", "enum": ["high", "low"]},
                     "inspectable": {"type": "boolean"},
+                    "candidate_id": {"type": "string", "pattern": "^candidate:\\d+$"},
                     "bbox": {
                         "type": "array",
                         "items": {"type": "number"},
@@ -304,6 +313,7 @@ SCENE_PERCEIVE_SCHEMA = {
                     },
                     "confidence": {"type": "string", "enum": ["high", "low"]},
                     "inspectable": {"type": "boolean"},
+                    "candidate_id": {"type": "string", "pattern": "^candidate:\\d+$"},
                     "bbox": {
                         "type": "array",
                         "items": {"type": "number"},
@@ -337,8 +347,8 @@ SCENE_PERCEIVE_CANONICAL_EXAMPLE = {
     "tutorial": None,
     "turn": "ours",
     "controls": [
-        {"label": "Strike", "role": "card", "confidence": "high", "source": "ocr"},
-        {"label": "End Turn", "role": "button", "confidence": "high", "source": "ocr"},
+        {"candidate_id": "candidate:1", "label": "Strike", "role": "card", "confidence": "high", "source": "ocr"},
+        {"candidate_id": "candidate:2", "label": "End Turn", "role": "button", "confidence": "high", "source": "ocr"},
     ],
     "combat": {"active": True, "confidence": "high"},
     "dialog": None,
@@ -350,6 +360,7 @@ SCENE_PERCEIVE_CANONICAL_EXAMPLE = {
     "hand_cards": [
         {
             "id": "card_1",
+            "candidate_id": "candidate:1",
             "label": "Strike",
             "name": "Strike",
             "name_source": "ocr",
@@ -406,7 +417,8 @@ OUTPUT SHAPE:
   "tutorial": {"active": true, "title": "...", "step": 1, "total": 3} | null,
   "turn": "ours|theirs|unknown" | null,
   "controls": [
-    {"label": "...", "role": "card|button|menu|dialog|enemy|other",
+    {"candidate_id": "candidate:4",
+     "label": "...", "role": "card|button|menu|dialog|enemy|other",
      "confidence": "high|low", "source": "detector|ocr|model"}
   ],
   "combat": {"active": true, "confidence": "high|low"} | null,
@@ -448,7 +460,15 @@ OBSERVATION RULES:
 - MODALS AND DIMMED BACKGROUNDS: classify the foreground overlay; record only
   foreground controls. Illustrations and dimmed background elements are not controls.
 - ICON-ONLY CONTROLS: record a visible icon using its detector label when one
-  exists; otherwise use a short descriptive label with low confidence.
+  exists; otherwise classify its visible symbol. Return that candidate's
+  `candidate_id`, visible label, generic role, and confidence; the runtime
+  already owns candidate geometry. `bbox` is audit-only and is never
+  executable. Use low confidence when the symbol is unclear.
+- Classify the literal visible candidate, not a function inferred from screen
+  position. Name the visible glyph: a checkmark or tick is Confirm; a chevron
+  is next or prev. Locks, decoration, empty panels, or unclear regions use
+  role "other" with low confidence. Game-specific labels are unrestricted.
+  Only visibly clickable candidates belong in `controls`.
 - Put ambiguous text/regions in `uncertain` and `unresolved`. `unresolved` is
   required even when empty.
 - `legal_actions` is an observation of supplied CV affordance evidence, not a
@@ -458,14 +478,19 @@ OBSERVATION RULES:
   every visible creature-like sprite. `enemies` is the hostile subset. Mirror
   observed cards/enemies into `controls` when they are actually active.
 - Emit one `hand_cards` row per physical card, including duplicate names.
-  Assign left-to-right ids card_1, card_2, ... and include the visible bbox
-  [x0,y0,x1,y1] on the 0-1000 grid. Never infer coordinates from a card name.
+  Attach each row with the current-frame `candidate_id`. Assign left-to-right
+  ids card_1, card_2, ... `bbox` may be echoed for audit but is never
+  executable. Never infer coordinates from a card name.
 - Unknown sprites must remain unknown: role `unknown_character` or `enemy`,
   low or high confidence as evidence allows, inspectable=true, label=null,
-  name=null, name_source="unresolved", bbox [x0,y0,x1,y1] on the 0-1000 grid.
+  name=null, name_source="unresolved", plus the current `candidate_id`.
   Never invent a canonical name. A specific entity name needs explicit OCR,
   detector/DINO, or game-state evidence and its matching `name_source`.
 - Examples demonstrate JSON structure only; never copy their semantic labels.
+- STS2 pile inspection: a dimmed draw/discard/exhaust view is still
+  `screen="combat"` with `overlays_active` of `draw_pile`, `discard_pile`,
+  or `exhaust_pile`. Those cards are not `hand_cards`. `Back` is the
+  foreground control.
 """
 
 FEW_SHOT_EXAMPLE_TUTORIAL = {
@@ -1092,6 +1117,8 @@ def _admit_control_row(row: dict[str, Any], *, require_geometry: bool = False) -
     role = str(row.get("role") or "").strip().lower()
     if role not in GENERIC_CONTROL_ROLES:
         return False
+    if str(row.get("confidence") or "high").strip().lower() == "low":
+        return False
     label = str(row.get("label") or "").strip()
     if not label:
         return False
@@ -1523,12 +1550,23 @@ def _detector_candidates_from_labels(
 
 def detector_candidates_from_marks(
     marks: Sequence[Any] | None,
-) -> list[dict[str, str]]:
-    """Build VLM1 detector candidates from aim marks (includes numbered map nodes)."""
-    return [
-        {"label": row["label"], "role_guess": row.get("role") or row.get("role_guess") or "other"}
-        for row in detector_typed_rows_from_marks(marks)
-    ]
+) -> list[dict[str, Any]]:
+    """Expose every current-frame region to LLM1 for exact semantic binding."""
+    out: list[dict[str, Any]] = []
+    for mark in marks or ():
+        label = str(getattr(mark, "label", "") or "icon").strip() or "icon"
+        out.append({
+            "candidate_id": f"candidate:{int(getattr(mark, 'id', 0) or 0)}",
+            "label": label,
+            "role_guess": _detector_role_for_label(
+                label, str(getattr(mark, "role", "") or "")
+            ),
+            "bbox": [
+                round(float(getattr(mark, edge, 0.0) or 0.0) * 1000)
+                for edge in ("x0", "y0", "x1", "y1")
+            ],
+        })
+    return out
 
 
 def _detector_role_for_label(label: str, explicit_role: str = "") -> str:
@@ -1587,7 +1625,7 @@ def scene_perceive_user(
     focus: str = "",
     host_anchor: dict[str, Any] | None = None,
     ocr_candidates: Sequence[str] | None = None,
-    detector_candidates: Sequence[dict[str, str]] | None = None,
+    detector_candidates: Sequence[dict[str, Any]] | None = None,
     affordance_hints: dict[str, Any] | None = None,
     ocr_suppress: Any | None = None,
 ) -> str:
@@ -1622,9 +1660,12 @@ def scene_perceive_user(
         "drop false positives, add anything missed):"
     )
     if detectors:
-        lines.extend(
-            f"  - {row['label']} (role guess: {row['role_guess']})" for row in detectors
-        )
+        for row in detectors:
+            identity = f"{row.get('candidate_id')}: " if row.get("candidate_id") else ""
+            bounds = f", bbox: {row.get('bbox')}" if row.get("bbox") else ""
+            lines.append(
+                f"  - {identity}{row['label']} (role guess: {row['role_guess']}{bounds})"
+            )
     else:
         lines.append("  (none)")
     if affordance_hints:
@@ -1842,6 +1883,10 @@ def reason_controls_for_turn(
             row["side"] = row.get("side") or "player"
             label = str(row["label"])
         role_early = str(row.get("role") or "").strip().lower()
+        if role_early == "other":
+            continue
+        if role_early in GENERIC_CONTROL_ROLES and str(row.get("confidence") or "high").strip().lower() == "low":
+            continue
         side_early = str(row.get("side") or "").strip().lower()
         if (
             role_early in {"unknown_character", "character"}

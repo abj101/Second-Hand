@@ -17,6 +17,8 @@ UNCERTAIN_ERROR_TOKENS: tuple[str, ...] = (
     "inventory-inconsistent",
 )
 
+_EPHEMERAL_FACT_RE = re.compile(r"^(mk_|mark_|object:)\d+$", re.I)
+
 KNOWN_CAP = 10
 HUNCH_CAP = 3
 LESSON_CAP = 2
@@ -33,6 +35,11 @@ def _clip(text: str, n: int = 80) -> str:
     if len(blob) <= n:
         return blob
     return blob[: n - 1] + "…"
+
+
+def ephemeral_fact_token(text: str) -> bool:
+    """True for mk_N / mark_N / object:N — never a grounded fact key."""
+    return bool(_EPHEMERAL_FACT_RE.match(str(text or "").strip()))
 
 
 def fact_key(*, screen: str, heading: str = "", label: str = "") -> str:
@@ -112,6 +119,8 @@ class GroundedStore:
     ) -> GroundedFact | None:
         blob = " ".join((value or "").split())
         if not blob:
+            return None
+        if ephemeral_fact_token(label) or ephemeral_fact_token(heading):
             return None
         key = fact_key(screen=screen, heading=heading, label=label or blob[:48])
         existing = self.facts.get(key)
@@ -358,6 +367,11 @@ def export_reject_reason(step: StepLog) -> str | None:
         return "unverified-card-transaction"
     if unresolved_stable_identity(step):
         return "unresolved-identity"
+    if not step.result.pixel_changed:
+        intent = getattr(step, "intent", None) or {}
+        kind = str(intent.get("kind") or "") if isinstance(intent, dict) else ""
+        if kind in {"click_control", "end_turn"}:
+            return "noop-click"
     return None
 
 

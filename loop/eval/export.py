@@ -7,7 +7,7 @@ from typing import Any
 
 from PIL import Image
 
-from loop.agent.decision import ACT_PROMPT_ID
+from loop.agent.decision import ACT_PROMPT_ID, ACT_PROMPT_ID_V2
 from loop.agent.prompts import NOTEBOOK_SCHEMA_VERSION
 from loop.config import project_root
 from loop.eval.outcome import VIEW_MAD_TAU, cv_backed_prompt, view_changed
@@ -24,7 +24,16 @@ from loop.os.chords import is_look_only
 
 
 V2_DECISION_SCHEMA = "v2"
+# Backward-compatible export fallback; emitted collect rows carry an explicit
+# old/new prompt ID via _typed_prompt_id and are never mixed.
 V2_PROMPT_ID = ACT_PROMPT_ID
+
+
+def _typed_prompt_id(step: StepLog) -> str:
+    if step.prompt_id:
+        return step.prompt_id
+    raw = step.turn_snapshot if isinstance(step.turn_snapshot, dict) else {}
+    return ACT_PROMPT_ID if "knowledge" in raw else ACT_PROMPT_ID_V2
 
 
 def _decision_schema(step: StepLog) -> str:
@@ -62,7 +71,10 @@ def _v2_snapshot(step: StepLog) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raw = (step.metrics or {}).get("turn_snapshot")
     raw = raw if isinstance(raw, dict) else {}
-    allowed = {"screen", "turn", "player", "cards", "targets", "controls", "last_execution"}
+    allowed = {
+        "screen", "turn", "player", "cards", "targets", "controls",
+        "last_execution", "knowledge",
+    }
     snapshot = {key: raw[key] for key in allowed if key in raw}
     if "screen" not in snapshot:
         snapshot["screen"] = str((step.metrics or {}).get("screen") or "")
@@ -353,6 +365,11 @@ def export_sft_rows(
     if len(schemas) > 1:
         return []
     if V2_DECISION_SCHEMA in schemas:
+        prompt_ids = {
+            _typed_prompt_id(step) for _, step in all_steps if step.fixture == "sts2"
+        }
+        if len(prompt_ids) > 1:
+            return []
         out: list[dict[str, Any]] = []
         for path, step in all_steps:
             if step.fixture != "sts2" or not step.result.executed_as_proposed:
@@ -430,7 +447,7 @@ def _v2_sft_row(step: StepLog, intent: dict[str, Any], run_dir: Path, reward: fl
         "fixture": step.fixture,
         "decision_schema": V2_DECISION_SCHEMA,
         "snapshot_id": str(getattr(step, "snapshot_id", "") or ""),
-        "prompt_id": str(getattr(step, "prompt_id", "") or V2_PROMPT_ID),
+        "prompt_id": _typed_prompt_id(step),
         "system": "Return exactly one ActionIntent JSON object matching the supplied schema. No prose.",
         "user": v2_user_prompt(step),
         "snapshot": _v2_snapshot(step),
@@ -512,6 +529,8 @@ def _export_v2_dpo_pairs(dirs: list[Path], source: str) -> list[dict[str, Any]]:
                     if i == j:
                         continue
                     rejected_step, rejected_reward, rejected = candidate
+                    if _typed_prompt_id(rejected_step) != _typed_prompt_id(chosen_step):
+                        continue
                     if not eligible_as_rejected(
                         rejected_step,
                         chosen=chosen_step,
@@ -534,7 +553,7 @@ def _export_v2_dpo_pairs(dirs: list[Path], source: str) -> list[dict[str, Any]]:
                     "step_id": chosen_step.step_id,
                     "decision_schema": V2_DECISION_SCHEMA,
                     "snapshot_id": chosen_step.snapshot_id,
-                    "prompt_id": chosen_step.prompt_id or V2_PROMPT_ID,
+                    "prompt_id": _typed_prompt_id(chosen_step),
                     "user": v2_user_prompt(chosen_step),
                     "pair_type": "state_bound",
                     "same_frame": bool(chosen_step.snapshot_id and chosen_step.snapshot_id == rejected_step.snapshot_id),

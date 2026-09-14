@@ -29,6 +29,7 @@ _INTENT_WORDS = frozenset({
     "sleeping", "awake", "buff", "debuff",
 })
 _HP_FRACTION_RE = re.compile(r"^\d+\s*/\s*\d+$")
+_UNSAFE_PATH = re.compile(r'[<>:"/\\|?*]')
 _HUD_CHROME = frozenset({
     "deck", "cards", "settings", "options", "menu", "map", "share", "legend",
     "potion", "relic", "icon", ":icon", "back",
@@ -494,7 +495,13 @@ class DiscoveryWorkflow:
     def _write_artifacts(self, contract: InspectionContract, before: Image.Image, after: Image.Image, result: DiscoveryResult) -> None:
         if self.artifacts_root is None:
             return
-        dest = self.artifacts_root / str(contract.run_id) / str(contract.step_id) / "discovery" / contract.object_id
+        dest = (
+            self.artifacts_root
+            / str(contract.run_id)
+            / str(contract.step_id)
+            / "discovery"
+            / (_UNSAFE_PATH.sub("_", str(contract.object_id or "object")) or "object")
+        )
         dest.mkdir(parents=True, exist_ok=True)
         before.convert("RGB").save(dest / "before.jpg", quality=95)
         after.convert("RGB").save(dest / "after_full.jpg", quality=95)

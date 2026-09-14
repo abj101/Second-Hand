@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from loop.config import project_root
@@ -25,6 +26,13 @@ def clear_fixture_memory(
         if path.exists():
             path.unlink()
             removed.append(str(path))
+    knowledge = (base / "knowledge.lancedb").resolve()
+    if knowledge.exists():
+        # Keep the recursive operation pinned to this fixture's memory root.
+        if knowledge.parent != base.resolve():
+            raise ValueError(f"unsafe knowledge path: {knowledge}")
+        shutil.rmtree(knowledge)
+        removed.append(str(knowledge))
     return removed
 
 

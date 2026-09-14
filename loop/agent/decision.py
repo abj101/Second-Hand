@@ -7,7 +7,7 @@ and resolves it against its own current-frame executor.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Callable, Literal, Mapping, Protocol, TypeAlias
 
@@ -19,7 +19,8 @@ ACT_PRIMARY_TIMEOUT_S = 8.0
 ACT_FALLBACK_TIMEOUT_S = 15.0
 ACT_MAX_TOKENS = 96
 ACT_NUM_CTX = 2048
-ACT_PROMPT_ID = "sts2-action-intent-v2"
+ACT_PROMPT_ID_V2 = "sts2-action-intent-v2"
+ACT_PROMPT_ID = "sts2-action-intent-v3-knowledge"
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ class TargetSnapshot:
     hp: int | None = None
     intent: str | None = None
     identity_confidence: float | None = None
+    position: str | None = None
 
     def __post_init__(self) -> None:
         conf = self.identity_confidence
@@ -64,12 +66,102 @@ class TargetSnapshot:
             object.__setattr__(self, "identity_confidence", None)
 
 
+def _lane_labels(count: int) -> tuple[str, ...]:
+    if count <= 1:
+        return ("" ,)[:count]
+    if count == 2:
+        return ("left", "right")
+    if count == 3:
+        return ("left", "middle", "right")
+    return tuple(str(i) for i in range(1, count + 1))
+
+
+def with_target_positions(targets: tuple[TargetSnapshot, ...] | list[TargetSnapshot]) -> tuple[TargetSnapshot, ...]:
+    """Add a compact left/middle/right discriminator; boxes stay execution-private."""
+    rows = list(targets)
+    if not rows:
+        return ()
+    order = sorted(range(len(rows)), key=lambda i: (rows[i].bbox.x0 + rows[i].bbox.x1) * 0.5)
+    labels = _lane_labels(len(rows))
+    out = list(rows)
+    for rank, index in enumerate(order):
+        label = labels[rank] if rank < len(labels) else str(rank + 1)
+        if label:
+            out[index] = replace(out[index], position=label)
+    return tuple(out)
+
+
+def attach_host_enemy_stats(
+    targets: tuple[TargetSnapshot, ...] | list[TargetSnapshot],
+    host_rows: list[Any] | None,
+) -> tuple[TargetSnapshot, ...]:
+    """Bind host HP/intent by horizontal position; never by list index or name."""
+    rows = list(targets)
+    host = [row for row in (host_rows or []) if isinstance(row, dict)]
+    if not rows or not host:
+        return tuple(rows)
+
+    def _host_x(row: dict[str, Any]) -> float | None:
+        if isinstance(row.get("x"), (int, float)):
+            return float(row["x"])
+        bbox = row.get("bbox")
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            try:
+                x0, _y0, x1, _y1 = (float(v) for v in bbox[:4])
+            except (TypeError, ValueError):
+                return None
+            if max(abs(x0), abs(x1)) > 1.5:
+                x0, x1 = x0 / 1000.0, x1 / 1000.0
+            return (x0 + x1) * 0.5
+        return None
+
+    host_x = [_host_x(row) for row in host]
+    if any(x is None for x in host_x):
+        return tuple(rows)
+    pairs: list[tuple[float, int, int]] = []
+    for ti, target in enumerate(rows):
+        tx = (target.bbox.x0 + target.bbox.x1) * 0.5
+        for hi, hx in enumerate(host_x):
+            pairs.append((abs(tx - float(hx)), ti, hi))
+    pairs.sort()
+    used_t: set[int] = set()
+    used_h: set[int] = set()
+    for _d, ti, hi in pairs:
+        if ti in used_t or hi in used_h:
+            continue
+        used_t.add(ti)
+        used_h.add(hi)
+        row = host[hi]
+        hp = row.get("hp")
+        intent = row.get("intent")
+        updates: dict[str, Any] = {}
+        if rows[ti].hp is None and isinstance(hp, (int, float)) and not isinstance(hp, bool):
+            updates["hp"] = int(hp)
+        if rows[ti].intent is None and intent:
+            updates["intent"] = str(intent)
+        if updates:
+            rows[ti] = replace(rows[ti], **updates)
+    return tuple(rows)
+
+
 @dataclass(frozen=True)
 class ControlSnapshot:
     control_id: str
     label: str
     bbox: BoundingBox
     role: str = "button"
+
+
+@dataclass(frozen=True)
+class KnowledgeSnapshot:
+    """Bounded advisory knowledge; never part of the legal action surface."""
+
+    memory_id: str
+    text: str
+    memory_type: str
+    confidence: float
+    status: str = "hypothesis"
+    entities: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -85,6 +177,10 @@ class TurnSnapshot:
     controls: tuple[ControlSnapshot, ...] = ()
     legal_intents: tuple[str, ...] | None = None
     last_execution: Mapping[str, Any] | None = None
+    # None preserves the exact v2 prompt contract. An empty tuple means the
+    # knowledge-enabled v3 contract ran but found no admissible memories.
+    knowledge: tuple[KnowledgeSnapshot, ...] | None = None
+    overlays: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         # frozen dataclasses prevent attribute reassignment; normalize their
@@ -92,6 +188,9 @@ class TurnSnapshot:
         object.__setattr__(self, "cards", tuple(self.cards))
         object.__setattr__(self, "targets", tuple(self.targets))
         object.__setattr__(self, "controls", tuple(self.controls))
+        object.__setattr__(self, "overlays", tuple(str(item).strip() for item in self.overlays if str(item).strip()))
+        if self.knowledge is not None:
+            object.__setattr__(self, "knowledge", tuple(self.knowledge[:3]))
         if self.legal_intents is not None:
             object.__setattr__(self, "legal_intents", tuple(dict.fromkeys(self.legal_intents)))
         if self.last_execution is not None:
@@ -112,20 +211,28 @@ class TurnSnapshot:
         cards: list[CardSnapshot] = []
         targets: list[TargetSnapshot] = []
         controls: list[ControlSnapshot] = []
-        for obj in tuple(getattr(surface, "objects", ()) or ()):
+        objects = tuple(getattr(surface, "objects", ()) or ())
+        counts: dict[str, int] = {}
+        for obj in objects:
+            object_id = str(getattr(obj, "object_id", "") or "").strip()
+            if object_id:
+                counts[object_id] = counts.get(object_id, 0) + 1
+        for obj in objects:
             bbox = BoundingBox(float(obj.x0), float(obj.y0), float(obj.x1), float(obj.y1))
             role = str(getattr(obj, "role", "") or "").strip().lower()
             object_id = str(getattr(obj, "object_id", "") or "").strip()
             label = str(getattr(obj, "label", "") or "").strip()
-            if not object_id:
+            if not object_id or counts.get(object_id, 0) != 1:
                 continue
             if role == "card":
                 cards.append(CardSnapshot(object_id, label or None, bbox, playable=True))
             elif role == "enemy":
                 targets.append(TargetSnapshot(object_id, bbox, name=label or None))
-            elif role in {"button", "control", "nav_prev", "nav_next"}:
+            elif role in {"button", "control", "nav_prev", "nav_next", "map_node"}:
                 controls.append(ControlSnapshot(object_id, label or object_id, bbox, role=role))
         context = getattr(surface, "context", None)
+        overlay = str(getattr(context, "overlay", "") or "").strip()
+        raw_intents = getattr(surface, "legal_intents", None)
         return cls(
             snapshot_id=str(getattr(surface, "snapshot_id", "") or ""),
             screen=str(getattr(context, "screen", "other") or "other"),
@@ -134,10 +241,11 @@ class TurnSnapshot:
             block=block,
             energy=energy,
             cards=tuple(cards),
-            targets=tuple(targets),
+            targets=with_target_positions(targets),
             controls=tuple(controls),
-            legal_intents=tuple(getattr(surface, "legal_intents", ()) or ()),
+            legal_intents=None if raw_intents is None else tuple(raw_intents),
             last_execution=last_execution,
+            overlays=(overlay,) if overlay else (),
         )
 
 
@@ -224,7 +332,7 @@ def legal_intents_for_snapshot(snapshot: TurnSnapshot) -> tuple[dict[str, Any], 
 
     allowed = set(snapshot.legal_intents) if snapshot.legal_intents is not None else None
     legal: list[dict[str, Any]] = []
-    if playable_cards and (allowed is None or "play_card" in allowed):
+    if playable_cards and target_ids and (allowed is None or "play_card" in allowed):
         legal.append({"kind": "play_card", "card_ids": playable_cards, "target_ids": target_ids})
     if end_turn_ids and (allowed is None or "end_turn" in allowed):
         legal.append({"kind": "end_turn", "control_ids": end_turn_ids})
@@ -247,7 +355,10 @@ def validate_action_intent(snapshot: TurnSnapshot, intent: ActionIntent) -> Acti
             raise ActionIntentError("invalid-act-intent:unknown-card-id")
         if not card.playable:
             raise ActionIntentError("invalid-act-intent:card-not-playable")
-        if intent.target_id is not None and intent.target_id not in targets:
+        if intent.target_id is None:
+            if targets:
+                raise ActionIntentError("invalid-act-intent:missing-target-id")
+        elif intent.target_id not in targets:
             raise ActionIntentError("invalid-act-intent:unknown-target-id")
     elif isinstance(intent, EndTurnIntent):
         control = controls.get(intent.control_id)
@@ -280,7 +391,11 @@ def _schema_for_snapshot(snapshot: TurnSnapshot) -> dict[str, Any]:
         if kind == "play_card":
             props["card_id"] = {"type": "string", "enum": list(row["card_ids"])}
             if row["target_ids"]:
-                props["target_id"] = {"type": ["string", "null"], "enum": [*row["target_ids"], None]}
+                props["target_id"] = {"type": "string", "enum": list(row["target_ids"])}
+                required = list(variant.get("required") or [])
+                if "target_id" not in required:
+                    required.append("target_id")
+                variant["required"] = required
         elif kind in {"end_turn", "click_control"}:
             props["control_id"] = {"type": "string", "enum": list(row["control_ids"])}
         elif kind == "inspect":
@@ -323,12 +438,26 @@ def compact_act_prompt(snapshot: TurnSnapshot) -> str:
         "cards": [{"card_id": c.card_id, "name": c.name, "playable": c.playable,
                    "description": c.description, "type": c.card_type, "cost": c.cost} for c in snapshot.cards],
         "targets": [{"target_id": t.target_id, "name": t.name, "hp": t.hp,
-                     "intent": t.intent, "identity_confidence": t.identity_confidence} for t in snapshot.targets],
+                     "intent": t.intent, "position": t.position,
+                     "identity_confidence": t.identity_confidence} for t in snapshot.targets],
         "controls": [{"control_id": c.control_id, "label": c.label, "role": c.role} for c in snapshot.controls],
+        "overlays": list(snapshot.overlays),
         "legal_intents": [dict(row) for row in legal_intents_for_snapshot(snapshot)],
         "last_execution": dict(snapshot.last_execution) if snapshot.last_execution is not None else None,
         "response_schema": _schema_for_snapshot(snapshot),
     }
+    if snapshot.knowledge is not None:
+        payload["knowledge"] = [
+            {
+                "memory_id": item.memory_id,
+                "text": item.text,
+                "type": item.memory_type,
+                "status": item.status,
+                "confidence": item.confidence,
+                "entities": list(item.entities),
+            }
+            for item in snapshot.knowledge[:3]
+        ]
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 

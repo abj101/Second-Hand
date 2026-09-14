@@ -373,14 +373,18 @@ def _row_entity_id(row: dict[str, Any]) -> str:
     return str(row.get("entity_id") or row.get("id") or "").strip()
 
 
-def _reserve_unknown_id(tracker: "EntityTracker", eid: str) -> None:
-    """Keep _next_unknown ahead of tracker-assigned ids like unknown_character_1."""
-    m = re.match(r"^unknown_character_(\d+)$", eid, re.I)
+def _reserve_instance_id(tracker: "EntityTracker", eid: str) -> None:
+    """Keep _next_unknown ahead of encounter ids like enemy_3."""
+    m = re.match(r"^enemy_(\d+)$", eid, re.I)
     if not m:
         return
     n = int(m.group(1))
     if n >= tracker._next_unknown:
         tracker._next_unknown = n + 1
+
+
+def _is_encounter_instance_id(eid: str) -> bool:
+    return bool(re.match(r"^enemy_\d+$", str(eid or "").strip(), re.I))
 
 
 def _parse_bbox(row: dict[str, Any]) -> tuple[float, float, float, float] | None:
@@ -451,11 +455,13 @@ class TrackedEntity:
     def display_label(self) -> str:
         if self.identified and self.canonical_name:
             return self.canonical_name
+        if is_anonymous_enemy_label(self.label) or is_unknown_entity_label(self.label):
+            return "unknown enemy"
         return self.label
 
     def to_row(self) -> dict[str, str]:
         conf = "high" if self.identified or self.confidence >= 0.75 else "low"
-        role = "enemy" if self.identified else self.role
+        role = "enemy" if self.role in _KNOWN_ENEMY_ROLES or self.identified else self.role
         row: dict[str, str] = {
             "label": self.display_label(),
             "role": role,
@@ -489,19 +495,48 @@ class EntityTracker:
         return max(ages, default=0)
 
     def _allocate_id(self) -> str:
-        eid = f"unknown_character_{self._next_unknown}"
+        eid = f"enemy_{self._next_unknown}"
         self._next_unknown += 1
         return eid
 
-    def _match(self, cx: float, cy: float) -> TrackedEntity | None:
+    def _match(self, cx: float, cy: float, *, used: set[str] | None = None) -> TrackedEntity | None:
         best: TrackedEntity | None = None
         best_d = _MATCH_RADIUS
+        skip = used or set()
         for ent in self.entities:
+            if ent.entity_id in skip:
+                continue
             d = _distance((cx, cy), (ent.cx, ent.cy))
             if d < best_d:
                 best_d = d
                 best = ent
         return best
+
+    def _assign_detections(
+        self,
+        detections: list[tuple[float, float]],
+    ) -> list[TrackedEntity | None]:
+        """One-to-one nearest assignment; each prior instance and detection used once."""
+        assigned: list[TrackedEntity | None] = [None] * len(detections)
+        if not detections or not self.entities:
+            return assigned
+        # ponytail: O(n²) sort of pairs; combat n is tiny.
+        pairs: list[tuple[float, int, int]] = []
+        for di, (cx, cy) in enumerate(detections):
+            for pi, ent in enumerate(self.entities):
+                d = _distance((cx, cy), (ent.cx, ent.cy))
+                if d < _MATCH_RADIUS:
+                    pairs.append((d, pi, di))
+        pairs.sort()
+        used_prev: set[int] = set()
+        used_det: set[int] = set()
+        for _d, pi, di in pairs:
+            if pi in used_prev or di in used_det:
+                continue
+            used_prev.add(pi)
+            used_det.add(di)
+            assigned[di] = self.entities[pi]
+        return assigned
 
     def identify(self, entity_id: str, name: str, *, role: str = "enemy") -> None:
         name = (name or "").strip()
@@ -532,10 +567,15 @@ class EntityTracker:
         self._identified_memory[name] = ent.bbox
 
     def _recall_identified(self, cx: float, cy: float) -> str:
+        live_names = {
+            ent.canonical_name
+            for ent in self.entities
+            if ent.identified and ent.last_seen_cycle == self._cycle and ent.canonical_name
+        }
         best = ""
         best_d = _MATCH_RADIUS
         for name, last in self._identified_memory.items():
-            if last is None:
+            if last is None or name in live_names:
                 continue
             center = _center(last)
             if center is None:
@@ -602,14 +642,11 @@ class EntityTracker:
         lexicon: "MarkLexicon | None" = None,
         screen: str | None = None,
     ) -> list[dict[str, str]]:
-        """Assign persistent IDs from typed, current-frame enemy evidence."""
+        """Assign persistent encounter IDs. Names never mint, merge, or replace IDs."""
         self._cycle += 1
-        seen_ids: set[str] = set()
-
+        detections: list[tuple[dict[str, Any], str, str, float, float, tuple[float, float, float, float] | None]] = []
         for row in rows:
-            if not isinstance(row, dict):
-                continue
-            if not is_enemy_discovery_row(row):
+            if not isinstance(row, dict) or not is_enemy_discovery_row(row):
                 continue
             role = str(row.get("role") or "unknown_character").strip()
             if _compact(role) == "character":
@@ -620,95 +657,63 @@ class EntityTracker:
                 name_source = _compact(str(row.get("name_source") or ""))
                 if name and name_source not in {"", "unresolved"} and not is_unknown_entity_label(name):
                     label = name
-            if not label:
-                name = _row_entity_id(row)
-                if name and not is_unknown_entity_label(name):
-                    label = name
             center = _row_center(row)
             if center is None:
                 continue
-            cx, cy = center
-            bbox = _parse_bbox(row)
+            detections.append((row, role, label, center[0], center[1], _parse_bbox(row)))
 
-            ent = self._match(cx, cy)
-            recalled = "" if ent is not None else self._recall_identified(cx, cy)
+        assigned = self._assign_detections([(cx, cy) for _r, _role, _lab, cx, cy, _b in detections])
+        used_ids = {ent.entity_id for ent in assigned if ent is not None}
+
+        for det, ent in zip(detections, assigned):
+            row, role, label, cx, cy, bbox = det
+            known = bool(label) and not is_unknown_entity_label(label)
             if ent is None:
-                if label and not is_unknown_entity_label(label):
-                    eid = _compact(label).replace(" ", "_")
-                    ent = TrackedEntity(
-                        entity_id=eid,
-                        label=label,
-                        role="enemy" if role == "enemy" else role,
-                        cx=cx,
-                        cy=cy,
-                        bbox=bbox,
-                        confidence=0.85
-                        if str(row.get("confidence") or "").strip().lower() == "high"
-                        else 0.55,
-                        inspectable=False,
-                        identified=True,
-                        canonical_name=label,
-                        first_seen_cycle=self._cycle,
-                        last_seen_cycle=self._cycle,
-                    )
-                    self._remember_identified(ent)
-                elif recalled:
-                    eid = _compact(recalled).replace(" ", "_")
-                    ent = TrackedEntity(
-                        entity_id=eid,
-                        label=recalled,
-                        role="enemy",
-                        cx=cx,
-                        cy=cy,
-                        bbox=bbox,
-                        confidence=0.85,
-                        inspectable=False,
-                        identified=True,
-                        canonical_name=recalled,
-                        first_seen_cycle=self._cycle,
-                        last_seen_cycle=self._cycle,
-                    )
-                    self._remember_identified(ent)
+                provided = _row_entity_id(row)
+                if (
+                    _is_encounter_instance_id(provided)
+                    and provided not in used_ids
+                    and all(existing.entity_id != provided for existing in self.entities)
+                ):
+                    eid = provided
+                    _reserve_instance_id(self, eid)
                 else:
-                    provided = _row_entity_id(row)
-                    if provided and is_unknown_entity_label(provided):
-                        eid = _compact(provided).replace(" ", "_")
-                        _reserve_unknown_id(self, eid)
-                    else:
-                        eid = self._allocate_id()
-                    ent = TrackedEntity(
-                        entity_id=eid,
-                        label=eid,
-                        role=role if role in _KNOWN_ENEMY_ROLES else "unknown_character",
-                        cx=cx,
-                        cy=cy,
-                        bbox=bbox,
-                        confidence=0.55,
-                        inspectable=True,
-                        first_seen_cycle=self._cycle,
-                        last_seen_cycle=self._cycle,
-                    )
+                    eid = self._allocate_id()
+                recalled = self._recall_identified(cx, cy) if not known else ""
+                named = label if known else recalled
+                ent = TrackedEntity(
+                    entity_id=eid,
+                    label=named or "unknown enemy",
+                    role=role if role in _KNOWN_ENEMY_ROLES else "unknown_character",
+                    cx=cx,
+                    cy=cy,
+                    bbox=bbox,
+                    confidence=0.85 if known or recalled else 0.55,
+                    inspectable=not bool(named),
+                    identified=bool(named),
+                    canonical_name=named,
+                    first_seen_cycle=self._cycle,
+                    last_seen_cycle=self._cycle,
+                )
+                if named:
+                    self._remember_identified(ent)
                 self.entities.append(ent)
+                used_ids.add(eid)
             else:
                 ent.cx, ent.cy = cx, cy
                 ent.last_seen_cycle = self._cycle
                 if bbox is not None:
                     ent.bbox = bbox
-                if label and not is_unknown_entity_label(label) and not ent.identified:
+                if known and not ent.identified:
                     ent.identified = True
                     ent.canonical_name = label
+                    ent.label = label
                     ent.role = "enemy"
                     ent.inspectable = False
                     self._remember_identified(ent)
-                elif not ent.identified:
-                    recalled = self._recall_identified(cx, cy)
-                    if recalled:
-                        self.identify(ent.entity_id, recalled)
 
-            seen_ids.add(ent.entity_id)
-
-        # Host OCR names without geometry cannot prove which sprite owns them.
-        # Identify only when host supplied a matching box/center.
+        live = [ent for ent in self.entities if ent.last_seen_cycle == self._cycle]
+        host_named: list[tuple[tuple[float, float], str]] = []
         for row in (host_stats or {}).get("enemies") or []:
             if not isinstance(row, dict):
                 continue
@@ -717,18 +722,29 @@ class EntityTracker:
                 continue
             center = _row_center(row)
             if center is not None:
-                self.identify_at(center[0], center[1], name)
+                host_named.append((center, name))
+        if host_named and live:
+            pairs: list[tuple[float, int, int, str]] = []
+            for hi, (center, name) in enumerate(host_named):
+                for ei, ent in enumerate(live):
+                    d = _distance(center, (ent.cx, ent.cy))
+                    if d < _MATCH_RADIUS:
+                        pairs.append((d, ei, hi, name))
+            pairs.sort()
+            used_ent: set[int] = set()
+            used_host: set[int] = set()
+            for _d, ei, hi, name in pairs:
+                if ei in used_ent or hi in used_host:
+                    continue
+                used_ent.add(ei)
+                used_host.add(hi)
+                self.identify(live[ei].entity_id, name)
 
-        # MarkLexicon is label-only and does not retain role provenance.  It
-        # therefore cannot name a hostile: a nearby control/card label could
-        # otherwise be promoted into an enemy identity.  Keep the entity
-        # anonymous until current-frame typed perception supplies a name.
         del lexicon, screen
-
         self._prune_unseen(host_stats)
 
         out: list[dict[str, str]] = []
-        seen_ids.clear()
+        seen_ids: set[str] = set()
         for ent in self.entities:
             if ent.entity_id in seen_ids:
                 continue
@@ -773,15 +789,21 @@ class EntityTracker:
         if not merged:
             return desc
 
-        have = {_compact(str(r.get("label") or "")) for r in desc.controls if isinstance(r, dict)}
+        have_ids = {
+            str(r.get("entity_id") or "")
+            for r in desc.controls
+            if isinstance(r, dict) and str(r.get("entity_id") or "").strip()
+        }
         desc.enemies = merged
         if not hasattr(desc, "characters"):
             desc.characters = []
         for row in merged:
-            key = _compact(row.get("label") or "")
-            if key and key not in have:
+            eid = str(row.get("entity_id") or "").strip()
+            if eid and eid not in have_ids:
                 desc.controls.append(dict(row))
-                have.add(key)
+                have_ids.add(eid)
+            elif not eid:
+                desc.controls.append(dict(row))
         grounded = any(_row_center(r) is not None for r in merged)
         if grounded:
             desc.controls = [

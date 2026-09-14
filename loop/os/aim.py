@@ -130,7 +130,7 @@ _GUI_PLACEHOLDER_CAP = 6
 _FUSION_IOU = 0.25
 _CV_COVERAGE_RESERVE = 4
 _NEAR_CENTER = 0.04
-_HUD_CHROME_Y = 0.12
+_HUD_CHROME_Y = 0.16
 _TOP_HUD_Y = 0.15
 _HUD_ONLY_LABELS = frozenset(
     {
@@ -138,6 +138,9 @@ _HUD_ONLY_LABELS = frozenset(
         "cards",
         "card",
         "deck",
+        "draw pile",
+        "discard pile",
+        "exhaust pile",
         "potion",
         "potions",
         "map",
@@ -550,8 +553,7 @@ def propose_hand_cards(
     STS cards fan and overlap, so a generic connected-component detector tends
     to fuse the whole hand.  The title remains visible once per physical card;
     use it as an anchor inside a strict hand crop.  These are *candidates*,
-    not cards: only current-frame typed geometry can promote one to an
-    executable card with an object id.
+    not cards: current-frame typed geometry must bind one before execution.
     """
     adapter = layout_adapter or default_layout_adapter()
     if not adapter.enables_hand_card_proposals(screen):
@@ -690,7 +692,6 @@ def seed_enemies_from_host(
         return list(marks or ())
 
     out = list(marks or ())
-    have = {_compact_label(m.label) for m in out if (m.label or "").strip()}
     player = (host_stats or {}).get("player") or {}
     player_max = player.get("hp_max") if isinstance(player, dict) else None
 
@@ -711,9 +712,12 @@ def seed_enemies_from_host(
                     continue
                 if word.y < adapter.hud_chrome_y:
                     continue
-                hp_positions.append((float(word.x), float(word.y), mx))
+                hp_positions.append((float(word.x), float(word.y), mx, cur))
         except Exception:  # noqa: BLE001 — seeding must never abort collect
             hp_positions = []
+
+    used_hp: set[int] = set()
+    from loop.memory.screen_objects import same_sprite_cluster
 
     for row in rows:
         if not isinstance(row, dict):
@@ -723,14 +727,22 @@ def seed_enemies_from_host(
             continue
         x, y = 0.55, 0.0
         found_hp = False
-        for wx, wy, mx in hp_positions:
-            if mx == int(hp_max):
-                x = wx
-                y = wy - _ENEMY_HP_SPRITE_OFFSET
-                if not in_combat_sprite_band(y, x, layout_adapter=adapter):
-                    y = max(adapter.hud_chrome_y + 0.02, min(adapter.hand_y - 0.02, float(wy)))
-                found_hp = True
-                break
+        want_cur = row.get("hp")
+        for idx, item in enumerate(hp_positions):
+            if idx in used_hp:
+                continue
+            wx, wy, mx = item[0], item[1], item[2]
+            if mx != int(hp_max):
+                continue
+            if isinstance(want_cur, (int, float)) and len(item) > 3 and item[3] != int(want_cur):
+                continue
+            x = wx
+            y = wy - _ENEMY_HP_SPRITE_OFFSET
+            if not in_combat_sprite_band(y, x, layout_adapter=adapter):
+                y = max(adapter.hud_chrome_y + 0.02, min(adapter.hand_y - 0.02, float(wy)))
+            found_hp = True
+            used_hp.add(idx)
+            break
         label = str(row.get("label") or "").strip()
         if not label and lexicon is not None:
             lib = lexicon.label_at(x, y, screen=screen or (host_stats or {}).get("screen"))
@@ -741,20 +753,18 @@ def seed_enemies_from_host(
         # Bbox-less unidentified seeds at y=0.32 collide with live mid-board sprites.
         if not found_hp and _is_unknown_entity_label(label):
             continue
-        if _compact_label(label) in have:
+        seed = _synthetic_mark(
+            mid=len(out) + 1,
+            label=label,
+            x=x,
+            y=y,
+            score=0.78,
+        )
+        if any(same_sprite_cluster(seed, other, stacked_duplicates=True) for other in out):
             continue
         if len(out) >= cap:
             break
-        out.append(
-            _synthetic_mark(
-                mid=len(out) + 1,
-                label=label,
-                x=x,
-                y=y,
-                score=0.78,
-            )
-        )
-        have.add(_compact_label(label))
+        out.append(seed)
     return out
 
 
@@ -776,20 +786,66 @@ def merge_cached_enemy_marks(
         return in_combat_sprite_band(mark.y, mark.x, layout_adapter=adapter)
 
     out = [m for m in (marks or ()) if not in_band(m)]
-    have = {_compact_label(m.label) for m in out if (m.label or "").strip()}
-    kept_band: list[AimMark] = []
+    kept_band: list[AimMark] = [m for m in out if in_band(m)]
     for em in cached:
-        key = _compact_label(em.label)
-        if key and key in have:
-            continue
         if in_band(em) and any(same_sprite_cluster(em, other) for other in kept_band):
             continue
         out.append(em)
-        if key:
-            have.add(key)
         if in_band(em):
             kept_band.append(em)
     return out
+
+
+def _row_candidate_index(marks: Sequence[AimMark], row: dict[str, Any]) -> int:
+    """Index of the unique current mark named by row candidate_id, else -1."""
+    cid = str(row.get("candidate_id") or "").strip()
+    if cid.lower().startswith("candidate:"):
+        cid = cid.split(":", 1)[1]
+    try:
+        mid = int(cid)
+    except ValueError:
+        return -1
+    hits = [index for index, mark in enumerate(marks) if int(mark.id) == mid]
+    return hits[0] if len(hits) == 1 else -1
+
+
+def _row_bbox_probe(row: dict[str, Any]) -> AimMark | None:
+    """Throwaway mark for IoU only. Never published as executable geometry."""
+    from loop.agent.entities import _parse_bbox
+
+    box = _parse_bbox(row)
+    if box is None:
+        return None
+    x0, y0, x1, y1 = box
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return AimMark(id=0, x=(x0 + x1) / 2.0, y=(y0 + y1) / 2.0, x0=x0, y0=y0, x1=x1, y1=y1)
+
+
+def _unique_overlap_index(
+    marks: Sequence[AimMark],
+    row: dict[str, Any],
+    claimed: set[int],
+    eligible,
+    *,
+    min_iou: float = 0.03,
+) -> int:
+    """Unique best IoU of row bbox onto an unclaimed eligible mark, else -1."""
+    probe = _row_bbox_probe(row)
+    if probe is None:
+        return -1
+    ranked = [
+        (_mark_iou(mark, probe), i)
+        for i, mark in enumerate(marks)
+        if i not in claimed and eligible(mark)
+    ]
+    ranked = [item for item in ranked if item[0] >= min_iou]
+    if not ranked:
+        return -1
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    if len(ranked) > 1 and ranked[1][0] >= ranked[0][0] - 1e-9:
+        return -1
+    return ranked[0][1]
 
 
 def apply_enemy_bboxes(
@@ -799,26 +855,26 @@ def apply_enemy_bboxes(
     cap: int = _MAX_MARKS,
     role: str = "enemy",
 ) -> list[AimMark]:
-    """Place synthetic combat-sprite marks from LLM1 bbox entries."""
+    """Copy labels onto existing combat-sprite marks. Never mint geometry."""
     from loop.agent.entities import is_prompt_instance_id
 
     stamp_role = (role or "enemy").strip().lower() or "enemy"
     prefix = "player" if stamp_role == "player" else "enemy"
     out = list(marks or ())
+    claimed: set[int] = set()
 
     def compatible(mark: AimMark) -> bool:
         mark_role = str(mark.role or "").strip().lower()
-        return mark_role == stamp_role or (stamp_role == "enemy" and mark_role == "target")
-
-    def overlaps(mark: AimMark, bounds: tuple[float, float, float, float]) -> bool:
-        bx0, by0, bx1, by1 = bounds
-        return (
-            max(float(mark.x0), bx0) < min(float(mark.x1), bx1)
-            and max(float(mark.y0), by0) < min(float(mark.y1), by1)
-        ) or (
-            float(mark.x0) <= (bx0 + bx1) * .5 <= float(mark.x1)
-            and float(mark.y0) <= (by0 + by1) * .5 <= float(mark.y1)
-        )
+        if stamp_role == "player":
+            return mark_role == "player"
+        if mark_role in {"player", "card", "hand_candidate", "button", "hud"}:
+            return False
+        if mark_role in {stamp_role, "target", "board_candidate"}:
+            return True
+        # Untyped combat bodies already treated as sprites, not player/HUD.
+        if mark_role in {"", "unknown", "other", "character", "unknown_character", "body"}:
+            return in_combat_sprite_band(float(mark.y), float(mark.x))
+        return False
 
     for enemy_index, row in enumerate(enemy_rows or [], start=1):
         if not isinstance(row, dict):
@@ -830,74 +886,51 @@ def apply_enemy_bboxes(
             continue
         default_label = "player" if stamp_role == "player" else "unidentified_enemy"
         label = str(row.get("label") or default_label).strip() or default_label
-        bbox_raw = row.get("bbox")
-        parts: list[float] = []
-        if isinstance(bbox_raw, str) and bbox_raw.strip():
-            try:
-                parts = [float(p) for p in bbox_raw.split(",") if p.strip()]
-            except ValueError:
-                parts = []
-        elif isinstance(bbox_raw, (list, tuple)):
-            try:
-                parts = [float(p) for p in bbox_raw[:4]]
-            except (TypeError, ValueError):
-                parts = []
-        if len(parts) < 4:
-            continue
-        x0, y0, x1, y1 = parts[:4]
-        if max(x0, y0, x1, y1) > 1.0:
-            x0, y0, x1, y1 = x0 / GRID, y0 / GRID, x1 / GRID, y1 / GRID
-        x = (x0 + x1) * 0.5
-        y = (y0 + y1) * 0.5
         raw_id = str(row.get("entity_id") or row.get("id") or "").strip()
         stamp_id = "" if is_prompt_instance_id(raw_id) else raw_id
-        compatible_hits = [
-            mark for mark in out
-            if compatible(mark) and overlaps(mark, (x0, y0, x1, y1))
-        ]
-        if len(compatible_hits) == 1:
-            nearby = compatible_hits[0]
-            # LLM instance tokens are aliases, never executable object IDs.
-            # Keep the observed mark untouched; the current action surface
-            # assigns canonical IDs and the store may bind an alias afterward.
-            if not stamp_id and raw_id:
-                continue
-            out = [
-                _copy_mark(
-                    mark,
-                    label=label,
-                    object_id=stamp_id or str(mark.object_id or f"{prefix}_{enemy_index}"),
-                    role=stamp_role,
-                    source=f"{mark.source}+llm1-bbox" if mark.source else "cv+llm1-bbox",
-                    confidence=max(mark.confidence, 0.72),
-                ) if mark.id == nearby.id else mark
-                for mark in out
-            ]
+        index = _row_candidate_index(out, row)
+        if index < 0 or index in claimed:
+            index = _unique_overlap_index(out, row, claimed, compatible)
+            if index >= 0:
+                nearby = out[index]
+            else:
+                slots = [
+                    (i, mark) for i, mark in enumerate(out)
+                    if i not in claimed and compatible(mark)
+                ]
+                exact = [
+                    item for item in slots
+                    if _compact_label(item[1].label) == _compact_label(label)
+                ]
+                if len(exact) == 1:
+                    index, nearby = exact[0]
+                elif len(slots) == 1:
+                    index, nearby = slots[0]
+                else:
+                    continue
+        else:
+            nearby = out[index]
+        if not stamp_id and raw_id:
             continue
-        # A same-label card/control/unknown mark is not enemy evidence and
-        # cannot suppress a current typed enemy bbox.  Multiple compatible
-        # objects are ambiguous and fail closed rather than picking one.
-        if len(compatible_hits) > 1:
-            continue
-        if len(out) >= cap:
-            break
-        out.append(
-            _synthetic_mark(
-                mid=len(out) + 1,
-                label=label,
-                x=x,
-                y=y,
-                score=0.72,
-            )
-        )
-        out[-1] = _copy_mark(
-            out[-1],
-            object_id=stamp_id or f"{prefix}_{enemy_index}",
+        claimed.add(index)
+        out[index] = _copy_mark(
+            nearby,
+            label=label,
+            object_id=stamp_id or str(nearby.object_id or f"{prefix}_{enemy_index}"),
             role=stamp_role,
-            source=str(row.get("source") or "llm1-bbox"),
-            confidence=0.72,
+            source="+".join(filter(None, (str(nearby.source or ""), "llm1"))),
+            confidence=max(nearby.confidence, 0.72),
         )
-    return out
+    return out[:cap]
+
+
+def _hand_stamp_slot(mark: AimMark) -> bool:
+    return (
+        (mark.role or "").strip().lower() in {"hand_candidate", "card"}
+        and "cache" not in str(mark.source or "").lower()
+        and not _is_end_turn_label(mark.label)
+        and in_hand_band(float(mark.x), float(mark.y))
+    )
 
 
 def apply_hand_bboxes(
@@ -906,111 +939,48 @@ def apply_hand_bboxes(
     *,
     cap: int = _MAX_MARKS,
 ) -> list[AimMark]:
-    """Promote uniquely matched, current-frame hand candidates to cards.
-
-    Typed in-hand geometry may create a click target only when there is no
-    current-frame candidate to bind. Unique-match still fail-closes when
-    candidates exist but are missing, ambiguous, or not 1:1.
-    """
+    """Copy card labels onto existing hand marks. Never mint geometry."""
     out = list(marks or ())
-
-    def in_full_hand(mark: AimMark) -> bool:
-        return (
-            _HAND_X0 <= mark.x0 <= mark.x1 <= _HAND_X1
-            and HAND_Y <= mark.y0 <= mark.y1 <= 1.0
-            and in_hand_band(mark.x, mark.y)
-        )
-
-    def current_card_candidate(mark: AimMark) -> bool:
-        if not in_full_hand(mark):
-            return False
-        if (mark.role or "").strip().lower() not in {"hand_candidate", "card"}:
-            return False
-        # Cached cards must be re-observed before they are executable again.
-        return "cache" not in str(mark.source or "").lower()
-
-    def geometry_matches(mark: AimMark, proposal: AimMark) -> bool:
-        # Fanned cards physically overlap their neighbours. Require substantial
-        # agreement rather than any intersection, then enforce a one-to-one
-        # match across the whole typed hand below.
-        return _mark_iou(mark, proposal) >= 0.30 and abs(mark.x - proposal.x) <= 0.10
-
-    proposals: list[tuple[int, AimMark]] = []
+    claimed: set[int] = set()
     for card_index, row in enumerate(hand_rows or (), start=1):
         if not isinstance(row, dict):
             continue
         label = str(row.get("label") or "").strip()
-        bbox_raw = row.get("bbox")
-        try:
-            parts = (
-                [float(p) for p in bbox_raw.split(",") if p.strip()]
-                if isinstance(bbox_raw, str)
-                else [float(p) for p in bbox_raw[:4]]
-            )
-        except (TypeError, ValueError):
+        if not label or _is_end_turn_label(label):
             continue
-        if not label or len(parts) < 4:
-            continue
-        x0, y0, x1, y1 = parts[:4]
-        if max(x0, y0, x1, y1) > 1.0:
-            x0, y0, x1, y1 = x0 / GRID, y0 / GRID, x1 / GRID, y1 / GRID
-        x, y = (x0 + x1) * 0.5, (y0 + y1) * 0.5
-        if not (
-            _HAND_X0 <= x0 <= x1 <= _HAND_X1
-            and HAND_Y <= y0 <= y1 <= 1.0
-            and in_hand_band(x, y)
-        ) or _is_end_turn_label(label):
-            continue
-        proposal = AimMark(
-            id=0, x=x, y=y, x0=x0, y0=max(HAND_Y, y0), x1=x1, y1=min(1.0, y1),
-            label=label, score=0.8,
-            object_id=str(row.get("entity_id") or row.get("id") or f"card_{card_index}"),
-            role="card", source=str(row.get("source") or "llm1-bbox"), confidence=0.8,
-        )
-        proposals.append((card_index, proposal))
-
-    candidate_indices = [
-        index for index, mark in enumerate(out) if current_card_candidate(mark)
-    ]
-    row_hits: dict[int, list[int]] = {
-        row_index: [
-            index for index in candidate_indices
-            if geometry_matches(out[index], proposal)
-        ]
-        for row_index, proposal in proposals
-    }
-    candidate_hits: dict[int, list[int]] = {
-        index: [
-            row_index for row_index, proposal in proposals
-            if geometry_matches(out[index], proposal)
-        ]
-        for index in candidate_indices
-    }
-    for row_index, proposal in proposals:
-        hits = row_hits[row_index]
-        if len(hits) != 1 or len(candidate_hits[hits[0]]) != 1:
-            continue
-        index = hits[0]
-        match = out[index]
-        incoming_unknown = _compact_label(proposal.label) in {
-            "unknown", "unknown card", "unknown_card", "icon", "card"
+        stamp_id = str(row.get("entity_id") or row.get("id") or f"card_{card_index}")
+        index = _row_candidate_index(out, row)
+        if index < 0 or index in claimed:
+            index = _unique_overlap_index(out, row, claimed, _hand_stamp_slot)
+            if index >= 0:
+                match = out[index]
+            else:
+                slots = [
+                    (i, mark) for i, mark in enumerate(out)
+                    if i not in claimed
+                    and _hand_stamp_slot(mark)
+                    and _compact_label(mark.label) == _compact_label(label)
+                ]
+                if len(slots) != 1:
+                    continue
+                index, match = slots[0]
+        else:
+            match = out[index]
+        claimed.add(index)
+        incoming_unknown = _compact_label(label) in {
+            "unknown", "unknown card", "unknown_card", "icon", "card",
         }
         grounded_ocr = (
             "ocr-hand" in str(match.source or "")
             and not _is_placeholder_label(match.label)
             and _compact_label(match.label) not in {"unknown", "unknown card", "unknown_card"}
         )
-        resolved_label = match.label if incoming_unknown or grounded_ocr else proposal.label
+        resolved_label = match.label if incoming_unknown or grounded_ocr else label
         out[index] = _copy_mark(
-            match, label=resolved_label, object_id=proposal.object_id, role="card",
-            source=f"{match.source}+llm1-bbox" if match.source else "llm1-bbox",
+            match, label=resolved_label, object_id=stamp_id, role="card",
+            source="+".join(filter(None, (str(match.source or ""), "llm1"))),
             confidence=max(match.confidence, 0.8),
         )
-    if not candidate_indices:
-        for _, proposal in proposals:
-            if len(out) >= cap:
-                break
-            out.append(proposal)
     return [_copy_mark(mark, mid=i) for i, mark in enumerate(out[:cap], start=1)]
 
 
@@ -1143,6 +1113,33 @@ def ground_combat_labels(
 _NODE_LABEL_RE = re.compile(r"^node_\d+$", re.I)
 _MAP_HUD_Y = 0.85
 _MAP_LEGEND_X_FALLBACK = 0.78
+_MAP_TOOLBAR_X1 = 0.16
+_MAP_TOOLBAR_Y0 = 0.82
+_MAP_NODE_Y0 = 0.12
+_MAP_BACK_X1 = 0.10
+
+
+def in_map_toolbar(x: float, y: float) -> bool:
+    """STS2 bottom-left annotation tools — never map progression or Back."""
+    return float(x) <= _MAP_TOOLBAR_X1 and float(y) >= _MAP_TOOLBAR_Y0
+
+
+def in_map_node_region(
+    x: float,
+    y: float,
+    *,
+    legend_xmin: float | None = None,
+) -> bool:
+    """Traversable map content; excludes toolbar, legend, HUD, and the back chevron."""
+    xx, yy = float(x), float(y)
+    xmin = _MAP_LEGEND_X_FALLBACK if legend_xmin is None else float(legend_xmin)
+    if yy < _MAP_NODE_Y0 or yy > _MAP_HUD_Y:
+        return False
+    if xx >= xmin or xx <= _MAP_BACK_X1:
+        return False
+    if in_map_toolbar(xx, yy):
+        return False
+    return True
 
 
 def number_spatial_nodes(
@@ -1160,9 +1157,7 @@ def number_spatial_nodes(
         xmin = _MAP_LEGEND_X_FALLBACK
 
     def _spatial_candidate(mark: AimMark) -> bool:
-        if mark.y < 0.12 or mark.y > _MAP_HUD_Y:
-            return False
-        if mark.x >= xmin:
+        if not in_map_node_region(mark.x, mark.y, legend_xmin=xmin):
             return False
         lab = (mark.label or "").strip()
         if lab and not _is_placeholder_label(lab) and not _NODE_LABEL_RE.match(lab):
@@ -1330,33 +1325,9 @@ def _label_lateral_nav(
     *,
     screen: str | None = None,
 ) -> list[AimMark]:
-    """Mid-height side placeholders on paginated overlays → Prev / Next."""
-    kind = (screen or "").strip().lower()
-    if kind == "combat":
-        return marks
-    tutorial_nav = kind == "tutorial"
-
-    def _nav_candidate(mark: AimMark) -> bool:
-        if not (0.25 <= mark.y <= 0.75):
-            return False
-        if _is_placeholder_label(mark.label):
-            return True
-        # _label_inspect_arrows runs first and mints Arrow; reclaim on tutorial.
-        return tutorial_nav and _compact_label(mark.label) == "arrow"
-
-    pool = [m for m in marks if _nav_candidate(m)]
-    left = [m for m in pool if m.x <= 0.22]
-    right = [m for m in pool if m.x >= 0.78]
-    out = list(marks)
-    if left:
-        pick = min(left, key=lambda m: (m.x, m.y))
-        if _compact_label(pick.label) != "prev":
-            out = _relabel(out, pick.id, "Prev")
-    if right:
-        pick = max(right, key=lambda m: (m.x, -m.y))
-        if _compact_label(pick.label) != "next":
-            out = _relabel(out, pick.id, "Next")
-    return out
+    """Geometry-only Prev/Next is forbidden; keep explicitly grounded labels."""
+    del screen
+    return marks
 
 
 def _scope_overlay_marks(
@@ -1402,12 +1373,10 @@ def _hud_chrome(
     if mark.y > _HUD_CHROME_Y:
         return False
     lookup = getattr(lexicon, "label_at", None) if lexicon is not None else None
-    if callable(lookup) and lookup(mark.x, mark.y, screen=screen):
+    learned = lookup(mark.x, mark.y, screen=screen) if callable(lookup) else None
+    if is_menu_label(learned or "") or is_menu_label(mark.label):
         return False
-    compact = _compact_label(mark.label)
-    if _is_placeholder_label(mark.label) or _ocr_junk(mark.label):
-        return True
-    return compact in {"points", "obtained", "share", "hp"}
+    return True
 
 
 def _bottom_chrome(mark: AimMark) -> bool:
@@ -1497,7 +1466,7 @@ def _corner_heuristic_ok(
 ) -> bool:
     """Icon-only pennants labeled without OCR — allowed only in corner bands."""
     compact = _compact_label(label)
-    if compact == "confirm" and mark.x >= _CORNER_CONFIRM_X and mark.y >= _CORNER_CONFIRM_Y:
+    if compact == "confirm" and _in_confirm_band(mark):
         return True
     # The map toolbar occupies this corner in STS2.  It is not a Back affordance
     # unless OCR independently verifies the label below.
@@ -1532,6 +1501,9 @@ def _strip_unverified_menu_labels(
     for mark in marks:
         if not _needs_ocr_proof(mark.label):
             out.append(mark)
+            continue
+        if _compact_label(mark.label) == "confirm" and not _in_confirm_band(mark):
+            out.append(_copy_mark(mark, label=""))
             continue
         if _corner_heuristic_ok(mark, mark.label, screen=screen):
             out.append(mark)
@@ -1774,6 +1746,9 @@ def fuse_dino_marks(
             cleaned.append(mark)
             continue
         compact = _compact_label(lab)
+        if compact == "confirm" and not _in_confirm_band(mark):
+            cleaned.append(_copy_mark(mark, label=""))
+            continue
         if allowed and compact not in allowed and _needs_ocr_proof(lab):
             cleaned.append(_copy_mark(mark, label=""))
             continue
@@ -2113,6 +2088,9 @@ def _relabel_from_lexicon(
         ):
             out.append(mark)
             continue
+        if _compact_label(learned) == "confirm" and not _in_confirm_band(mark):
+            out.append(mark)
+            continue
         if (
             _needs_ocr_proof(learned)
             and not _corner_heuristic_ok(mark, learned, screen=screen)
@@ -2204,12 +2182,18 @@ def _merge_aim_marks(
     )
     cv_all = [_with_source(m, "cv") for m in cv]
     cv_ranked = sorted(
-        (m for m in cv_all if not _cv_too_big(m)),
+        (
+            m
+            for m in cv_all
+            if not _cv_too_big(m) and not _hud_chrome(m, lexicon=lexicon, screen=screen)
+        ),
         key=lambda m: (-m.score, -m.y, m.x),
     )
     for mark in cv_all:
         if _cv_too_big(mark):
             _reject(mark, "too_big")
+        elif _hud_chrome(mark, lexicon=lexicon, screen=screen):
+            _reject(mark, "hud_chrome")
     for mark in sorted(progress, key=lambda m: (m.y, m.x)):
         _take(mark)
         if len(picked) >= cap:
@@ -2276,6 +2260,13 @@ def _merge_aim_marks(
             }
         )
     return out
+
+
+def _in_confirm_band(mark: AimMark) -> bool:
+    return (
+        mark.x >= _CORNER_CONFIRM_X
+        and _CORNER_CONFIRM_Y <= mark.y <= _CORNER_CONFIRM_Y + _CORNER_MAX_H
+    )
 
 
 def _is_corner_confirm(label: str) -> bool:
@@ -2358,13 +2349,6 @@ def _label_corner_icons(
         return marks
     screen_key = (screen or "").strip().lower()
     labeled = list(marks)
-    if screen_key in {"select", "title", "other", ""}:
-        labeled = _label_unlabeled_corner(
-            labeled,
-            label="Confirm",
-            pool=[m for m in labeled if m.x >= _CORNER_CONFIRM_X and m.y >= _CORNER_CONFIRM_Y],
-            already=any(_is_corner_confirm(m.label) for m in labeled),
-        )
     if screen_key != "map":
         labeled = _label_unlabeled_corner(
             labeled,
@@ -2373,6 +2357,19 @@ def _label_corner_icons(
             already=any(_compact_label(m.label) == "back" for m in labeled),
         )
     labeled = _label_dialog_buttons(labeled, dialog=dialog)
+    labeled = [_tighten_corner_control(m) for m in labeled]
+    labeled = [
+        _copy_mark(m, label="")
+        if _compact_label(m.label) == "confirm" and not _in_confirm_band(m)
+        else m
+        for m in labeled
+    ]
+    labeled = _label_unlabeled_corner(
+        labeled,
+        label="Confirm",
+        pool=[m for m in labeled if _is_placeholder_label(m.label) and _in_confirm_band(m)],
+        already=any(_compact_label(m.label) == "confirm" for m in labeled),
+    )
     return [_tighten_corner_control(m) for m in labeled]
 
 
@@ -2440,6 +2437,50 @@ def paint_aim(
         draw.line([(lx, ly - arm), (lx, ly + arm)], fill=col, width=3)
         _text(draw, (lx + 6, ly - 16), "last", font=small, fill=col)
     return Image.alpha_composite(rgb.convert("RGBA"), overlay).convert("RGB")
+
+
+def compose_candidate_image(
+    image: Image.Image,
+    marks: Sequence[AimMark] | None = None,
+) -> Image.Image:
+    """Clean source frame plus labeled candidate crops. Never draws on game pixels."""
+    source = image.convert("RGB")
+    seq = tuple(marks or ())[:_MAX_MARKS]
+    if not seq:
+        return source.copy()
+    w, h = source.size
+    tile = 64
+    cols = min(8, len(seq))
+    gap = 4
+    font = _font(12)
+    probe = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+    _, th = _text_size(probe, "candidate:16", font)
+    band_h = th + 6
+    cell_w = tile + gap * 2
+    cell_h = tile + band_h + gap
+    rows = (len(seq) + cols - 1) // cols
+    out = Image.new("RGB", (max(w, cols * cell_w), h + rows * cell_h + gap), (16, 16, 16))
+    out.paste(source, (0, 0))
+    draw = ImageDraw.Draw(out)
+    span_w = max(w - 1, 1)
+    span_h = max(h - 1, 1)
+    for i, mark in enumerate(seq):
+        col, row = i % cols, i // cols
+        x = col * cell_w + gap
+        y = h + row * cell_h + gap
+        x0 = int(round(float(mark.x0) * span_w))
+        y0 = int(round(float(mark.y0) * span_h))
+        x1 = int(round(float(mark.x1) * span_w)) + 1
+        y1 = int(round(float(mark.y1) * span_h)) + 1
+        pad = 2
+        x0 = max(0, min(w - 1, min(x0, x1 - 1) - pad))
+        y0 = max(0, min(h - 1, min(y0, y1 - 1) - pad))
+        x1 = max(x0 + 1, min(w, max(x0 + 1, x1) + pad))
+        y1 = max(y0 + 1, min(h, max(y0 + 1, y1) + pad))
+        crop = source.crop((x0, y0, x1, y1)).resize((tile, tile), Image.Resampling.NEAREST)
+        out.paste(crop, (x, y))
+        _text(draw, (x, y + tile + 1), f"candidate:{mark.id}", font=font, fill=(255, 255, 255, 255))
+    return out
 
 
 def bind_aim(action: ActionLog, guide: AimGuide | None) -> ActionLog:
@@ -2549,6 +2590,72 @@ def clamp_to_overlay(action: ActionLog, guide: AimGuide | None) -> ActionLog:
     else:
         out.name = None
     return out
+
+
+def _empty_model_action(action: ActionLog) -> ActionLog:
+    return ActionLog(duration_ms=action.duration_ms)
+
+
+def _danger_blocked(guide: AimGuide, mark: AimMark) -> bool:
+    label = mark.label or ""
+    confirm = label.strip().lower() in _CONFIRM_WORDS
+    if label_kind(label) == "danger":
+        return True
+    return confirm and any(label_kind(m.label) == "danger" for m in guide.marks)
+
+
+def resolve_model_mark(
+    action: ActionLog,
+    guide: AimGuide | None,
+    *,
+    choice: str = "",
+) -> tuple[ActionLog, str | None]:
+    """Bind model JSON to this frame. Fail closed; never retarget or infer hover."""
+    empty = _empty_model_action(action)
+    want = _compact_label(choice)
+    raw_mark = action.mark
+    raw_hover = bool(action.hover)
+    if guide is None or not guide.marks:
+        if raw_mark is not None:
+            return empty, "invalid-mark"
+        if want:
+            return empty, "unresolved-choice"
+        return action, None
+    bound = clamp_to_overlay(bind_aim(action, guide), guide)
+    bound = bound.model_copy(update={"hover": raw_hover})
+    if bound.click_x is not None and bound.click_y is not None:
+        bound.name = bound.derive_name()
+    if raw_mark is not None:
+        hit = guide.by_id(int(raw_mark))
+        if hit is None or bound.mark is None:
+            return empty, "invalid-mark"
+        if want and _compact_label(hit.label) != want:
+            return empty, "mark-choice-mismatch"
+        if _danger_blocked(guide, hit):
+            return empty, "danger-blocked"
+        return bound, None
+    if not want:
+        return bound, None
+    hits = [m for m in guide.marks if _compact_label(m.label) == want]
+    if len(hits) > 1:
+        return empty, "ambiguous-label"
+    if not hits:
+        return empty, "unresolved-choice"
+    hit = hits[0]
+    if _danger_blocked(guide, hit):
+        return empty, "danger-blocked"
+    out = ActionLog(
+        mark=hit.id,
+        click_x=hit.x,
+        click_y=hit.y,
+        hover=raw_hover,
+        duration_ms=action.duration_ms,
+        target=bound.target,
+        click_x2=bound.click_x2,
+        click_y2=bound.click_y2,
+    )
+    out.name = out.derive_name()
+    return out, None
 
 
 def needs_tooltip(label: str) -> bool:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
+import numpy as np
 from PIL import Image
 
 from loop.os.ocr import read_text
@@ -63,15 +64,11 @@ def _crop_text(image: Image.Image, box: tuple[float, float, float, float]) -> st
 
 def _hp_pairs_in(blob: str) -> list[tuple[int, int]]:
     pairs: list[tuple[int, int]] = []
-    seen: set[tuple[int, int]] = set()
     for match in _HP_PAIR.finditer(blob or ""):
         cur, mx = int(match.group(1)), int(match.group(2))
         if mx <= 0 or cur > mx or mx > 999:
             continue
-        pair = (cur, mx)
-        if pair not in seen:
-            seen.add(pair)
-            pairs.append(pair)
+        pairs.append((cur, mx))
     return pairs
 
 
@@ -80,15 +77,66 @@ def _player_hp_from_blob(blob: str) -> tuple[int, int] | None:
     return _best_hp_pair(blob)
 
 
-def _enemy_pairs(blob: str, player: tuple[int, int] | None) -> list[dict[str, Any]]:
+def _enemy_pairs(
+    blob: str,
+    player: tuple[int, int] | None,
+    energy: tuple[int, int] | None = None,
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for cur, mx in _hp_pairs_in(blob):
         if player is not None and (cur, mx) == player:
+            continue
+        if energy is not None and (cur, mx) == energy:
             continue
         if mx > 200:
             continue
         out.append({"hp": cur, "hp_max": mx, "label": None})
     return out
+
+
+def _plates_from_words(
+    image: Image.Image,
+    player: tuple[int, int] | None,
+) -> tuple[list[dict[str, Any]], tuple[int, int] | None]:
+    """HP plates distinguished by value *and* screen position."""
+    try:
+        from loop.os.ocr import read_words
+        words = list(read_words(image) or [])
+    except Exception:  # noqa: BLE001 — stats must never abort collect
+        return [], None
+    pair_re = re.compile(r"^(\d+)\s*/\s*(\d+)$")
+    plates: list[dict[str, Any]] = []
+    energy: tuple[int, int] | None = None
+    for word in words:
+        m = pair_re.match((word.text or "").strip())
+        if not m:
+            continue
+        cur, mx = int(m.group(1)), int(m.group(2))
+        if mx <= 0 or cur > mx or mx > 200:
+            continue
+        if player is not None and (cur, mx) == player:
+            continue
+        x, y = float(word.x), float(word.y)
+        if x <= 0.18 and 0.78 <= y <= 0.90 and mx <= 10:
+            energy = (cur, mx)
+            continue
+        if y >= 0.78:
+            continue
+        dup = next(
+            (
+                True
+                for other in plates
+                if other["hp"] == cur
+                and other["hp_max"] == mx
+                and abs(float(other["x"]) - x) < 0.04
+                and abs(float(other["y"]) - y) < 0.04
+            ),
+            False,
+        )
+        if dup:
+            continue
+        plates.append({"hp": cur, "hp_max": mx, "label": None, "x": x, "y": y})
+    return plates, energy
 
 
 def _parse_tutorial(blob: str) -> dict[str, Any] | None:
@@ -103,7 +151,6 @@ def _parse_tutorial(blob: str) -> dict[str, Any] | None:
         or "map basics" in low
         or "enable tutorials" in low
         or "you start each combat" in low
-        or "cards here are shuffled" in low
     )
     if not active:
         return None
@@ -170,7 +217,7 @@ def stats_from_blob(blob: str, *, screen: str | None = None) -> dict[str, Any]:
         energy = _energy_pair(low, player_pair)
         if energy is not None:
             player["energy"], player["energy_max"] = energy
-        enemies = _enemy_pairs(low, player_pair)
+        enemies = _enemy_pairs(low, player_pair, energy)
 
     tutorial = _parse_tutorial(text)
     markers = _markers_from_blob(low)
@@ -258,14 +305,61 @@ def extract_sts_stats(image: Image.Image) -> dict[str, Any]:
                 player["energy"], player["energy_max"] = energy
         stats["player"] = player or None
 
+        positioned, positioned_energy = _plates_from_words(image, player_pair)
+        if positioned_energy is not None:
+            player["energy"], player["energy_max"] = positioned_energy
+            stats["player"] = player
         enemy_blob = " ".join(part for part in (enemy_roi, merged) if part)
-        stats["enemies"] = _enemy_pairs(enemy_blob, player_pair)
+        energy_pair = None
+        if isinstance(player.get("energy"), int) and isinstance(player.get("energy_max"), int):
+            energy_pair = (player["energy"], player["energy_max"])
+        blob_enemies = _enemy_pairs(enemy_blob, player_pair, energy_pair)
+        stats["enemies"] = positioned if len(positioned) >= len(blob_enemies) else blob_enemies
 
         turn = parse_turn_gate(turn_roi or merged)
         if turn != "unknown":
             stats["turn"] = turn
 
+    if str(stats.get("screen") or "").strip().lower() == "map":
+        stats["map_tool"] = selected_map_tool(image)
     return stats
+
+
+# Three glyph slots around the live step-24 click at (0.082, 0.932). Slot 1 is the eraser.
+MAP_TOOL_ROIS: tuple[tuple[float, float, float, float], ...] = (
+    (0.048, 0.908, 0.072, 0.956),
+    (0.070, 0.908, 0.094, 0.956),
+    (0.092, 0.908, 0.116, 0.956),
+)
+_MAP_TOOL_PINK_FRAC = 0.04
+
+
+def _map_tool_pink_frac(image: Image.Image, box: tuple[float, float, float, float]) -> float:
+    w, h = image.size
+    if w < 8 or h < 8:
+        return 0.0
+    x0, y0, x1, y1 = box
+    crop = image.crop((int(x0 * w), int(y0 * h), max(int(x0 * w) + 1, int(x1 * w)), max(int(y0 * h) + 1, int(y1 * h))))
+    arr = np.asarray(crop.convert("RGB"), dtype=np.int16)
+    if arr.size == 0:
+        return 0.0
+    r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
+    pink = (r >= 150) & (b >= 70) & (g <= 130) & ((r - g) >= 40) & (b > g)
+    return float(pink.mean())
+
+
+def selected_map_tool(image: Image.Image) -> str | None:
+    """Current-frame selected annotation slot, or None if none/ambiguous."""
+    if image is None:
+        return None
+    hits = [
+        index
+        for index, box in enumerate(MAP_TOOL_ROIS)
+        if _map_tool_pink_frac(image, box) >= _MAP_TOOL_PINK_FRAC
+    ]
+    if len(hits) != 1:
+        return None
+    return f"map_tool:{hits[0]}"
 
 
 def stats_to_score_metrics(stats: dict[str, Any]) -> dict[str, Any]:
@@ -296,4 +390,6 @@ def stats_to_score_metrics(stats: dict[str, Any]) -> dict[str, Any]:
             val = meta.get(key)
             if val is not None:
                 scored[key] = val
+    if stats.get("map_tool"):
+        scored["map_tool"] = stats.get("map_tool")
     return scored

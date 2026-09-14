@@ -172,6 +172,7 @@ class StepResult(BaseModel):
 class MemoryHit(BaseModel):
     ids: list[str] = Field(default_factory=list)
     snippets: list[str] = Field(default_factory=list)
+    scores: list[float] = Field(default_factory=list)
 
 
 class StepLog(BaseModel):
@@ -301,6 +302,7 @@ class SessionSummary(BaseModel):
     episodes: int = 0
     unique_device_names: list[str] = Field(default_factory=list)
     memory_size: int = 0
+    knowledge_size: int = 0
     mean_return: float = 0.0
     fail_rate: float = 0.0
     mean_think_ms: float | None = None
@@ -312,6 +314,8 @@ class SessionSummary(BaseModel):
     wins: int = 0
     losses: int = 0
     inconclusive_episodes: int = 0
+    operational_failures: int = 0
+    operational_failure_rate: float = 0.0
     interrupt_cv: int = 0
     interrupt_dino: int = 0
     stop_requested: bool = False

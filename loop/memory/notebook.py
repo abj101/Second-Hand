@@ -7,7 +7,7 @@ from typing import Any
 
 from loop.labels import bind_verb_ok
 from loop.memory.graph import pick_focus
-from loop.memory.grounded import GroundedStore, fact_key, play_relevant_outcome
+from loop.memory.grounded import GroundedStore, ephemeral_fact_token, fact_key, play_relevant_outcome
 from loop.memory.journal import FactJournal, _bind_rank, _clip, _norm
 
 MAX_LINES = 12
@@ -587,7 +587,10 @@ class Notebook:
         prev_metrics: dict[str, Any],
         metrics: dict[str, Any],
         step_id: int = 0,
+        object_id: str = "",
     ) -> str | None:
+        if ephemeral_fact_token(label) or ephemeral_fact_token(object_id):
+            return None
         if not play_relevant_outcome(
             outcome=outcome,
             prev_screen=prev_screen,
@@ -599,13 +602,14 @@ class Notebook:
             return None
         value = f"{device} {_clip(label, 32)} → {outcome}" if label else f"{device} → {outcome}"
         scope = "run" if self.memory_scope == "run" else "episode"
+        provenance = "|".join(part for part in (prev_screen, object_id or label) if part)
         row = self.grounded.promote_outcome(
             screen=screen,
             value=value,
             step_id=step_id,
             scope=scope,
             label=label,
-            provenance="verified-click",
+            provenance=provenance or "verified-click",
             evidence="transition",
         )
         return row.line() if row is not None else None

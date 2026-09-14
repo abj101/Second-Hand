@@ -10,6 +10,7 @@ _LOG = logging.getLogger("loop.perceive")
 
 from loop.agent.entities import is_discovery_role, is_unknown_entity_label
 from loop.agent.prompts import SCENE_PERCEIVE_SCHEMA, scene_perceive_system, scene_perceive_user
+from loop.os.frame_model import GENERIC_CONTROL_ROLES
 from loop.model.gateway import EpisodeThread, ModelCall, VlmGateway
 from loop.os.affordance import AffordanceSignal, merge_legal_actions
 from loop.os.capture import EncodedFrame
@@ -53,6 +54,8 @@ _PAGINATED_TUTORIAL_NAV = frozenset({"prev", "next", "back", "arrow"})
 _NAME_SOURCES = frozenset({"ocr", "dino", "game_state", "unresolved"})
 _NAME_SOURCE_ALIASES = {"detector": "dino"}
 _UNKNOWN_ENEMY = "unknown_enemy"
+_CANDIDATE_ID_RE = re.compile(r"^candidate:\d+$")
+_EXECUTABLE_CONTROL_ROLES = GENERIC_CONTROL_ROLES
 
 
 def _observed_name_set(
@@ -291,7 +294,7 @@ def _promote_known_controls(
             label = "Got it"
         elif marker in {"yes", "no", "back", "close"}:
             label = marker.capitalize()
-        controls.append({"label": label, "role": _role_for_marker(label)})
+        controls.append({"label": label, "role": _role_for_marker(label), "confidence": "high"})
         have.add(marker)
     return controls
 
@@ -318,6 +321,8 @@ def _ground_controls(
         label = str(row.get("label") or "").strip()
         compact = _compact(label)
         if not compact:
+            if _freeform_control_grounded(row):
+                out.append(row)
             continue
         if screen_key == "map" and compact in _MAP_LEGEND:
             if compact in clickable_compact:
@@ -334,6 +339,12 @@ def _ground_controls(
         if compact in vlm_native:
             if compact in _DIALOG_BUTTONS and screen_key in _STALE_DIALOG_SCREENS:
                 if compact in grounded:
+                    out.append(row)
+                continue
+            role = str(row.get("role") or "").strip().lower()
+            conf = str(row.get("confidence") or "").strip().lower()
+            if role in _EXECUTABLE_CONTROL_ROLES:
+                if _freeform_control_grounded(row) or conf == "low":
                     out.append(row)
                 continue
             out.append(row)
@@ -387,6 +398,14 @@ def _has_valid_bbox(bbox: Any) -> bool:
         parts = [p.strip() for p in bbox.split(",") if p.strip()]
         return len(parts) >= 4
     return False
+
+
+def _freeform_control_grounded(row: dict[str, Any]) -> bool:
+    """Syntactically valid candidate rows may proceed without OCR or bbox."""
+    cid = str(row.get("candidate_id") or "").strip()
+    if not _CANDIDATE_ID_RE.fullmatch(cid):
+        return False
+    return str(row.get("confidence") or "").strip().lower() == "high"
 
 
 def _entity_label(row: dict[str, Any]) -> str | None:
@@ -457,6 +476,9 @@ def _row_from_slot(row: Any, *, default_role: str) -> dict[str, str] | None:
     entity_id = str(row.get("entity_id") or row.get("id") or "").strip()
     if entity_id:
         item["entity_id"] = entity_id
+    candidate_id = str(row.get("candidate_id") or "").strip()
+    if candidate_id:
+        item["candidate_id"] = candidate_id
     inspectable = row.get("inspectable")
     if inspectable is not None:
         if isinstance(inspectable, bool):
@@ -609,28 +631,21 @@ def inject_host_enemies_into_scene(
     rows = (host_stats or {}).get("enemies") or []
     if not rows:
         return desc
-    have = {
-        _compact(str(row.get("label") or ""))
-        for row in desc.controls
-        if str(row.get("role") or "") == "enemy" and str(row.get("label") or "").strip()
-    }
-    have |= {
-        _compact(str(row.get("label") or ""))
-        for row in desc.enemies
-        if str(row.get("label") or "").strip()
-    }
+    existing = [
+        row for row in list(desc.enemies) + list(desc.controls)
+        if isinstance(row, dict) and str(row.get("role") or "") == "enemy"
+    ]
+    if len(existing) >= len(rows):
+        return desc
     for row in rows:
         if not isinstance(row, dict):
             continue
+        if len(existing) >= len(rows):
+            break
         hp_max = row.get("hp_max")
         if not isinstance(hp_max, (int, float)) or hp_max <= 0:
             continue
-        label = str(row.get("label") or "").strip()
-        if not label:
-            label = _UNIDENTIFIED_ENEMY
-        key = _compact(label)
-        if key in have:
-            continue
+        label = str(row.get("label") or "").strip() or _UNIDENTIFIED_ENEMY
         conf = "high" if label != _UNIDENTIFIED_ENEMY else "low"
         entry: dict[str, str] = {
             "label": label,
@@ -640,7 +655,7 @@ def inject_host_enemies_into_scene(
         }
         desc.enemies.append(entry)
         desc.controls.append(dict(entry))
-        have.add(key)
+        existing.append(entry)
     return desc
 
 
@@ -735,14 +750,13 @@ class SceneDescription:
                 label = _entity_label(row) or ""
                 role = str(row.get("role") or row.get("region") or "other").strip()
                 has_bbox = _has_valid_bbox(row.get("bbox"))
-                if not label and role in {"enemy", "unknown_character", "character"} and has_bbox:
-                    label = "unknown_character"
-                if not label and not has_bbox:
+                candidate_id = str(row.get("candidate_id") or "").strip()
+                if not label and not candidate_id:
                     continue
                 if label and _looks_like_stat(label):
                     continue
                 if not label:
-                    label = "unknown_character"
+                    label = ""
                 confidence = str(row.get("confidence") or "").strip().lower()
                 if confidence not in {"high", "low"}:
                     confidence = "low" if _compact(label) in uncertain_compact else "high"
@@ -751,6 +765,9 @@ class SceneDescription:
                     "name_source": str(row.get("name_source") or "unresolved"),
                     "role": role, "confidence": confidence,
                 }
+                candidate_id = str(row.get("candidate_id") or "").strip()
+                if candidate_id:
+                    entry["candidate_id"] = candidate_id
                 if has_bbox:
                     bbox = row.get("bbox")
                     if isinstance(bbox, str):
@@ -911,8 +928,13 @@ class SceneDescription:
         labels: list[str] = []
         for row in self.controls:
             lab = str(row.get("label") or "").strip()
-            if lab and lab not in labels:
-                labels.append(lab)
+            if not lab or lab in labels:
+                continue
+            role = str(row.get("role") or "").strip().lower()
+            conf = str(row.get("confidence") or "high").strip().lower()
+            if role == "other" or conf == "low":
+                continue
+            labels.append(lab)
         opts = self.dialog.get("options")
         if isinstance(opts, list):
             for opt in opts:
@@ -1561,7 +1583,7 @@ def scene_from_ocr(
             text = str(label or "").strip()
             if not text or _looks_like_stat(text):
                 continue
-            fresh_controls.append({"label": text, "role": "other", "confidence": "high"})
+            fresh_controls.append({"label": text, "role": _role_for_marker(text), "confidence": "high"})
     fresh_controls = _promote_known_controls(
         fresh_controls,
         visible_text=[],

@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Literal, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 import numpy as np
 
@@ -16,6 +16,7 @@ from loop.agent.heuristic import HEURISTIC_POLICY_ID, heuristic_action
 from loop.agent.decision import (
     ACT_SYSTEM_PROMPT,
     ACT_PROMPT_ID,
+    ACT_PROMPT_ID_V2,
     ActReasoner,
     ActReasonerError,
     BoundingBox,
@@ -23,9 +24,12 @@ from loop.agent.decision import (
     ClickControlIntent,
     compact_act_prompt,
     turn_snapshot_for_log,
+    attach_host_enemy_stats,
+    with_target_positions,
     ControlSnapshot,
     EndTurnIntent,
     InspectIntent,
+    KnowledgeSnapshot,
     PlayCardIntent,
     TargetSnapshot,
     TurnSnapshot,
@@ -37,6 +41,7 @@ from loop.agent.entities import (
     _row_center,
     entity_route_facts,
     is_anonymous_enemy_label,
+    is_enemy_discovery_row,
     is_frame_mark_token,
     is_mark_derived_object_id,
     is_player_row,
@@ -58,7 +63,13 @@ from loop.agent.discovery import (
     validate_contract,
 )
 from loop.agent.perception_cache import PerceptionCache, PerceptionReuse, ocr_uncertain_for_reuse
-from loop.agent.recovery import RecoveryAction, SourceFailureRecovery
+from loop.agent.recovery import (
+    ControlNoopRecovery,
+    RecoveryAction,
+    SourceFailureRecovery,
+    control_noop_fingerprint,
+    semantic_object_id,
+)
 from loop.agent.perceive import (
     inject_host_enemies_into_scene,
     perceive_scene,
@@ -137,14 +148,12 @@ from loop.memory.journal import (
 from loop.memory.lexicon import screen_from_labels
 from loop.memory.overlay_state import ControlSuppressionState, OverlayState
 from loop.memory.notebook import Notebook, avoid_devices, listing_has_dialog, overlay_screen
-from loop.memory.screen_objects import (
-    ScreenObjectStore,
-    collapse_duplicate_named_targets,
-    collapse_same_sprite_cluster,
-)
+from loop.memory.screen_objects import ScreenObjectStore
 from loop.memory.skills import Skill, SkillBank
 from loop.memory.store import MemoryStore
 from loop.memory.semantic import SemanticMemoryStore
+from loop.memory.knowledge import KnowledgeStore
+from loop.memory.consolidate import EpisodeConsolidator
 from loop.mcp.orchestrator import ToolOrchestrator
 from loop.mcp.registry import ToolRegistry
 from loop.mcp.tools.memory import register_reasoner_tools
@@ -167,12 +176,10 @@ from loop.os.frame_model import (
     FrameContext,
     FrameModel,
     GENERIC_CONTROL_ROLES,
-    bounds_iou,
     build_action_surface,
     build_frame_model,
     control_key_from_row,
     find_control_row_for_suppression,
-    paginated_tutorial_active,
     surface_fingerprint,
 )
 from loop.state.game_state import GameState, LegalAction, reconcile as reconcile_game_state
@@ -191,7 +198,6 @@ from loop.os.pointer_hygiene import (
 )
 from loop.os.primitives import mouse_move
 from loop.os.layout_adapter import (
-    HAND_Y,
     LayoutAdapter,
     default_layout_adapter,
     generic_layout_adapter,
@@ -207,8 +213,6 @@ from loop.os.aim import (
     build_marks,
     clamp_to_overlay,
     fill_from_aim,
-    apply_enemy_bboxes,
-    apply_hand_bboxes,
     ground_combat_labels,
     merge_cached_enemy_marks,
     seed_enemies_from_host,
@@ -217,14 +221,15 @@ from loop.os.aim import (
     dino_boxes_to_marks,
     detect_marks,
     fuse_dino_marks,
-    in_combat_sprite_band,
     in_hand_band,
     label_kind,
     needs_tooltip,
     number_spatial_nodes,
     ocr_click_marks,
+    compose_candidate_image,
     paint_aim,
     prefer_hover,
+    resolve_model_mark,
     steer_off_danger,
     steer_to_labeled,
 )
@@ -344,12 +349,6 @@ def _one_line(text: str, limit: int = 280) -> str:
 
 _MAX_REASON_USER_CHARS = 6000
 _MAX_REASON_JOURNAL_CHARS = 3200
-
-# Screens where an empty action surface means "perception stalled", not "no legal
-# move": loot and map screens always have something clickable on them.
-LOOT_SCREENS = frozenset({"map", "reward"})
-LOOT_SURFACE_RECOVERY_LIMIT = 4
-
 
 def _bounded_reason_journal(parts: list[str]) -> str:
     """Preserve authoritative state first; trim historical prose deterministically."""
@@ -552,6 +551,10 @@ class CollectConfig:
     perceive_model: str = DEFAULT_CLOUD_MODEL
     context_mode: Literal["cold", "threaded"] = "cold"
     context_schedule: tuple[str, ...] = ()
+    # CLI collection enables this by default for STS2 two-stage. Keeping the
+    # bare config false preserves isolated test and non-STS2 prompt contracts.
+    knowledge: bool = False
+    knowledge_learn: bool = True
 
     def __post_init__(self) -> None:
         if not self.perceive_model:
@@ -568,6 +571,7 @@ class CollectAgent:
         skills: SkillBank | None = None,
         gateway: VlmGateway | None = None,
         perceive_gateway: VlmGateway | None = None,
+        knowledge: KnowledgeStore | None = None,
         config: CollectConfig | None = None,
         detector: Any | None = None,
     ) -> None:
@@ -578,11 +582,29 @@ class CollectAgent:
         self.gateway = gateway
         self.perceive_gateway = perceive_gateway
         self.config = config or CollectConfig()
+        self.knowledge = knowledge
+        self._knowledge_consolidator = (
+            EpisodeConsolidator(gateway, knowledge)
+            if (
+                gateway is not None and knowledge is not None
+                and self.config.knowledge and self.config.knowledge_learn
+                and not self.config.skip_models
+            )
+            else None
+        )
+        self._knowledge_cache: dict[tuple[Any, ...], tuple[Any, ...]] = {}
+        self._knowledge_hits: tuple[Any, ...] = ()
+        self._knowledge_signature: tuple[Any, ...] | None = None
+        self._knowledge_actionable_seen = False
+        self._knowledge_failure_key = ""
+        self._knowledge_failure_count = 0
+        self._knowledge_metrics: dict[str, Any] = {}
         self.session_id = uuid.uuid4().hex[:12]
         self._all_actions: set[str] = set()
         self._episode_returns: list[float] = []
         self._episode_success: list[bool] = []
         self._episode_outcomes: list[str] = []
+        self._episode_operational: list[bool] = []
         self._skill_on_flags: list[bool] = []
         self._think_ms: list[float] = []
         self._session_flags: list[str] = []
@@ -681,6 +703,7 @@ class CollectAgent:
         self._last_perceive_call: dict[str, Any] = {}
         self._last_execution_failure: dict[str, Any] | None = None
         self._source_failure_recovery = SourceFailureRecovery()
+        self._control_failure_recovery = ControlNoopRecovery()
         self._last_unverified_effect: bool = False
         self._effect_attempts: list[dict[str, Any]] = []
         self._last_reason_state_key: str = ""
@@ -708,11 +731,10 @@ class CollectAgent:
         self._scene_desc: Any = None
         self._frame_model: FrameModel | None = None
         self._action_surface: ActionSurface | None = None
+        self._bound_candidate_capture: tuple[tuple[Any, ...], int] | None = None
         self._empty_action_surface_key: str = ""
         self._empty_action_surface_count: int = 0
         self._snapshot_dropped_noncanonical: int = 0
-        self._loot_surface_recoveries: int = 0
-        self._loot_surface_screen: str = ""
         self._decision_softlock: bool = False
         self._last_frame_mad: float = 0.0
         self._turn_transition: bool = False
@@ -736,11 +758,13 @@ class CollectAgent:
         self._step_illegal_blocked = False
         self._last_legal_reason: str | None = None
         self._pending_exec_error: str | None = None
+        self._model_mark_locked = False
         self._last_targeting_opts: dict[str, Any] | None = None
         self._perceive_retry_reason: str | None = None
         self._overlay_state = OverlayState()
         self._overlay_escape = OverlayEscapeState()
         self._overlay_escape_action: ActionLog | None = None
+        self._map_tool_exit_key: tuple[str, str] | None = None
         self._control_suppression = ControlSuppressionState()
         self._last_surface_screen: str = ""
         self._last_surface_membership: tuple[str, ...] = ()
@@ -779,6 +803,8 @@ class CollectAgent:
         in_combat = bool(host.get("combat_active")) or screen == "combat"
         if in_combat and not self._was_in_combat:
             self._combat_index += 1
+            self._entity_tracker = EntityTracker()
+            self._discovery_attempts = {}
         self._was_in_combat = in_combat
 
     def _apply_combat_exit_reset(self, *, reason: str) -> None:
@@ -795,8 +821,10 @@ class CollectAgent:
         self._last_execution_failure = None
         self._last_unverified_effect = False
         self._source_recovery().reset()
+        self._control_noop_recovery().reset()
         self._effect_attempts = []
         self._pending_exec_error = None
+        self._model_mark_locked = False
         self._planned_hand_signature = None
         self._stale_source_plan = None
         self._blocked_sources = {}
@@ -1135,6 +1163,18 @@ class CollectAgent:
         self._last_hover_key = key
         return action
 
+    def _apply_overlay_model_bind(self, action: ActionLog, *, choice: str = "") -> ActionLog:
+        """Current-frame mark contract for overlay JSON. Fail closed; never retarget."""
+        had_mark = action.mark is not None
+        had_choice = bool(str(choice or "").strip())
+        bound, err = resolve_model_mark(action, self._aim, choice=choice)
+        if had_mark or had_choice:
+            self._model_mark_locked = True
+        if err:
+            self._pending_exec_error = err
+            self._force_perceive = True
+        return bound
+
     def _aim_label(self, action: ActionLog) -> str:
         plan = getattr(self, "_last_execution_plan", None) or {}
         source = plan.get("source") if isinstance(plan, dict) else None
@@ -1338,17 +1378,21 @@ class CollectAgent:
         """Fail closed after every fill/steer fallback, immediately before dispatch."""
         plan = getattr(self, "_last_execution_plan", {})
         plan_action = str(plan.get("action") or "") if isinstance(plan, dict) else ""
-        screen = str(
-            self._obs_metrics.get("screen")
-            or getattr(self, "_host_stats", {}).get("screen")
-            or ""
-        ).strip().lower()
         guard_control = bool(
             getattr(self, "_last_decision_schema", "") == "v2"
-            and plan_action == "click_control"
-            and screen in {"map", "reward"}
+            and plan_action in {"click_control", "end_turn"}
         )
         if not self._two_stage() or (not self._combat_screen_now() and not guard_control) or is_empty_chord(action):
+            return action
+        overlay_action = getattr(self, "_overlay_escape_action", None)
+        if (
+            getattr(self, "_last_reason_backend", "") == "overlay-escape"
+            and overlay_action is not None
+            and action.name == overlay_action.name
+            and action.mark is None
+            and action.click_x is None
+            and action.click_y is None
+        ):
             return action
         # Successful inspect_object is a hover, never a card click. Force hover
         # if fill/steer stripped it, then allow without targeting_validate.
@@ -1404,33 +1448,78 @@ class CollectAgent:
                     identity_matches = bool(
                         source_obj is not None
                         and expected_id
-                        and str(action.source_object_id or source_obj.object_id or "") == expected_id
+                        and str(action.source_object_id or "") == expected_id
                     )
-                    if verdict.get("ok") and source_obj is not None and (mark_matches or identity_matches):
+                    planned_point = (source or {}).get("point") if isinstance(source, dict) else None
+                    planned_bounds = (source or {}).get("bounds") if isinstance(source, dict) else None
+                    point_matches = bool(
+                        isinstance(planned_point, dict)
+                        and isinstance(planned_point.get("x"), (int, float))
+                        and isinstance(planned_point.get("y"), (int, float))
+                        and action.click_x is not None
+                        and action.click_y is not None
+                        and abs(float(action.click_x) - float(planned_point["x"])) <= 0.005
+                        and abs(float(action.click_y) - float(planned_point["y"])) <= 0.005
+                    )
+                    in_planned_bounds = bool(
+                        isinstance(planned_bounds, dict)
+                        and action.click_x is not None
+                        and action.click_y is not None
+                        and float(planned_bounds.get("x0", 1.0)) <= float(action.click_x)
+                        <= float(planned_bounds.get("x1", 0.0))
+                        and float(planned_bounds.get("y0", 1.0)) <= float(action.click_y)
+                        <= float(planned_bounds.get("y1", 0.0))
+                    )
+                    surface_snapshot_id = str(plan.get("surface_snapshot_id") or "")
+                    surface = getattr(self, "_action_surface", None)
+                    surface_matches = bool(
+                        not surface_snapshot_id
+                        or (
+                            surface is not None
+                            and str(surface.snapshot_id) == surface_snapshot_id
+                            and str(self._last_snapshot_id or "") == surface_snapshot_id
+                            and str(surface.run_id) == str(self.session_id)
+                            and int(surface.step_id) == int(self._step_id or 0)
+                        )
+                    )
+                    if (
+                        verdict.get("ok")
+                        and source_obj is not None
+                        and mark_matches
+                        and identity_matches
+                        and point_matches
+                        and in_planned_bounds
+                        and surface_matches
+                    ):
                         return action
-                    reason = str(
-                        resolved.get("reason") or verdict.get("reason") or "source-not-found"
-                    )
+                    if not surface_matches:
+                        reason = "stale-snapshot"
+                    elif not (mark_matches and identity_matches and point_matches and in_planned_bounds):
+                        reason = "stale-card-binding"
+                    else:
+                        reason = str(
+                            resolved.get("reason") or verdict.get("reason") or "source-not-found"
+                        )
                 self._last_execution_plan = {}
                 self._planned_hand_signature = None
                 self._force_perceive = True
             elif guard_control:
-                # Map/reward controls are only executable as the exact current
-                # typed object selected by the reasoner.  ``bind_aim`` may
-                # reassign a stale mark after a fresh overlay, so validate its
-                # mark/role/point against both the plan and current guide.
-                expected_control = str(plan.get("control_id") or "").strip()
-                planned_object = str(plan.get("object_id") or expected_control).strip()
-                planned_mark = plan.get("mark_id")
-                planned_role = str(plan.get("role") or "").strip().lower()
-                planned_point = plan.get("point") if isinstance(plan.get("point"), dict) else {}
-                source_obj = (
-                    self._screen_objects.by_id(int(action.mark))
-                    if action.mark is not None else None
+                expected_control = str(plan.get("control_id") or plan.get("object_id") or "").strip()
+                frame_matches = str(plan.get("snapshot_id") or "") == str(self._last_snapshot_id or "")
+                published = None
+                surface = getattr(self, "_action_surface", None)
+                if surface is not None and expected_control:
+                    published = surface.object_by_id(expected_control)
+                if published is None and expected_control:
+                    published = (getattr(self, "_v2_control_objects", None) or {}).get(expected_control)
+                in_published = bool(
+                    published is not None
+                    and action.click_x is not None
+                    and action.click_y is not None
+                    and float(published.x0) <= float(action.click_x) <= float(published.x1)
+                    and float(published.y0) <= float(action.click_y) <= float(published.y1)
                 )
-                aim_mark = self._aim.by_id(int(action.mark)) if self._aim is not None and action.mark is not None else None
-                current_role = str(getattr(source_obj, "role", "") or "").strip().lower()
-                aim_role = str(getattr(aim_mark, "role", "") or "").strip().lower()
+                planned_point = plan.get("point") if isinstance(plan.get("point"), dict) else {}
                 point_matches = bool(
                     action.click_x is not None and action.click_y is not None
                     and isinstance(planned_point.get("x"), (int, float))
@@ -1438,30 +1527,7 @@ class CollectAgent:
                     and abs(float(action.click_x) - float(planned_point["x"])) <= 0.005
                     and abs(float(action.click_y) - float(planned_point["y"])) <= 0.005
                 )
-                current_point_matches = bool(
-                    source_obj is not None and aim_mark is not None
-                    and action.click_x is not None and action.click_y is not None
-                    and abs(float(action.click_x) - float(source_obj.x)) <= 0.005
-                    and abs(float(action.click_y) - float(source_obj.y)) <= 0.005
-                    and abs(float(action.click_x) - float(aim_mark.x)) <= 0.005
-                    and abs(float(action.click_y) - float(aim_mark.y)) <= 0.005
-                )
-                mark_matches = bool(
-                    isinstance(planned_mark, int) and not isinstance(planned_mark, bool)
-                    and action.mark is not None and int(action.mark) == planned_mark
-                    and source_obj is not None and int(source_obj.mark_id) == planned_mark
-                    and aim_mark is not None and int(aim_mark.id) == planned_mark
-                )
-                identity_matches = bool(
-                    expected_control and planned_object == expected_control
-                    and source_obj is not None and aim_mark is not None
-                    and str(source_obj.object_id or "") == expected_control
-                    and str(aim_mark.object_id or "") == expected_control
-                    and str(action.source_object_id or "") == expected_control
-                    and current_role == planned_role == aim_role == str(action.source_role or "").strip().lower()
-                )
-                frame_matches = str(plan.get("snapshot_id") or "") == str(self._last_snapshot_id or "")
-                if frame_matches and mark_matches and identity_matches and point_matches and current_point_matches:
+                if frame_matches and (in_published or (published is None and point_matches)):
                     return action
                 self._last_execution_plan = {}
                 self._force_perceive = True
@@ -1948,11 +2014,12 @@ class CollectAgent:
         prior = getattr(self, "_blocked_controls_screen", "")
         if prior and screen and prior != screen:
             self._blocked_controls = set()
+            self._control_noop_recovery().reset()
         if screen:
             self._blocked_controls_screen = screen
 
     def _record_blocked_control_id(self, control_id: str) -> None:
-        cid = str(control_id or "").strip()
+        cid = semantic_object_id(control_id)
         if not cid:
             return
         self._prune_blocked_controls()
@@ -1965,12 +2032,46 @@ class CollectAgent:
         if screen:
             self._blocked_controls_screen = screen
 
-    def _control_is_blocked(self, control_id: str) -> bool:
+    def _control_row_from(self, control: Any, control_id: str = "") -> dict[str, Any]:
+        if isinstance(control, dict):
+            return dict(control)
+        bbox = getattr(control, "bbox", None)
+        if control is None:
+            return {"object_id": control_id, "label": "", "role": "button"} if control_id else {}
+        row: dict[str, Any] = {
+            "object_id": str(getattr(control, "object_id", None) or getattr(control, "control_id", None) or control_id or ""),
+            "label": str(getattr(control, "label", "") or ""),
+            "role": str(getattr(control, "role", "") or "button"),
+        }
+        if bbox is not None:
+            row.update({
+                "x0": float(bbox.x0), "y0": float(bbox.y0),
+                "x1": float(bbox.x1), "y1": float(bbox.y1),
+            })
+        else:
+            for key in ("x0", "y0", "x1", "y1", "x", "y"):
+                value = getattr(control, key, None)
+                if isinstance(value, (int, float)):
+                    row[key] = float(value)
+        return row
+
+    def _control_is_blocked(self, control_id: str, control: Any = None) -> bool:
         self._prune_blocked_controls()
         cid = str(control_id or "").strip()
-        if not cid:
+        if cid and cid in (getattr(self, "_blocked_controls", None) or set()):
+            return True
+        suppression = getattr(self, "_control_suppression", None)
+        if suppression is None:
             return False
-        return cid in (getattr(self, "_blocked_controls", None) or set())
+        row = self._control_row_from(control, cid)
+        if not row:
+            return False
+        screen = self._current_surface_screen()
+        key = suppression.key_for_row(
+            row, screen=screen,
+            prior_rows=getattr(self, "_prev_surface_controls", None),
+        )
+        return suppression.is_quarantined(key)
 
     def _hand_inventory_mutated_since_plan(self) -> bool:
         planned = getattr(self, "_planned_hand_signature", None)
@@ -1995,20 +2096,10 @@ class CollectAgent:
         return False
 
     def _aim_mark_for_object(self, obj: Any) -> AimMark | None:
-        """Map a snapshot-scoped store object onto current aim geometry. No coord fallback."""
+        """Copy geometry from the published object; raw mark numbers are unrelated."""
         if obj is None:
             return None
-        guide = getattr(self, "_aim", None)
         oid = str(getattr(obj, "object_id", "") or "")
-        if guide is not None and oid:
-            hits = [mark for mark in guide.marks if str(mark.object_id or "") == oid]
-            if len(hits) == 1:
-                return hits[0]
-        mark_id = getattr(obj, "mark_id", None)
-        if guide is not None and mark_id is not None:
-            hit = guide.by_id(int(mark_id))
-            if hit is not None:
-                return hit
         return AimMark(
             id=int(getattr(obj, "mark_id", 0) or 0),
             x=float(obj.x),
@@ -2020,6 +2111,54 @@ class CollectAgent:
             label=str(getattr(obj, "label", "") or ""),
             object_id=oid,
             role=str(getattr(obj, "role", "") or "card"),
+        )
+
+    @staticmethod
+    def _mark_from_execution_spec(spec: Any) -> AimMark | None:
+        """Rehydrate immutable runtime geometry without consulting a later aim list."""
+        if not isinstance(spec, dict):
+            return None
+        point = spec.get("point")
+        bounds = spec.get("bounds")
+        if not isinstance(point, dict) or not isinstance(bounds, dict):
+            return None
+        try:
+            mark_id = int(spec["mark_id"])
+            x, y = float(point["x"]), float(point["y"])
+            x0, y0 = float(bounds["x0"]), float(bounds["y0"])
+            x1, y1 = float(bounds["x1"]), float(bounds["y1"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if x1 <= x0 or y1 <= y0 or not (x0 <= x <= x1 and y0 <= y <= y1):
+            return None
+        return AimMark(
+            id=mark_id,
+            x=x,
+            y=y,
+            x0=x0,
+            y0=y0,
+            x1=x1,
+            y1=y1,
+            label=str(spec.get("label") or ""),
+            object_id=str(spec.get("object_id") or ""),
+            role=str(spec.get("role") or "unknown"),
+            source="action-surface",
+        )
+
+    @staticmethod
+    def _object_matches_execution_spec(obj: Any, spec: Any) -> bool:
+        planned = CollectAgent._mark_from_execution_spec(spec)
+        if obj is None or planned is None:
+            return False
+        return bool(
+            int(getattr(obj, "mark_id", getattr(obj, "id", -1))) == planned.id
+            and str(getattr(obj, "object_id", "") or "") == planned.object_id
+            and abs(float(obj.x) - planned.x) <= 0.005
+            and abs(float(obj.y) - planned.y) <= 0.005
+            and abs(float(obj.x0) - planned.x0) <= 0.005
+            and abs(float(obj.y0) - planned.y0) <= 0.005
+            and abs(float(obj.x1) - planned.x1) <= 0.005
+            and abs(float(obj.y1) - planned.y1) <= 0.005
         )
 
     def _hand_source_mark(self, card: AimMark | None, evidence: list[str]) -> AimMark | None:
@@ -2256,12 +2395,10 @@ class CollectAgent:
 
         effect_regions: list[tuple[str, tuple[float, float, float, float], float]] = [
             ("energy_or_hud_changed", (0.035, 0.72, 0.13, 0.93), 0.055),
-            ("turn_control_changed", (0.82, 0.72, 0.98, 0.92), 0.055),
         ]
-        # Enemy sprites, HP bars, and intent glyphs animate continuously. A
-        # source click cannot safely claim a targeted effect from that region;
-        # energy/turn HUD evidence is the only fail-safe auto-resolution proof
-        # before the explicit target click.
+        # Enemy sprites, HP bars, intent glyphs, and the End Turn button animate
+        # independently of card resolution. Energy/HUD change is the only
+        # fail-safe auto-resolution proof before the explicit target click.
         effects: list[str] = []
         for name, box, threshold in effect_regions:
             values = [self._roi_mad(probe.pre_frame, frame, box) for frame in samples]
@@ -2761,22 +2898,30 @@ class CollectAgent:
                     if reject_reason == "stale-snapshot":
                         self._invalidate_hand_inventory(reason="stale-snapshot")
                 else:
-                    card = self._hand_source_mark(
-                        self._aim_mark_for_object(resolved.get("source")),
-                        evidence,
-                    )
-                    if card is None:
-                        reject_reason = "source-not-found"
-                        if not any(item.startswith("off-hand-source-mark:") for item in evidence):
-                            evidence.append("snapshot-scoped-object-missing")
+                    resolved_source = resolved.get("source")
+                    if not self._object_matches_execution_spec(resolved_source, source_spec):
+                        reject_reason = "stale-snapshot"
+                        evidence.append("source-geometry-mismatch")
+                    else:
+                        card = self._hand_source_mark(
+                            self._mark_from_execution_spec(source_spec),
+                            evidence,
+                        )
+                        if card is None:
+                            reject_reason = "source-not-found"
+                            if not any(item.startswith("off-hand-source-mark:") for item in evidence):
+                                evidence.append("snapshot-scoped-object-missing")
         else:
             card = before_aim.by_id(int(action.mark)) if before_aim is not None and action.mark is not None else None
             if card is None:
                 card = self._nearest_mark(before_aim, action.click_x, action.click_y)
-        target = before_aim.by_id(int(action.target)) if before_aim is not None and action.target is not None else None
-        if target is None:
-            target = self._nearest_mark(before_aim, action.click_x2, action.click_y2)
         planned_target = plan.get("target_candidate") if isinstance(plan, dict) else None
+        if v2_source:
+            target = self._mark_from_execution_spec(planned_target)
+        else:
+            target = before_aim.by_id(int(action.target)) if before_aim is not None and action.target is not None else None
+            if target is None:
+                target = self._nearest_mark(before_aim, action.click_x2, action.click_y2)
         planned_target_id = (
             str(planned_target.get("object_id") or "")
             if isinstance(planned_target, dict)
@@ -2965,6 +3110,22 @@ class CollectAgent:
                 )
                 if fresh_obj is not None:
                     transaction.verification_evidence.append("post-selection-bounds")
+            if (
+                fresh_obj is None
+                and refreshed_inventory
+                and store is not None
+                and isinstance(planned_target, dict)
+                and str(planned_target.get("role") or "").strip().lower() == "enemy"
+            ):
+                current_enemies = [
+                    obj for obj in store.objects
+                    if object_role(obj, entity_targets_ok=True) == "enemy"
+                ]
+                if len(current_enemies) == 1:
+                    fresh_obj = current_enemies[0]
+                    transaction.verification_evidence.append(
+                        f"post-selection-sole-enemy:{fresh_obj.object_id}"
+                    )
             if fresh_obj is not None:
                 rebound = self._aim_mark_for_object(fresh_obj)
                 if rebound is not None:
@@ -3196,6 +3357,30 @@ class CollectAgent:
         out.name = out.derive_name()
         return out
 
+    def _v2_plan_owns_action_geometry(self) -> bool:
+        """Typed ACT geometry is immutable once resolved from the action surface."""
+        plan = getattr(self, "_last_execution_plan", None) or {}
+        return bool(
+            getattr(self, "_last_decision_schema", "") == "v2"
+            and str(plan.get("action") or "")
+            in {"play_card", "click_control", "end_turn", "inspect"}
+        )
+
+    def _bind_action_for_dispatch(
+        self,
+        action: ActionLog,
+        before_bind: ActionLog,
+    ) -> ActionLog:
+        """Apply legacy aim binding only when no typed surface owns the action."""
+        if getattr(self, "_overlay_escape_action", None) is not None:
+            return self._overlay_escape_action
+        if self._v2_plan_owns_action_geometry():
+            return before_bind
+        rebound = bind_aim(action, self._aim)
+        if self._last_decision_schema != "v2":
+            rebound = clamp_to_overlay(rebound, self._aim)
+        return self._preserve_steered_identity(before_bind, rebound)
+
     def _identity_swap(self, before: ActionLog, after: ActionLog) -> bool:
         if bool(before.hover) != bool(after.hover):
             return True
@@ -3364,7 +3549,7 @@ class CollectAgent:
         """Legacy aim/chord synthesis is never an execution input for v2."""
         return self._last_decision_schema != "v2"
 
-    _DISCOVERY_ATTEMPT_LIMIT = 2
+    _DISCOVERY_ATTEMPT_LIMIT = 1
 
     def _identity_unresolved_keys(self) -> set[str]:
         attempts = getattr(self, "_discovery_attempts", None) or {}
@@ -3390,8 +3575,7 @@ class CollectAgent:
             and str(getattr(obj, "object_id", "") or "").startswith("enemy_")
         ]
         if store_enemies:
-            # Current-frame canonical enemy is enough to act. Phantom tracker /
-            # prompt ids must not force explore→rescan on an anchored fight.
+            # Current-frame canonical enemy_N is executable even while unnamed.
             blockers = [
                 row for row in blockers
                 if str(row.get("rule") or "") != "identify-before-act"
@@ -3430,7 +3614,11 @@ class CollectAgent:
             architecture=self.config.architecture if self._turn_based() else "overlay",
         )
         if self.fixture.id == "sts2" and self._two_stage():
-            return ACT_PROMPT_ID
+            return (
+                ACT_PROMPT_ID
+                if self.config.knowledge and self.knowledge is not None and not self.config.skip_models
+                else ACT_PROMPT_ID_V2
+            )
         return legacy
 
     def _death_lesson(self, steps: list[StepLog]) -> str:
@@ -3652,6 +3840,32 @@ class CollectAgent:
                 })
         if trans_out is not None:
             record["transaction_outcome"] = trans_out
+        intent = record.get("intent") if isinstance(record.get("intent"), dict) else {}
+        kind = str(intent.get("kind") or "")
+        surface = getattr(self, "_action_surface", None)
+        overlay_escape = getattr(self, "_last_reason_backend", "") == "overlay-escape"
+        if pixel_changed and (
+            overlay_escape
+            or (
+                kind == "click_control"
+                and bool(getattr(getattr(surface, "context", None), "blocking_overlay", False))
+            )
+        ):
+            cache = getattr(self, "_perception_cache", None)
+            if cache is not None:
+                cache.reset()
+            self._cached_perceive_scene = None
+            self._force_perceive = True
+        if kind in {"click_control", "end_turn"}:
+            record["screen"] = screen_key
+            record["object_id"] = semantic_object_id(
+                object_id or intent.get("control_id") or ""
+            )
+            if bbox is not None and len(bbox) >= 4:
+                record["bbox"] = [float(part) for part in bbox[:4]]
+            record["evidence_fingerprint"] = str(evidence_fingerprint or "") or self._evidence_fingerprint(
+                screen=screen_key
+            )
         self._last_unverified_effect = effect == "unverified"
         if effect == "unverified" or error:
             self._last_execution_failure = record
@@ -3672,6 +3886,8 @@ class CollectAgent:
         recovery = getattr(self, "_source_failure_recovery", None)
         if isinstance(recovery, SourceFailureRecovery) and (effect == "verified" or screen_changed):
             recovery.reset()
+        if effect == "verified" or screen_changed:
+            self._control_noop_recovery().reset()
         return record
 
     def _apply_effect_sequence(self, record: dict[str, Any], attempt: dict[str, Any]) -> None:
@@ -3756,13 +3972,14 @@ class CollectAgent:
                 obj.to_dict()
                 for obj in interactive()
                 if str(getattr(obj, "role", "") or "").strip().lower()
-                in GENERIC_CONTROL_ROLES | {"card", "enemy", "player", "target"}
+                in GENERIC_CONTROL_ROLES | {"card", "enemy", "player", "target", "map_node"}
             ]
             if rows:
                 surface_screen = str(
                     screen_key or getattr(getattr(surface, "context", None), "screen", "") or ""
                 ).strip().lower()
-                return f"surf:{surface_fingerprint(screen=surface_screen, rows=rows)}"
+                tool = str(getattr(getattr(surface, "context", None), "map_tool", None) or "")
+                return f"surf:{surface_fingerprint(screen=surface_screen, rows=rows)}|map_tool:{tool}"
         cache = getattr(self, "_perception_cache", None)
         view = getattr(self, "_last_obs_image", None)
         hasher = getattr(cache, "compute_frame_hash", None)
@@ -3798,6 +4015,15 @@ class CollectAgent:
                 layout_adapter=self._layout_adapter(),
             )
         )
+        if screen == "combat" and self._two_stage():
+            marks = seed_enemies_from_host(
+                marks,
+                host_stats=self._host_stats,
+                image=image,
+                lexicon=lexicon,
+                screen=screen,
+                layout_adapter=self._layout_adapter(),
+            )
         marks = self._number_aim_marks(marks, screen=screen, ocr_words=words)
         self._last_ocr_words = list(words)
         last_xy = self._aim.last_xy if self._aim is not None else None
@@ -3827,17 +4053,16 @@ class CollectAgent:
         return tuple(sorted(keys))
 
     def _annotate_control_identity(self, controls: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Copy durable ids + current observation onto control rows. Never mark numbers."""
-        obs = str(getattr(self, "_last_snapshot_id", "") or "").strip()
+        """Copy durable ids onto control rows. Never mark numbers or snapshot UUIDs."""
         out: list[dict[str, Any]] = []
         for row in controls:
             item = dict(row)
             oid = str(item.get("object_id") or item.get("entity_id") or "").strip()
             if oid:
                 item["object_id"] = oid
-            if obs:
-                item.setdefault("snapshot_id", obs)
-                item.setdefault("observation_id", obs)
+            # Snapshot UUIDs would reset suppression/recovery on every rescan.
+            item.pop("snapshot_id", None)
+            item.pop("observation_id", None)
             out.append(item)
         return out
 
@@ -3861,6 +4086,7 @@ class CollectAgent:
         )
         if screen_changed or membership_changed or bounds_moved or not suppression.fingerprint:
             suppression.reset(fingerprint)
+            self._control_noop_recovery().reset()
         self._last_surface_screen = screen
         self._last_surface_membership = current_membership
         prior = list(getattr(self, "_prev_surface_controls", None) or [])
@@ -3911,13 +4137,7 @@ class CollectAgent:
             row = probe
         key = suppression.key_for_row(row, screen=screen, prior_rows=controls)
         count = suppression.record_no_change(fingerprint, key)
-        cid = str(
-            oid
-            or (row.get("object_id") if isinstance(row, dict) else "")
-            or ""
-        ).strip()
-        if cid:
-            self._record_blocked_control_id(cid)
+        suppression.quarantine(key)
         if count >= 2:
             self._maybe_arm_overlay_escape()
 
@@ -4076,7 +4296,7 @@ class CollectAgent:
         self,
         *,
         focus: str = "",
-        detector_candidates: list[dict[str, str]] | None = None,
+        detector_candidates: list[dict[str, Any]] | None = None,
     ) -> str:
         overlay = getattr(self, "_overlay_state", None)
         suppress = None
@@ -4213,6 +4433,28 @@ class CollectAgent:
         self._force_inspect = False
         return list(words), marks, list(gui_marks), ocr_ms + gui_ms
 
+    def _numbered_obs_frame(self, image: Any) -> Any:
+        """Encode a clean frame plus candidate crops so LLM1 sees candidate IDs."""
+        cap = int(getattr(self.fixture, "obs_longest_side", 1280) or 1280)
+        marks = getattr(getattr(self, "_aim", None), "marks", ()) or ()
+        return encode_observe(
+            compose_candidate_image(image, marks),
+            cap=cap,
+            jpeg_quality=90,
+        )
+
+    def _perceive_input_frame(self, obs_frame: Any) -> Any:
+        """Prefer the already-painted numbered frame; never invent a second overlay."""
+        numbered = getattr(self, "_reason_vlm_frames", None)
+        if numbered:
+            return numbered[0]
+        image = getattr(self, "_last_obs_image", None)
+        if image is not None:
+            painted = self._numbered_obs_frame(image)
+            self._reason_vlm_frames = [painted]
+            return painted
+        return obs_frame
+
     def _rescan_scene(self, *, focus: str = "") -> float:
         """Harness-internal LLM1 rescan from the current frame, not the old candidate list."""
         from loop.agent.prompts import two_stage_system_for
@@ -4239,8 +4481,6 @@ class CollectAgent:
         observe = getattr(self.fixture, "observe_image", None)
         image = observe(raw) if callable(observe) else raw
         self._last_obs_image = image
-        cap = int(getattr(self.fixture, "obs_longest_side", 1280) or 1280)
-        frame = encode_observe(image, cap=cap, jpeg_quality=90)
         perceive_system, _ = two_stage_system_for(arm=self.config.arm)
         fresh_ok = False
         try:
@@ -4248,6 +4488,10 @@ class CollectAgent:
             fresh_ok = True
         except Exception:  # noqa: BLE001 — recovery must still call vision
             fresh_ok = False
+        marks = getattr(getattr(self, "_aim", None), "marks", ()) or ()
+        candidate_marks = {f"candidate:{mark.id}": mark for mark in marks}
+        frame = self._numbered_obs_frame(image)
+        self._reason_vlm_frames = [frame]
         candidates = self._detector_candidates() if fresh_ok else []
         detector_labels = [row["label"] for row in candidates if row.get("label")]
         outcome = str(getattr(self, "_last_outcome", None) or "").strip()
@@ -4271,7 +4515,7 @@ class CollectAgent:
         )
         self._remember_perceive_call(call)
         self._capture_perception_audit(desc)
-        reason_controls = self._apply_perceive_scene(desc)
+        reason_controls = self._apply_perceive_scene(desc, candidate_marks=candidate_marks)
         if str(desc.screen or "").strip().lower() == "combat":
             self._cached_perceive_scene = desc
             self._cached_perceive_scene_step = int(self._step_id or 0)
@@ -4380,109 +4624,33 @@ class CollectAgent:
             ))
         return lines
 
-    @staticmethod
-    def _scene_bbox(value: Any) -> tuple[float, float, float, float] | None:
-        if isinstance(value, str):
-            try:
-                values = [float(part.strip()) for part in value.split(",")]
-            except ValueError:
-                return None
-        elif isinstance(value, (list, tuple)):
-            try:
-                values = [float(part) for part in value]
-            except (TypeError, ValueError):
-                return None
-        else:
-            return None
-        if len(values) < 4:
-            return None
-        x0, y0, x1, y1 = values[:4]
-        if max(abs(x0), abs(y0), abs(x1), abs(y1)) > 1.5:
-            x0, y0, x1, y1 = (part / 1000.0 for part in (x0, y0, x1, y1))
-        if x1 <= x0 or y1 <= y0:
-            return None
-        return x0, y0, x1, y1
-
     _PROMOTE_ROLES = frozenset({
         "", "unknown", "icon", "other", "board candidate",
     })
     _CARD_PROMOTE_ROLES = frozenset({"hand candidate"})
 
-    def _llm1_geometry_match(self, mark: AimMark, row: dict[str, Any]) -> bool:
-        bbox = self._scene_bbox(row.get("bbox"))
-        if bbox is None:
-            return False
-        x0, y0, x1, y1 = bbox
-        if x0 <= float(mark.x) <= x1 and y0 <= float(mark.y) <= y1:
-            return True
-        mid_x, mid_y = (x0 + x1) / 2.0, (y0 + y1) / 2.0
-        if float(mark.x0) <= mid_x <= float(mark.x1) and float(mark.y0) <= mid_y <= float(mark.y1):
-            return True
-        return bounds_iou((float(mark.x0), float(mark.y0), float(mark.x1), float(mark.y1)), bbox) >= 0.1
-
-    def _best_geometry_hit(
-        self,
-        hits: list[tuple[int, AimMark]],
-        row: dict[str, Any],
-    ) -> tuple[int, AimMark] | None:
-        if not hits:
+    @staticmethod
+    def _candidate_capture_fingerprint(candidate_marks: dict | None) -> tuple[Any, ...] | None:
+        if not candidate_marks:
             return None
-        if len(hits) == 1:
-            return hits[0]
-        bbox = self._scene_bbox(row.get("bbox"))
-        if bbox is None:
-            return None
-        ranked = sorted(
-            hits,
-            key=lambda item: bounds_iou(
-                (float(item[1].x0), float(item[1].y0), float(item[1].x1), float(item[1].y1)),
-                bbox,
-            ),
-            reverse=True,
+        return tuple(
+            (
+                str(cid),
+                int(getattr(mark, "id", 0) or 0),
+                round(float(getattr(mark, "x0", 0.0) or 0.0), 6),
+                round(float(getattr(mark, "y0", 0.0) or 0.0), 6),
+                round(float(getattr(mark, "x1", 0.0) or 0.0), 6),
+                round(float(getattr(mark, "y1", 0.0) or 0.0), 6),
+            )
+            for cid, mark in sorted(candidate_marks.items(), key=lambda item: str(item[0]))
         )
-        return ranked[0]
 
-    def _llm1_can_promote_card(self, mark: AimMark, row: dict[str, Any]) -> bool:
-        adapter = self._layout_adapter()
-        host = getattr(self, "_host_stats", None) or {}
-        screen = str(host.get("screen") or "combat")
-        if not adapter.enables_hand_card_proposals(screen):
-            return False
-        if paginated_tutorial_active(host_stats=host):
-            return False
-        mark_role = self._surface_key(mark.role)
-        if mark_role not in self._CARD_PROMOTE_ROLES:
-            return False
-        if not in_hand_band(float(mark.x), float(mark.y), layout_adapter=adapter):
-            return False
-        if self._surface_key(mark.label) in {"end turn", "prev", "next", "back"}:
-            return False
-        return self._llm1_geometry_match(mark, row)
-
-    def _llm1_can_promote_enemy(self, mark: AimMark, row: dict[str, Any]) -> bool:
-        adapter = self._layout_adapter()
-        host = getattr(self, "_host_stats", None) or {}
-        screen = str(host.get("screen") or "combat")
-        if not adapter.enables_combat_role_stamps(screen):
-            return False
-        if paginated_tutorial_active(host_stats=host):
-            return False
-        if is_player_row(row):
-            return False
-        if self._surface_key(mark.role) == "player" or self._surface_key(mark.label) == "player":
-            return False
-        if self._surface_key(mark.label) in {"icon", "button"}:
-            return False
-        mark_role = self._surface_key(mark.role)
-        if mark_role not in self._PROMOTE_ROLES:
-            return False
-        if float(mark.y) >= float(getattr(adapter, "hand_y", HAND_Y)):
-            return False
-        if not in_combat_sprite_band(float(mark.y), float(mark.x), layout_adapter=adapter):
-            return False
-        return self._llm1_geometry_match(mark, row)
-
-    def _reconcile_scene_marks(self, scene_desc: Any) -> list[AimMark]:
+    def _reconcile_scene_marks(
+        self,
+        scene_desc: Any,
+        *,
+        candidate_marks: dict | None = None,
+    ) -> list[AimMark]:
         """Ground semantic scene rows onto current-frame marks without inventing targets."""
         if self._aim is None or scene_desc is None:
             return list(self._aim.marks) if self._aim is not None else []
@@ -4494,10 +4662,24 @@ class CollectAgent:
             getattr(scene_desc, "characters", None) or [],
         ):
             rows.extend(row for row in bucket if isinstance(row, dict))
+        id_counts: dict[str, int] = {}
+        for row in rows:
+            cid = str(row.get("candidate_id") or "").strip()
+            if cid:
+                id_counts[cid] = id_counts.get(cid, 0) + 1
         marks = list(self._aim.marks)
         used: set[int] = set()
+        capture_fp = self._candidate_capture_fingerprint(candidate_marks)
+        bound_capture = getattr(self, "_bound_candidate_capture", None)
+        stale_capture = bool(
+            bound_capture is not None
+            and capture_fp is not None
+            and bound_capture[0] == capture_fp
+            and int(bound_capture[1]) != int(self._step_id or 0)
+        )
         generic = {"button", "control", "dialog", "menu", "nav_prev", "nav_next", "next", "prev", "previous"}
         domain = {"card", "enemy", "player", "target", "character", "unknown_character"}
+        self._unresolved_required_geometry = False
         screen = str(
             getattr(scene_desc, "screen", None)
             or (getattr(self, "_host_stats", None) or {}).get("screen")
@@ -4507,6 +4689,10 @@ class CollectAgent:
 
         def compatible(mark: AimMark, row_role: str) -> bool:
             mark_role = self._surface_key(mark.role)
+            if row_role == "map_node":
+                from loop.os.aim import in_map_node_region
+
+                return in_map_node_region(float(mark.x), float(mark.y))
             if row_role in generic:
                 return True  # foreground/generic semantics take precedence
             if row_role in domain:
@@ -4514,6 +4700,8 @@ class CollectAgent:
                 # object, but cannot promote an arbitrary icon/body/text mark
                 # to a card or target.  Promotion here made transient
                 # ``object:N`` rows prompt-visible and later unresolvable.
+                if row_role == "card" and mark_role == "hand candidate":
+                    return True
                 if not mark_role or mark_role in {"unknown", "icon", "other"}:
                     return False
                 if mark_role in generic:
@@ -4530,9 +4718,14 @@ class CollectAgent:
         for row in rows:
             label = str(row.get("label") or row.get("name") or "").strip()
             row_id = str(row.get("entity_id") or row.get("object_id") or row.get("id") or "").strip()
+            candidate_id = str(row.get("candidate_id") or "").strip()
             if is_frame_mark_token(row_id):
                 row_id = ""
             row_role = self._surface_key(row.get("role") or row.get("kind") or "other")
+            if row_role == "other":
+                continue
+            if row_role in generic and str(row.get("confidence") or "high").lower() != "high":
+                continue
             if screen == "reward" and row_role == "card":
                 # Reward offers are choices, not combat hand cards. Treat them
                 # as generic controls so unique-bbox/OCR grounding can bind
@@ -4544,7 +4737,44 @@ class CollectAgent:
                 if index not in used and compatible(mark, row_role)
             ]
             match: tuple[int, AimMark] | None = None
-            if row_id:
+            if candidate_id:
+                # candidate:N is snapshot-local identity. Stamp a copy of the
+                # captured mark; never look up that id in a later _aim list.
+                # Never consult row["bbox"] on this branch.
+                if id_counts.get(candidate_id, 0) != 1 or stale_capture:
+                    if str(row.get("confidence") or "high").lower() == "high":
+                        self._unresolved_required_geometry = True
+                    continue
+                captured = (candidate_marks or {}).get(candidate_id)
+                if captured is None:
+                    if str(row.get("confidence") or "high").lower() == "high":
+                        self._unresolved_required_geometry = True
+                    continue
+                if (
+                    self._surface_key(label) == "back"
+                    and str(self._host_stats.get("activity") or "").strip().lower() == "combat"
+                    and not (
+                        float(getattr(captured, "x", 1.0)) <= 0.12
+                        and float(getattr(captured, "y", 0.0)) >= 0.80
+                    )
+                ):
+                    # In combat the lower-left pile icon is a frequent false
+                    # candidate for Back. Only current Back-corner geometry is
+                    # safe to promote; a real pile overlay can use Escape.
+                    self._unresolved_required_geometry = True
+                    continue
+                captured_id = int(getattr(captured, "id", 0) or 0)
+                index = next(
+                    (i for i, mark in enumerate(marks) if int(mark.id) == captured_id),
+                    -1,
+                )
+                if index < 0:
+                    index = len(marks)
+                    marks.append(captured)
+                else:
+                    marks[index] = captured
+                match = (index, marks[index])
+            if match is None and row_id:
                 exact = [(index, mark) for index, mark in candidates if str(mark.object_id or "") == row_id]
                 if len(exact) == 1:
                     match = exact[0]
@@ -4555,20 +4785,6 @@ class CollectAgent:
                 ]
                 if len(exact) == 1:
                     match = exact[0]
-            if match is None and row_role in generic:
-                # A validated control may be textless in local OCR while the
-                # current frame still has one visual mark for its typed bbox.
-                # Bind only a uniquely-contained current mark; no geometry
-                # may invent a card, enemy, or other domain entity.
-                bbox = self._scene_bbox(row.get("bbox"))
-                if bbox is not None:
-                    x0, y0, x1, y1 = bbox
-                    contained = [
-                        (index, mark) for index, mark in candidates
-                        if x0 <= float(mark.x) <= x1 and y0 <= float(mark.y) <= y1
-                    ]
-                    if len(contained) == 1:
-                        match = contained[0]
             if match is None and row_role in generic and label:
                 # Reward controls often arrive as a model-typed label while
                 # OCR exposes its individual words. Bind only one exact,
@@ -4576,7 +4792,6 @@ class CollectAgent:
                 phrase_key = self._ocr_phrase_key(label)
                 if (
                     screen == "reward"
-                    and self._scene_bbox(row.get("bbox")) is None
                     and len(phrase_key.split()) > 1
                 ):
                     phrase_words = list(getattr(self, "_last_ocr_words", ()) or ())
@@ -4660,35 +4875,28 @@ class CollectAgent:
                         marks.append(mark)
                         match = (index, mark)
                         ocr_bound = True
-            if match is None and row_role == "card":
-                hits = [
-                    (index, mark) for index, mark in enumerate(marks)
-                    if index not in used and self._llm1_can_promote_card(mark, row)
+            if match is not None and screen == "reward" and row_role in generic and label:
+                phrase_matches = [
+                    line for line in self._ocr_phrase_lines(
+                        list(getattr(self, "_last_ocr_words", ()) or ())
+                    )
+                    if self._ocr_phrase_key(line[0]) == self._ocr_phrase_key(label)
                 ]
-                match = self._best_geometry_hit(hits, row)
-            if match is None and row_role in {"enemy", "unknown_character", "character", "target"}:
-                from loop.memory.screen_objects import enemy_like, same_sprite_cluster
-
-                existing_enemies = [other for other in marks if enemy_like(other)]
-                overlap_existing = [
-                    (index, mark) for index, mark in enumerate(marks)
-                    if index not in used
-                    and enemy_like(mark)
-                    and self._llm1_geometry_match(mark, row)
-                ]
-                if overlap_existing:
-                    match = self._best_geometry_hit(overlap_existing, row)
-                else:
-                    hits = [
-                        (index, mark) for index, mark in enumerate(marks)
-                        if index not in used
-                        and self._llm1_can_promote_enemy(mark, row)
-                        and not any(
-                            same_sprite_cluster(mark, other, stacked_duplicates=True)
-                            for other in existing_enemies
-                        )
-                    ]
-                    match = self._best_geometry_hit(hits, row)
+                if len(phrase_matches) == 1:
+                    _, (x0, y0, x1, y1), _ = phrase_matches[0]
+                    index, mark = match
+                    mark = _copy_mark(
+                        mark,
+                        x=(x0 + x1) / 2.0,
+                        y=(y0 + y1) / 2.0,
+                        x0=x0,
+                        y0=y0,
+                        x1=x1,
+                        y1=y1,
+                    )
+                    marks[index] = mark
+                    match = (index, mark)
+                    ocr_bound = True
             if match is None:
                 continue
             index, mark = match
@@ -4734,6 +4942,8 @@ class CollectAgent:
                 source=source,
                 confidence=conf,
             )
+            if candidate_id:
+                continue
         return marks
 
     def _finalize_action_surface(
@@ -4741,6 +4951,7 @@ class CollectAgent:
         scene_desc: Any,
         *,
         informational: list[str] | None = None,
+        candidate_marks: dict | None = None,
     ) -> ActionSurface | None:
         """Build and persist the one canonical executable inventory for this frame."""
         if self._aim is None:
@@ -4753,6 +4964,17 @@ class CollectAgent:
             or self._obs_metrics.get("screen")
             or "other"
         ).strip().lower() or "other"
+        if screen == "map" and getattr(self, "_last_obs_image", None) is not None:
+            from loop.os.sts_stats import selected_map_tool
+
+            self._host_stats["map_tool"] = selected_map_tool(self._last_obs_image)
+        else:
+            self._host_stats.pop("map_tool", None)
+        overlays = list(getattr(scene_desc, "overlays_active", None) or []) if scene_desc is not None else []
+        if overlays:
+            self._host_stats["overlays_active"] = overlays
+        else:
+            self._host_stats.pop("overlays_active", None)
         activity = self.fixture.resolve_activity(
             metrics=self._obs_metrics,
             host_stats=self._host_stats,
@@ -4761,8 +4983,10 @@ class CollectAgent:
         dimmed = False
         if activity == "combat":
             dimmed = overlay_looks_dimmed(getattr(self, "_last_obs_image", None))
-            if dimmed and not isinstance(self._host_stats.get("blocking_overlay"), bool):
+            if dimmed:
                 self._host_stats["blocking_overlay"] = True
+            else:
+                self._host_stats.pop("blocking_overlay", None)
         overlay = getattr(self, "_overlay_state", None)
         if overlay is not None and scene_desc is not None:
             dialog_raw = getattr(scene_desc, "dialog", None)
@@ -4797,17 +5021,26 @@ class CollectAgent:
                 ):
                     scene_desc.screen = host_screen
                     screen = host_screen
-        reconciled = self._reconcile_scene_marks(scene_desc)
+        if screen == "combat" and scene_desc is not None:
+            controls = getattr(scene_desc, "controls", None) or []
+            if isinstance(controls, list):
+                scene_desc.controls = [
+                    row for row in controls
+                    if not isinstance(row, dict)
+                    or str(row.get("role") or "").strip().lower() != "card"
+                ]
+        reconciled = self._reconcile_scene_marks(scene_desc, candidate_marks=candidate_marks)
+        reconciled = self._enrich_reconciled_marks(scene_desc, reconciled)
         from loop.memory.screen_objects import (
             _context_host_enemy_count,
             _prefer_target_row,
             collapse_same_sprite_cluster,
-            enemy_like,
+            sprite_like,
         )
 
         reconciled = collapse_same_sprite_cluster(
             reconciled,
-            is_candidate=enemy_like,
+            is_candidate=sprite_like,
             prefer=_prefer_target_row,
             host_enemies=_context_host_enemy_count(self._host_stats),
             stacked_duplicates=True,
@@ -4837,7 +5070,7 @@ class CollectAgent:
             host_stats=self._host_stats,
             informational=informational,
         )
-        stamped = self._screen_objects.save_frame(
+        self._screen_objects.save_frame(
             run_id=self.session_id,
             step_id=int(self._step_id or 0),
             marks=enriched,
@@ -4846,28 +5079,55 @@ class CollectAgent:
             context=surface.context,
             surface=surface,
         )
-        surface = build_action_surface(
-            stamped,
-            run_id=self.session_id,
-            step_id=int(self._step_id or 0),
-            screen=screen,
-            activity=activity,
-            layout=surface.context.layout,
-            blocking_overlay=surface.context.blocking_overlay,
-            host_stats=self._host_stats,
-            informational=informational,
-        )
-        self._aim = AimGuide.from_marks(
-            self._last_obs_image if self._last_obs_image is not None else self._aim.image,
-            stamped,
-            last_xy=self._aim.last_xy,
-        )
+        capture_fp = self._candidate_capture_fingerprint(candidate_marks)
+        if capture_fp is not None:
+            self._bound_candidate_capture = (capture_fp, int(self._step_id or 0))
         self._action_surface = surface
         self._frame_model = surface.frame_model()
         escape = getattr(self, "_overlay_escape", None)
         if escape is not None and not surface.context.blocking_overlay and not dimmed:
             escape.reset()
         return surface
+
+    def _enemy_cardinality_counts(self, snapshot: TurnSnapshot, scene_desc: Any) -> tuple[int, int, int, int | None]:
+        perceived = 0
+        if scene_desc is not None:
+            for bucket in (
+                getattr(scene_desc, "enemies", None) or [],
+                getattr(scene_desc, "characters", None) or [],
+            ):
+                for row in bucket:
+                    if isinstance(row, dict) and is_enemy_discovery_row(row):
+                        perceived += 1
+        tracker = getattr(self, "_entity_tracker", None)
+        tracked = 0
+        if tracker is not None:
+            tracked = sum(1 for ent in tracker.entities if ent.last_seen_cycle == tracker._cycle)
+        published = len(getattr(snapshot, "targets", ()) or ())
+        host_hp = _host_enemy_count(getattr(self, "_host_stats", None))
+        return perceived, tracked, published, host_hp
+
+    def _recover_enemy_cardinality(self, snapshot: TurnSnapshot, scene_desc: Any) -> TurnSnapshot:
+        """One rebuild when published targets are fewer than grounded enemy bodies."""
+        if not self._combat_screen_now() or getattr(self, "_enemy_cardinality_rebuilt", False):
+            return snapshot
+        surface = getattr(self, "_action_surface", None)
+        if bool(getattr(getattr(surface, "context", None), "blocking_overlay", False)):
+            return snapshot
+        perceived, tracked, published, host_hp = self._enemy_cardinality_counts(snapshot, scene_desc)
+        grounded = max(perceived, tracked)
+        if published >= grounded:
+            return snapshot
+        self._enemy_cardinality_rebuilt = True
+        _combat_trace(
+            "CARDINALITY",
+            f"enemy_cardinality: perceived={perceived} tracked={tracked} published={published} host_hp={host_hp}",
+        )
+        _combat_trace("CARDINALITY", "recovery_reason: published-target-deficit")
+        if scene_desc is not None:
+            self._finalize_action_surface(scene_desc)
+            snapshot = self._build_turn_snapshot(scene_desc)
+        return snapshot
 
     def _reason_controls_from_surface(self, scene_desc: Any) -> list[dict[str, Any]]:
         surface = self._action_surface
@@ -4901,6 +5161,40 @@ class CollectAgent:
         )
         self._persist_verified_tutorial_rules()
         return self._game_state
+
+    def _game_state_contradicts_surface(self) -> bool:
+        """True when GameState still authorizes combat while the surface does not."""
+        surface = getattr(self, "_action_surface", None)
+        state = getattr(self, "_game_state", None)
+        if surface is None or state is None:
+            return False
+        kinds = {
+            str(getattr(action, "kind", "") or "")
+            for action in (getattr(state, "legal_actions", ()) or ())
+        }
+        if not (kinds & {"play_card", "select_card", "end_turn"}):
+            return False
+        ctx = getattr(surface, "context", None)
+        if ctx is None:
+            return False
+        if bool(getattr(ctx, "blocking_overlay", False)):
+            return False
+        return str(getattr(ctx, "screen", "") or "") in {"reward", "map", "loot"}
+
+    def _maybe_rescan_contradictory_game_state(self) -> bool:
+        """Reject ACT once and rescan. GameState never becomes a second legal list."""
+        if not self._game_state_contradicts_surface():
+            return False
+        if getattr(self, "_surface_contradiction_rescanned", False):
+            return False
+        self._surface_contradiction_rescanned = True
+        self._pending_exec_error = "surface-state-contradiction"
+        self._force_perceive = True
+        try:
+            self._rescan_scene(focus="surface-state-contradiction")
+        except Exception:
+            pass
+        return True
 
     def _state_prompt_block(self) -> str:
         state = self._game_state
@@ -4998,10 +5292,10 @@ class CollectAgent:
         if rules:
             self.semantic_memory.save()
 
-    def _ground_aim_from_scene(self, scene_desc: Any) -> None:
-        """Materialize LLM1 controls onto aim marks (combat targets/cards, map nodes)."""
-        if self._aim is None or scene_desc is None:
-            return
+    def _enrich_reconciled_marks(self, scene_desc: Any, marks: list[AimMark]) -> list[AimMark]:
+        """Stamp combat/map labels onto reconciled geometry. Does not publish."""
+        if scene_desc is None:
+            return marks
         controls = getattr(scene_desc, "controls", None) or []
         screen = str(
             getattr(scene_desc, "screen", None)
@@ -5009,17 +5303,14 @@ class CollectAgent:
             or self._obs_metrics.get("screen")
             or ""
         ).strip() or None
-        before = list(self._aim.marks)
-        grounded = before
+        grounded = list(marks)
         screen_key = (screen or "").strip().lower()
-
-        _DISCOVERY_ROLES = frozenset({"enemy", "unknown_character", "character"})
-
+        discovery_roles = frozenset({"enemy", "unknown_character", "character"})
         enemies = [
             str(row.get("label") or "").strip()
             for row in controls
             if isinstance(row, dict)
-            and str(row.get("role") or "") in _DISCOVERY_ROLES
+            and str(row.get("role") or "") in discovery_roles
             and not is_player_row(row)
         ]
         typed_enemies = getattr(scene_desc, "enemies", None) or []
@@ -5051,43 +5342,19 @@ class CollectAgent:
                 hand=None,
                 screen=screen,
             )
-        hand_grounded = apply_hand_bboxes(grounded, typed_hand)
-        if hand_grounded != grounded:
-            grounded = hand_grounded
+        if not hand_names and typed_hand:
+            hand_names = [
+                str(row.get("label") or "").strip()
+                for row in typed_hand
+                if isinstance(row, dict) and str(row.get("label") or "").strip()
+            ]
         if hand_names:
-            # Legacy name-only hand data may rename a verified placeholder,
-            # but _claimable_hand_slot forbids it from creating/promoting one.
             grounded = ground_combat_labels(
                 grounded, enemies=None, hand=hand_names, screen=screen,
             )
-        enemy_rows = list(typed_enemies) + list(typed_characters) + [
-            row for row in controls
-            if isinstance(row, dict) and str(row.get("role") or "") in _DISCOVERY_ROLES
-        ]
-        player_rows: list[dict[str, Any]] = []
-        hostile_rows: list[dict[str, Any]] = []
-        for row in enemy_rows:
-            if not isinstance(row, dict):
-                continue
-            if is_player_row(row):
-                stamped = dict(row)
-                stamped["label"] = player_display_label(str(stamped.get("label") or ""))
-                stamped["role"] = "player"
-                player_rows.append(stamped)
-            else:
-                hostile_rows.append(row)
-        bbox_grounded = apply_enemy_bboxes(grounded, hostile_rows)
-        if player_rows:
-            bbox_grounded = apply_enemy_bboxes(bbox_grounded, player_rows, role="player")
-        if bbox_grounded != grounded:
-            grounded = bbox_grounded
         if screen_key == "map":
             grounded = ground_spatial_labels(grounded, controls, screen=screen)
-
-        # Typed hand rows own cardinality and geometry. OCR can sharpen the
-        # name of a row that apply_hand_bboxes actually bound, but it cannot
-        # add another executable card through the redundant controls list.
-        if screen_key == "combat":
+        if screen_key == "combat" and typed_hand:
             by_id = {
                 str(mark.object_id or ""): mark
                 for mark in grounded
@@ -5098,13 +5365,10 @@ class CollectAgent:
                 if not isinstance(row, dict):
                     continue
                 patched = dict(row)
-                row_id = str(
-                    row.get("entity_id") or row.get("id") or f"card_{index}"
-                )
+                row_id = str(row.get("entity_id") or row.get("id") or f"card_{index}")
                 mark = by_id.get(row_id)
                 compact = " ".join(
-                    str(getattr(mark, "label", "") or "")
-                    .lower().replace("_", " ").split()
+                    str(getattr(mark, "label", "") or "").lower().replace("_", " ").split()
                 )
                 if mark is not None and compact not in {
                     "", "unknown", "unknown card", "icon", "card",
@@ -5117,46 +5381,14 @@ class CollectAgent:
                     })
                 patched_hand.append(patched)
             scene_desc.hand_cards = patched_hand
-            scene_desc.controls = [
-                row for row in controls
-                if not isinstance(row, dict)
-                or str(row.get("role") or "").strip().lower() != "card"
-            ]
-
-        if grounded == before:
-            return
-        before_labels = {
-            " ".join(str(m.label or "").lower().split())
-            for m in before
-            if (m.label or "").strip()
-        }
-        added = [
-            m.label
-            for m in grounded
-            if (m.label or "").strip()
-            and " ".join(m.label.lower().split()) not in before_labels
-        ]
-        image = self._last_obs_image if self._last_obs_image is not None else self._aim.image
-        step_id = int(self._step_id or 0)
-        if step_id > 0:
-            stamped = self._screen_objects.save_frame(
-                run_id=self.session_id,
-                step_id=step_id,
-                marks=grounded,
-                screen=screen,
-                source="llm1",
-            )
-            self._aim = AimGuide.from_marks(image, stamped, last_xy=self._aim.last_xy)
-        else:
-            self._aim = AimGuide.from_marks(image, grounded, last_xy=self._aim.last_xy)
-        if added:
-            _say(f"  aim      grounded {', '.join(added[:6])}")
+        return grounded
 
     def _apply_perceive_scene(
         self,
         scene_desc: Any,
         *,
         detector_rows: list[dict[str, Any]] | None = None,
+        candidate_marks: dict | None = None,
     ) -> list[dict[str, Any]]:
         """Post-LLM1: ground combat/map labels, frame model."""
         self._scene_desc = scene_desc
@@ -5196,11 +5428,11 @@ class CollectAgent:
             if reconciled != str(scene_desc.screen or ""):
                 scene_desc.screen = reconciled
         self._last_scene = scene_desc.as_text() or scene_desc.scene
-        self._ground_aim_from_scene(scene_desc)
         if getattr(getattr(self, "fixture", None), "id", "") == "sts2":
             self._finalize_action_surface(
                 scene_desc,
                 informational=scene_desc.informational_text(),
+                candidate_marks=candidate_marks,
             )
             reason_controls = self._reason_controls_from_surface(scene_desc)
             self._reason_controls = reason_controls
@@ -5235,82 +5467,114 @@ class CollectAgent:
         return getattr(value, "value", value)
 
     @staticmethod
-    def _prefer_published_target(kept: TargetSnapshot, challenger: TargetSnapshot) -> TargetSnapshot:
-        kept_e1 = str(kept.target_id or "").strip().lower() == "enemy_1"
-        chall_e1 = str(challenger.target_id or "").strip().lower() == "enemy_1"
-        if kept_e1 != chall_e1:
-            return kept if kept_e1 else challenger
+    def _knowledge_name(value: Any) -> str:
+        return " ".join(str(value or "").casefold().replace("_", " ").split())
 
-        def identified(name: str | None) -> bool:
-            raw = str(name or "").strip()
-            if not raw:
-                return False
-            compact = " ".join(raw.lower().replace("_", " ").split())
-            if compact.startswith("unknown"):
-                return False
-            return not is_anonymous_enemy_label(raw)
+    def _knowledge_for_snapshot(self, snapshot: TurnSnapshot) -> tuple[KnowledgeSnapshot, ...]:
+        """Recall only after current-frame truth has produced a typed snapshot."""
+        if not self.config.knowledge or self.knowledge is None or self.config.skip_models:
+            return ()
+        entities = tuple(dict.fromkeys(
+            name for name in (
+                *(self._knowledge_name(card.name) for card in snapshot.cards),
+                *(self._knowledge_name(target.name) for target in snapshot.targets),
+                *(self._knowledge_name(control.label) for control in snapshot.controls),
+                *(self._knowledge_name(control.control_id) for control in snapshot.controls),
+                *(self._knowledge_name(overlay) for overlay in snapshot.overlays),
+            ) if name and not name.startswith("unknown")
+        ))
+        activity_raw = getattr(getattr(self, "_game_state", None), "underlying_activity", "")
+        activity = self._knowledge_name(getattr(activity_raw, "value", activity_raw))
+        signature = (self._knowledge_name(snapshot.screen), activity, entities)
+        failure = getattr(self, "_last_execution_failure", None) or {}
+        failure_key = self._knowledge_name(
+            failure.get("code") or failure.get("error") or failure.get("transaction_outcome")
+        )
+        if failure_key and failure_key == self._knowledge_failure_key:
+            self._knowledge_failure_count += 1
+        elif failure_key:
+            self._knowledge_failure_key = failure_key
+            self._knowledge_failure_count = 1
+        else:
+            self._knowledge_failure_key = ""
+            self._knowledge_failure_count = 0
+        repeated_failure = bool(failure_key and self._knowledge_failure_count >= 2)
+        actionable = bool(legal_intents_for_snapshot(snapshot))
+        should_recall = bool(
+            (actionable and not self._knowledge_actionable_seen)
+            or (self._knowledge_signature is not None and signature != self._knowledge_signature)
+            or repeated_failure
+        )
+        self._knowledge_actionable_seen = self._knowledge_actionable_seen or actionable
+        self._knowledge_signature = signature
+        if not should_recall:
+            self._knowledge_metrics = {
+                "queried": False, "reused_last": True, "hits": len(self._knowledge_hits),
+                "embedding_ms": 0.0, "hybrid_search_ms": 0.0,
+                "retrieval_backend": "last_encounter",
+            }
+            return self._knowledge_snapshots(self._knowledge_hits)
+        query = "; ".join(part for part in (
+            f"screen {signature[0]}" if signature[0] else "",
+            f"activity {activity}" if activity else "",
+            f"entities {', '.join(entities)}" if entities else "",
+            f"repeated failure {failure_key}" if repeated_failure else "",
+        ) if part)
+        cache_key = (self.knowledge.game_id, self._knowledge_name(query), entities, ())
+        started = time.perf_counter()
+        try:
+            if cache_key in self._knowledge_cache:
+                hits = self._knowledge_cache[cache_key]
+                cache_hit = True
+            else:
+                hits = tuple(self.knowledge.recall(query, entities=entities, limit=3))
+                self._knowledge_cache[cache_key] = hits
+                while len(self._knowledge_cache) > 32:
+                    self._knowledge_cache.pop(next(iter(self._knowledge_cache)))
+                cache_hit = False
+            self._knowledge_hits = tuple(hits[:3])
+            self._knowledge_metrics = {
+                "queried": True, "cache_hit": cache_hit, "hits": len(self._knowledge_hits),
+                "recall_ms": (time.perf_counter() - started) * 1000,
+            }
+            store_metrics = getattr(self.knowledge, "last_recall_metrics", None)
+            if cache_hit:
+                self._knowledge_metrics.update({
+                    "embedding_ms": 0.0, "hybrid_search_ms": 0.0,
+                    "retrieval_backend": "episode_cache",
+                })
+            elif isinstance(store_metrics, dict):
+                self._knowledge_metrics.update(store_metrics)
+        except Exception as exc:  # Recall is advisory and must never block gameplay.
+            self._knowledge_hits = ()
+            self._knowledge_metrics = {
+                "queried": True, "failure": f"{type(exc).__name__}:{str(exc)[:200]}",
+                "recall_ms": (time.perf_counter() - started) * 1000,
+            }
+        return self._knowledge_snapshots(self._knowledge_hits)
 
-        kept_named = identified(kept.name)
-        chall_named = identified(challenger.name)
-        if kept_named != chall_named:
-            return kept if kept_named else challenger
-
-        def conf(row: TargetSnapshot) -> float:
-            value = row.identity_confidence
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                return -1.0
-            return float(value)
-
-        kept_c = conf(kept)
-        chall_c = conf(challenger)
-        if chall_c != kept_c:
-            return challenger if chall_c > kept_c else kept
-        return kept
-
-    @classmethod
-    def _merge_published_target(
-        cls,
-        kept: TargetSnapshot,
-        challenger: TargetSnapshot,
-    ) -> TargetSnapshot:
-        """Collapse two rows of one sprite, keeping the better id and the better name.
-
-        The executable id wins on ``enemy_1`` precedence, but an anonymous winner
-        still adopts the identity and stats of the row it absorbed: at
-        20260908T194352Z step 11 the unnamed HP plate sorted ahead of the named
-        Nibbit body, and publishing "unknown enemy" would have thrown away a
-        resolved identity.
-        """
-        winner = cls._prefer_published_target(kept, challenger)
-        loser = challenger if winner is kept else kept
-
-        def identified(row: TargetSnapshot) -> bool:
-            raw = str(row.name or "").strip()
-            if not raw:
-                return False
-            compact = " ".join(raw.lower().replace("_", " ").split())
-            return not compact.startswith("unknown") and not is_anonymous_enemy_label(raw)
-
-        updates: dict[str, Any] = {}
-        if not identified(winner) and identified(loser):
-            updates["name"] = loser.name
-            updates["identity_confidence"] = loser.identity_confidence
-        if winner.hp is None and loser.hp is not None:
-            updates["hp"] = loser.hp
-        if winner.intent is None and loser.intent is not None:
-            updates["intent"] = loser.intent
-        return replace(winner, **updates) if updates else winner
+    @staticmethod
+    def _knowledge_snapshots(hits: Sequence[Any]) -> tuple[KnowledgeSnapshot, ...]:
+        return tuple(
+            KnowledgeSnapshot(
+                memory_id=str(getattr(hit, "memory_id", getattr(hit, "id", ""))),
+                text=str(getattr(hit, "text", "")),
+                memory_type=str(getattr(hit, "type", "fact")),
+                confidence=float(getattr(hit, "confidence", 0.0)),
+                status=str(getattr(hit, "status", "hypothesis")),
+                entities=tuple(getattr(hit, "entities", ()) or ()),
+            )
+            for hit in hits[:3]
+            if str(getattr(hit, "memory_id", getattr(hit, "id", "")))
+        )
 
     def _build_turn_snapshot(self, scene_desc: Any) -> TurnSnapshot:
-        """Freeze the current typed object inventory for one v2 ACT call."""
+        """ACT inventory is the published ActionSurface plus resource enrichment."""
+        from types import SimpleNamespace
+
         from loop.mcp.tools.targeting import bind_snapshot_target_ids
 
         surface = getattr(self, "_action_surface", None)
-        if surface is not None:
-            snapshot_id = surface.snapshot_id
-        else:
-            identity = current_snapshot_identity(self._screen_objects)
-            snapshot_id = str(identity["snapshot_id"])
         instance_rows: list[dict[str, Any]] = []
         if scene_desc is not None:
             for bucket in (
@@ -5333,7 +5597,7 @@ class CollectAgent:
             instance_rows,
             entity_targets_ok=self._combat_screen_now(),
         )
-        game_state = self._game_state
+        game_state = getattr(self, "_game_state", None)
         player = getattr(game_state, "player", None)
         host_player = self._host_stats.get("player") or {}
 
@@ -5345,175 +5609,119 @@ class CollectAgent:
                 raw = host_player.get(name)
             return int(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) else None
 
-        energy = _resource("energy")
-        cards: list[CardSnapshot] = []
-        targets: list[TargetSnapshot] = []
-        controls: list[ControlSnapshot] = []
-        self._v2_control_objects = {}
-        hand_states = list(getattr(game_state, "hand", ()) or ())
-        enemy_states = list(getattr(game_state, "enemies", ()) or ())
-        scene_cards = [
-            row for row in list(getattr(scene_desc, "hand_cards", None) or [])
-            if isinstance(row, dict)
-        ]
-
-        def _norm(value: Any) -> str:
-            return " ".join(str(value or "").lower().replace("_", " ").split())
-
-        def _matching(items: list[Any], obj: Any, *, name_field: str) -> Any | None:
-            oid = str(obj.object_id or "")
-            exact = next((row for row in items if str(getattr(row, "id", "")) == oid), None)
-            if exact is not None:
-                return exact
-            label = _norm(obj.label)
-            named = [
-                row for row in items
-                if _norm(self._field_value(getattr(row, name_field, None))) == label
-            ]
-            if len(named) == 1:
-                return named[0]
-            best: tuple[float, Any] | None = None
-            for row in items:
-                bbox = self._field_value(getattr(row, "bbox", None))
-                if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
-                    continue
-                cx = (float(bbox[0]) + float(bbox[2])) / 2
-                cy = (float(bbox[1]) + float(bbox[3])) / 2
-                dist = (cx - obj.x) ** 2 + (cy - obj.y) ** 2
-                if best is None or dist < best[0]:
-                    best = (dist, row)
-            return best[1] if best is not None and best[0] <= 0.16 * 0.16 else None
-
-        control_counts: dict[str, int] = {}
-        dropped_noncanonical = 0
-        for obj in self._screen_objects.objects:
-            # A finalized surface has already applied generic precedence and
-            # fixture policy.  Reclassifying persisted objects here recreated
-            # the old card-band split brain.
-            role = str(obj.role or "").strip().lower()
-            if surface is None:
-                role = object_role(obj, entity_targets_ok=self._combat_screen_now())
-            bbox = BoundingBox(obj.x0, obj.y0, obj.x1, obj.y1)
-            if role in {"card", "enemy"}:
-                object_id = str(obj.object_id or "").strip()
-                if (
-                    not object_id
-                    or is_prompt_instance_id(object_id)
-                    or is_mark_derived_object_id(object_id)
-                ):
-                    # Mark-derived / prompt ids are not executable. Count and skip;
-                    # 1a/1b should have rewritten these before the store freeze.
-                    dropped_noncanonical += 1
-                    continue
-            if role == "card":
-                state = _matching(hand_states, obj, name_field="name")
-                detail = next((
-                    row for row in scene_cards
-                    if str(row.get("entity_id") or row.get("id") or "") == str(obj.object_id)
-                ), None)
-                # The ActionSurface/store object is the sole authority for a
-                # prompt-facing card's identity and visible name.  Perception
-                # and state rows can supply optional metadata below, but may
-                # not relabel a canonical object: their independently ordered
-                # duplicate-card lists otherwise turn e.g. ``card_3`` from a
-                # displayed Strike into a dispatched Defend.
-                detail = detail or {}
-                card_name = str(obj.label or "").strip() or None
-                cost = self._field_value(getattr(state, "cost", None)) if state is not None else None
-                playable = self._field_value(getattr(state, "playable", None)) if state is not None else None
-                if playable is None:
-                    playable = True
-                if isinstance(cost, (int, float)) and energy is not None and int(cost) > energy:
-                    playable = False
-                if self._source_is_blocked(str(obj.object_id), float(obj.x), float(obj.y)):
-                    playable = False
-                cards.append(CardSnapshot(
-                    card_id=str(obj.object_id), name=card_name, bbox=bbox,
-                    playable=bool(playable),
-                    description=str(detail.get("description") or "").strip() or None,
-                    card_type=str(detail.get("type") or detail.get("card_type") or "").strip() or None,
-                    cost=int(cost) if isinstance(cost, (int, float)) else None,
-                ))
-            elif role == "enemy":
-                target_id = str(obj.object_id or "").strip()
-                state = _matching(enemy_states, obj, name_field="label")
-                hp = self._field_value(getattr(state, "hp", None)) if state is not None else None
-                intent = self._field_value(getattr(state, "intent", None)) if state is not None else None
-                confidence = getattr(getattr(state, "label", None), "confidence", None) if state is not None else obj.confidence
-                raw_target_name = (
-                    self._field_value(getattr(state, "label", None)) if state is not None else obj.label
-                )
-                target_name = str(raw_target_name or "").strip()
-                compact_target = _norm(target_name)
-                if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
-                    identity_confidence = None
-                else:
-                    number = float(confidence)
-                    identity_confidence = number if 0.0 <= number <= 1.0 else None
-                if (
-                    is_anonymous_enemy_label(target_name)
-                    or any(phrase in compact_target for phrase in (
-                        "deal ", " damage", "gain ", " block", "draw ", "exhaust",
-                    ))
-                ):
-                    target_name = "unknown enemy"
-                    if identity_confidence is None or identity_confidence >= 0.75:
-                        identity_confidence = 0.35
-                if self._target_is_blocked(target_id, snapshot_id=snapshot_id):
-                    continue
-                targets.append(TargetSnapshot(
-                    target_id=target_id, bbox=bbox, name=target_name or None,
-                    hp=int(hp) if isinstance(hp, (int, float)) else None,
-                    intent=str(intent) if intent is not None else None,
-                    identity_confidence=identity_confidence,
-                ))
-            elif role in {"button", "control", "nav_prev", "nav_next"}:
-                slug = "_".join(_norm(obj.label).split()) or "control"
-                control_counts[slug] = control_counts.get(slug, 0) + 1
-                suffix = f"_{control_counts[slug]}" if control_counts[slug] > 1 else ""
-                control_id = str(obj.object_id or f"control:{slug}{suffix}")
-                if self._control_is_blocked(control_id):
-                    continue
-                self._v2_control_objects[control_id] = obj
-                controls.append(ControlSnapshot(control_id, obj.label or slug, bbox, role=role))
-            object_id = str(obj.object_id or "").strip()
-            if (
-                object_id
-                and not is_prompt_instance_id(object_id)
-                and not is_mark_derived_object_id(object_id)
-            ):
-                self._v2_control_objects.setdefault(object_id, obj)
-
-        self._snapshot_dropped_noncanonical = dropped_noncanonical
-        if dropped_noncanonical:
-            _say(f"  snapshot  dropped_noncanonical={dropped_noncanonical}")
-        targets = collapse_same_sprite_cluster(
-            targets,
-            is_candidate=lambda _row: True,
-            prefer=self._merge_published_target,
-            host_enemies=_host_enemy_count(self._host_stats),
-            stacked_duplicates=True,
-        )
-        targets = collapse_duplicate_named_targets(
-            targets,
-            prefer=self._merge_published_target,
-            host_enemies=_host_enemy_count(self._host_stats),
-        )
         turn = self._field_value(getattr(game_state, "turn", None)) if game_state is not None else None
         if turn is None:
             turn = self._host_stats.get("turn")
-        return TurnSnapshot(
-            snapshot_id=snapshot_id,
-            screen=(
-                surface.context.screen if surface is not None
-                else str(getattr(scene_desc, "screen", None) or self._host_stats.get("screen") or "other")
-            ),
+        if surface is None:
+            identity = current_snapshot_identity(self._screen_objects)
+            published: Any = SimpleNamespace(
+                snapshot_id=str(identity["snapshot_id"]),
+                objects=tuple(self._screen_objects.objects),
+                legal_intents=None,
+                context=SimpleNamespace(
+                    screen=str(
+                        getattr(scene_desc, "screen", None)
+                        or self._host_stats.get("screen")
+                        or "other"
+                    ),
+                    overlay="",
+                ),
+            )
+        else:
+            published = surface
+        snapshot = TurnSnapshot.from_action_surface(
+            published,
             turn=str(turn) if turn is not None else None,
-            hp=_resource("hp"), block=_resource("block"), energy=energy,
-            cards=tuple(cards), targets=tuple(targets), controls=tuple(controls),
-            legal_intents=(surface.legal_intents if surface is not None else None),
-            last_execution=self._last_execution_failure,
+            hp=_resource("hp"),
+            block=_resource("block"),
+            energy=_resource("energy"),
+            last_execution=getattr(self, "_last_execution_failure", None),
         )
+        snapshot_id = snapshot.snapshot_id
+        cards: list[CardSnapshot] = []
+        for card in snapshot.cards:
+            if not self._canonical_act_id(card.card_id):
+                continue
+            playable = card.playable
+            cx = (card.bbox.x0 + card.bbox.x1) * 0.5
+            cy = (card.bbox.y0 + card.bbox.y1) * 0.5
+            if self._source_is_blocked(card.card_id, cx, cy):
+                playable = False
+            cards.append(card if playable == card.playable else replace(card, playable=False))
+        host_enemies = list((self._host_stats or {}).get("enemies") or [])
+        targets: list[TargetSnapshot] = []
+        for target in attach_host_enemy_stats(snapshot.targets, host_enemies):
+            if not self._canonical_act_id(target.target_id):
+                continue
+            if self._target_is_blocked(target.target_id, snapshot_id=snapshot_id):
+                continue
+            name = str(target.name or "").strip()
+            compact = " ".join(name.lower().replace("_", " ").split())
+            confidence = target.identity_confidence
+            if (
+                is_anonymous_enemy_label(name)
+                or any(phrase in compact for phrase in (
+                    "deal ", " damage", "gain ", " block", "draw ", "exhaust",
+                ))
+            ):
+                name = "unknown enemy"
+                if confidence is None or confidence >= 0.75:
+                    confidence = 0.35
+            if name != str(target.name or "").strip() or confidence != target.identity_confidence:
+                target = replace(target, name=name or None, identity_confidence=confidence)
+            targets.append(target)
+        controls = tuple(
+            control for control in snapshot.controls
+            if control.control_id and not self._control_is_blocked(
+                control.control_id, control=control,
+            )
+        )
+        snapshot = replace(
+            snapshot,
+            cards=tuple(cards),
+            targets=with_target_positions(targets),
+            controls=controls,
+        )
+        self._v2_control_objects = {}
+        store = getattr(self, "_screen_objects", None)
+        source_objects = tuple(surface.objects) if surface is not None else tuple(getattr(store, "objects", ()) or ())
+        for obj in source_objects:
+            oid = str(getattr(obj, "object_id", "") or "").strip()
+            if not oid:
+                continue
+            if surface is not None and surface.object_by_id(oid) is None:
+                continue
+            role = str(getattr(obj, "role", "") or "").strip().lower()
+            if role in {"card", "enemy"} and not self._canonical_act_id(oid):
+                continue
+            self._v2_control_objects[oid] = obj
+        dropped = 0
+        kept = {card.card_id for card in snapshot.cards} | {target.target_id for target in snapshot.targets}
+        for obj in tuple(getattr(store, "objects", ()) or ()):
+            role = str(obj.role or "").strip().lower()
+            if role not in {"card", "enemy"}:
+                continue
+            oid = str(obj.object_id or "").strip()
+            if oid in kept:
+                continue
+            if not oid or is_prompt_instance_id(oid) or is_mark_derived_object_id(oid):
+                dropped += 1
+        self._snapshot_dropped_noncanonical = dropped
+        if dropped:
+            _say(f"  snapshot  dropped_noncanonical={dropped}")
+        config = getattr(self, "config", None)
+        knowledge = getattr(self, "knowledge", None)
+        if (
+            bool(getattr(config, "knowledge", False)) and knowledge is not None
+            and not bool(getattr(config, "skip_models", False))
+        ):
+            snapshot = replace(snapshot, knowledge=self._knowledge_for_snapshot(snapshot))
+        return snapshot
+
+    @staticmethod
+    def _canonical_act_id(object_id: str) -> bool:
+        oid = str(object_id or "").strip()
+        return bool(oid) and not is_prompt_instance_id(oid) and not is_mark_derived_object_id(oid)
 
     def _is_transition_observation(self) -> bool:
         """True for empty, dark, or moving hud-off frames that are not a playable surface."""
@@ -5590,19 +5798,107 @@ class CollectAgent:
         kinds = {str(row.get("kind") or "") for row in legal_intents}
         return bool(kinds & {"play_card", "end_turn"})
 
+    def _map_tool_active(self) -> bool:
+        surface = getattr(self, "_action_surface", None)
+        tool = getattr(getattr(surface, "context", None), "map_tool", None)
+        if tool:
+            return True
+        return bool((getattr(self, "_host_stats", None) or {}).get("map_tool"))
+
+    def _click_map_annotation_tool(self, obj: Any) -> None:
+        x = (float(obj.x0) + float(obj.x1)) * 0.5
+        y = (float(obj.y0) + float(obj.y1)) * 0.5
+        if x <= 0.0 and y <= 0.0:
+            x, y = float(obj.x), float(obj.y)
+        self.fixture.execute_chord(
+            ActionLog(name="exit_map_annotation_mode", click_x=x, click_y=y),
+            settle=True,
+        )
+
+    def _recapture_map_tool(self) -> str | None:
+        from loop.os.sts_stats import selected_map_tool
+
+        try:
+            raw = self.fixture.grab_image()
+            self._last_raw_obs_image = raw
+            observe = getattr(self.fixture, "observe_image", None)
+            view = observe(raw) if callable(observe) else raw
+            self._last_obs_image = view
+        except Exception:  # noqa: BLE001 — recovery must fail closed
+            view = getattr(self, "_last_obs_image", None)
+        if view is None:
+            return str((getattr(self, "_host_stats", None) or {}).get("map_tool") or "") or None
+        tool = selected_map_tool(view)
+        self._host_stats["map_tool"] = tool
+        return tool
+
+    def _maybe_exit_map_annotation_mode(self) -> str | None:
+        """Deselect a live map tool before ACT. None continues; an error code skips ACT."""
+        surface = getattr(self, "_action_surface", None)
+        tool = getattr(getattr(surface, "context", None), "map_tool", None)
+        if not tool:
+            tool = (getattr(self, "_host_stats", None) or {}).get("map_tool")
+        if not tool:
+            self._map_tool_exit_key = None
+            return None
+        screen = str(getattr(getattr(surface, "context", None), "screen", "") or "map")
+        key = (screen, str(tool))
+        if getattr(self, "_map_tool_exit_key", None) == key:
+            self._pending_exec_error = "map-annotation-mode-stuck"
+            self._force_perceive = True
+            return "map-annotation-mode-stuck"
+        obj = None
+        if surface is not None:
+            obj = next((item for item in surface.objects if item.object_id == tool), None)
+        if obj is None:
+            image = getattr(self, "_last_obs_image", None)
+            if image is not None:
+                try:
+                    self._rebuild_observation_marks(image)
+                    scene = getattr(self, "_scene_desc", None)
+                    if scene is not None:
+                        self._finalize_action_surface(scene)
+                except Exception:  # noqa: BLE001 — unresolved stays closed
+                    pass
+            surface = getattr(self, "_action_surface", None)
+            obj = next(
+                (item for item in (getattr(surface, "objects", ()) or ()) if item.object_id == tool),
+                None,
+            )
+            if obj is None:
+                self._pending_exec_error = "map-annotation-tool-unresolved"
+                return "map-annotation-tool-unresolved"
+        self._map_tool_exit_key = key
+        self._last_reason_backend = "map-annotation-exit"
+        self._click_map_annotation_tool(obj)
+        if self._recapture_map_tool():
+            self._pending_exec_error = "map-annotation-mode-stuck"
+            self._force_perceive = True
+            return "map-annotation-mode-stuck"
+        self._map_tool_exit_key = None
+        self._last_execution_failure = None
+        self._unchanged_failure_count = 0
+        blocked = getattr(self, "_blocked_controls", None)
+        if isinstance(blocked, set):
+            blocked.clear()
+        scene = getattr(self, "_scene_desc", None)
+        if scene is not None:
+            self._finalize_action_surface(scene)
+        return None
+
     def _replan_after_control_failure(
         self,
         snapshot: TurnSnapshot,
         legal_intents: tuple[dict[str, Any], ...],
     ) -> bool:
-        screen = str(snapshot.screen or "").strip().lower()
-        if screen not in {"map", "reward"}:
+        if self._map_tool_active():
             return False
         rec = getattr(self, "_last_execution_failure", None) or {}
         intent = rec.get("intent") if isinstance(rec, dict) else None
         if not isinstance(intent, dict):
             intent = getattr(self, "_last_intent", None) or {}
-        if str(intent.get("kind") or "") != "click_control":
+        kind = str(intent.get("kind") or "")
+        if kind not in {"click_control", "end_turn"}:
             return False
         failure_text = " ".join(
             str(rec.get(key) or "")
@@ -5611,62 +5907,22 @@ class CollectAgent:
         if "stale-control-binding" in failure_text:
             return False
         cid = str(intent.get("control_id") or "").strip()
-        if cid:
-            self._record_blocked_control_id(cid)
         others = [
             control.control_id
             for control in snapshot.controls
             if control.control_id and control.control_id != cid
+            and not self._control_is_blocked(control.control_id, control=control)
         ]
         if others:
             return True
         for row in legal_intents:
-            if str(row.get("kind") or "") != "click_control":
+            if str(row.get("kind") or "") not in {"click_control", "end_turn"}:
                 continue
-            ids = [str(item) for item in (row.get("control_ids") or ()) if str(item) != cid]
-            if ids:
-                return True
+            for item in row.get("control_ids") or ():
+                sid = str(item)
+                if sid and sid != cid and not self._control_is_blocked(sid):
+                    return True
         return False
-
-    def _recover_loot_surface(self, snapshot: TurnSnapshot, *, reason: str) -> bool:
-        """Rescan instead of soft-locking when a reward/map screen goes quiet.
-
-        A loot screen whose action surface came back empty is a perception stall,
-        not a genuine "no legal move": at 20260908T194352Z steps 14/17/18 the
-        reward screen still had Skip and the card reward on it while the surface
-        published nothing, and the unconditional soft-lock burned the step budget.
-        Bounded so a screen that really is dead still terminates the episode.
-        """
-        screen = self._surface_key(snapshot.screen) or self._current_surface_screen()
-        if screen not in LOOT_SCREENS:
-            return False
-        if screen != self._loot_surface_screen:
-            self._loot_surface_screen = screen
-            self._loot_surface_recoveries = 0
-        if self._loot_surface_recoveries >= LOOT_SURFACE_RECOVERY_LIMIT:
-            return False
-        self._loot_surface_recoveries += 1
-        # A no-op click blocked its own control id; on a stalled loot screen that
-        # id may be the only way forward, so hand the whole screen back.
-        self._blocked_controls = set()
-        self._blocked_controls_screen = ""
-        self._empty_action_surface_key = ""
-        self._empty_action_surface_count = 0
-        self._pending_exec_error = reason
-        self._force_perceive = True
-        self._pending_inventory_rescan = True
-        cache = getattr(self, "_perception_cache", None)
-        if cache is not None:
-            cache.reset()
-        gw = getattr(self, "perceive_gateway", None) or getattr(self, "gateway", None)
-        if getattr(self, "_last_obs_image", None) is not None and gw is not None:
-            try:
-                self._rescan_scene(focus=reason)
-                self._pending_inventory_rescan = False
-            except Exception:  # noqa: BLE001 — recovery must never abort collect
-                pass
-        _say(f"  loot      {screen} stall recovery {self._loot_surface_recoveries} ({reason})")
-        return True
 
     def _should_replan_unchanged_failure(
         self,
@@ -5687,6 +5943,186 @@ class CollectAgent:
             recovery = SourceFailureRecovery()
             self._source_failure_recovery = recovery
         return recovery
+
+    def _control_noop_recovery(self) -> ControlNoopRecovery:
+        recovery = getattr(self, "_control_failure_recovery", None)
+        if not isinstance(recovery, ControlNoopRecovery):
+            recovery = ControlNoopRecovery()
+            self._control_failure_recovery = recovery
+        return recovery
+
+    def _softlock_decision(self, reason: str) -> dict[str, Any]:
+        self._pending_exec_error = reason
+        self._decision_softlock = True
+        self._last_decision_schema = "v2"
+        flags = getattr(self, "_session_flags", None)
+        if flags is None:
+            self._session_flags = []
+            flags = self._session_flags
+        if "decision_softlock" not in flags:
+            flags.append("decision_softlock")
+        return {}
+
+    def _quarantine_control_failure(self, failure: Mapping[str, Any]) -> None:
+        intent = failure.get("intent") if isinstance(failure.get("intent"), Mapping) else {}
+        cid = semantic_object_id(
+            failure.get("object_id") or intent.get("control_id") or ""
+        )
+        bbox = failure.get("bbox")
+        row: dict[str, Any] = {
+            "object_id": cid,
+            "label": str(intent.get("label") or failure.get("label") or ""),
+            "role": str(intent.get("role") or "button"),
+        }
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            row.update({
+                "x0": float(bbox[0]), "y0": float(bbox[1]),
+                "x1": float(bbox[2]), "y1": float(bbox[3]),
+            })
+        suppression = getattr(self, "_control_suppression", None)
+        if suppression is None:
+            suppression = ControlSuppressionState()
+            self._control_suppression = suppression
+        screen = str(failure.get("screen") or self._current_surface_screen() or "")
+        controls = list(getattr(self, "_prev_surface_controls", None) or [])
+        key = suppression.key_for_row(row, screen=screen, prior_rows=controls)
+        suppression.quarantine(key)
+
+    @staticmethod
+    def _pixels_changed(mad64: float, pixel_mad: float) -> bool:
+        return max(float(mad64), float(pixel_mad)) > 0.02
+
+    @staticmethod
+    def _tutorial_identity(blob: Any) -> tuple[Any, ...]:
+        if not isinstance(blob, Mapping):
+            return ()
+        tut = blob.get("tutorial") if isinstance(blob.get("tutorial"), Mapping) else blob
+        if not isinstance(tut, Mapping):
+            return ()
+        ident = (tut.get("title"), tut.get("step"), tut.get("total"))
+        return ident if ident != (None, None, None) else ()
+
+    def _tutorial_effect_changed(self, rec: Mapping[str, Any] | None = None) -> bool:
+        rec = rec if isinstance(rec, Mapping) else {}
+        before = self._tutorial_identity(rec.get("prev_tutorial")) or self._tutorial_identity(
+            getattr(self, "_prev_host_stats", None)
+        )
+        after = self._tutorial_identity(rec.get("tutorial")) or self._tutorial_identity(
+            getattr(self, "_host_stats", None)
+        )
+        return bool(before) and before != after
+
+    def _control_noop_failed_record(self, rec: dict[str, Any] | None) -> bool:
+        if not isinstance(rec, dict):
+            return False
+        intent = rec.get("intent") if isinstance(rec.get("intent"), dict) else None
+        if not isinstance(intent, dict):
+            intent = getattr(self, "_last_intent", None) or {}
+        if str(intent.get("kind") or "") not in {"click_control", "end_turn"}:
+            return False
+        blob = " ".join(str(rec.get(key) or "") for key in ("code", "dispatch", "error", "transaction_outcome"))
+        if "stale-control-binding" in blob:
+            return False
+        if rec.get("pixel_changed") is True:
+            return False
+        mad = rec.get("pixel_mad")
+        if isinstance(mad, (int, float)) and self._pixels_changed(0.0, float(mad)):
+            return False
+        if self._tutorial_effect_changed(rec):
+            return False
+        return True
+
+    def _handle_control_noop_recovery(
+        self,
+        snapshot: TurnSnapshot,
+        legal_intents: tuple[dict[str, Any], ...],
+    ) -> dict[str, Any] | None:
+        failure = getattr(self, "_last_execution_failure", None)
+        if not self._control_noop_failed_record(failure if isinstance(failure, dict) else None):
+            return None
+        assert isinstance(failure, dict)
+        payload = dict(failure)
+        if not payload.get("screen"):
+            payload["screen"] = snapshot.screen
+        intent = payload.get("intent") if isinstance(payload.get("intent"), dict) else {}
+        cid = str(payload.get("object_id") or intent.get("control_id") or "").strip()
+        failed_bbox = control_noop_fingerprint(payload)[1]
+
+        def _same_failed_physical_control(control: Any) -> bool:
+            if str(getattr(control, "control_id", "") or "") == cid:
+                return True
+            row = self._control_row_from(control)
+            try:
+                bbox = tuple(
+                    round(float(row[key]), 2) for key in ("x0", "y0", "x1", "y1")
+                )
+            except (KeyError, TypeError, ValueError):
+                return False
+            return failed_bbox is not None and bbox == failed_bbox
+
+        failed_control_ids = {
+            str(control.control_id)
+            for control in snapshot.controls
+            if control.control_id and _same_failed_physical_control(control)
+        }
+        has_others = any(
+            control.control_id and not _same_failed_physical_control(control)
+            and not self._control_is_blocked(control.control_id, control=control)
+            for control in snapshot.controls
+        )
+        if not has_others:
+            for row in legal_intents:
+                if str(row.get("kind") or "") not in {"click_control", "end_turn"}:
+                    continue
+                for item in row.get("control_ids") or ():
+                    sid = str(item)
+                    if (
+                        not sid
+                        or sid == cid
+                        or sid in failed_control_ids
+                        or self._control_is_blocked(sid)
+                    ):
+                        continue
+                    has_others = True
+                    break
+                if has_others:
+                    break
+        result = self._control_noop_recovery().observe(
+            payload,
+            other_controls=has_others,
+            overlay_active=self._overlay_blocking_now(),
+        )
+        self._unchanged_failure_count = 0
+        if result.quarantine:
+            self._quarantine_control_failure(payload)
+        if result.action is RecoveryAction.REBUILD:
+            self._force_perceive = True
+            cache = getattr(self, "_perception_cache", None)
+            if cache is not None:
+                cache.reset()
+            try:
+                self._rescan_scene(focus="control-noop")
+            except Exception:  # noqa: BLE001 — one failed rescan still consumes the rung
+                pass
+            self._control_noop_recovery().mark_rescanned()
+            self._last_execution_failure = None
+            self._pending_exec_error = result.reason or "control-noop-rescan"
+            return {}
+        if result.action is RecoveryAction.REPLAN:
+            self._last_execution_failure = None
+            return None
+        if result.action is RecoveryAction.ESCAPE:
+            state = getattr(self, "_overlay_escape", None)
+            if state is None:
+                state = OverlayEscapeState()
+                self._overlay_escape = state
+            state.arm(trigger="control-noop")
+            escaped = self._apply_overlay_escape(snapshot)
+            if escaped is not None:
+                self._last_execution_failure = None
+                return escaped
+            return self._softlock_decision(result.reason or "control-noop-exhausted")
+        return self._softlock_decision(result.reason or "control-noop-exhausted")
 
     @staticmethod
     def _typed_end_turn_intent(
@@ -5802,15 +6238,12 @@ class CollectAgent:
             parsed = self._bind_runtime_end_turn(snapshot, result.intent)
             if parsed is not None:
                 return parsed
-        self._pending_exec_error = result.reason or "source-recovery-softlock"
-        self._decision_softlock = True
-        self._last_decision_schema = "v2"
-        if "decision_softlock" not in self._session_flags:
-            self._session_flags.append("decision_softlock")
-        return {}
+        return self._softlock_decision(result.reason or "source-recovery-softlock")
 
     def _run_v2_act(self, snapshot: TurnSnapshot) -> tuple[dict[str, Any], float]:
         """Choose one typed intent, then deterministically bind it to this frame."""
+        if getattr(self, "_decision_softlock", False):
+            return {}, 0.0
         state_key = json.dumps({
             "screen": snapshot.screen, "turn": snapshot.turn,
             "hp": snapshot.hp, "block": snapshot.block, "energy": snapshot.energy,
@@ -5819,6 +6252,23 @@ class CollectAgent:
             "controls": [(c.control_id, c.label) for c in snapshot.controls],
         }, sort_keys=True, separators=(",", ":"))
         legal_intents = legal_intents_for_snapshot(snapshot)
+        surface = getattr(self, "_action_surface", None)
+        context = getattr(surface, "context", None)
+        if (
+            bool(getattr(context, "overlay", None))
+            and not legal_intents
+        ):
+            # Named overlays are fixture-confirmed pile views. If no current
+            # dismiss control is grounded, use the fixture's native key now.
+            state = getattr(self, "_overlay_escape", None)
+            if state is None:
+                state = OverlayEscapeState()
+                self._overlay_escape = state
+            state.arm(trigger="named-overlay-no-controls")
+            state.rung = 3
+            escaped = self._apply_overlay_escape(snapshot)
+            if escaped is not None:
+                return escaped, 0.0
         if getattr(self, "_overlay_escape", None) is not None and self._overlay_escape.armed:
             escaped = self._apply_overlay_escape(snapshot)
             if escaped is not None:
@@ -5831,6 +6281,9 @@ class CollectAgent:
             if escaped is not None:
                 return escaped, 0.0
         recovered = self._handle_source_failure_recovery(snapshot, legal_intents)
+        if recovered is not None:
+            return recovered, 0.0
+        recovered = self._handle_control_noop_recovery(snapshot, legal_intents)
         if recovered is not None:
             return recovered, 0.0
         if not legal_intents:
@@ -5865,8 +6318,9 @@ class CollectAgent:
             else:
                 self._empty_action_surface_key = state_key
                 self._empty_action_surface_count = 1
-            if interactive_evidence and self._empty_action_surface_count == 1:
-                self._pending_exec_error = "inventory-inconsistent"
+            if self._empty_action_surface_count == 1:
+                focus = "inventory-inconsistent" if interactive_evidence else "empty-action-surface"
+                self._pending_exec_error = focus
                 self._force_perceive = True
                 self._pending_inventory_rescan = True
                 cache = getattr(self, "_perception_cache", None)
@@ -5875,24 +6329,15 @@ class CollectAgent:
                 gw = getattr(self, "perceive_gateway", None) or getattr(self, "gateway", None)
                 if getattr(self, "_last_obs_image", None) is not None and gw is not None:
                     try:
-                        self._rescan_scene(focus="inventory-inconsistent")
+                        self._rescan_scene(focus=focus)
                         self._pending_inventory_rescan = False
                     except Exception:
                         pass
             else:
-                self._pending_exec_error = "empty-action-surface"
-                if self._empty_action_surface_count >= 2 and not self._recover_loot_surface(
-                    snapshot, reason="loot-surface-stall"
-                ):
-                    self._decision_softlock = True
-                    if "decision_softlock" not in self._session_flags:
-                        self._session_flags.append("decision_softlock")
+                self._softlock_decision("empty-action-surface")
             return {}, 0.0
         self._empty_action_surface_key = ""
         self._empty_action_surface_count = 0
-        if not self._last_execution_failure:
-            # A clean step is real progress; the loot screen earns a fresh budget.
-            self._loot_surface_recoveries = 0
         if self._last_execution_failure and state_key == self._last_reason_state_key:
             self._unchanged_failure_count += 1
             if self._unchanged_failure_count >= 2:
@@ -5904,15 +6349,8 @@ class CollectAgent:
                         self._rescan_scene(focus=focus)
                     except Exception:
                         pass
-                elif self._recover_loot_surface(snapshot, reason="loot-control-stall"):
-                    self._unchanged_failure_count = 0
-                else:
-                    self._pending_exec_error = "decision-softlock"
-                    self._decision_softlock = True
-                    self._last_decision_schema = "v2"
-                    if "decision_softlock" not in self._session_flags:
-                        self._session_flags.append("decision_softlock")
                     return {}, 0.0
+                return self._softlock_decision("decision-softlock"), 0.0
         else:
             self._unchanged_failure_count = 0
         self._last_reason_state_key = state_key
@@ -5986,6 +6424,8 @@ class CollectAgent:
                 entity_targets_ok=self._combat_screen_now(),
             )
             self._last_execution_plan = dict(planned.get("transaction") or planned)
+            if planned.get("ok"):
+                self._last_execution_plan["surface_snapshot_id"] = snapshot.snapshot_id
             if not planned.get("ok"):
                 self._pending_exec_error = "action-surface-invariant"
                 parsed = {}
@@ -6004,28 +6444,58 @@ class CollectAgent:
                     "target": (target_meta.name if target_meta is not None else None) or (target or {}).get("label") or "",
                 }
         elif isinstance(intent, (EndTurnIntent, ClickControlIntent)):
-            obj = self._v2_control_objects.get(intent.control_id)
-            if obj is None:
-                self._pending_exec_error = "action-surface-invariant"
-                self._last_execution_plan = {"ok": False, "reason": "action-surface-invariant"}
+            surface = getattr(self, "_action_surface", None)
+            identity_ok = True
+            if surface is not None:
+                identity_ok = (
+                    str(surface.run_id) == str(self.session_id)
+                    and int(surface.step_id) == int(self._step_id or 0)
+                    and str(snapshot.snapshot_id) == str(surface.snapshot_id)
+                )
+            if not identity_ok:
+                self._pending_exec_error = "stale-snapshot"
+                self._last_execution_plan = {"ok": False, "reason": "stale-snapshot"}
                 parsed = {}
             else:
-                frame_identity = current_snapshot_identity(self._screen_objects)
-                self._last_execution_plan = {
-                    "decision_schema": "v2", "snapshot_id": snapshot.snapshot_id,
-                    "frame_snapshot_id": frame_identity["snapshot_id"],
-                    "frame_run_id": frame_identity["run_id"],
-                    "frame_step_id": frame_identity["step_id"],
-                    "action": intent.kind, "control_id": intent.control_id,
-                    "object_id": obj.object_id or intent.control_id,
-                    "mark_id": getattr(obj, "mark_id", None),
-                    "role": getattr(obj, "role", ""),
-                    "label": obj.label,
-                    "point": {"x": obj.x, "y": obj.y},
-                }
-                parsed = {"action": intent.kind, "choice": obj.label}
+                obj = surface.object_by_id(intent.control_id) if surface is not None else None
+                if obj is None:
+                    obj = self._v2_control_objects.get(intent.control_id)
+                if obj is None:
+                    self._pending_exec_error = "action-surface-invariant"
+                    self._last_execution_plan = {"ok": False, "reason": "action-surface-invariant"}
+                    parsed = {}
+                elif self._control_is_blocked(intent.control_id, control=obj):
+                    self._pending_exec_error = "control-quarantined"
+                    self._last_execution_plan = {"ok": False, "reason": "control-quarantined"}
+                    parsed = {}
+                    remaining = [
+                        control for control in snapshot.controls
+                        if control.control_id and not self._control_is_blocked(
+                            control.control_id, control=control,
+                        )
+                    ]
+                    if not remaining:
+                        self._softlock_decision("control-noop-exhausted")
+                else:
+                    frame_identity = current_snapshot_identity(self._screen_objects)
+                    self._last_execution_plan = {
+                        "decision_schema": "v2", "snapshot_id": snapshot.snapshot_id,
+                        "frame_snapshot_id": frame_identity["snapshot_id"],
+                        "frame_run_id": frame_identity["run_id"],
+                        "frame_step_id": frame_identity["step_id"],
+                        "action": intent.kind, "control_id": intent.control_id,
+                        "object_id": obj.object_id or intent.control_id,
+                        "mark_id": getattr(obj, "mark_id", getattr(obj, "id", None)),
+                        "role": getattr(obj, "role", ""),
+                        "label": obj.label,
+                        "point": {"x": obj.x, "y": obj.y},
+                    }
+                    parsed = {"action": intent.kind, "choice": obj.label}
         elif isinstance(intent, InspectIntent):
-            obj = self._v2_control_objects.get(intent.object_id)
+            surface = getattr(self, "_action_surface", None)
+            obj = surface.object_by_id(intent.object_id) if surface is not None else None
+            if obj is None:
+                obj = self._v2_control_objects.get(intent.object_id)
             if obj is None:
                 self._pending_exec_error = "action-surface-invariant"
                 self._last_execution_plan = {"ok": False, "reason": "action-surface-invariant"}
@@ -6121,12 +6591,17 @@ class CollectAgent:
         )
         self._force_perceive = False
         ran_llm1 = run_llm1
+        candidate_marks = None
         if run_llm1:
+            snapshot = {
+                f"candidate:{mark.id}": mark
+                for mark in (getattr(getattr(self, "_aim", None), "marks", ()) or ())
+            }
             perceive_started = time.perf_counter()
             try:
                 scene_desc, perceive_call = perceive_scene(
                     perceive_gw,
-                    obs_frame,
+                    self._perceive_input_frame(obs_frame),
                     hud=self._obs_metrics,
                     host_stats=self._host_stats,
                     detector_labels=detector_labels,
@@ -6143,6 +6618,7 @@ class CollectAgent:
                 if not getattr(scene_desc, "schema_valid", True):
                     raise ValueError("malformed perception output")
                 self._remember_perceive_call(perceive_call)
+                candidate_marks = snapshot
                 _say(f"  perceive   llm1 ({gate_reason})")
             except Exception as exc:  # cloud timeout/HTTP/schema -> canonical sensors
                 perceive_ms = (time.perf_counter() - perceive_started) * 1000
@@ -6158,6 +6634,7 @@ class CollectAgent:
                 )
                 gate_reason = f"{gate_reason}; ocr-fallback:{type(exc).__name__}"
                 self._last_perceive_raw = ""
+                candidate_marks = None
                 _say(f"  perceive   OCR/frame fallback ({type(exc).__name__})")
         else:
             scene_desc = scene_from_ocr(
@@ -6173,6 +6650,7 @@ class CollectAgent:
             perceive_call = None
         combat_errors = validate_combat_perceive(scene_desc, self._host_stats)
         perceive_retry_reason = ""
+        did_rescan = False
         if combat_errors:
             perceive_retry_reason = "; ".join(combat_errors)
             _say(f"  perceive   combat fail: {perceive_retry_reason}")
@@ -6185,12 +6663,19 @@ class CollectAgent:
                 else:
                     perceive_retry_reason = "; ".join(combat_errors)
             else:
+                prev_scene = scene_desc
                 retry_ms = self._rescan_scene(focus="locate the enemy sprite and its HP bar")
                 perceive_ms += retry_ms
+                did_rescan = True
                 scene_desc = self._scene_desc or scene_desc
                 combat_errors = validate_combat_perceive(scene_desc, self._host_stats)
                 if combat_errors:
                     perceive_retry_reason = "; ".join(combat_errors)
+                if scene_desc is not prev_scene:
+                    candidate_marks = {
+                        f"candidate:{mark.id}": mark
+                        for mark in (getattr(getattr(self, "_aim", None), "marks", ()) or ())
+                    }
         self._perceive_retry_reason = perceive_retry_reason or None
         self._record_perception_telemetry(
             ran_llm1=ran_llm1,
@@ -6203,7 +6688,19 @@ class CollectAgent:
             ran_llm1=ran_llm1,
             combat_errors=combat_errors if combat_errors else None,
         )
-        reason_controls = self._apply_perceive_scene(scene_desc, detector_rows=self._detector_typed_rows())
+        reason_controls = self._apply_perceive_scene(
+            scene_desc,
+            detector_rows=self._detector_typed_rows(),
+            candidate_marks=candidate_marks,
+        )
+        if not did_rescan and getattr(self, "_unresolved_required_geometry", False):
+            try:
+                retry_ms = self._rescan_scene(focus="unresolved candidate geometry")
+                perceive_ms += retry_ms
+                scene_desc = self._scene_desc or scene_desc
+                reason_controls = self._reason_controls_from_surface(scene_desc)
+            except Exception:
+                pass
         transition_metrics = self._maybe_apply_combat_exit_transition(
             self._obs_metrics, scene_desc=scene_desc
         )
@@ -6285,7 +6782,21 @@ class CollectAgent:
             # ACT consumes one compact typed snapshot.  It never receives the
             # screenshot, frame marks, coordinates, notebook prose, or MCP
             # catalog; planning and input remain deterministic runtime work.
+            blocked = self._maybe_exit_map_annotation_mode()
+            if blocked:
+                self._last_decision_schema = "v2"
+                self._last_reason_backend = blocked
+                self._last_reason_fallback = blocked
+                self._last_reason_raw = ""
+                return {}, perceive_ms, 0.0, self._scene_desc or scene_desc
             snapshot = self._build_turn_snapshot(scene_desc)
+            if self._maybe_rescan_contradictory_game_state():
+                self._last_decision_schema = "v2"
+                self._last_reason_backend = "surface-state-contradiction"
+                self._last_reason_fallback = "surface-state-contradiction"
+                self._last_reason_raw = ""
+                return {}, perceive_ms, 0.0, self._scene_desc or scene_desc
+            snapshot = self._recover_enemy_cardinality(snapshot, scene_desc)
             parsed_out, reason_ms = self._run_v2_act(snapshot)
             self._think_ms.append(perceive_ms + reason_ms)
             return parsed_out, perceive_ms, reason_ms, self._scene_desc or scene_desc
@@ -6894,9 +7405,6 @@ class CollectAgent:
         oid = str(item.object_id or "").strip()
         if oid:
             self._discovery_attempts[oid] = self._discovery_attempts.get(oid, 0) + 1
-        lab = str(item.label or "").strip()
-        if lab and lab.casefold() != oid.casefold():
-            self._discovery_attempts[lab] = self._discovery_attempts.get(lab, 0) + 1
         return contract
 
     _DISCOVERY_BUDGET = 6
@@ -6947,23 +7455,49 @@ class CollectAgent:
             eid = str(row.get("entity_id") or row.get("id") or "")
             if oid and eid == oid:
                 return True
-            center = _row_center(row)
-            if center is None:
-                return False
-            return abs(center[0] - float(cx)) < 0.12 and abs(center[1] - float(cy)) < 0.12
+            return False
 
+        if oid:
+            patched = False
+            for bucket_name in ("enemies", "controls", "hand_cards", "characters"):
+                bucket = getattr(scene_desc, bucket_name, None) or []
+                for row in bucket:
+                    if not isinstance(row, dict) or not _hit(row):
+                        continue
+                    row["label"] = name
+                    row["name"] = name
+                    row["inspectable"] = False
+                    row["identified"] = True
+                    row["name_source"] = "hover_ocr"
+                    if role == "enemy" or bucket_name == "enemies":
+                        row["role"] = "enemy"
+                    patched = True
+            if patched:
+                return
+
+        best_row = None
+        best_d = 0.12
         for bucket_name in ("enemies", "controls", "hand_cards", "characters"):
             bucket = getattr(scene_desc, bucket_name, None) or []
             for row in bucket:
-                if not isinstance(row, dict) or not _hit(row):
+                if not isinstance(row, dict):
                     continue
-                row["label"] = name
-                row["name"] = name
-                row["inspectable"] = False
-                row["identified"] = True
-                row["name_source"] = "hover_ocr"
-                if role == "enemy" or bucket_name == "enemies":
-                    row["role"] = "enemy"
+                center = _row_center(row)
+                if center is None:
+                    continue
+                d = abs(center[0] - float(cx)) + abs(center[1] - float(cy))
+                if d < best_d:
+                    best_d = d
+                    best_row = row
+        if best_row is None:
+            return
+        best_row["label"] = name
+        best_row["name"] = name
+        best_row["inspectable"] = False
+        best_row["identified"] = True
+        best_row["name_source"] = "hover_ocr"
+        if role == "enemy":
+            best_row["role"] = "enemy"
 
     def _bind_discovery_name(self, result: DiscoveryResult, scene_desc: Any | None = None) -> None:
         name = str(result.name or "").strip()
@@ -6975,7 +7509,8 @@ class CollectAgent:
         if tracker is not None:
             if oid:
                 tracker.identify(oid, name)
-            tracker.identify_at(float(cx), float(cy), name)
+            else:
+                tracker.identify_at(float(cx), float(cy), name)
         store = getattr(self, "_screen_objects", None)
         if store is not None and oid and hasattr(store, "relabel"):
             store.relabel(oid, name)
@@ -6999,6 +7534,12 @@ class CollectAgent:
                 verified=True,
                 step_id=int(getattr(self, "_step_id", 0) or 0),
             )
+            save = getattr(memory, "save", None)
+            if callable(save):
+                try:
+                    save()
+                except OSError:
+                    self._session_flags.append("semantic_identity_save_failed")
 
     def _refresh_reason_after_discovery(self, scene_desc: Any) -> None:
         labels: list[str] = []
@@ -7072,7 +7613,7 @@ class CollectAgent:
             for cand in queue:
                 oid = str(cand.object_id or "")
                 lab = str(cand.label or "")
-                if attempts.get(oid, 0) >= limit or (lab and attempts.get(lab, 0) >= limit):
+                if attempts.get(oid, 0) >= limit:
                     continue
                 item = cand
                 break
@@ -7080,11 +7621,8 @@ class CollectAgent:
                 break
             inspections += 1
             oid = str(item.object_id or "")
-            lab = str(item.label or "")
             if oid:
                 attempts[oid] = attempts.get(oid, 0) + 1
-            if lab and lab.casefold() != oid.casefold():
-                attempts[lab] = attempts.get(lab, 0) + 1
             remaining = [cand for cand in queue if cand.object_id != item.object_id]
             try:
                 before = self.fixture.observe_image(self.fixture.grab_image())
@@ -7130,7 +7668,7 @@ class CollectAgent:
         for item in queue:
             oid = str(item.object_id or "")
             lab = str(item.label or "")
-            if attempts.get(oid, 0) >= limit or (lab and attempts.get(lab, 0) >= limit):
+            if attempts.get(oid, 0) >= limit:
                 continue
             action = ActionLog(
                 mark=item.mark_id, click_x=item.target[0], click_y=item.target[1],
@@ -7259,12 +7797,21 @@ class CollectAgent:
         losses = sum(1 for value in self._episode_outcomes if value == "loss")
         inconclusive = sum(1 for value in self._episode_outcomes if value == "inconclusive")
         determinate = wins + losses
+        ops = getattr(self, "_episode_operational", None) or []
+        operational_failures = sum(1 for flag in ops if flag)
+        operational_rate = (operational_failures / n) if n else 0.0
+        try:
+            knowledge_size = 0 if self.knowledge is None else self.knowledge.size()
+        except Exception:
+            knowledge_size = 0
+            self._session_flags.append("knowledge_size_failed")
         return SessionSummary(
             session_id=self.session_id,
             fixture=self.fixture.id,
             episodes=n,
             unique_device_names=sorted(self._all_actions),
             memory_size=0 if self.memory is None else self.memory.size(),
+            knowledge_size=knowledge_size,
             mean_return=(sum(self._episode_returns) / n if n else 0.0),
             fail_rate=(losses / determinate if determinate else 0.0),
             mean_think_ms=(sum(self._think_ms) / len(self._think_ms) if self._think_ms else None),
@@ -7280,6 +7827,8 @@ class CollectAgent:
             wins=wins,
             losses=losses,
             inconclusive_episodes=inconclusive,
+            operational_failures=operational_failures,
+            operational_failure_rate=operational_rate,
             interrupt_cv=self._interrupt_cv,
             interrupt_dino=self._interrupt_dino,
         )
@@ -7525,6 +8074,7 @@ class CollectAgent:
         menu_streak = 0
         t_end = time.perf_counter() + self.config.timeout_s
         wall_timeout = False
+        step_budget_complete = False
         terminal: Literal["alive", "fail", "win", "timeout"] = "alive"
         action_round_robin = names(self.fixture.action_table)
         skill_on, active_skill = self._schedule_skill()
@@ -7544,6 +8094,7 @@ class CollectAgent:
         self._pointer_hygiene = PointerHygieneState()
         self._overlay_escape = OverlayEscapeState()
         self._overlay_escape_action = None
+        self._map_tool_exit_key = None
         self._last_hover_key = None
         self._hovered_marks = set()
         self._discovery_attempts = {}
@@ -7557,13 +8108,12 @@ class CollectAgent:
         self._act_thread.reset()
         self._last_unverified_effect = False
         self._source_recovery().reset()
+        self._control_noop_recovery().reset()
         self._effect_attempts = []
         self._perception_cache.reset()
         self._action_surface = None
         self._empty_action_surface_key = ""
         self._empty_action_surface_count = 0
-        self._loot_surface_recoveries = 0
-        self._loot_surface_screen = ""
         self._decision_softlock = False
         self._blocked_sources = {}
         self._blocked_hand_signature = None
@@ -7584,6 +8134,13 @@ class CollectAgent:
         self._combat_won_steps = {}
         self._was_in_combat = False
         self._current_episode_id = episode_id
+        self._knowledge_cache = {}
+        self._knowledge_hits = ()
+        self._knowledge_signature = None
+        self._knowledge_actionable_seen = False
+        self._knowledge_failure_key = ""
+        self._knowledge_failure_count = 0
+        self._knowledge_metrics = {}
         self._cancel_explore()
         self._survey.reset()
         self._approach.reset()
@@ -7624,6 +8181,7 @@ class CollectAgent:
             t_step = time.perf_counter()
             t0 = t_step
             self._step_id = step_id
+            self._knowledge_metrics = {"queried": False}
             self._hygiene().recapture_used = 0
             tag = f"{self._episode_n}.{step_id}"
             self._step_recheck_count = 0
@@ -7631,6 +8189,9 @@ class CollectAgent:
             self._step_illegal_blocked = False
             self._last_legal_reason = None
             self._pending_exec_error = None
+            self._enemy_cardinality_rebuilt = False
+            self._surface_contradiction_rescanned = False
+            self._model_mark_locked = False
             self._last_targeting_opts = None
             self._perceive_retry_reason = None
             self._last_scene = ""
@@ -7903,7 +8464,7 @@ class CollectAgent:
                     dino_path = self.store.frame_path(episode_id, step_id, "dino")
                     dino_path.write_bytes(dino_frame.data)
                 if self._two_stage():
-                    painted = paint_aim(view, marks=self._aim.marks, last_xy=self._last_click)
+                    painted = compose_candidate_image(view, self._aim.marks)
                     vlm_obs = encode_image(painted, longest_side=side, jpeg_quality=90)
                     self._reason_vlm_frames = [vlm_obs]
                     if self.config.debug_overlay:
@@ -8549,16 +9110,23 @@ class CollectAgent:
                         or self._last_intent.get("object_id")
                         or ""
                     )
-                    control_obj = self._v2_control_objects.get(object_key)
+                    surface = getattr(self, "_action_surface", None)
+                    control_obj = surface.object_by_id(object_key) if surface is not None else None
+                    if control_obj is None:
+                        control_obj = self._v2_control_objects.get(object_key)
                     if control_obj is not None:
+                        plan = getattr(self, "_last_execution_plan", None) or {}
+                        point = plan.get("point") if isinstance(plan, dict) and isinstance(plan.get("point"), dict) else {}
+                        click_x = point.get("x") if isinstance(point.get("x"), (int, float)) else control_obj.x
+                        click_y = point.get("y") if isinstance(point.get("y"), (int, float)) else control_obj.y
                         semantic = ActionLog(
-                            mark=control_obj.mark_id,
-                            click_x=control_obj.x,
-                            click_y=control_obj.y,
+                            mark=None,
+                            click_x=float(click_x),
+                            click_y=float(click_y),
                             hover=v2_kind == "inspect",
                             duration_ms=self.config.burst_ms,
-                            source_role=control_obj.role,
-                            source_object_id=control_obj.object_id or object_key,
+                            source_role=getattr(control_obj, "role", None),
+                            source_object_id=getattr(control_obj, "object_id", None) or object_key,
                         )
                         semantic.name = semantic.derive_name()
 
@@ -8667,7 +9235,11 @@ class CollectAgent:
                 elif semantic is not None:
                     unresolved_choice = False
                 if semantic is not None:
-                    action = self._attach_action_identity(semantic)
+                    action = (
+                        semantic
+                        if self._v2_plan_owns_action_geometry()
+                        else self._attach_action_identity(semantic)
+                    )
                 else:
                     action = ActionLog(duration_ms=self.config.burst_ms)
                     if choice and allowed_choice and not is_tool:
@@ -8694,13 +9266,12 @@ class CollectAgent:
                     vlm_hud["note"] = note
                 if choice:
                     vlm_hud["choice"] = choice
-                before_bind = self._attach_action_identity(action)
-                if getattr(self, "_overlay_escape_action", None) is not None:
-                    action = self._overlay_escape_action
-                else:
-                    action = bind_aim(action, self._aim)
-                    action = clamp_to_overlay(action, self._aim)
-                    action = self._preserve_steered_identity(before_bind, action)
+                before_bind = (
+                    action
+                    if self._v2_plan_owns_action_geometry()
+                    else self._attach_action_identity(action)
+                )
+                action = self._bind_action_for_dispatch(action, before_bind)
                 if (
                     tool_inspection_contract is not None
                     and action.mark is not None
@@ -8808,8 +9379,10 @@ class CollectAgent:
                         vlm_hud["goal"] = goal
                     if note:
                         vlm_hud["note"] = note
-                    action = bind_aim(action, self._aim)
-                    action = clamp_to_overlay(action, self._aim)
+                    choice = str(vlm_hud.get("choice") or parsed.get("choice") or "").strip()
+                    if choice:
+                        vlm_hud["choice"] = choice
+                    action = self._apply_overlay_model_bind(action, choice=choice)
                 proposed = action.model_copy(deep=True)
                 if turn:
                     listing = self._aim.listing() if self._aim is not None else None
@@ -8836,7 +9409,9 @@ class CollectAgent:
                     _say(f"  {tag} gsm      VLM invoke_gsm explore")
                 else:
                     if is_empty_chord(action):
-                        if not self._allow_legacy_empty_fill():
+                        if self._pending_exec_error:
+                            _say(f"  {tag} rejected {self._pending_exec_error} — no click")
+                        elif not self._allow_legacy_empty_fill():
                             _say(f"  {tag} empty typed intent — no legacy fill")
                             energy = (self._obs_metrics or {}).get("energy")
                             if energy is None:
@@ -8925,7 +9500,8 @@ class CollectAgent:
             if not interrupt:
                 action = _strip_locked_face(action, locked=locked_target or yield_vlm)
             if turn:
-                action = clamp_to_overlay(action, self._aim)
+                if self._last_decision_schema != "v2":
+                    action = clamp_to_overlay(action, self._aim)
                 two_stage_unresolved = (
                     self._two_stage()
                     and bool(str(vlm_hud.get("choice") or "").strip())
@@ -8937,6 +9513,8 @@ class CollectAgent:
                         or two_stage_unresolved
                         or not self._allow_legacy_empty_fill()
                         or (self._two_stage() and self._combat_screen_now())
+                        or bool(self._pending_exec_error)
+                        or bool(getattr(self, "_model_mark_locked", False))
                     )
                     if not skip_fill:
                         filled = fill_from_aim(
@@ -8956,6 +9534,7 @@ class CollectAgent:
                     not terminal_tool_action
                     and self._last_decision_schema != "v2"
                     and not self._skip_labeled_combat_fill(before_bind)
+                    and not getattr(self, "_model_mark_locked", False)
                 ):
                     action = steer_to_labeled(
                         action,
@@ -9028,7 +9607,8 @@ class CollectAgent:
                     if not vlm_hud.get("note"):
                         vlm_hud["note"] = overlay_note
                 before_hover = action
-                if not terminal_tool_action and self._last_decision_schema != "v2":
+                model_locked = bool(getattr(self, "_model_mark_locked", False))
+                if not terminal_tool_action and self._last_decision_schema != "v2" and not model_locked:
                     action = prefer_hover(action, self._aim, hovered=self._hovered_marks)
                 if action.hover and not before_hover.hover:
                     _say(f"  {tag} hover    first on mk_{action.mark} (tooltip)")
@@ -9038,13 +9618,17 @@ class CollectAgent:
                             f"mark={action.mark} label={self._aim_label(action)!r} "
                             f"xy={action.click_x},{action.click_y}",
                         )
-                if not terminal_tool_action and self._last_decision_schema != "v2":
+                if not terminal_tool_action and self._last_decision_schema != "v2" and not model_locked:
                     action = self._promote_repeat_hover(action)
-                steered = action if terminal_tool_action or self._last_decision_schema == "v2" else steer_off_danger(
-                    action,
-                    self._aim,
-                    recent=recent_chords,
-                    duration_ms=int(action.duration_ms or self.config.burst_ms),
+                steered = (
+                    action
+                    if terminal_tool_action or self._last_decision_schema == "v2" or model_locked
+                    else steer_off_danger(
+                        action,
+                        self._aim,
+                        recent=recent_chords,
+                        duration_ms=int(action.duration_ms or self.config.burst_ms),
+                    )
                 )
                 if steered is not action and steered.mark != action.mark:
                     _say(
@@ -9052,7 +9636,7 @@ class CollectAgent:
                         f"→ {format_chord(steered)}"
                     )
                     action = steered
-                if not terminal_tool_action:
+                if not terminal_tool_action and not model_locked:
                     self._supersede_rejected_action_with_inspection(action, tag=tag)
                 action = self._final_combat_dispatch_gate(
                     action,
@@ -9183,7 +9767,13 @@ class CollectAgent:
                                 primitive_logs = transaction.primitives
                                 card_transaction = transaction.transaction
                                 error = transaction.error
-                                if self._maybe_park_after_action(action, park_after=True):
+                                completed = bool(
+                                    card_transaction.target_dispatched
+                                    or card_transaction.outcome == "auto_resolved"
+                                )
+                                if self._maybe_park_after_action(
+                                    action, park_after=True if completed else None
+                                ):
                                     executed = list(executed) + ["pk"]
                                     try:
                                         after = self.fixture.observe_image(self.fixture.grab_image())
@@ -9298,7 +9888,7 @@ class CollectAgent:
             mad64 = mean_absdiff(before_thumb, after_thumb)
             pixel_mad = mean_absdiff(roi_thumb(before, 256), roi_thumb(after, 256))
             self._last_frame_mad = float(pixel_mad)
-            pixel_changed = mad64 > 0.02
+            pixel_changed = self._pixels_changed(mad64, pixel_mad)
             after_frame = encode_image(after, longest_side=768, jpeg_quality=85)
             after_path = self.store.frame_path(episode_id, step_id, "after")
             after_path.write_bytes(after_frame.data)
@@ -9320,6 +9910,14 @@ class CollectAgent:
                 if rich_turn_refresh
                 else self.fixture.scorer(after)
             )
+            prev_tool = (prev_metrics or {}).get("map_tool")
+            new_tool = metrics.get("map_tool") or (self._host_stats or {}).get("map_tool")
+            if prev_tool != new_tool:
+                pixel_changed = True
+                if new_tool and not prev_tool and not error:
+                    self._pending_exec_error = self._pending_exec_error or "map-annotation-mode-entered"
+            if self._tutorial_effect_changed():
+                pixel_changed = True
             if turn:
                 choice = vlm_hud.get("choice")
                 if isinstance(choice, str) and choice.strip():
@@ -9439,6 +10037,8 @@ class CollectAgent:
                     metrics["affordance_hit"] = affordance_hit_for_action(
                         action, self._effective_legal_actions()
                     )
+                    if self.config.knowledge and self.knowledge is not None:
+                        metrics["knowledge"] = dict(self._knowledge_metrics)
             if turn and self._two_stage():
                 prev_screen = str(prev_metrics.get("screen") or "")
                 new_screen = str(metrics.get("screen") or "")
@@ -9663,6 +10263,18 @@ class CollectAgent:
                     step_id=step_id,
                 )
 
+            if turn and self.config.knowledge and self.knowledge is not None:
+                memory_hit = MemoryHit(
+                    ids=[
+                        str(getattr(hit, "memory_id", getattr(hit, "id", "")))
+                        for hit in self._knowledge_hits
+                    ],
+                    snippets=[str(getattr(hit, "text", ""))[:240] for hit in self._knowledge_hits],
+                    scores=[
+                        float(getattr(hit, "score", getattr(hit, "retrieval_score", 0.0)))
+                        for hit in self._knowledge_hits
+                    ],
+                )
             record = StepLog(
                 session_id=self.session_id,
                 episode_id=episode_id,
@@ -9917,6 +10529,7 @@ class CollectAgent:
                     next_screen=next_screen,
                 )
                 if click_fact is not None:
+                    intent = getattr(self, "_last_intent", None) or {}
                     self.notebook.promote_click(
                         screen=click_screen,
                         label=aim_label,
@@ -9927,6 +10540,9 @@ class CollectAgent:
                         prev_metrics=prev_metrics,
                         metrics=metrics,
                         step_id=step_id,
+                        object_id=str(
+                            intent.get("control_id") or intent.get("card_id") or ""
+                        ),
                     )
                 if (
                     turn
@@ -10062,6 +10678,8 @@ class CollectAgent:
             )
             if terminal != "alive":
                 break
+        else:
+            step_budget_complete = True
 
         if terminal == "alive":
             terminal = "timeout"
@@ -10078,8 +10696,18 @@ class CollectAgent:
         fill_return_to_go(steps)
         ep_flags = audit_episode(steps=steps)
         ep_flags.append(f"context:{self._episode_context_mode}")
+        stuck_softlock = any(flag.startswith("stuck_") for flag in ep_flags)
+        planned_budget = bool(
+            step_budget_complete
+            and not getattr(self, "_decision_softlock", False)
+            and not stuck_softlock
+        )
         if wall_timeout:
             ep_flags.append("wall_clock_timeout")
+        elif getattr(self, "_decision_softlock", False):
+            ep_flags.append("decision_softlock")
+        elif planned_budget:
+            ep_flags.append("planned_step_budget_complete")
         elif terminal == "timeout" and "hud_identity_stuck" not in ep_flags:
             ep_flags.append("step_budget_timeout")
         self._session_flags.extend(ep_flags)
@@ -10090,7 +10718,7 @@ class CollectAgent:
             record.success = success
         if steps:
             self.store.replace_episode_steps(episode_id, steps)
-        softlock = "stuck_no_pixel_change" in ep_flags or "hud_identity_stuck" in ep_flags
+        softlock = stuck_softlock
         reset: Literal["in_game", "snapshot", "abort"] = "in_game"
         skip_reset = self.config.until_fail and terminal in {"fail", "win"}
         if not skip_reset and (terminal == "fail" or (softlock and self.config.snapshot_on_softlock)):
@@ -10118,12 +10746,42 @@ class CollectAgent:
             memory_carry=memory_carry,
         )
         self.store.write_episode(episode)
+        consolidator = self._knowledge_consolidator
+        if consolidator is not None:
+            try:
+                result = consolidator.consolidate(
+                    run_ref=str(self.store.run_dir.resolve()),
+                    episode=episode,
+                    steps=steps,
+                    nearby=self._knowledge_hits,
+                )
+                episode.memory_carry["knowledge"] = result.telemetry()
+                failed = bool(result.error)
+            except Exception as exc:  # Preserve the already-durable episode.
+                episode.memory_carry["knowledge"] = {
+                    "error": f"{type(exc).__name__}:{str(exc)[:300]}"
+                }
+                failed = True
+            if failed:
+                self._session_flags.append("knowledge_consolidation_failed")
+            try:
+                self.store.replace_episode(episode)
+            except Exception:
+                self._session_flags.append("knowledge_telemetry_save_failed")
         if self.fixture.id == "sts2":
             write_train_jsonl(self.store.run_dir)
             write_sft_jsonl(self.store.run_dir)
         self._episode_returns.append(cumulative)
         self._episode_success.append(success)
         self._episode_outcomes.append(outcome)
+        self._episode_operational.append(
+            bool(
+                getattr(self, "_decision_softlock", False)
+                or wall_timeout
+                or softlock
+                or (terminal == "timeout" and not planned_budget)
+            )
+        )
         _say(
             f"episode {self._episode_n} ended  {terminal}  "
             f"steps={len(steps)}  success={success}  return={cumulative:.3f}"

@@ -16,6 +16,7 @@ from typing import Any, Literal, Sequence
 from loop.os.aim import (
     AimMark,
     _compact_label,
+    _hud_chrome,
     _is_placeholder_label,
     is_legend_label,
     label_kind,
@@ -40,17 +41,26 @@ class FrameContext:
     activity: str = "unknown"
     layout: LayoutArchetype = "unknown"
     blocking_overlay: bool = False
+    map_tool: str | None = None
+    overlay: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "screen", (self.screen or "other").strip().lower() or "other")
         object.__setattr__(self, "activity", (self.activity or "unknown").strip().lower() or "unknown")
+        tool = str(self.map_tool or "").strip()
+        object.__setattr__(self, "map_tool", tool or None)
+        overlay = str(self.overlay or "").strip().lower() or None
+        object.__setattr__(self, "overlay", overlay)
 
     @property
     def allows_domain_entities(self) -> bool:
         return self.activity == "combat" and not self.blocking_overlay
 
 _NAV_LABELS = frozenset({"prev", "previous", "next", "arrow"})
-_DIALOG_LABELS = frozenset({"yes", "no", "got it", "close", "confirm", "continue", "back"})
+_DIALOG_LABELS = frozenset({
+    "yes", "no", "got it", "close", "confirm", "continue", "back",
+    "draw pile", "discard pile", "exhaust pile",
+})
 GENERIC_CONTROL_ROLES = frozenset({
     "button", "control", "dialog", "menu", "nav_prev", "nav_next",
 })
@@ -59,7 +69,12 @@ _TARGET_ROLES = frozenset({"unknown_character", "character", "target", "enemy", 
 _QUANTIZE_STEP = 0.025
 _MOVE_TOLERANCE = 0.05
 _DOMAIN_ROLES = frozenset({"card", "enemy", "player", "target"})
-_ACTIONABLE_ROLES = frozenset({"button", "nav_prev", "nav_next", "card", "enemy", "player"})
+_ACTIONABLE_ROLES = frozenset({"button", "nav_prev", "nav_next", "map_node", "card", "enemy", "player"})
+_PILE_OVERLAYS = frozenset({"draw_pile", "discard_pile", "exhaust_pile"})
+_COMBAT_CHROME_LABELS = frozenset({
+    "settings", "options", "menu", "map", "deck", "cards", "share", "legend",
+    "relic", "relics", "potion", "potions", "back",
+})
 
 
 def quantize_coord(value: float) -> float:
@@ -84,22 +99,41 @@ def paginated_tutorial_active(
     return isinstance(step, int) and isinstance(total, int) and step < total
 
 
-def infer_overlay_nav(context: FrameContext, *, host_stats: dict[str, Any] | None = None) -> bool:
-    """True when paginated/dialog overlay nav (Prev/Next) is expected."""
+def _named_overlay_from(host_stats: dict[str, Any] | None) -> str | None:
     stats = host_stats or {}
-    if context.screen == "combat" and context.activity == "combat":
-        return paginated_tutorial_active(host_stats=stats)
-    if context.screen == "tutorial":
+    rows: list[Any] = []
+    for key in ("overlays_active", "overlays"):
+        value = stats.get(key)
+        if isinstance(value, str):
+            rows.append(value)
+        elif isinstance(value, (list, tuple, set)):
+            rows.extend(value)
+    for raw in rows:
+        slug = re.sub(r"[^a-z0-9]+", "_", str(raw or "").strip().lower()).strip("_")
+        if slug in _PILE_OVERLAYS:
+            return slug
+    return None
+
+
+def infer_overlay_nav(context: FrameContext, *, host_stats: dict[str, Any] | None = None) -> bool:
+    """True for an unfinished numbered tutorial, or its last page while screen is tutorial."""
+    if paginated_tutorial_active(host_stats=host_stats):
         return True
-    if context.layout in {"paginated_overlay", "modal_dialog"}:
-        return True
-    return bool(context.blocking_overlay)
+    if context.screen != "tutorial":
+        return False
+    tut = (host_stats or {}).get("tutorial")
+    if not isinstance(tut, dict) or not tut.get("active"):
+        return False
+    step, total = tut.get("step"), tut.get("total")
+    return isinstance(step, int) and isinstance(total, int)
 
 
 def row_bounds(row: dict[str, Any]) -> tuple[float, float, float, float] | None:
-    bbox = row.get("bbox")
-    if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
-        return tuple(float(part) for part in bbox[:4])
+    from loop.agent.entities import _parse_bbox
+
+    parsed = _parse_bbox(row)
+    if parsed is not None:
+        return parsed
     keys = ("x0", "y0", "x1", "y1")
     if all(row.get(key) is not None for key in keys):
         return (
@@ -195,7 +229,7 @@ def find_control_row_for_suppression(
     *,
     screen: str = "",
 ) -> dict[str, Any] | None:
-    """Pick a prior row by stable object_id, else label + spatial overlap."""
+    """Pick a prior row by stable object_id, then bbox, then label."""
     if not candidates:
         return None
     object_id = stable_object_id_from_row(row)
@@ -203,9 +237,12 @@ def find_control_row_for_suppression(
         for candidate in candidates:
             if stable_object_id_from_row(candidate) == object_id:
                 return candidate
+    spatial = [candidate for candidate in candidates if rows_spatially_overlap(row, candidate)]
+    if len(spatial) == 1:
+        return spatial[0]
     compact = _compact_label(str(row.get("label") or ""))
     if not compact:
-        return None
+        return spatial[0] if spatial else None
     label_matches = [
         candidate
         for candidate in candidates
@@ -213,17 +250,16 @@ def find_control_row_for_suppression(
     ]
     if len(label_matches) == 1:
         return label_matches[0]
-    spatial = [candidate for candidate in label_matches if rows_spatially_overlap(row, candidate)]
-    if len(spatial) == 1:
-        return spatial[0]
-    if not spatial and label_matches:
+    labeled_spatial = [candidate for candidate in label_matches if rows_spatially_overlap(row, candidate)]
+    if len(labeled_spatial) == 1:
+        return labeled_spatial[0]
+    if label_matches:
         return label_matches[0]
-    return None
+    return spatial[0] if spatial else None
 
 
 def control_key_from_row(row: dict[str, Any], *, screen: str = "") -> str:
     screen_key = (screen or str(row.get("screen") or "")).strip().lower()
-    role = str(row.get("role") or "").strip().lower()
     bounds = quantized_bounds_key(row)
     parts: list[str] = [screen_key]
     observation = observation_context_from_row(row)
@@ -232,9 +268,7 @@ def control_key_from_row(row: dict[str, Any], *, screen: str = "") -> str:
     object_id = stable_object_id_from_row(row)
     if object_id:
         parts.append(f"oid:{object_id}")
-    else:
-        parts.append(f"lbl:{_compact_label(str(row.get('label') or ''))}")
-    parts.extend([bounds, role])
+    parts.append(bounds)
     return "|".join(parts)
 
 
@@ -245,21 +279,19 @@ def surface_fingerprint(
 ) -> str:
     """Stable surface identity from screen + typed action objects (no mark ids)."""
     screen_key = (screen or "").strip().lower()
-    entries: list[tuple[str, str, str]] = []
+    entries: list[tuple[str, str]] = []
     for row in rows or ():
         if not isinstance(row, dict):
             continue
         role = str(row.get("role") or "").strip().lower()
-        if role not in GENERIC_CONTROL_ROLES and role not in _TARGET_ROLES and role != "card":
+        if role not in GENERIC_CONTROL_ROLES and role not in _TARGET_ROLES and role not in {"card", "map_node"}:
             continue
-        label = " ".join(
-            "".join(ch if ch.isalnum() else " " for ch in str(row.get("label") or "").lower()).split()
-        )
-        if not label:
+        bounds = quantized_bounds_key(row)
+        if not bounds:
             continue
-        entries.append((role, label, quantized_bounds_key(row)))
+        entries.append((role, bounds))
     entries.sort()
-    body = "|".join(f"{role}:{label}:{bounds}" for role, label, bounds in entries)
+    body = "|".join(f"{role}:{bounds}" for role, bounds in entries)
     return f"{screen_key}|{body}"
 
 
@@ -279,11 +311,29 @@ def _role_for_label(
     host_stats: dict[str, Any] | None = None,
 ) -> str:
     compact = _compact_label(label)
-    explicit = _compact_label(str(mark.role or ""))
+    raw_role = str(mark.role or "").strip().lower()
+    explicit = _compact_label(raw_role)
     overlay_nav = infer_overlay_nav(context, host_stats=host_stats)
 
     if explicit in {"suppressed", "background", "hand candidate"}:
         return "suppressed"
+    if context.blocking_overlay and explicit in _DOMAIN_ROLES:
+        return "suppressed"
+    # Fixture map roles are current-frame geometry, not scene-prose promotion.
+    if raw_role in {"map_annotation_tool", "map_node"}:
+        return raw_role
+    # A placeholder label cannot inherit button/nav from an upstream generic row.
+    # Reward phrases stay executable because OCR replaces `icon` before this runs.
+    if _is_placeholder_label(label):
+        if explicit in {"hud", "body", "icon", "unknown"}:
+            return explicit
+        return "icon"
+    # Runtime Arrow chevrons keep label "Arrow"; overlay/tutorial promotes geometry to nav.
+    if overlay_nav or context.screen == "tutorial":
+        if compact == "next" or (compact == "arrow" and float(mark.x) >= 0.5):
+            return "nav_next"
+        if compact in {"prev", "previous"} or (compact == "arrow" and float(mark.x) < 0.5):
+            return "nav_prev"
     # Grounded generic semantics beat every positional or fixture hint.
     if explicit in {"nav_next", "next"}:
         return "nav_next" if overlay_nav else "unknown"
@@ -299,10 +349,6 @@ def _role_for_label(
         return "nav_next" if overlay_nav else "unknown"
     if compact in {"prev", "previous"}:
         return "nav_prev" if overlay_nav else "unknown"
-    if compact == "arrow":
-        if overlay_nav:
-            return "nav_prev" if mark.x < 0.5 else "nav_next"
-        return "icon"
     if compact in _DIALOG_LABELS or label_kind(label) in {"progress", "danger"}:
         return "button"
 
@@ -312,14 +358,6 @@ def _role_for_label(
         return "enemy" if explicit == "target" else explicit
     if explicit in {"hud", "body", "icon", "unknown"}:
         return explicit
-
-    if _is_placeholder_label(label):
-        if overlay_nav:
-            if mark.x <= 0.22 and 0.25 <= mark.y <= 0.75:
-                return "nav_prev"
-            if mark.x >= 0.78 and 0.25 <= mark.y <= 0.75:
-                return "nav_next"
-        return "icon"
     return "unknown"
 
 
@@ -327,6 +365,10 @@ def _kind_for_mark(mark: AimMark, label: str, *, role: str) -> ObjectKind:
     compact = _compact_label(label)
     if role == "suppressed":
         return "unknown"
+    if role == "map_annotation_tool":
+        return "chrome"
+    if _hud_chrome(mark):
+        return "informational" if compact and not _is_placeholder_label(label) else "chrome"
     if is_legend_label(label) or _looks_like_prose(label):
         return "informational"
     if label_kind(label) in {"progress", "danger"}:
@@ -359,8 +401,13 @@ def _control_ids(objects: list[FrameObject]) -> list[FrameObject]:
     ordinals: dict[str, int] = {}
     for obj in objects:
         object_id = str(obj.object_id or "").strip()
-        if obj.role in {"button", "nav_prev", "nav_next"}:
-            base = f"control:{_slug(obj.label)}"
+        if obj.role in {"button", "nav_prev", "nav_next", "map_node"}:
+            if obj.role == "nav_next":
+                base = "control:next"
+            elif obj.role == "nav_prev":
+                base = "control:prev"
+            else:
+                base = f"control:{_slug(obj.label)}"
             ordinal = ordinals.get(base, 0) + 1
             ordinals[base] = ordinal
             object_id = base if ordinal == 1 else f"{base}:{ordinal}"
@@ -503,6 +550,8 @@ class ActionSurface:
                 "activity": self.context.activity,
                 "layout": self.context.layout,
                 "blocking_overlay": self.context.blocking_overlay,
+                "map_tool": self.context.map_tool,
+                "overlay": self.context.overlay,
             },
             "objects": [obj.to_dict() for obj in self.objects],
             "legal_intents": list(self.legal_intents),
@@ -532,6 +581,11 @@ def infer_layout(
     combat_board = screen == "combat" and activity_key in {"", "combat"}
     if combat_board and not tutorial_open:
         nav_signal = False
+    # A stale Prev/Next label must not mint paginated_overlay on an ordinary map.
+    if screen == "map" and not tutorial_open:
+        explicit_overlay = (host_stats or {}).get("blocking_overlay")
+        if not (isinstance(explicit_overlay, bool) and explicit_overlay):
+            nav_signal = False
     if nav_signal:
         return "paginated_overlay"
     if labels >= {"yes", "no"} or (labels & {"yes", "no", "got it"} and screen in {"select", "tutorial", "other"}):
@@ -617,6 +671,8 @@ def _blocking_overlay_from(
     host_stats: dict[str, Any] | None,
 ) -> bool:
     stats = host_stats or {}
+    if _named_overlay_from(stats):
+        return True
     explicit = stats.get("blocking_overlay")
     if isinstance(explicit, bool):
         return explicit
@@ -636,7 +692,7 @@ def _legal_intents(objects: list[FrameObject], *, context: FrameContext) -> tupl
         intents.append("play_card")
     if context.allows_domain_entities and any("end turn" in label for label in labels):
         intents.append("end_turn")
-    if roles & {"button", "nav_prev", "nav_next"}:
+    if roles & {"button", "nav_prev", "nav_next", "map_node"}:
         intents.append("click_control")
     if (
         not context.blocking_overlay
@@ -697,7 +753,8 @@ def build_action_surface(
         activity=activity_key,
         host_stats=stats,
     )
-    blocked = (
+    overlay = _named_overlay_from(stats)
+    blocked = True if overlay else (
         bool(blocking_overlay)
         if blocking_overlay is not None
         else _blocking_overlay_from(
@@ -707,15 +764,33 @@ def build_action_surface(
             host_stats=stats,
         )
     )
+    tool = stats.get("map_tool")
+    map_tool = str(tool).strip() if tool else None
     context = FrameContext(
         screen=screen_key,
         activity=activity_key,
         layout=resolved_layout,
         blocking_overlay=blocked,
+        map_tool=map_tool,
+        overlay=overlay,
     )
     objects = _objects_from_marks(
         marks, context=context, informational=informational, host_stats=stats,
     )
+    if context.activity == "combat" and not context.blocking_overlay:
+        # Menu chrome is visible around the combat board, but is not part of
+        # the gameplay action surface.  Publishing it as a generic button lets
+        # ACT choose Settings/Map instead of a card or End Turn after an
+        # overlay closes.  Inspectable piles remain available, and overlay
+        # controls bypass this gate while their overlay is actually active.
+        objects = [
+            obj for obj in objects
+            if not (
+                obj.kind == "interactive"
+                and obj.role in {"button", "control", "nav_prev", "nav_next", "map_node"}
+                and _compact_label(obj.label) in _COMBAT_CHROME_LABELS
+            )
+        ]
     payload = {
         "run_id": str(run_id),
         "step_id": int(step_id),
@@ -724,6 +799,8 @@ def build_action_surface(
             "activity": context.activity,
             "layout": context.layout,
             "blocking_overlay": context.blocking_overlay,
+            "map_tool": context.map_tool,
+            "overlay": context.overlay,
         },
         "objects": [obj.to_dict() for obj in objects],
     }

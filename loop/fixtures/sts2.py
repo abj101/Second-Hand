@@ -10,7 +10,14 @@ from PIL import Image
 from loop.fixtures.base import FixtureBase
 from loop.log.schema import ActionLog, StepLog, Terminal
 from loop.os.executor import OsController
-from loop.os.aim import _copy_mark, is_menu_label
+from loop.os.aim import (
+    _copy_mark,
+    _is_placeholder_label,
+    _NODE_LABEL_RE,
+    in_map_node_region,
+    in_map_toolbar,
+    is_menu_label,
+)
 from loop.os.mouse import MENU_HOLD_S, MENU_HOVER_S
 from loop.os.primitives import MousePrimitive, mouse_click, mouse_move
 from loop.os.geometry import (
@@ -170,8 +177,10 @@ class Sts2Fixture(FixtureBase):
     ) -> list[Any]:
         """Apply STS entity semantics only on an unobscured combat surface."""
         del host_stats
-        allowed = bool(getattr(context, "allows_domain_entities", False))
         screen = str(getattr(context, "screen", "") or "").strip().lower()
+        if screen == "map":
+            return self._enrich_map_marks(list(marks))
+        allowed = bool(getattr(context, "allows_domain_entities", False))
         out: list[Any] = []
         dialog_labels = {"yes", "no", "got it", "confirm", "continue", "close", "back", "prev", "next"}
         for mark in marks:
@@ -196,6 +205,29 @@ class Sts2Fixture(FixtureBase):
                 continue
             if role == "target":
                 mark = _copy_mark(mark, role="enemy")
+            out.append(mark)
+        return out
+
+    def _enrich_map_marks(self, marks: list[Any]) -> list[Any]:
+        toolbar = [mark for mark in marks if in_map_toolbar(float(mark.x), float(mark.y))]
+        toolbar.sort(key=lambda mark: (float(mark.x), float(mark.y)))
+        slots = {int(mark.id): f"map_tool:{index}" for index, mark in enumerate(toolbar[:3])}
+        out: list[Any] = []
+        for mark in marks:
+            slot = slots.get(int(getattr(mark, "id", 0) or 0))
+            if slot is not None:
+                out.append(_copy_mark(mark, role="map_annotation_tool", object_id=slot))
+                continue
+            label = str(getattr(mark, "label", "") or "")
+            if in_map_node_region(float(mark.x), float(mark.y)) and (
+                _is_placeholder_label(label) or _NODE_LABEL_RE.match(label)
+            ):
+                out.append(_copy_mark(mark, role="map_node"))
+                continue
+            role = str(getattr(mark, "role", "") or "").strip().lower()
+            if role in {"card", "enemy", "player", "target"}:
+                out.append(_copy_mark(mark, role="suppressed", object_id=""))
+                continue
             out.append(mark)
         return out
 

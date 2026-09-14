@@ -105,6 +105,8 @@ def object_role(obj: ScreenObject, *, entity_targets_ok: bool = False) -> str:
     # A modal button in the lower band must never become a card.
     if explicit in {"button", "control", "dialog", "menu", "nav_prev", "nav_next"}:
         return "button"
+    if explicit == "map_node":
+        return "map_node"
     if compact in {"yes", "no", "got it", "confirm", "continue", "close", "back", "prev", "previous", "next"}:
         return "button"
     if explicit in {"card", "enemy", "player", "target"} and (screen == "combat" or entity_targets_ok):

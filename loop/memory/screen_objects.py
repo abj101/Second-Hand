@@ -150,7 +150,7 @@ def same_sprite_cluster(
     host_enemies: int | None = None,
     stacked_duplicates: bool = False,
 ) -> bool:
-    """True when two boxes are the same visible sprite (IoU≥0.20 or center≤0.12).
+    """True when two boxes are the same visible sprite (strong IoU or HP/body stack).
 
     Centers ≥0.25 apart stay distinct unless the pair is a vertical HP/body
     stack in the same column.  Host count is deliberately not evidence that
@@ -184,8 +184,8 @@ def same_sprite_cluster(
         return stacked()
     if _bbox_iou(a, b) >= SAME_SPRITE_IOU:
         return True
-    if dist <= SAME_SPRITE_CENTER:
-        return True
+    # Center distance alone is not proof: two side-by-side bodies can sit ~0.10
+    # apart. Only IoU or an explicit HP/body stack may merge.
     return stacked_duplicates and stacked()
 
 
@@ -359,18 +359,20 @@ def enemy_like(mark: Any) -> bool:
     return (getattr(mark, "role", "") or "").strip().lower() in {"enemy", "target"}
 
 
+def sprite_like(mark: Any) -> bool:
+    from loop.os.frame_model import _TARGET_ROLES
+
+    role = (getattr(mark, "role", "") or "").strip().lower()
+    if role == "player":
+        return False
+    return role in _TARGET_ROLES or role in _UNTYPED_SPRITE_ROLES
+
+
 def _prepare_frame_marks(marks: list[AimMark], *, context: Any | None = None) -> list[AimMark]:
     from loop.os.aim import _copy_mark
-    from loop.os.frame_model import _TARGET_ROLES
 
     def player_like(mark: AimMark) -> bool:
         return (mark.role or "").strip().lower() == "player"
-
-    def sprite_like(mark: AimMark) -> bool:
-        role = (mark.role or "").strip().lower()
-        if role == "player":
-            return False
-        return role in _TARGET_ROLES or role in _UNTYPED_SPRITE_ROLES
 
     kept: list[AimMark] = []
     for mark in sorted(marks, key=lambda item: (item.x, item.y, item.id)):
@@ -600,7 +602,7 @@ class ScreenObjectStore:
         source: str = "ocr",
         context: Any | None = None,
         surface: Any | None = None,
-    ) -> list[AimMark]:
+    ) -> list[AimMark] | None:
         self._run_id = str(run_id)
         self._step_id = int(step_id)
         kind = (screen or "").strip().lower() or "other"
@@ -610,6 +612,66 @@ class ScreenObjectStore:
         )
         self._instance_aliases = {}
         rows: list[ScreenObject] = []
+        if surface is not None:
+            for obj in tuple(getattr(surface, "objects", ()) or ()):
+                mark_id = int(getattr(obj, "id", 0) or 0)
+                if mark_id >= 10_000:
+                    continue
+                mark = AimMark(
+                    id=mark_id,
+                    x=float(getattr(obj, "x", 0.0) or 0.0),
+                    y=float(getattr(obj, "y", 0.0) or 0.0),
+                    x0=float(getattr(obj, "x0", 0.0) or 0.0),
+                    y0=float(getattr(obj, "y0", 0.0) or 0.0),
+                    x1=float(getattr(obj, "x1", 0.0) or 0.0),
+                    y1=float(getattr(obj, "y1", 0.0) or 0.0),
+                    label=str(getattr(obj, "label", "") or ""),
+                    object_id=str(getattr(obj, "object_id", "") or ""),
+                    role=str(getattr(obj, "role", "") or ""),
+                    source=str(getattr(obj, "source", "") or source),
+                    confidence=float(getattr(obj, "confidence", 0.0) or 0.0),
+                )
+                stored = ScreenObject.from_mark(mark, screen=kind, source=source)
+                stored = replace(
+                    stored,
+                    provenance=str(getattr(obj, "provenance", "") or stored.provenance),
+                )
+                rows.append(stored)
+                self._conn.execute(
+                    """
+                    INSERT INTO screen_objects (
+                        run_id, step_id, mark_id, x, y, x0, y0, x1, y1,
+                        label, kind, source, screen, listing,
+                        object_id, role, confidence, provenance
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        self._run_id,
+                        self._step_id,
+                        stored.mark_id,
+                        stored.x,
+                        stored.y,
+                        stored.x0,
+                        stored.y0,
+                        stored.x1,
+                        stored.y1,
+                        stored.label,
+                        stored.kind,
+                        stored.source,
+                        stored.screen,
+                        stored.listing,
+                        stored.object_id,
+                        stored.role,
+                        stored.confidence,
+                        stored.provenance,
+                    ),
+                )
+            self._conn.commit()
+            self._objects = rows
+            return None
+        from loop.os.aim import _copy_mark
+        from loop.os.frame_model import FrameContext, build_action_surface
+
         # OCR/CV/Dino fusion can emit the same mark id more than once.  The
         # database key is (run, step, mark), so collapse duplicates before
         # inserting; keep the last occurrence as it is the most recently
@@ -617,9 +679,6 @@ class ScreenObjectStore:
         unique_marks: dict[int, AimMark] = {}
         for mark in marks:
             unique_marks[int(mark.id)] = mark
-        from loop.os.aim import _copy_mark
-        from loop.os.frame_model import FrameContext, build_action_surface
-
         if context is None:
             context = FrameContext(
                 screen=kind,

@@ -1,0 +1,14 @@
+{
+  "memories": [
+    {"memory_id": "energy-refill", "text": "Ending a turn refills energy", "entities": ["energy"], "type": "mechanic"},
+    {"memory_id": "strike-damage", "text": "Strike damages an enemy", "entities": ["Strike"], "type": "fact"},
+    {"memory_id": "route-failure", "text": "After a route failure, reassess the path", "entities": ["route"], "type": "failure_lesson"},
+    {"memory_id": "defend-block", "text": "Defend grants block", "entities": ["Defend"], "type": "fact"}
+  ],
+  "queries": [
+    {"query": "what happens to energy when I finish my turn", "relevant_memory_ids": ["energy-refill"]},
+    {"query": "Strike", "relevant_memory_ids": ["strike-damage"]},
+    {"query": "what should happen after a failed route", "relevant_memory_ids": ["route-failure"]},
+    {"query": "which relic doubles gold rewards", "relevant_memory_ids": []}
+  ]
+}
