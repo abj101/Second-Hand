@@ -77,13 +77,10 @@ def should_park_after_pointer(
     """True when a completed pointer gesture should leave the target."""
     if park_after is False:
         return False
+    if park_after is True:
+        return True
     if hover or mid_transaction or drag:
         return False
-    if park_after is True:
-        # The outer completed-action boundary also covers key-only actions.
-        # ``park_after`` is the runtime's explicit observation barrier, not an
-        # inference that a pointer primitive happened in this chord.
-        return True
     if combat_selection_held:
         return False
     return bool(has_click)

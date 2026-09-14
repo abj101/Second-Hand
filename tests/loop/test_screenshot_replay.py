@@ -93,3 +93,41 @@ def test_screenshot_replay(label: dict) -> None:
     overlay = label.get("overlay")
     if overlay:
         assert getattr(surface.context, "overlay", None) == overlay
+
+
+def test_defend_without_target_is_legal() -> None:
+    from dataclasses import replace
+
+    from loop.agent.decision import (
+        BoundingBox,
+        CardSnapshot,
+        PlayCardIntent,
+        TargetSnapshot,
+        TurnSnapshot,
+        validate_action_intent,
+    )
+
+    path = SCREENS / "combat_runb_000001.jpg"
+    image = Image.open(path).convert("RGB")
+    stats = extract_sts_stats(image)
+    screen = str(stats.get("screen") or "combat")
+    marks = build_marks(image, screen=screen or None)
+    surface = build_action_surface(marks, host_stats=stats, screen=screen or None)
+    snapshot = TurnSnapshot.from_action_surface(surface)
+    defend = next((card for card in snapshot.cards if _compact(card.name or "") == "defend"), None)
+    if defend is None:
+        obj = next(item for item in surface.objects if _compact(item.label) == "defend")
+        defend = CardSnapshot(
+            str(getattr(obj, "object_id", "") or "card_defend"),
+            "Defend",
+            BoundingBox(float(obj.x0), float(obj.y0), float(obj.x1), float(obj.y1)),
+            True,
+        )
+        snapshot = replace(snapshot, cards=snapshot.cards + (defend,), legal_intents=None)
+    if not snapshot.targets:
+        snapshot = replace(
+            snapshot,
+            targets=(TargetSnapshot("enemy_1", BoundingBox(0.6, 0.4, 0.8, 0.6), name="enemy"),),
+        )
+    snapshot = replace(snapshot, legal_intents=None)
+    validate_action_intent(snapshot, PlayCardIntent(card_id=defend.card_id, target_id=None))

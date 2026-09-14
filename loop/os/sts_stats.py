@@ -325,15 +325,6 @@ def extract_sts_stats(image: Image.Image) -> dict[str, Any]:
     return stats
 
 
-# Three glyph slots around the live step-24 click at (0.082, 0.932). Slot 1 is the eraser.
-MAP_TOOL_ROIS: tuple[tuple[float, float, float, float], ...] = (
-    (0.048, 0.908, 0.072, 0.956),
-    (0.070, 0.908, 0.094, 0.956),
-    (0.092, 0.908, 0.116, 0.956),
-)
-_MAP_TOOL_PINK_FRAC = 0.04
-
-
 def _map_tool_pink_frac(image: Image.Image, box: tuple[float, float, float, float]) -> float:
     w, h = image.size
     if w < 8 or h < 8:
@@ -350,12 +341,14 @@ def _map_tool_pink_frac(image: Image.Image, box: tuple[float, float, float, floa
 
 def selected_map_tool(image: Image.Image) -> str | None:
     """Current-frame selected annotation slot, or None if none/ambiguous."""
+    from loop.fixtures.sts2 import MAP_TOOL_PINK_FRAC, MAP_TOOL_ROIS
+
     if image is None:
         return None
     hits = [
         index
         for index, box in enumerate(MAP_TOOL_ROIS)
-        if _map_tool_pink_frac(image, box) >= _MAP_TOOL_PINK_FRAC
+        if _map_tool_pink_frac(image, box) >= MAP_TOOL_PINK_FRAC
     ]
     if len(hits) != 1:
         return None

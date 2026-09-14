@@ -98,3 +98,14 @@ def test_centered_letterbox_is_not_top_left_scaled() -> None:
     assert abs(box[3] - 0.75) < 1e-6
     assert not is_top_left_scaled_capture(frame)
     assert not is_top_left_scaled_capture(Image.new("RGB", (1915, 1078), (40, 20, 20)))
+
+
+def test_parse_bbox_remaps_composed_strip_y() -> None:
+    from loop.agent.entities import _parse_bbox
+
+    box = _parse_bbox({"bbox": "100,500,200,600"})
+    assert box == (0.1, 0.5, 0.2, 0.6)
+    remapped = _parse_bbox({"bbox": "100,500,200,600"}, frame_h=1000, client_h=800)
+    assert remapped == (0.1, 0.625, 0.2, 0.75)
+    same = _parse_bbox({"bbox": "100,500,200,600"}, frame_h=800, client_h=800)
+    assert same == (0.1, 0.5, 0.2, 0.6)

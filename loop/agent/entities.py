@@ -316,7 +316,7 @@ def entity_route_facts(
         elif identify_before_act and inspectable and not identified and center is not None and (
             role in {"enemy", "unknown_character", "target"} or is_anonymous_enemy_label(label)
         ):
-            blocker = True
+            blocker = False
             rule = "identify-before-act"
         elif not targetable and (inspectable or is_anonymous_enemy_label(label)) and role in {
             "enemy", "unknown_character", "target",
@@ -387,7 +387,12 @@ def _is_encounter_instance_id(eid: str) -> bool:
     return bool(re.match(r"^enemy_\d+$", str(eid or "").strip(), re.I))
 
 
-def _parse_bbox(row: dict[str, Any]) -> tuple[float, float, float, float] | None:
+def _parse_bbox(
+    row: dict[str, Any],
+    *,
+    frame_h: int | None = None,
+    client_h: int | None = None,
+) -> tuple[float, float, float, float] | None:
     bbox_raw = row.get("bbox")
     parts: list[float] = []
     if isinstance(bbox_raw, str) and bbox_raw.strip():
@@ -405,6 +410,9 @@ def _parse_bbox(row: dict[str, Any]) -> tuple[float, float, float, float] | None
     x0, y0, x1, y1 = parts[:4]
     if max(x0, y0, x1, y1) > 1.0:
         x0, y0, x1, y1 = x0 / 1000.0, y0 / 1000.0, x1 / 1000.0, y1 / 1000.0
+    if frame_h and client_h and frame_h > client_h:
+        scale = float(frame_h) / float(client_h)
+        y0, y1 = y0 * scale, y1 * scale
     return (x0, y0, x1, y1)
 
 

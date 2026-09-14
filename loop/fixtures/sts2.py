@@ -14,8 +14,6 @@ from loop.os.aim import (
     _copy_mark,
     _is_placeholder_label,
     _NODE_LABEL_RE,
-    in_map_node_region,
-    in_map_toolbar,
     is_menu_label,
 )
 from loop.os.mouse import MENU_HOLD_S, MENU_HOVER_S
@@ -42,6 +40,42 @@ TITLES = ("Slay the Spire 2", "Slay the Spire II")
 # the fixed Skip affordance and the top HUD out of the local refresh region.
 _REWARD_STACK_ROI = (0.18, 0.20, 0.82, 0.78)
 _IDENTITY_BOX: _ContentBox = (0.0, 0.0, 1.0, 1.0)
+
+MAP_HUD_Y = 0.85
+MAP_LEGEND_X_FALLBACK = 0.78
+MAP_TOOLBAR_X1 = 0.16
+MAP_TOOLBAR_Y0 = 0.82
+MAP_NODE_Y0 = 0.12
+MAP_BACK_X1 = 0.10
+MAP_TOOL_ROIS: tuple[tuple[float, float, float, float], ...] = (
+    (0.048, 0.908, 0.072, 0.956),
+    (0.070, 0.908, 0.094, 0.956),
+    (0.092, 0.908, 0.116, 0.956),
+)
+MAP_TOOL_PINK_FRAC = 0.04
+
+
+def in_map_toolbar(x: float, y: float) -> bool:
+    """STS2 bottom-left annotation tools — never map progression or Back."""
+    return float(x) <= MAP_TOOLBAR_X1 and float(y) >= MAP_TOOLBAR_Y0
+
+
+def in_map_node_region(
+    x: float,
+    y: float,
+    *,
+    legend_xmin: float | None = None,
+) -> bool:
+    """Traversable map content; excludes toolbar, legend, HUD, and the back chevron."""
+    xx, yy = float(x), float(y)
+    xmin = MAP_LEGEND_X_FALLBACK if legend_xmin is None else float(legend_xmin)
+    if yy < MAP_NODE_Y0 or yy > MAP_HUD_Y:
+        return False
+    if xx >= xmin or xx <= MAP_BACK_X1:
+        return False
+    if in_map_toolbar(xx, yy):
+        return False
+    return True
 
 
 def normalize_host_stats(stats: dict[str, Any]) -> dict[str, Any]:

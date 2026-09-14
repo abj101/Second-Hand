@@ -1111,17 +1111,12 @@ def ground_combat_labels(
 
 
 _NODE_LABEL_RE = re.compile(r"^node_\d+$", re.I)
-_MAP_HUD_Y = 0.85
-_MAP_LEGEND_X_FALLBACK = 0.78
-_MAP_TOOLBAR_X1 = 0.16
-_MAP_TOOLBAR_Y0 = 0.82
-_MAP_NODE_Y0 = 0.12
-_MAP_BACK_X1 = 0.10
 
 
 def in_map_toolbar(x: float, y: float) -> bool:
-    """STS2 bottom-left annotation tools — never map progression or Back."""
-    return float(x) <= _MAP_TOOLBAR_X1 and float(y) >= _MAP_TOOLBAR_Y0
+    from loop.fixtures.sts2 import in_map_toolbar as _in_map_toolbar
+
+    return _in_map_toolbar(x, y)
 
 
 def in_map_node_region(
@@ -1130,16 +1125,9 @@ def in_map_node_region(
     *,
     legend_xmin: float | None = None,
 ) -> bool:
-    """Traversable map content; excludes toolbar, legend, HUD, and the back chevron."""
-    xx, yy = float(x), float(y)
-    xmin = _MAP_LEGEND_X_FALLBACK if legend_xmin is None else float(legend_xmin)
-    if yy < _MAP_NODE_Y0 or yy > _MAP_HUD_Y:
-        return False
-    if xx >= xmin or xx <= _MAP_BACK_X1:
-        return False
-    if in_map_toolbar(xx, yy):
-        return False
-    return True
+    from loop.fixtures.sts2 import in_map_node_region as _in_map_node_region
+
+    return _in_map_node_region(x, y, legend_xmin=legend_xmin)
 
 
 def number_spatial_nodes(
@@ -1154,7 +1142,9 @@ def number_spatial_nodes(
         return list(marks)
     xmin = _legend_xmin(list(ocr_words or ()))
     if xmin is None:
-        xmin = _MAP_LEGEND_X_FALLBACK
+        from loop.fixtures.sts2 import MAP_LEGEND_X_FALLBACK
+
+        xmin = MAP_LEGEND_X_FALLBACK
 
     def _spatial_candidate(mark: AimMark) -> bool:
         if not in_map_node_region(mark.x, mark.y, legend_xmin=xmin):
@@ -1189,6 +1179,7 @@ def ground_spatial_labels(
     base = list(marks or ())
     if kind != "map" or not base:
         return [_copy_mark(m, mid=i) for i, m in enumerate(base[: max(1, cap)], start=1)]
+    from loop.fixtures.sts2 import MAP_HUD_Y, MAP_NODE_Y0
 
     allowed_high: set[str] = set()
     node_labels: list[str] = []
@@ -1228,7 +1219,7 @@ def ground_spatial_labels(
                 m
                 for m in out
                 if m.id not in claimed
-                and 0.12 <= m.y <= _MAP_HUD_Y
+                and MAP_NODE_Y0 <= m.y <= MAP_HUD_Y
                 and (
                     _is_placeholder_label(m.label)
                     or _NODE_LABEL_RE.match(m.label or "")

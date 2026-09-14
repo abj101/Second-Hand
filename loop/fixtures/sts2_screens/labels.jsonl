@@ -6,3 +6,4 @@
 {"file": "combat_runb_000006.jpg", "screen": "combat", "must_include": ["End Turn"], "must_not_include": ["Singleplayer"], "unique_labels": ["End Turn"]}
 {"file": "combat_runb_000007.jpg", "screen": "combat", "must_include": ["End Turn"], "must_not_include": ["Singleplayer"], "unique_labels": ["End Turn"]}
 {"file": "combat_runb_000019.jpg", "screen": "combat", "must_include": ["End Turn"], "must_not_include": ["Singleplayer"], "unique_labels": ["End Turn"]}
+{"file": "reward_loot.jpg", "screen": "reward", "must_include": ["Confirm"], "must_not_include": ["End Turn"]}

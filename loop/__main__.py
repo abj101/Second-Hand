@@ -242,8 +242,8 @@ def cmd_collect(argv: list[str] | None = None) -> int:
     parser.set_defaults(gui=True)
     parser.add_argument(
         "--gui-device",
-        default="cpu",
-        help="cpu (default, coexist with Ollama) or cuda",
+        default=None,
+        help="cpu or cuda (default: cuda if available, else cpu)",
     )
     parser.add_argument(
         "--gui-model",
@@ -266,6 +266,11 @@ def cmd_collect(argv: list[str] | None = None) -> int:
         choices=("run", "episode"),
         default="run",
         help="Notebook Known/Lessons scope: run (default) or episode",
+    )
+    parser.add_argument(
+        "--knowledge",
+        action="store_true",
+        help="enable persistent semantic recall (off by default)",
     )
     parser.add_argument(
         "--no-knowledge",
@@ -367,7 +372,7 @@ def cmd_collect(argv: list[str] | None = None) -> int:
             )
         knowledge_enabled = bool(
             fixture.id == "sts2" and architecture == "two_stage"
-            and not args.no_knowledge and not skip_models
+            and args.knowledge and not args.no_knowledge and not skip_models
         )
         if knowledge_enabled:
             from loop.memory.knowledge import KnowledgeStore
@@ -428,7 +433,9 @@ def cmd_collect(argv: list[str] | None = None) -> int:
                 dino_device=args.dino_device,
                 dino_model=args.dino_model,
                 gui=args.gui,
-                gui_device=args.gui_device,
+                gui_device=args.gui_device or (
+                    "cuda" if __import__("torch").cuda.is_available() else "cpu"
+                ),
                 gui_model=args.gui_model,
                 gui_download=bool(args.gui),
                 survey=not args.no_survey,

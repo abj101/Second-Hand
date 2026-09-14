@@ -7,11 +7,13 @@ and resolves it against its own current-frame executor.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Callable, Literal, Mapping, Protocol, TypeAlias
 
 from loop.model.gateway import EpisodeThread, ModelCall, VlmGateway
+from loop.mcp.tools.targeting import _DEFENSIVE_WORDS
 
 ACT_PRIMARY_MODEL = "gemma4:31b-cloud"
 ACT_FALLBACK_MODEL = "qwen3.5:4b-instruct-q4_K_M"
@@ -306,7 +308,16 @@ def _semantic_key(value: str | None) -> str:
 
 
 def _is_end_turn_control(control: ControlSnapshot) -> bool:
-    return _semantic_key(control.role) == "end turn" or _semantic_key(control.label) == "end turn"
+    if _semantic_key(control.role) == "end turn":
+        return True
+    return re.fullmatch(r"end turn(?: \d+)?", _semantic_key(control.label)) is not None
+
+
+def _defensive_card(card: CardSnapshot) -> bool:
+    words = set(_semantic_key(card.name).split())
+    if card.card_type:
+        words |= set(_semantic_key(card.card_type).split())
+    return bool(words & _DEFENSIVE_WORDS)
 
 
 def legal_intents_for_snapshot(snapshot: TurnSnapshot) -> tuple[dict[str, Any], ...]:
@@ -326,14 +337,16 @@ def legal_intents_for_snapshot(snapshot: TurnSnapshot) -> tuple[dict[str, Any], 
     )
     object_ids = tuple(dict.fromkeys((
         *(card.card_id for card in snapshot.cards if card.card_id),
-        *(target.target_id for target in snapshot.targets if target.target_id),
         *control_ids,
     )))
 
     allowed = set(snapshot.legal_intents) if snapshot.legal_intents is not None else None
     legal: list[dict[str, Any]] = []
-    if playable_cards and target_ids and (allowed is None or "play_card" in allowed):
-        legal.append({"kind": "play_card", "card_ids": playable_cards, "target_ids": target_ids})
+    if playable_cards and (allowed is None or "play_card" in allowed):
+        play = {"kind": "play_card", "card_ids": playable_cards}
+        if target_ids:
+            play["target_ids"] = target_ids
+        legal.append(play)
     if end_turn_ids and (allowed is None or "end_turn" in allowed):
         legal.append({"kind": "end_turn", "control_ids": end_turn_ids})
     if control_ids and (allowed is None or "click_control" in allowed):
@@ -356,7 +369,7 @@ def validate_action_intent(snapshot: TurnSnapshot, intent: ActionIntent) -> Acti
         if not card.playable:
             raise ActionIntentError("invalid-act-intent:card-not-playable")
         if intent.target_id is None:
-            if targets:
+            if targets and not _defensive_card(card):
                 raise ActionIntentError("invalid-act-intent:missing-target-id")
         elif intent.target_id not in targets:
             raise ActionIntentError("invalid-act-intent:unknown-target-id")
@@ -390,12 +403,9 @@ def _schema_for_snapshot(snapshot: TurnSnapshot) -> dict[str, Any]:
         props = variant["properties"]
         if kind == "play_card":
             props["card_id"] = {"type": "string", "enum": list(row["card_ids"])}
-            if row["target_ids"]:
-                props["target_id"] = {"type": "string", "enum": list(row["target_ids"])}
-                required = list(variant.get("required") or [])
-                if "target_id" not in required:
-                    required.append("target_id")
-                variant["required"] = required
+            ids = list(row.get("target_ids") or ())
+            if ids:
+                props["target_id"] = {"type": "string", "enum": ids}
         elif kind in {"end_turn", "click_control"}:
             props["control_id"] = {"type": "string", "enum": list(row["control_ids"])}
         elif kind == "inspect":
