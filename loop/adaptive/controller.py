@@ -34,7 +34,23 @@ from loop.adaptive.policy import (
 from loop.adaptive.policy_worker import PolicyTurnStatus, PolicyWorker
 from loop.adaptive.snapshot import assert_no_privileged, build_native_observation, snapshot_payload
 from loop.adaptive.schema import AdaptiveSchema, StateSnapshot
+from loop.adaptive.orchestrator import (
+    OrchestratorConfig,
+    SyncOrchestratorRunner,
+    ensure_directive,
+    orchestrator_worker,
+)
 from loop.adaptive.telemetry import DecisionRow, NativeShadowRow, TelemetryStore, percentile
+
+__all__ = [
+    "GenerationStore",
+    "NativeShadowConfig",
+    "NativeShadowLoop",
+    "ReactConfig",
+    "orchestrator_worker",
+    "reset_barrier",
+    "run_episode",
+]
 
 
 class GenerationStore:
@@ -112,41 +128,6 @@ def _frame_bytes(observation: object) -> bytes | None:
     if isinstance(observation, (bytes, bytearray)):
         return bytes(observation)
     return None
-
-
-async def orchestrator_worker(
-    events: asyncio.Queue,
-    directive_store: GenerationStore,
-    *,
-    episode_generation: int,
-    config: ReactConfig,
-    stop: asyncio.Event,
-) -> None:
-    revision = 1
-
-    def _publish() -> None:
-        directive_store.publish(
-            episode_generation,
-            Directive(
-                revision=revision,
-                episode_generation=episode_generation,
-                intent=config.default_intent,
-                ttl_s=config.directive_ttl_s,
-                published_at=time.monotonic(),
-            ),
-        )
-
-    _publish()
-    while not stop.is_set():
-        try:
-            ev = await asyncio.wait_for(events.get(), timeout=0.25)
-        except asyncio.TimeoutError:
-            _publish()
-            continue
-        kind = ev.get("kind") if isinstance(ev, dict) else ""
-        if kind in ("halt", "timeout", "terminal", "unfocused", "low_confidence"):
-            revision += 1
-        _publish()
 
 
 async def run_episode(
@@ -556,31 +537,11 @@ def _bootstrap_directive(
     episode_generation: int,
     config: NativeShadowConfig,
 ) -> Directive:
-    if store.latest() is None:
-        now = time.monotonic()
-        store.publish(
-            episode_generation,
-            Directive(
-                revision=1,
-                episode_generation=episode_generation,
-                intent=config.default_intent,
-                ttl_s=config.directive_ttl_s,
-                published_at=now,
-            ),
-        )
-    directive = store.latest()
-    assert directive is not None
-    now = time.monotonic()
-    if now - directive.published_at > directive.ttl_s:
-        store.publish(
-            episode_generation,
-            replace(
-                directive,
-                revision=directive.revision + 1,
-                published_at=now,
-            ),
-        )
-        directive = store.latest()
+    directive = ensure_directive(
+        store,
+        episode_generation=episode_generation,
+        config=config,
+    )
     assert directive is not None
     return directive
 
@@ -605,6 +566,7 @@ class NativeShadowLoop:
         self._telemetry = telemetry
         self._config = config or NativeShadowConfig()
         self._directive_store = GenerationStore()
+        self._orchestrator: SyncOrchestratorRunner | None = None
         self._episode_id = episode_id or uuid.uuid4().hex
         self._episode_generation = episode_generation
         self._frame_index = 0
@@ -617,7 +579,25 @@ class NativeShadowLoop:
         self._policy_unavailable = 0
 
     def close(self) -> None:
+        if self._orchestrator is not None:
+            self._orchestrator.close()
+            self._orchestrator = None
         self._worker.shutdown()
+
+    def _ensure_orchestrator(self) -> SyncOrchestratorRunner:
+        if self._orchestrator is None:
+            self._orchestrator = SyncOrchestratorRunner(
+                self._directive_store,
+                episode_generation=self._episode_generation,
+                config=OrchestratorConfig(
+                    default_intent=self._config.default_intent,
+                    directive_ttl_s=self._config.directive_ttl_s,
+                ),
+            )
+        return self._orchestrator
+
+    def _orchestrator_notify(self, kind: str, **payload: object) -> None:
+        self._ensure_orchestrator().notify(kind, **payload)
 
     def metrics(self) -> dict:
         return {
@@ -664,11 +644,19 @@ class NativeShadowLoop:
         reactive = reactive_state_from_native(native_obs)
         assert_no_privileged(reactive)
 
-        directive = _bootstrap_directive(
+        self._ensure_orchestrator()
+        directive = ensure_directive(
             self._directive_store,
             episode_generation=self._episode_generation,
             config=self._config,
         )
+        if directive is None:
+            self._orchestrator_notify("directive_expired")
+            directive = ensure_directive(
+                self._directive_store,
+                episode_generation=self._episode_generation,
+                config=self._config,
+            )
 
         schema = self._session.schema
         decision_source = "observe"
@@ -687,6 +675,7 @@ class NativeShadowLoop:
         try:
             catalog = compile_catalog_from_surface(schema, snap)
         except CatalogCompileError:
+            self._orchestrator_notify("catalog_change")
             self._emit_row(
                 snap,
                 native_obs,
@@ -734,6 +723,7 @@ class NativeShadowLoop:
 
         if not allowed:
             dispatch_reason = "release_observe"
+            self._orchestrator_notify("mask_change")
             self._emit_row(
                 snap,
                 native_obs,
@@ -821,6 +811,7 @@ class NativeShadowLoop:
         if turn_id <= 0:
             decision_source = "unavailable"
             dispatch_reason = "decider_requires_at_least_two_candidates"
+            self._orchestrator_notify("policy_worker_failed")
             self._policy_unavailable += 1
             self._emit_row(
                 snap,
@@ -873,6 +864,14 @@ class NativeShadowLoop:
         elif result.status is PolicyTurnStatus.UNAVAILABLE:
             decision_source = "unavailable"
             dispatch_reason = result.reason or "policy_unavailable"
+            kind = (
+                "slow_inference"
+                if (result.reason or "").startswith("inference_deadline")
+                else "malformed_inference"
+                if (result.reason or "").startswith("decision_invalid")
+                else "policy_worker_failed"
+            )
+            self._orchestrator_notify(kind)
             self._policy_unavailable += 1
             self._pending = None
         else:
@@ -913,6 +912,7 @@ class NativeShadowLoop:
         mask = pending.mask
         mask_d = mask_digest(mask)  # type: ignore[arg-type]
         if result.status is PolicyTurnStatus.UNAVAILABLE:
+            self._orchestrator_notify("policy_worker_failed")
             self._policy_unavailable += 1
             self._emit_row(
                 snap,
@@ -986,6 +986,7 @@ class NativeShadowLoop:
                 pending.directive,
             )
         except DecisionError as exc:
+            self._orchestrator_notify("malformed_inference")
             self._policy_unavailable += 1
             return "unavailable", None, False, f"decision_invalid:{exc}", None
 
@@ -1039,6 +1040,19 @@ class NativeShadowLoop:
             self._dispatch_accepted += 1
         else:
             self._dispatch_rejected += 1
+            reason = receipt.reason
+            if reason in ("stale_snapshot", "untrusted_capture"):
+                self._orchestrator_notify("stale_capture")
+            elif reason == "directive_expired":
+                self._orchestrator_notify("directive_expired")
+            elif reason == "unfocused":
+                self._orchestrator_notify("focus_loss")
+            elif reason in ("catalog_mismatch", "schema_mismatch"):
+                self._orchestrator_notify("schema_change")
+            elif reason == "mask_mismatch":
+                self._orchestrator_notify("mask_change")
+            elif reason == "terminal":
+                self._orchestrator_notify("terminal")
         return receipt.accepted, receipt.reason, plan_digest
 
     def _emit_row(

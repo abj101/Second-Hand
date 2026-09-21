@@ -25,10 +25,12 @@ adaptive-loop = "loop.__main__:main"
 include = ["loop*", "benchmarks*"]
 
 [tool.pytest.ini_options]
-addopts = ["--import-mode=importlib", "-m", "not benchmark and not native_input"]
+addopts = ["--import-mode=importlib", "-m", "not benchmark and not native_input and not soak and not gpu"]
 testpaths = ["tests", "benchmarks/infinite_mario/tests"]
 pythonpath = ["."]
 markers = [
     "benchmark: needs PlayJev cache, Chromium, and Playwright (deselected by default)",
     "native_input: sends real Win32 input to an instrumented window (deselected by default)",
+    "soak: long-running shadow or armed qualification (deselected by default)",
+    "gpu: requires CUDA Decider weights (deselected by default)",
 ]

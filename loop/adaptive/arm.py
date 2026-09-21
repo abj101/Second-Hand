@@ -27,6 +27,7 @@ from loop.adaptive.controller import (
     _filtered_candidates,
     _v2_from_native_obs,
 )
+from loop.adaptive.orchestrator import OrchestratorConfig, SyncOrchestratorRunner
 from loop.adaptive.executor import Executor, NativeDispatchContext
 from loop.adaptive.orchestrate import Trace
 from loop.adaptive.policy import DeterministicPolicy, StructuredDecision, reactive_state_from_native
@@ -589,21 +590,28 @@ def run_armed_collect(
                 finally:
                     worker.shutdown()
 
-        # Stage 6 — directive revision stub (observe must not stall)
-        directive = _bootstrap_directive(
+        # Stage 6 — event-driven directive revision (reaction does not await orchestrator)
+        orch = SyncOrchestratorRunner(
             directive_store,
             episode_generation=cfg.episode_generation,
-            config=NativeShadowConfig(directive_ttl_s=cfg.directive_ttl_s),
-        )
-        directive_store.publish(
-            cfg.episode_generation,
-            replace(
-                directive,
-                revision=directive.revision + 1,
-                published_at=time.monotonic(),
+            config=OrchestratorConfig(
+                default_intent="armed constant directive",
+                directive_ttl_s=cfg.directive_ttl_s,
             ),
         )
-        _recs, _graph, _snap, _holder = observe()
+        try:
+            before_rev = _bootstrap_directive(
+                directive_store,
+                episode_generation=cfg.episode_generation,
+                config=NativeShadowConfig(directive_ttl_s=cfg.directive_ttl_s),
+            ).revision
+            orch.notify("reset", intent="revised armed intent")
+            time.sleep(0.05)
+            after = directive_store.latest()
+            assert after is not None and after.revision > before_rev
+            _recs, _graph, _snap, _holder = observe()
+        finally:
+            orch.close()
         stages_done.append(6)
 
         summary = {
