@@ -28,10 +28,103 @@ class ParamSpec:
     required: bool = True
 
 
+_SCHEMA_PRIMITIVE_OPS = frozenset({"click", "move", "key_tap", "key_hold", "sleep"})
+_TRUSTED_MOUSE_BUTTONS = frozenset({"left", "right", "middle"})
+_MAX_SLEEP_S = 5.0
+_MAX_KEY_TAP_MS = 500
+_MAX_KEY_HOLD_MS = 2000
+
+
+class PrimitiveSchemaError(ValueError):
+    """Invalid primitive op or params at schema compile time."""
+
+
+def _validate_primitive_params(op: str, params: dict) -> dict:
+    if not isinstance(params, dict):
+        raise PrimitiveSchemaError("params must be a mapping")
+    unknown = set(params) - _allowed_param_keys(op)
+    if unknown:
+        raise PrimitiveSchemaError(f"unknown params for {op!r}: {sorted(unknown)}")
+    if op == "click":
+        button = params.get("button", "left")
+        if button not in _TRUSTED_MOUSE_BUTTONS:
+            raise PrimitiveSchemaError(f"click button not trusted: {button!r}")
+        return {"button": str(button)}
+    if op == "move":
+        if params:
+            raise PrimitiveSchemaError("move accepts no params")
+        return {}
+    if op == "sleep":
+        duration_s = float(params.get("duration_s", 0.0))
+        if duration_s < 0 or duration_s > _MAX_SLEEP_S:
+            raise PrimitiveSchemaError(f"sleep duration_s out of range: {duration_s}")
+        return {"duration_s": duration_s}
+    if op == "key_tap":
+        key = params.get("key")
+        if not isinstance(key, str) or not key.strip():
+            raise PrimitiveSchemaError("key_tap requires non-empty key")
+        from loop.os.keyboard import is_allowlisted_key
+
+        if not is_allowlisted_key(key):
+            raise PrimitiveSchemaError(f"key_tap key not allowlisted: {key!r}")
+        duration_ms = params.get("duration_ms", 50)
+        if not isinstance(duration_ms, (int, float)):
+            raise PrimitiveSchemaError("key_tap duration_ms must be numeric")
+        duration_ms = int(duration_ms)
+        if duration_ms <= 0 or duration_ms > _MAX_KEY_TAP_MS:
+            raise PrimitiveSchemaError(f"key_tap duration_ms out of range: {duration_ms}")
+        return {"key": key, "duration_ms": duration_ms}
+    if op == "key_hold":
+        key = params.get("key")
+        if not isinstance(key, str) or not key.strip():
+            raise PrimitiveSchemaError("key_hold requires non-empty key")
+        from loop.os.keyboard import is_allowlisted_key
+
+        if not is_allowlisted_key(key):
+            raise PrimitiveSchemaError(f"key_hold key not allowlisted: {key!r}")
+        if "duration_ms" not in params:
+            raise PrimitiveSchemaError("key_hold requires duration_ms")
+        duration_ms = params["duration_ms"]
+        if not isinstance(duration_ms, (int, float)):
+            raise PrimitiveSchemaError("key_hold duration_ms must be numeric")
+        duration_ms = int(duration_ms)
+        if duration_ms <= 0 or duration_ms > _MAX_KEY_HOLD_MS:
+            raise PrimitiveSchemaError(f"key_hold duration_ms out of range: {duration_ms}")
+        return {"key": key, "duration_ms": duration_ms}
+    raise PrimitiveSchemaError(f"unsupported primitive op: {op!r}")
+
+
+def _allowed_param_keys(op: str) -> frozenset[str]:
+    if op == "click":
+        return frozenset({"button"})
+    if op == "move":
+        return frozenset()
+    if op == "sleep":
+        return frozenset({"duration_s"})
+    if op == "key_tap":
+        return frozenset({"key", "duration_ms"})
+    if op == "key_hold":
+        return frozenset({"key", "duration_ms"})
+    return frozenset()
+
+
+def validate_primitive_step(step: "PrimitiveStep") -> None:
+    if step.op not in _SCHEMA_PRIMITIVE_OPS:
+        raise PrimitiveSchemaError(f"unsupported primitive op: {step.op!r}")
+    if not isinstance(step.bindings, tuple) or any(not isinstance(b, str) for b in step.bindings):
+        raise PrimitiveSchemaError("bindings must be a tuple of strings")
+    _validate_primitive_params(step.op, dict(step.params))
+
+
 @dataclass(frozen=True)
 class PrimitiveStep:
-    op: str  # "click" | "move" | "tap_key" | "sleep"
+    op: str  # "click" | "move" | "key_tap" | "key_hold" | "sleep"
     bindings: tuple[str, ...] = ()
+    params: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "params", dict(self.params))
+        validate_primitive_step(self)
 
 
 @dataclass(frozen=True)
@@ -247,7 +340,10 @@ def _sort_value(value: Any) -> Any:
 
 def _to_plain(obj: Any) -> Any:
     if is_dataclass(obj):
-        return _sort_value({f.name: _to_plain(getattr(obj, f.name)) for f in fields(obj)})
+        payload = {f.name: _to_plain(getattr(obj, f.name)) for f in fields(obj)}
+        if isinstance(obj, PrimitiveStep) and not payload.get("params"):
+            payload.pop("params", None)
+        return _sort_value(payload)
     if isinstance(obj, tuple):
         return [_to_plain(x) for x in obj]
     if isinstance(obj, dict):
@@ -402,6 +498,7 @@ def _from_dict(cls: type, data: dict) -> Any:
     if cls is PrimitiveStep:
         d = dict(data)
         d["bindings"] = tuple(d.get("bindings", ()))
+        d.setdefault("params", {})
         return PrimitiveStep(**d)
     if cls is EffectPredicate:
         d = dict(data)

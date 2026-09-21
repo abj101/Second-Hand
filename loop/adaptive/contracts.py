@@ -104,6 +104,9 @@ class ExecutionReceipt:
     after_capture_provenance: tuple[str, ...]
     expected_effect: ExpectedEffectOutcome
 
+    def __bool__(self) -> bool:
+        return self.accepted
+
 
 def _constraints_payload(constraints: NativeTrustedConstraints) -> dict[str, Any]:
     return {

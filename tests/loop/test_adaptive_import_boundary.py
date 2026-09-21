@@ -18,6 +18,8 @@ ALLOWED_LOOP_IMPORT_PREFIXES: tuple[str, ...] = (
     "loop.os.mouse",
     "loop.os.window",
     "loop.os.primitives",
+    "loop.os.keyboard",
+    "loop.os.input_owner",
     "loop.model.gateway",
 )
 

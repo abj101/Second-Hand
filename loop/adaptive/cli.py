@@ -8,6 +8,7 @@ import os
 import sys
 from pathlib import Path
 
+from loop.adaptive.decider_config import add_decider_args
 from loop.adaptive.orchestrate import Trace, compile_schema, orchestrate, promote
 from loop.adaptive.perceive import SceneAssembler, derive_interactions
 from loop.adaptive.runtime import InvocationError, normalized_click_point, select_invocation
@@ -247,27 +248,13 @@ def _live_observe_factory(session: Session, target, assembler: SceneAssembler):
 
 
 def _make_screen_runner(target, scene_holder: list):
-    from loop.os.mouse import Mouse
-    from loop.os.primitives import MousePrimitive
-    from loop.os.window import client_to_screen
+    from loop.adaptive.runtime import make_native_primitives_runner
+    from loop.os.input_owner import NativeInputOwner
 
-    def runner(steps: tuple[PrimitiveStep, ...], bindings: dict) -> None:
-        for st in steps:
-            if st.op != "click":
-                continue
-            target_id = bindings.get("target") or bindings.get("node_id")
-            if target_id is None:
-                raise InvocationError("click binding missing target")
-            scene = scene_holder[0]
-            if scene is None:
-                raise InvocationError("no scene for click")
-            nx, ny = normalized_click_point(scene, str(target_id))
-            sx, sy = client_to_screen(target, nx, ny)
-            Mouse().execute(
-                MousePrimitive(op="click", button="left"), screen_xy=(sx, sy)
-            )
-
-    return runner
+    owner = NativeInputOwner.for_target(target)
+    return make_native_primitives_runner(
+        owner, get_scene=lambda: scene_holder[0]
+    )
 
 
 def _resolve_live_target(window_title: str, hwnd: int | None = None):
@@ -856,6 +843,7 @@ def cmd_collect(argv: list[str] | None = None) -> int:
         action="store_true",
         help="proposal/admission; add --arm to execute one reversible candidate twice",
     )
+    add_decider_args(parser)
     args = parser.parse_args(argv)
 
     if args.arm and not args.window and not args.synthetic:

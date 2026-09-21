@@ -585,3 +585,16 @@ def normalized_click_point(scene: SceneGraph, node_id: str) -> tuple[float, floa
             x0, y0, x1, y1 = node.bbox
             return ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
     raise InvocationError(f"node_id not in scene: {node_id!r}")
+
+
+def make_native_primitives_runner(
+    owner: Any,
+    *,
+    get_scene: Callable[[], SceneGraph | None],
+) -> PrimitivesRunner:
+    """Bounded primitive runner backed by the native input owner."""
+
+    def runner(steps: tuple[PrimitiveStep, ...], bindings: dict[str, Any]) -> None:
+        owner.run_plan(steps, bindings, scene=get_scene())
+
+    return runner
