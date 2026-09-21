@@ -1,4 +1,4 @@
-"""StateSnapshotV2 sidecar and motion-based perception."""
+"""StateSnapshotV2 benchmark sidecar; verified ``StateSnapshot`` remains product truth."""
 
 from __future__ import annotations
 

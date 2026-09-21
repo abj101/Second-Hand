@@ -22,6 +22,10 @@ Desktop `Session.act()` remains fail-closed and is not imported or invoked by th
 
 This ADR extends the kernel with an optional evaluation loop. It does not replace or relax ADR 0001 live capture, promotion, or armed execution rules.
 
+## Native product truth (Wave 0)
+
+`StateSnapshotV2` remains the benchmark evaluation sidecar only. The native product path treats verified `StateSnapshot` plus the frozen `NativeObservation` envelope in `loop/adaptive/contracts.py` as authoritative observation metadata; promotion from V2 into verified snapshot/surface stays explicit and fail-closed per ADR 0001.
+
 ## Consequences
 
 - Synthetic episodes can run in CI without Chromium, CUDA, or game fixtures in `loop/adaptive/`.

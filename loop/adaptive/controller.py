@@ -1,4 +1,4 @@
-"""Benchmark react loop: perceive, decide, dispatch, step."""
+"""Product react loop controller; benchmark adapters plug in via ``Environment.step``."""
 
 from __future__ import annotations
 

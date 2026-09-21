@@ -1,4 +1,4 @@
-"""Dispatch gate and watchdog (no desktop input)."""
+"""Product dispatch gate and watchdog; benchmark path uses ``Environment.step`` only."""
 
 from __future__ import annotations
 

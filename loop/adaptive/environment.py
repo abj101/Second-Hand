@@ -1,4 +1,4 @@
-"""Generic environment protocol and in-memory fixture for benchmarks."""
+"""``Environment`` protocol for optional benchmark adapters and in-memory fixtures."""
 
 from __future__ import annotations
 

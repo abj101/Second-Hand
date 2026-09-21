@@ -6,6 +6,8 @@ This repository contains one application-agnostic runtime that learns a state sc
 
 `pixels → evidence ledger → scene graph → schema proposals → validation → immutable schema revision → state snapshot → legal action surface → verified effect`
 
+The next product milestone is defined in [the native Decider orchestration plan](docs/native-decider-orchestration-plan.md). PlayJev and Playwright are optional benchmark tooling, not production input providers.
+
 - Perception emits neutral OCR, region, color, motion, and track evidence.
 - The orchestrator proposes fields, entity types, modes, selectors, actions, and effects from evidence.
 - Promotion requires repeated observations and replayable causal traces.
@@ -27,6 +29,22 @@ python -m loop collect --workspace .tmp/live --window "Window title" --steps 30
 ```powershell
 python -m pytest -q
 ```
+
+## Local Decider on Windows (optional GPU profile)
+
+Decider runs directly on Windows; WSL2 is not required. The model package supports Python 3.11+, but its current `numpy<2` dependency makes Python 3.12 the supported profile because NumPy 1.26 does not publish Python 3.13 wheels. The setup script creates an isolated Python 3.12 environment, installs the pinned CUDA/Triton stack, and executes a real GPU kernel:
+
+```powershell
+.\scripts\setup_native_decider.ps1
+```
+
+To also download the immutable 0.8B model snapshot and run a real `system_one` decision:
+
+```powershell
+.\scripts\setup_native_decider.ps1 -DownloadModel
+```
+
+Use `.venv-decider\Scripts\python.exe` for the Decider-backed runtime. A system `python` or another `.venv` may legitimately point at a CPU-only PyTorch build; the smoke check prevents that interpreter mix-up.
 
 ## Benchmark (optional)
 

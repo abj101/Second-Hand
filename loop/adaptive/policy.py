@@ -1,4 +1,4 @@
-"""Benchmark policies and decision validation."""
+"""Product policy protocol and decision validation (deterministic, random, Decider)."""
 
 from __future__ import annotations
 

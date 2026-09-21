@@ -1,4 +1,4 @@
-"""Append-only JSONL telemetry for benchmark episodes."""
+"""Append-only JSONL telemetry for react episodes (native and benchmark adapters)."""
 
 from __future__ import annotations
 

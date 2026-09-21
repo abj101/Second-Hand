@@ -1,8 +1,10 @@
 # Adaptive Orchestrator Architecture Plan
 
-Status: proposed
+Status: benchmark-only reference; native execution sequencing superseded by `native-decider-orchestration-plan.md`
 Date: 2026-09-20
 First development environment: PlayJev Infinite Mario
+
+> This document describes the optional PlayJev benchmark path. It is not the product-path execution plan and does not authorize PlayJev or Playwright as production input providers.
 
 ## Decision
 

@@ -1,4 +1,8 @@
-"""Candidate actions, directives, and action masks (benchmark path)."""
+"""Product-owned candidate actions, directives, and action masks.
+
+Optional fixture adapters supply benchmark catalogs; native compilation uses
+``loop.adaptive.contracts`` (``NativeCandidate`` / ``NativeCatalog``).
+"""
 
 from __future__ import annotations
 

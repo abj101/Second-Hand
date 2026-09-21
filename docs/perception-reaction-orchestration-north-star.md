@@ -1,9 +1,11 @@
 # Perception → Reaction → Orchestration North Star
 
-Status: proposed architecture; no runtime implementation is authorized by this document
+Status: benchmark-oriented reference; native execution sequencing superseded by `native-decider-orchestration-plan.md`
 Date: 2026-09-20
 Primary proving ground: PlayJev Infinite Mario
 Current hardware target: NVIDIA GeForce RTX 4060, 8 GB VRAM
+
+> The canonical product-path plan is `native-decider-orchestration-plan.md`: native window capture, local Decider, and verified Win32 input through `Session.act()`.
 
 This is the canonical specification for the current perception, reaction, and orchestration slice. `adaptive-orchestrator-plan.md` supplies the matching implementation sequence. Both defer learning until the fixed-weight reactive baseline is reliable.
 
