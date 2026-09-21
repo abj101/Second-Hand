@@ -44,6 +44,35 @@ class DecisionRow:
     latency_e2e_s: float
 
 
+@dataclass(frozen=True)
+class NativeShadowRow:
+    """Shadow-react telemetry; no primitive plans or model chain-of-thought."""
+
+    episode_id: str
+    episode_generation: int
+    frame_index: int
+    schema_revision_id: str
+    snapshot_id: str
+    observation_age_s: float
+    capture_integrity: str
+    hwnd: int
+    pid: int
+    focused: bool
+    directive_revision: int
+    catalog_revision: str
+    mask_digest: str
+    mask_allowed_ids: tuple[str, ...]
+    decision_source: str
+    selected_action_id: str | None
+    deterministic_action_id: str | None
+    dispatch_accepted: bool
+    dispatch_reason: str
+    primitive_plan_digest: str | None
+    policy_turn_id: int
+    latency_policy_s: float
+    latency_e2e_s: float
+
+
 def percentile(xs: list[float], p: float) -> float:
     if not xs:
         return 0.0
@@ -61,6 +90,7 @@ class TelemetryStore:
         self.path = path
         self.workspace = workspace
         self._rows: list[DecisionRow] = []
+        self._shadow_rows: list[NativeShadowRow] = []
         if workspace is not None:
             (workspace / "frames").mkdir(parents=True, exist_ok=True)
 
@@ -81,5 +111,16 @@ class TelemetryStore:
         with self.path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
 
+    def append_shadow(self, row: NativeShadowRow) -> None:
+        self._shadow_rows.append(row)
+        line = json.dumps(asdict(row), sort_keys=True)
+        shadow_path = self.path.with_name("shadow_react.jsonl")
+        shadow_path.parent.mkdir(parents=True, exist_ok=True)
+        with shadow_path.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
     def rows(self) -> list[DecisionRow]:
         return list(self._rows)
+
+    def shadow_rows(self) -> list[NativeShadowRow]:
+        return list(self._shadow_rows)

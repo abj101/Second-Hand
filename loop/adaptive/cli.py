@@ -318,8 +318,26 @@ def _shadow_metrics(frames: list[dict], *, warmup: int = 3) -> dict:
     }
 
 
+def _shadow_policy_worker(
+    *,
+    inference_timeout_s: float,
+) -> tuple[object, object]:
+    from loop.adaptive.controller import Executor
+    from loop.adaptive.policy import DeterministicPolicy
+    from loop.adaptive.policy_worker import PolicyWorker
+
+    policy = DeterministicPolicy()
+    worker = PolicyWorker(policy, inference_timeout_s=inference_timeout_s)
+    return worker, Executor()
+
+
 def _shadow_collect(
-    session: Session, window_title: str, n_steps: int, hwnd: int | None = None
+    session: Session,
+    window_title: str,
+    n_steps: int,
+    hwnd: int | None = None,
+    *,
+    decider_timeout: float = 30.0,
 ) -> tuple[int, dict]:
     try:
         target = _resolve_live_target(window_title, hwnd)
@@ -329,6 +347,10 @@ def _shadow_collect(
         print(json.dumps(err), file=sys.stderr, flush=True)
         return 2, err
 
+    from loop.adaptive.controller import NativeShadowConfig, NativeShadowLoop
+    from loop.adaptive.telemetry import TelemetryStore
+    from loop.os.window import is_foreground
+
     assembler = SceneAssembler()
     observe = _live_observe_factory(session, target, assembler)
     n_frames = max(1, n_steps)
@@ -337,25 +359,54 @@ def _shadow_collect(
     policy = session.schema.policy
     n_obs = max(policy.min_agreeing_reads, 1)
 
-    for i in range(n_frames):
-        recs, graph, snap, _holder = observe()
-        reason = _shadow_schema_abort(session, graph)
-        if reason:
-            err = {"mode": "shadow", "error": reason}
-            print(json.dumps(err), file=sys.stderr, flush=True)
-            return 2, err
-        frames.append(
-            {
-                "track_ids": sorted(_track_ids(graph)),
-                "field_keys": _field_keys(graph),
-                "mode_id": snap.mode_id,
-                "revision_id": snap.schema_revision_id,
-                "surface_action_ids": list(snap.surface.action_ids),
-            }
-        )
-        traces.append(Trace(dict(snap.fields), dict(snap.fields), recs, recs))
-        if len(traces) >= n_obs:
-            _try_promote(session, traces, recs)
+    worker, executor = _shadow_policy_worker(inference_timeout_s=decider_timeout)
+    telemetry = TelemetryStore(
+        session.workspace / "react.jsonl",
+        workspace=session.workspace,
+    )
+    shadow = NativeShadowLoop(
+        session,
+        worker,
+        executor,
+        telemetry,
+        config=NativeShadowConfig(decision_deadline_s=min(0.25, decider_timeout)),
+    )
+    identity = session.target or {}
+    pid = int(identity.get("pid") or 0)
+
+    try:
+        for _i in range(n_frames):
+            recs, graph, snap, _holder = observe()
+            reason = _shadow_schema_abort(session, graph)
+            if reason:
+                err = {"mode": "shadow", "error": reason}
+                print(json.dumps(err), file=sys.stderr, flush=True)
+                return 2, err
+            prov = getattr(observe, "provenance", {}) or {}
+            integrity = str(prov.get("integrity") or "trusted")
+            hwnd_val = int(prov.get("hwnd") or target.hwnd)
+            shadow.process_frame(
+                snap,
+                hwnd=hwnd_val,
+                pid=pid,
+                capture_integrity=integrity,
+                capture_provenance=(str(prov.get("source") or "window"),),
+                focused=is_foreground(target),
+            )
+            frames.append(
+                {
+                    "track_ids": sorted(_track_ids(graph)),
+                    "field_keys": _field_keys(graph),
+                    "mode_id": snap.mode_id,
+                    "revision_id": snap.schema_revision_id,
+                    "surface_action_ids": list(snap.surface.action_ids),
+                }
+            )
+            traces.append(Trace(dict(snap.fields), dict(snap.fields), recs, recs))
+            if len(traces) >= n_obs:
+                _try_promote(session, traces, recs)
+    finally:
+        shadow.close()
 
     metrics = _shadow_metrics(frames)
     schema = session.schema
@@ -363,6 +414,7 @@ def _shadow_collect(
         "mode": "shadow",
         "frames": n_frames,
         **metrics,
+        **shadow.metrics(),
         "revision_id": schema.revision.revision_id,
         "fields": [f.field_id for f in schema.fields],
         "actions": [a.action_id for a in schema.actions],
@@ -877,7 +929,13 @@ def cmd_collect(argv: list[str] | None = None) -> int:
     if args.arm:
         rc, summary = _armed_collect(session, args.window, max(1, args.steps), args.hwnd)
     else:
-        rc, summary = _shadow_collect(session, args.window, max(1, args.steps), args.hwnd)
+        rc, summary = _shadow_collect(
+            session,
+            args.window,
+            max(1, args.steps),
+            args.hwnd,
+            decider_timeout=float(args.decider_timeout),
+        )
 
     session.write_step_log(args.workspace / "summary.json", summary)
     if rc == 0:
