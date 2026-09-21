@@ -65,7 +65,10 @@ def test_request_is_canonical_and_redacted() -> None:
     assert "key:left" not in rendered
     assert "key:right" not in rendered
     assert "snapshot-1" not in rendered
-    assert state["directive"] == {"intent": "progress while surviving"}
+    assert state["directive"] == {
+        "intent": "progress while surviving",
+        "revision": _directive().revision,
+    }
 
 
 class _FakeDecider:

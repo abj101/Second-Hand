@@ -10,6 +10,7 @@ from PIL import Image
 
 from loop.adaptive.environment import StepResult
 from loop.adaptive.evidence import assign_track_ids, detect_regions, motion_bbox
+from loop.adaptive.contracts import NativeObservation, ObservationQuality
 from loop.adaptive.schema import ActionSurface, StateSnapshot, empty_schema
 
 _SCHEMA_REV = empty_schema().revision.revision_id
@@ -90,6 +91,41 @@ def assert_no_privileged(obj: object) -> None:
         return
     if obj == "SECRET":
         raise ValueError("privileged leak: SECRET value")
+
+
+def build_native_observation(
+    snapshot: StateSnapshot,
+    *,
+    episode_id: str,
+    episode_generation: int,
+    capture_ts_monotonic: float,
+    publication_ts_monotonic: float,
+    capture_integrity: str,
+    capture_provenance: tuple[str, ...],
+    hwnd: int,
+    pid: int,
+    target_identity: dict[str, str],
+    quality: ObservationQuality,
+    missing_required_fields: tuple[str, ...] = (),
+) -> NativeObservation:
+    age = max(0.0, publication_ts_monotonic - capture_ts_monotonic)
+    return NativeObservation(
+        episode_id=episode_id,
+        episode_generation=episode_generation,
+        capture_ts_monotonic=capture_ts_monotonic,
+        publication_ts_monotonic=publication_ts_monotonic,
+        observation_age_s=age,
+        capture_integrity=capture_integrity,
+        capture_provenance=capture_provenance,
+        hwnd=hwnd,
+        pid=pid,
+        target_identity=dict(target_identity),
+        snapshot_id=snapshot.snapshot_id,
+        schema_revision_id=snapshot.schema_revision_id,
+        quality=quality,
+        missing_required_fields=missing_required_fields,
+        snapshot=snapshot,
+    )
 
 
 def to_verified_snapshot(v2: StateSnapshotV2) -> StateSnapshot:

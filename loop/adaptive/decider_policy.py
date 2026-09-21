@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from typing import Any, Protocol
 
 from loop.adaptive.candidates import CandidateAction, Directive
-from loop.adaptive.policy import DecisionError, StructuredDecision
+from loop.adaptive.policy import DecisionError, ReactiveState, StructuredDecision, coerce_reactive
 from loop.adaptive.snapshot import StateSnapshotV2, assert_no_privileged
 
 
@@ -32,43 +32,50 @@ class SystemOne(Protocol):
     ) -> Mapping[str, object]: ...
 
 
-def build_decider_state(snapshot: StateSnapshotV2, directive: Directive) -> dict[str, object]:
+def build_decider_state(
+    snapshot: StateSnapshotV2 | ReactiveState,
+    directive: Directive,
+) -> dict[str, object]:
     """Return model-visible semantics, excluding control and dispatch metadata."""
 
-    state: dict[str, object] = {
-        "directive": {"intent": directive.intent},
-        "observation": {
-            "mode": snapshot.mode if snapshot.mode is not None else "unknown",
-            "confidence": round(snapshot.confidence, 4),
-            "fields": {
-                name: {
-                    "value": field.value,
-                    "confidence": round(field.confidence, 4),
-                    "unknown": field.unknown,
-                }
-                for name, field in sorted(snapshot.fields.items())
-            },
-            "entities": [
-                {
-                    "id": entity.stable_id,
-                    "type": entity.type,
-                    "confidence": round(entity.confidence, 4),
-                }
-                for entity in sorted(snapshot.entities, key=lambda item: item.stable_id)
-            ],
-            "relations": [
-                {
-                    "source": relation.src,
-                    "relation": relation.kind,
-                    "target": relation.dst,
-                    "confidence": round(relation.confidence, 4),
-                }
-                for relation in sorted(
-                    snapshot.relations,
-                    key=lambda item: (item.src, item.kind, item.dst),
-                )
-            ],
+    reactive = coerce_reactive(snapshot)
+    observation: dict[str, object] = {
+        "mode": reactive.mode if reactive.mode is not None else "unknown",
+        "confidence": round(reactive.confidence, 4),
+        "fields": {
+            name: {
+                "value": field.value,
+                "confidence": round(field.confidence, 4),
+                "unknown": field.unknown,
+            }
+            for name, field in sorted(reactive.fields.items())
         },
+        "entities": [
+            {
+                "id": entity.stable_id,
+                "type": entity.type,
+                "confidence": round(entity.confidence, 4),
+            }
+            for entity in sorted(reactive.entities, key=lambda item: item.stable_id)
+        ],
+        "relations": [
+            {
+                "source": relation.src,
+                "relation": relation.kind,
+                "target": relation.dst,
+                "confidence": round(relation.confidence, 4),
+            }
+            for relation in sorted(
+                reactive.relations,
+                key=lambda item: (item.src, item.kind, item.dst),
+            )
+        ],
+    }
+    if reactive.prior_verified_outcome is not None:
+        observation["prior_verified_outcome"] = dict(reactive.prior_verified_outcome)
+    state: dict[str, object] = {
+        "directive": {"intent": directive.intent, "revision": directive.revision},
+        "observation": observation,
     }
     assert_no_privileged(state)
     return state
@@ -188,12 +195,13 @@ class DeciderPolicy:
 
     def score(
         self,
-        snapshot: StateSnapshotV2,
+        snapshot: StateSnapshotV2 | ReactiveState,
         directive: Directive,
         candidates: tuple[CandidateAction, ...],
     ) -> StructuredDecision:
         ordered, questions = build_decider_questions(candidates)
-        state = build_decider_state(snapshot, directive)
+        reactive = coerce_reactive(snapshot)
+        state = build_decider_state(reactive, directive)
         response = self._model.system_one(
             state,
             questions,
@@ -211,8 +219,8 @@ class DeciderPolicy:
             confidence=confidence,
             probabilities=probabilities,
             decided_at=time.monotonic(),
-            episode_generation=snapshot.episode_generation,
-            snapshot_id=snapshot.snapshot_id,
+            episode_generation=reactive.episode_generation,
+            snapshot_id=reactive.snapshot_id,
             directive_revision=directive.revision,
             catalog_revision=self.catalog_revision,
         )
