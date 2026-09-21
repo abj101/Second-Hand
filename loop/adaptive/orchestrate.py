@@ -32,6 +32,14 @@ from loop.adaptive.schema import (
 PROMPT_VERSION = "composer-2.5-v1"
 _COORD_KEYS = frozenset({"x", "y", "bbox", "xy", "screen_xy", "px", "py", "nx", "ny"})
 
+# Conservative native constraints stamped on every promoted click action (Wave 2).
+PROMOTED_NATIVE_CONSTRAINTS: dict[str, object] = {
+    "risk": "low",
+    "retry": "deny",
+    "cooldown_s": 0.5,
+    "max_plan_duration_s": 1.0,
+}
+
 _ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _OCR_LABEL_LINE = re.compile(
     r"^([A-Za-z_][A-Za-z0-9_]*)[:\s]+(-?\d+(?:\.\d+)?)$",
@@ -699,6 +707,34 @@ def _merge_mode(schema: AdaptiveSchema, payload: dict) -> AdaptiveSchema:
     return replace(schema, modes=schema.modes + (ModeSpec(mid, activation=activation),))
 
 
+def _validate_native_constraints_dict(constraints: dict) -> None:
+    from loop.adaptive import contracts as native_contracts
+    from loop.adaptive.candidates import native_constraints_from_spec
+
+    trusted = native_constraints_from_spec(
+        ActionSpec(
+            action_id="_constraint_probe",
+            parameters=(),
+            preconditions=(),
+            primitive_plan=(PrimitiveStep("click", ("target",)),),
+            expected_effects=(),
+            constraints=constraints,
+        )
+    )
+    native_contracts._validate_constraints(trusted)
+
+
+def _resolve_promoted_native_constraints(payload: dict) -> dict:
+    merged = dict(PROMOTED_NATIVE_CONSTRAINTS)
+    extra = payload.get("constraints")
+    if extra:
+        if not isinstance(extra, dict):
+            raise ValueError("constraints must be a mapping")
+        merged.update(extra)
+    _validate_native_constraints_dict(merged)
+    return merged
+
+
 def _merge_action(schema: AdaptiveSchema, payload: dict) -> AdaptiveSchema:
     field_id = str(payload.get("field_id", ""))
     op = str(payload.get("op", "increased"))
@@ -716,6 +752,9 @@ def _merge_action(schema: AdaptiveSchema, payload: dict) -> AdaptiveSchema:
     effects: tuple[EffectPredicate, ...] = ()
     if field_id:
         effects = (EffectPredicate(field_id, op),)
+    constraints: dict = {}
+    if has_target:
+        constraints = _resolve_promoted_native_constraints(payload)
     spec = ActionSpec(
         action_id=aid,
         parameters=(ParamSpec("target", "entity"),) if has_target else (),
@@ -723,6 +762,7 @@ def _merge_action(schema: AdaptiveSchema, payload: dict) -> AdaptiveSchema:
         primitive_plan=((PrimitiveStep("click", ("target",)),) if has_target else ()),
         expected_effects=effects,
         selector=selector,
+        constraints=constraints,
     )
     return replace(schema, actions=schema.actions + (spec,))
 
@@ -813,7 +853,19 @@ def _detector_kind_for_field(value_type: str) -> str:
     return "pixel_color_frac"
 
 
+def _validate_compiled_native_actions(schema: AdaptiveSchema) -> None:
+    from loop.adaptive.schema import validate_primitive_step
+
+    for action in schema.actions:
+        if not action.primitive_plan:
+            continue
+        for step in action.primitive_plan:
+            validate_primitive_step(step)
+        _validate_native_constraints_dict(dict(action.constraints))
+
+
 def compile_schema(schema: AdaptiveSchema) -> AdaptiveSchema:
+    _validate_compiled_native_actions(schema)
     by_id = {s.sensor_id: s for s in schema.sensors}
     new_fields: list[FieldSpec] = []
     new_sensors: list[SensorRecipe] = list(schema.sensors)

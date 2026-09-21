@@ -222,6 +222,8 @@ def test_two_trials_promote_and_journal_reload(tmp_path: Path):
     schema = ctrl.promote()
     assert schema.actions
     assert all("track_" not in a.action_id for a in schema.actions)
+    assert schema.actions[0].constraints.get("risk") == "low"
+    assert schema.actions[0].expected_effects
     journal = ExperimentJournal(tmp_path / "experiment.jsonl")
     assert journal.last_plan() is not None
     loaded = ExperimentController(session, min_frames=4)

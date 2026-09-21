@@ -323,7 +323,7 @@ def admit_plan(
     ids = tuple(str(x) for x in (cand.get("candidate_ids") or ()))
     if not ids or any(i not in valid for i in ids):
         return None
-    if _has_coordinates(cand):
+    if _has_coordinates(cand) or _has_coordinates(cand.get("rollback")):
         return None
     effects = tuple(dict(x) for x in (cand.get("predicted_effects") or ()) if isinstance(x, dict))
     if len(effects) != 1:
