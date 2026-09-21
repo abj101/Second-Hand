@@ -1,5 +1,0 @@
-Placeholder for user-owned Pokémon Platinum manual pages. Do not paste copyrighted
-manual scans into git. At run time, drop owned text into this file locally (it is
-fine to keep unpublished) or pass --manual-file. Overworld: walk with the D-pad,
-talk with A, menus with Start. Battles are turn-based: pick Fight / Pokemon / Bag / Run,
-then a move. Dual screens: map/UI often on the bottom screen.

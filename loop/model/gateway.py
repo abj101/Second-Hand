@@ -10,8 +10,9 @@ from urllib.parse import urlparse, urlunparse
 
 import httpx
 
-from loop.config import DEFAULT_MODEL
 from loop.os.capture import EncodedFrame
+
+DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
 
 
 def _is_ollama_cloud(model_id: str) -> bool:
@@ -314,6 +315,112 @@ class VlmGateway:
         return urlunparse((parsed.scheme, parsed.netloc, path or "", "", "", "")).rstrip("/")
 
 
+DEFAULT_PROPOSAL_MODEL = os.getenv("PROPOSAL_MODEL", "gpt-5.6")
+
+
+class ProposalGateway:
+    """OpenAI-compatible Responses API client for structured image proposals.
+
+    Off the qualified-action hot path. Uses httpx only.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str | None = None,
+        model: str | None = None,
+        max_tokens: int = 800,
+    ) -> None:
+        self.api_key = api_key
+        self.base_url = (base_url or os.getenv("PROPOSAL_API_URL") or "https://api.openai.com/v1").rstrip("/")
+        self.model = model or DEFAULT_PROPOSAL_MODEL
+        self.max_tokens = max_tokens
+
+    @classmethod
+    def from_env(cls) -> "ProposalGateway | None":
+        key = os.getenv("PROPOSAL_API_KEY") or os.getenv("OPENAI_API_KEY")
+        if not key:
+            return None
+        return cls(api_key=key)
+
+    def complete_json(
+        self,
+        *,
+        system: str,
+        user: str,
+        json_schema: dict[str, Any],
+        schema_name: str = "proposal",
+        frames: list[EncodedFrame] | None = None,
+        timeout_s: float | None = None,
+    ) -> ModelCall:
+        import base64
+
+        user_content: list[dict[str, Any]] = [{"type": "input_text", "text": user}]
+        for frame in frames or []:
+            b64 = base64.b64encode(frame.data).decode("ascii")
+            user_content.append(
+                {"type": "input_image", "image_url": f"data:{frame.mime};base64,{b64}"}
+            )
+        body = {
+            "model": self.model,
+            "input": [
+                {"role": "system", "content": [{"type": "input_text", "text": system}]},
+                {"role": "user", "content": user_content},
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": schema_name,
+                    "strict": True,
+                    "schema": json_schema,
+                }
+            },
+            "max_output_tokens": self.max_tokens,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        t0 = time.perf_counter()
+        seconds = 60.0 if timeout_s is None else float(timeout_s)
+        response = httpx.post(
+            f"{self.base_url}/responses",
+            json=body,
+            headers=headers,
+            timeout=httpx.Timeout(seconds, connect=min(seconds, 10.0)),
+        )
+        _raise_for_status(response)
+        payload = response.json() or {}
+        text = _responses_text(payload)
+        parsed = _parse_json(text)
+        return _model_call_from_response(
+            text=text,
+            parsed=parsed,
+            model=self.model,
+            latency_ms=(time.perf_counter() - t0) * 1000,
+            response=response,
+            image_supplied=bool(frames),
+        )
+
+
+def _responses_text(payload: dict[str, Any]) -> str:
+    direct = payload.get("output_text")
+    if isinstance(direct, str) and direct.strip():
+        return direct
+    chunks: list[str] = []
+    for item in payload.get("output") or ():
+        if not isinstance(item, dict):
+            continue
+        for part in item.get("content") or ():
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text") or part.get("output_text")
+            if isinstance(text, str):
+                chunks.append(text)
+    return "".join(chunks)
+
+
 def _chat_messages(
     *,
     system: str,
@@ -440,4 +547,4 @@ def _raise_for_status(response: httpx.Response) -> None:
     except httpx.HTTPStatusError as exc:
         detail = response.text.strip()
         suffix = f": {detail[:600]}" if detail else ""
-        raise RuntimeError(f"Ollama {response.status_code} for {response.request.url}{suffix}") from exc
+        raise RuntimeError(f"HTTP {response.status_code} for {response.request.url}{suffix}") from exc

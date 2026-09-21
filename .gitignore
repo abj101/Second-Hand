@@ -1,17 +1,13 @@
 # Experiment runs (screenshots, traces, costs)
 runs/
 
-# L2 persisted procedural memory (per-fixture action stats)
-data/memory/
-
-# GSM registry rewrites (labels / reward params; kinds stay in yaml)
-data/gsm/
-
-# Collect-loop session memory and start snapshots (never commit ER saves)
-data/loop/
+# Local adaptive workspaces and evidence
+data/
 
 # Downloaded GGUFs for custom quant imports
 .cache/
+# PlayJev/Mario fetch cache lives under .cache/benchmarks/
+benchmarks/infinite_mario/.cache/
 
 # Secrets
 .env
@@ -43,12 +39,8 @@ build/
 .pytest_cache/
 .mypy_cache/
 
-# Node (vendored games may have their own)
+# Node
 node_modules/
-games/**/node_modules/
-
-# Nested git from vendored clones (we vendor as source, not submodules)
-games/**/.git/
 
 # OS / editor
 .DS_Store
@@ -73,6 +65,3 @@ Thumbs.db
 /inspect_*.txt
 /scripts/_tmp_*.py
 /tests/fixtures/affordance/affordance/
-
-# Local reference copy; cite the canonical upstream paper in research.md
-/GSM-Paper.pdf

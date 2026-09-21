@@ -1,3 +1,0 @@
-Elden Ring stretch notes (Phase 1 if reached): score navigation, NPC talk, menus,
-and item use — not boss combat. Controls are the usual action-RPG pad: move, camera,
-interact, menu. VLM latency will fail realtime combat; do not treat that as a harness bug.

@@ -311,6 +311,55 @@ def is_foreground(target: WindowTarget) -> bool:
     return int(user32.GetForegroundWindow()) == target.hwnd
 
 
+def _process_exe(pid: int) -> str:
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not handle:
+        return ""
+    try:
+        query = kernel32.QueryFullProcessImageNameW
+        query.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        query.restype = wintypes.BOOL
+        buf = ctypes.create_unicode_buffer(32768)
+        size = wintypes.DWORD(len(buf))
+        if query(handle, 0, buf, ctypes.byref(size)):
+            path = buf.value.replace("/", "\\")
+            return path.rsplit("\\", 1)[-1].lower()
+        return ""
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def target_identity(target: WindowTarget, *, selector: str = "") -> dict:
+    """Stable process/window identity. hwnd/pid bind the current instance only."""
+
+    pid = wintypes.DWORD(0)
+    try:
+        user32.GetWindowThreadProcessId(int(target.hwnd), ctypes.byref(pid))
+    except OSError:
+        pid = wintypes.DWORD(0)
+    class_buf = ctypes.create_unicode_buffer(256)
+    try:
+        user32.GetClassNameW(int(target.hwnd), class_buf, 256)
+        window_class = class_buf.value
+    except OSError:
+        window_class = ""
+    return {
+        "selector": str(selector),
+        "exe": _process_exe(int(pid.value)),
+        "window_class": window_class,
+        "hwnd": int(target.hwnd),
+        "pid": int(pid.value),
+        "title": str(target.title),
+        "client_size": [int(target.width), int(target.height)],
+    }
+
+
 def foreground_title() -> str:
     hwnd = int(user32.GetForegroundWindow())
     length = user32.GetWindowTextLengthW(hwnd)
