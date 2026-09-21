@@ -426,6 +426,8 @@ def _shadow_collect(
 def _armed_collect(
     session: Session, window_title: str, n_steps: int, hwnd: int | None = None
 ) -> tuple[int, dict]:
+    from loop.adaptive.arm import run_armed_collect
+
     try:
         target = _resolve_live_target(window_title, hwnd)
         _bind_live_session(session, target, window_title)
@@ -436,67 +438,7 @@ def _armed_collect(
 
     assembler = SceneAssembler()
     observe = _live_observe_factory(session, target, assembler)
-    warm = max(3, min(n_steps, max(3, session.schema.policy.min_agreeing_reads)))
-    traces: list[Trace] = []
-    snap = None
-    scene_holder = None
-    for _ in range(warm):
-        recs, graph, snap, scene_holder = observe()
-        reason = _shadow_schema_abort(session, graph)
-        if reason:
-            err = {"mode": "armed", "error": reason}
-            print(json.dumps(err), file=sys.stderr, flush=True)
-            return 2, err
-        traces.append(Trace(dict(snap.fields), dict(snap.fields), recs, recs))
-    _try_promote(session, traces, recs)
-
-    # Re-project against the accepted revision, then require the complete
-    # action surface to remain identical on three trusted observations.
-    stable: list[tuple[str, ...]] = []
-    for _ in range(3):
-        _recs, _graph, snap, scene_holder = observe()
-        stable.append(tuple(snap.surface.action_ids))
-    if len(set(stable)) != 1:
-        err = {"mode": "armed", "error": "unstable legal action surface"}
-        print(json.dumps(err), file=sys.stderr, flush=True)
-        return 2, err
-    if snap is None or len(snap.surface.actions) != 1:
-        err = {"mode": "armed", "error": "legal action surface is not unique"}
-        print(json.dumps(err), file=sys.stderr, flush=True)
-        return 2, err
-
-    inv = select_invocation(snap) if snap is not None else None
-    if inv is None:
-        err = {"mode": "armed", "error": "no legal action"}
-        print(json.dumps(err), file=sys.stderr, flush=True)
-        return 2, err
-
-    runner = _make_screen_runner(target, scene_holder or [None])
-    try:
-        ok = session.act(
-            inv,
-            runner,
-            lambda: observe()[1],
-            before=snap,
-        )
-    except (InvocationError, ValueError, OSError) as exc:
-        err = {"mode": "armed", "error": str(exc)}
-        print(json.dumps(err), file=sys.stderr, flush=True)
-        return 2, err
-
-    if not ok:
-        err = {"mode": "armed", "error": "action not verified"}
-        print(json.dumps(err), file=sys.stderr, flush=True)
-        return 2, err
-
-    schema = session.schema
-    summary = {
-        "mode": "armed",
-        "verified": 1,
-        "revision_id": schema.revision.revision_id,
-        "workspace": str(session.workspace.resolve()),
-    }
-    return 0, summary
+    return run_armed_collect(session, target, observe, n_steps=n_steps)
 
 
 def _synthetic_collect(session: Session, n_steps: int) -> dict:
