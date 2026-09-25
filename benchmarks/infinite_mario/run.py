@@ -25,11 +25,10 @@ from benchmarks.infinite_mario.adapter import MarioEnvironment
 from benchmarks.infinite_mario.perceive import MarioPerception
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_REVISION = "2d7a0280841e3244a299c9c640efc8cefc46d476"
 
 
 def _cache_dir(repo_root: Path) -> Path:
-    return repo_root / ".cache" / "benchmarks" / "playjev" / DEFAULT_REVISION
+    return repo_root / ".cache" / "benchmarks" / "infinite-mario"
 
 
 def _load_seeds(repo_root: Path, split: str) -> list[int]:
@@ -52,8 +51,15 @@ async def _run_one(
     policy_name: str,
     max_steps: int,
     workspace: Path,
+    tracker_name: str = "none",
 ) -> dict:
-    perception = MarioPerception()
+    from loop.adaptive.tracker import open_tracker
+
+    from benchmarks.infinite_mario.track_experiment import load_track_prompts
+
+    prompts = load_track_prompts() if tracker_name != "none" else None
+    tracker = open_tracker(tracker_name, prompts=prompts)
+    perception = MarioPerception(tracker)
     executor = Executor()
     telemetry = TelemetryStore(workspace / "telemetry.jsonl", workspace=workspace)
     directive_store = GenerationStore()
@@ -124,6 +130,9 @@ async def _run_one(
         "environment_revision": summary.get("environment_revision") or "infinite-mario-v1",
         "model_choice": None,
         "vram_mb": None,
+        "tracker": tracker_name,
+        "tracker_status": "none" if tracker is None else str(tracker.status),
+        "tracker_associator": "none" if tracker is None else str(tracker.associator),
     }
 
 
@@ -136,11 +145,15 @@ async def run_report(
     workspace: Path,
     seed_override: int | None = None,
     max_episodes: int = 1,
+    tracker_name: str = "none",
 ) -> dict:
     cache = _cache_dir(repo_root)
     if not cache.is_dir():
+        from benchmarks.test_games import by_name
+
+        upstream = by_name("Infinite Mario").repo
         raise FileNotFoundError(
-            f"PlayJev cache missing at {cache}. Run: python -m loop fetch-playjev"
+            f"Mario page cache missing at {cache}. Upstream: {upstream}"
         )
 
     seeds = _load_seeds(repo_root, split)
@@ -162,10 +175,20 @@ async def run_report(
         if policy_name == "baselines":
             for seed in seeds:
                 det = await _run_one(
-                    env, seed=seed, policy_name="deterministic", max_steps=max_steps, workspace=workspace
+                    env,
+                    seed=seed,
+                    policy_name="deterministic",
+                    max_steps=max_steps,
+                    workspace=workspace,
+                    tracker_name=tracker_name,
                 )
                 rnd = await _run_one(
-                    env, seed=seed, policy_name="random", max_steps=max_steps, workspace=workspace
+                    env,
+                    seed=seed,
+                    policy_name="random",
+                    max_steps=max_steps,
+                    workspace=workspace,
+                    tracker_name=tracker_name,
                 )
                 report["episodes"].append({"seed": seed, "deterministic": det, "random": rnd})
         else:
@@ -176,6 +199,7 @@ async def run_report(
                     policy_name=policy_name,
                     max_steps=max_steps,
                     workspace=workspace,
+                    tracker_name=tracker_name,
                 )
                 report["episodes"].append(ep)
     finally:
@@ -211,6 +235,7 @@ async def run_report(
             report["latency_e2e_p50"] = first.get("latency_e2e_p50")
             report["latency_e2e_p95"] = first.get("latency_e2e_p95")
         report["policy"] = policy_name
+        report["tracker"] = tracker_name
         report["environment_fingerprint"] = report["fingerprint"]
     return report
 
@@ -226,6 +251,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-steps", type=int, default=20)
     parser.add_argument("--seed", type=int, default=None, help="override manifest seed")
+    parser.add_argument(
+        "--tracker",
+        choices=("none", "yolo-world", "sam2"),
+        default="none",
+        help="spatial tracker; none keeps the motion sensor",
+    )
     args = parser.parse_args(argv)
 
     workspace = args.workspace.resolve()
@@ -240,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
             max_steps=args.max_steps,
             workspace=workspace,
             seed_override=args.seed,
+            tracker_name=args.tracker,
         )
     )
     out = workspace / "report.json"

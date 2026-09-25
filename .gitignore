@@ -6,7 +6,10 @@ data/
 
 # Downloaded GGUFs for custom quant imports
 .cache/
-# PlayJev/Mario fetch cache lives under .cache/benchmarks/
+# Local object-detection model weights
+*.pt
+weights/
+# Local game checkouts live under .cache/benchmarks/
 benchmarks/infinite_mario/.cache/
 
 # Secrets
@@ -32,6 +35,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .venv/
+.venv-perception/
 venv/
 *.egg-info/
 dist/

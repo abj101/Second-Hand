@@ -21,6 +21,11 @@ DECIDER_2B_MODEL_REVISION = "b37f7e1ba3fbc9238004cf531fabbee2619973fd"
 _QUESTION = "Which currently valid action best advances the directive from this observation?"
 
 
+def scoring_policy_source(policy: object) -> str:
+    """Telemetry label for the policy object that scored (never a fallback alias)."""
+    return type(policy).__name__
+
+
 class SystemOne(Protocol):
     def system_one(
         self,

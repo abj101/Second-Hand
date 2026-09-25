@@ -9,6 +9,7 @@ from loop.adaptive.decider_policy import (
     DeciderPolicy,
     build_decider_questions,
     build_decider_state,
+    scoring_policy_source,
     validate_system_one_answer,
 )
 from loop.adaptive.policy import DecisionError
@@ -125,3 +126,8 @@ def test_invalid_answers_fail_closed(answer: dict[str, object]) -> None:
 def test_decider_is_not_called_for_invalid_candidate_count() -> None:
     with pytest.raises(DecisionError, match="2..255"):
         build_decider_questions((_candidates()[0],))
+
+
+def test_scoring_policy_source_names_concrete_policy() -> None:
+    model = _FakeDecider()
+    assert scoring_policy_source(DeciderPolicy(model)) == "DeciderPolicy"

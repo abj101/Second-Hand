@@ -1,6 +1,6 @@
 # Adaptive Orchestrator Architecture Plan
 
-Status: benchmark-only reference; native execution sequencing superseded by `native-decider-orchestration-plan.md`
+Status: benchmark-only reference. Product vision is `perception-reaction-orchestration-north-star.md`. Build sequence is `north-star-build-plan.md`.
 Date: 2026-09-20
 First development environment: PlayJev Infinite Mario
 

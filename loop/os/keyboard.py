@@ -95,7 +95,7 @@ class Keyboard:
             self._up(scan, extended)
             self._held.discard(code)
 
-    def hold(self, code: str, *, duration_ms: int) -> None:
+    def hold(self, code: str, *, duration_ms: int, release_at: float | None = None) -> None:
         scan, extended = compile_key(code)
         with self._lock:
             if code in self._held:
@@ -108,7 +108,10 @@ class Keyboard:
                 self._up(scan, extended)
                 self._held.discard(code)
 
-        timer = threading.Timer(max(0.0, duration_ms / 1000.0), _release)
+        delay_s = max(0.0, duration_ms / 1000.0)
+        if release_at is not None:
+            delay_s = min(delay_s, max(0.0, release_at - time.monotonic()))
+        timer = threading.Timer(delay_s, _release)
         timer.daemon = True
         with self._lock:
             self._timers.append(timer)

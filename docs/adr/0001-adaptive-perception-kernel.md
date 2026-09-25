@@ -25,3 +25,7 @@ A 30-frame live shadow run proved window capture, OCR, ledger persistence, numer
 - Repository purity is checked across all retained Python code.
 - Synthetic testing proves the causal pipeline but is not a substitute for live qualification.
 - The next milestone is a generic, explicitly armed experiment controller—not another application adapter.
+
+## Clarification — 2026-09-22
+
+The [north-star game-brief contract](../perception-reaction-orchestration-north-star.md#game-brief-purpose-and-authority) permits versioned, game-specific JSON prose as advisory orchestration context. The kernel still starts from an empty schema and uses pixels and receipts for state and action evidence. A brief supplies background and a fallback objective; it is neither a domain-specific runtime nor a source of executable bindings, selectors, or verified effects. Game names and mechanics belong in data, not conditional branches in the kernel.

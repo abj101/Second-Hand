@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING
 
 from loop.adaptive.candidates import CandidateAction, Directive
-from loop.adaptive.policy import DecisionError, Policy, ReactiveState, StructuredDecision
+from loop.adaptive.policy import DecisionError, Policy, ReactiveState, StructuredDecision, reactive_episode_meta
 from loop.adaptive.snapshot import StateSnapshotV2
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -58,6 +61,12 @@ class _Job:
     candidates: tuple[CandidateAction, ...]
     deadline_at: float
     submitted_at: float
+    catalog_revision: str
+    candidate_action_ids: tuple[str, ...]
+    snapshot_id: str
+    directive_revision: int
+    episode_generation: int
+    job_image: "Image.Image | None" = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +114,12 @@ class PolicyWorker:
         directive: Directive,
         candidates: tuple[CandidateAction, ...],
         *,
+        catalog_revision: str | None = None,
+        candidate_action_ids: tuple[str, ...] | None = None,
+        snapshot_id: str | None = None,
+        directive_revision: int | None = None,
+        episode_generation: int | None = None,
+        job_image: "Image.Image | None" = None,
         timeout_s: float | None = None,
         now: float | None = None,
     ) -> int:
@@ -112,6 +127,24 @@ class PolicyWorker:
 
         if len(candidates) < 2:
             return 0
+
+        snap_id, episode_gen = reactive_episode_meta(snapshot)
+        frozen_catalog = (
+            catalog_revision
+            if catalog_revision is not None
+            else str(getattr(self._policy, "catalog_revision", ""))
+        )
+        ordered_ids = (
+            candidate_action_ids
+            if candidate_action_ids is not None
+            else tuple(candidate.action_id for candidate in candidates)
+        )
+        frozen_image = job_image.copy() if job_image is not None else None
+        if frozen_image is None:
+            from loop.adaptive.qwen_policy import QwenReactionPolicy
+
+            if isinstance(self._policy, QwenReactionPolicy) and self._policy._crop is not None:
+                frozen_image = self._policy._crop.copy()
 
         monotonic_now = time.monotonic() if now is None else now
         limit = self._default_timeout_s if timeout_s is None else timeout_s
@@ -126,6 +159,12 @@ class PolicyWorker:
                 candidates=candidates,
                 deadline_at=monotonic_now + limit,
                 submitted_at=monotonic_now,
+                catalog_revision=frozen_catalog,
+                candidate_action_ids=ordered_ids,
+                snapshot_id=snap_id if snapshot_id is None else snapshot_id,
+                directive_revision=directive.revision if directive_revision is None else directive_revision,
+                episode_generation=episode_gen if episode_generation is None else episode_generation,
+                job_image=frozen_image,
             )
             self._pending = job
             self._deadlines[turn_id] = job.deadline_at
@@ -218,13 +257,21 @@ class PolicyWorker:
                 self._inflight = job
 
             started = time.monotonic()
+            qwen_policy = None
+            prior_crop = None
             try:
+                from loop.adaptive.qwen_policy import QwenReactionPolicy
+
+                if isinstance(self._policy, QwenReactionPolicy):
+                    qwen_policy = self._policy
+                    prior_crop = qwen_policy._crop
+                    qwen_policy._crop = job.job_image
                 decision = self._policy.score(job.snapshot, job.directive, job.candidates)
             except DecisionError as exc:
                 finished = _Finished(
                     job.turn_id,
                     None,
-                    str(exc),
+                    f"decision_invalid:{exc}",
                     PolicyInferenceTelemetry(time.monotonic() - started, self._read_peak_vram()),
                 )
             except Exception as exc:
@@ -237,10 +284,13 @@ class PolicyWorker:
             else:
                 finished = _Finished(
                     job.turn_id,
-                    decision,
+                    self._bind_job_context(decision, job),
                     "",
                     PolicyInferenceTelemetry(time.monotonic() - started, self._read_peak_vram()),
                 )
+            finally:
+                if qwen_policy is not None:
+                    qwen_policy._crop = prior_crop
 
             with self._cond:
                 self._inflight = None
@@ -257,6 +307,18 @@ class PolicyWorker:
                     self._finished = finished
                 if self._pending is not None:
                     self._cond.notify_all()
+
+    @staticmethod
+    def _bind_job_context(decision: StructuredDecision, job: _Job) -> StructuredDecision:
+        """Stamp request-scoped identity; never adopt the policy object's live catalog."""
+
+        return replace(
+            decision,
+            catalog_revision=job.catalog_revision,
+            snapshot_id=job.snapshot_id,
+            directive_revision=job.directive_revision,
+            episode_generation=job.episode_generation,
+        )
 
     def _read_peak_vram(self) -> float | None:
         if self._peak_vram is None:

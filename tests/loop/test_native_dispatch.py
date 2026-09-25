@@ -25,9 +25,11 @@ from loop.adaptive.executor import Executor, NativeDispatchContext
 from loop.adaptive.policy import (
     DeterministicPolicy,
     ReactiveState,
+    project_reactive_for_model,
     reactive_state_from_native,
     reactive_state_from_v2,
 )
+from loop.adaptive.schema import SceneGraph, SceneNode
 from loop.adaptive.schema import (
     ActionInstance,
     ActionSpec,
@@ -104,18 +106,22 @@ def _verified_snapshot(schema, action_ids: tuple[str, ...]) -> StateSnapshot:
 def _observation(**overrides: object):
     schema = _schema_with_actions("click_a", "click_b")
     snap = _verified_snapshot(schema, ("click_a", "click_b"))
+    captured = time.monotonic()
     base = dict(
         snapshot=snap,
         episode_id="ep1",
         episode_generation=3,
-        capture_ts_monotonic=100.0,
-        publication_ts_monotonic=100.05,
+        capture_ts_monotonic=captured - 0.01,
+        publication_ts_monotonic=captured,
         capture_integrity="ok",
         capture_provenance=("window_capture",),
         hwnd=42,
         pid=99,
         target_identity={"selector": "win"},
         quality=ObservationQuality.trusted,
+        capture_age_known=True,
+        acquisition_origin="pre-grab-sync",
+        observation_sequence=1,
     )
     base.update(overrides)
     return build_native_observation(**base)  # type: ignore[arg-type]
@@ -369,11 +375,69 @@ def test_native_dispatch_fuzz_never_leases_on_stale_or_mismatch() -> None:
                 "not_on_surface",
                 "mask_mismatch",
                 "untrusted_capture",
+                "degraded_capture",
                 "recovery_locked",
                 "missing_required_fields",
                 "target_identity",
                 "schema_mismatch",
+                    "rebound",
+                    "unverified_acquisition",
             }
+
+
+def test_native_dispatch_rejects_empty_policy_revision() -> None:
+    obs = _observation()
+    schema = _schema_with_actions("click_a", "click_b")
+    catalog = compile_catalog_from_surface(schema, obs.snapshot)
+    directive = Directive(1, obs.episode_generation, "i", 30.0, time.monotonic())
+    mask = compile_mask(
+        catalog,
+        directive,
+        gate=MaskGateContext(
+            quality=ObservationQuality.trusted,
+            surface_ids=frozenset(obs.snapshot.surface.action_ids),
+        ),
+    )
+    ctx = replace(_native_context(obs, catalog, directive, mask), policy_revision="")
+    ex = Executor()
+    now = time.monotonic()
+    from loop.adaptive.policy import StructuredDecision
+
+    decision = StructuredDecision(
+        "click_a",
+        1.0,
+        {"click_a": 1.0},
+        now,
+        obs.episode_generation,
+        obs.snapshot_id,
+        directive.revision,
+        catalog.revision,
+    )
+    receipt = ex.dispatch(
+        decision,
+        _v2_from_obs(obs),
+        catalog,
+        directive,
+        now=now,
+        native=ctx,
+    )
+    assert not receipt.accepted
+    assert receipt.reason == "policy_revision missing"
+    assert receipt.lease is None
+
+
+def test_arm_stages_four_five_use_deterministic_policy_source() -> None:
+    from pathlib import Path
+
+    arm_text = (Path(__file__).resolve().parents[2] / "loop/adaptive/arm.py").read_text(
+        encoding="utf-8"
+    )
+    start = arm_text.index("# Stages 4–5")
+    end = arm_text.index("# Stage 6", start)
+    block = arm_text[start:end]
+    assert 'decision_source="decider"' not in block
+    assert "decision_source=decision_source" in block
+    assert "DeterministicPolicy" in block
 
 
 def test_native_dispatch_issues_lease_when_valid() -> None:
@@ -421,6 +485,245 @@ def test_native_dispatch_issues_lease_when_valid() -> None:
     assert lease.hwnd == obs.hwnd and lease.pid == obs.pid
 
 
+def test_directive_forbid_phantom_does_not_add_candidate() -> None:
+    schema = _schema_with_actions("click_a", "click_b")
+    snap = _verified_snapshot(schema, ("click_a", "click_b"))
+    catalog = compile_catalog_from_surface(schema, snap)
+    gate = MaskGateContext(surface_ids=frozenset(snap.surface.action_ids))
+    open_mask = compile_mask(catalog, Directive(1, 0, "go", 30.0, time.monotonic()), gate=gate)
+    forbid_b = compile_mask(
+        catalog,
+        Directive(1, 0, "go", 30.0, time.monotonic(), forbidden_ids=("click_b",)),
+        gate=gate,
+    )
+    forbid_b_and_phantom = compile_mask(
+        catalog,
+        Directive(
+            1,
+            0,
+            "go",
+            30.0,
+            time.monotonic(),
+            forbidden_ids=("click_b", "phantom_action"),
+        ),
+        gate=gate,
+    )
+    assert open_mask.allowed_ids == ("click_a", "click_b")
+    assert forbid_b.allowed_ids == ("click_a",)
+    assert forbid_b_and_phantom.allowed_ids == forbid_b.allowed_ids
+
+
+def test_degraded_and_untrusted_masks_are_empty() -> None:
+    schema = _schema_with_actions("click_a")
+    snap = _verified_snapshot(schema, ("click_a",))
+    catalog = compile_catalog_from_surface(schema, snap)
+    directive = Directive(1, 0, "go", 30.0, time.monotonic())
+    gate = MaskGateContext(
+        quality=ObservationQuality.trusted,
+        surface_ids=frozenset(snap.surface.action_ids),
+    )
+    trusted = compile_mask(catalog, directive, gate=gate)
+    assert trusted.allowed_ids == ("click_a",)
+    degraded = compile_mask(
+        catalog,
+        directive,
+        gate=replace(gate, quality=ObservationQuality.degraded),
+    )
+    assert degraded.allowed_ids == ()
+    untrusted = compile_mask(
+        catalog,
+        directive,
+        gate=replace(gate, quality=ObservationQuality.untrusted),
+    )
+    assert untrusted.allowed_ids == ()
+
+
+def test_degraded_capture_rejects_dispatch_without_lease() -> None:
+    obs = _observation(quality=ObservationQuality.degraded)
+    schema = _schema_with_actions("click_a", "click_b")
+    catalog = compile_catalog_from_surface(schema, obs.snapshot)
+    directive = Directive(1, obs.episode_generation, "i", 30.0, time.monotonic())
+    mask = compile_mask(
+        catalog,
+        directive,
+        gate=MaskGateContext(
+            quality=ObservationQuality.degraded,
+            surface_ids=frozenset(obs.snapshot.surface.action_ids),
+        ),
+    )
+    assert mask.allowed_ids == ()
+    ctx = _native_context(obs, catalog, directive, mask)
+    ex = Executor()
+    now = time.monotonic()
+    from loop.adaptive.policy import StructuredDecision
+
+    decision = StructuredDecision(
+        "click_a",
+        1.0,
+        {"click_a": 1.0},
+        now,
+        obs.episode_generation,
+        obs.snapshot_id,
+        directive.revision,
+        catalog.revision,
+    )
+    receipt = ex.dispatch(
+        decision,
+        _v2_from_obs(obs),
+        catalog,
+        directive,
+        now=now,
+        native=ctx,
+    )
+    assert not receipt.accepted
+    assert receipt.reason == "degraded_capture"
+    assert receipt.lease is None
+
+
+def _scene(snapshot_id: str, node_id: str, bbox: tuple[float, float, float, float]) -> SceneGraph:
+    return SceneGraph(
+        snapshot_id=snapshot_id,
+        nodes=(SceneNode(node_id, bbox, (), {}),),
+    )
+
+
+def test_dispatch_accepts_newer_snapshot_when_binding_stable() -> None:
+    obs = _observation()
+    schema = _schema_with_actions("click_a", "click_b")
+    catalog = compile_catalog_from_surface(schema, obs.snapshot)
+    directive = Directive(1, obs.episode_generation, "i", 30.0, time.monotonic())
+    mask = compile_mask(
+        catalog,
+        directive,
+        gate=MaskGateContext(
+            quality=ObservationQuality.trusted,
+            surface_ids=frozenset(obs.snapshot.surface.action_ids),
+        ),
+    )
+    leased = _scene("snap-decision", "node-a", (0.1, 0.1, 0.2, 0.2))
+    current = _scene("snap-latest", "node-a", (0.11, 0.11, 0.21, 0.21))
+    newer_snap = replace(obs.snapshot, snapshot_id="snap-latest")
+    newer_obs = replace(obs, snapshot_id="snap-latest", snapshot=newer_snap)
+    ctx = replace(
+        _native_context(newer_obs, catalog, directive, mask),
+        leased_scene=leased,
+        current_scene=current,
+    )
+    ex = Executor()
+    now = time.monotonic()
+    from loop.adaptive.policy import StructuredDecision
+
+    decision = StructuredDecision(
+        "click_a",
+        1.0,
+        {"click_a": 1.0},
+        now,
+        obs.episode_generation,
+        "snap-decision",
+        directive.revision,
+        catalog.revision,
+        bound_entity_id="node-a",
+        scene_id="snap-decision",
+    )
+    receipt = ex.dispatch(
+        decision,
+        replace(_v2_from_obs(newer_obs), snapshot_id="snap-latest"),
+        catalog,
+        directive,
+        now=now,
+        native=ctx,
+    )
+    assert receipt.accepted
+    assert receipt.lease is not None
+    assert receipt.lease.target_identity["leased_scene_id"] == "snap-decision"
+    assert receipt.lease.snapshot_id == "snap-decision"
+
+
+def test_dispatch_rejects_rebound_when_binding_moved() -> None:
+    obs = _observation()
+    schema = _schema_with_actions("click_a", "click_b")
+    catalog = compile_catalog_from_surface(schema, obs.snapshot)
+    directive = Directive(1, obs.episode_generation, "i", 30.0, time.monotonic())
+    mask = compile_mask(
+        catalog,
+        directive,
+        gate=MaskGateContext(
+            quality=ObservationQuality.trusted,
+            surface_ids=frozenset(obs.snapshot.surface.action_ids),
+        ),
+    )
+    leased = _scene("snap-decision", "node-a", (0.1, 0.1, 0.2, 0.2))
+    current = _scene("snap-latest", "node-a", (0.5, 0.5, 0.6, 0.6))
+    newer_snap = replace(obs.snapshot, snapshot_id="snap-latest")
+    newer_obs = replace(obs, snapshot_id="snap-latest", snapshot=newer_snap)
+    ctx = replace(
+        _native_context(newer_obs, catalog, directive, mask),
+        leased_scene=leased,
+        current_scene=current,
+    )
+    ex = Executor()
+    now = time.monotonic()
+    from loop.adaptive.policy import StructuredDecision
+
+    decision = StructuredDecision(
+        "click_a",
+        1.0,
+        {"click_a": 1.0},
+        now,
+        obs.episode_generation,
+        "snap-decision",
+        directive.revision,
+        catalog.revision,
+        bound_entity_id="node-a",
+        scene_id="snap-decision",
+    )
+    receipt = ex.dispatch(
+        decision,
+        replace(_v2_from_obs(newer_obs), snapshot_id="snap-latest"),
+        catalog,
+        directive,
+        now=now,
+        native=ctx,
+    )
+    assert not receipt.accepted
+    assert receipt.reason == "rebound"
+    assert receipt.lease is None
+
+
+def test_actuation_scene_ignores_latest_snapshot() -> None:
+    from loop.adaptive.snapshot import actuation_scene
+
+    frozen = _scene("scene-frozen", "n1", (0.0, 0.0, 0.1, 0.1))
+    latest = _scene("scene-new", "n2", (0.9, 0.9, 1.0, 1.0))
+    resolved = actuation_scene("scene-frozen", frozen, latest)
+    assert resolved.snapshot_id == "scene-frozen"
+    assert resolved.nodes[0].node_id == "n1"
+
+
+def test_attention_redacts_model_projection_only() -> None:
+    from loop.adaptive.policy import ReactiveField
+
+    obs = _observation()
+    reactive = ReactiveState(
+        snapshot_id=obs.snapshot_id,
+        schema_revision_id=obs.schema_revision_id,
+        episode_id=obs.episode_id,
+        episode_generation=obs.episode_generation,
+        mode="running",
+        confidence=1.0,
+        fields={
+            "score": ReactiveField(1, 1.0, False),
+            "hp": ReactiveField(3, 1.0, False),
+        },
+        entities=(),
+        relations=(),
+    )
+    directive = Directive(1, obs.episode_generation, "go", 30.0, 0.0, attention=("score",))
+    projected = project_reactive_for_model(reactive, directive)
+    assert set(projected.fields) == {"score"}
+    assert set(reactive.fields) == {"score", "hp"}
+
+
 def test_policy_accepts_reactive_state() -> None:
     obs = _observation()
     reactive = reactive_state_from_native(obs)
@@ -435,3 +738,120 @@ def test_policy_accepts_reactive_state() -> None:
     )
     assert decision.candidate_id == "click_b"
     assert decision.snapshot_id == obs.snapshot_id
+
+
+def _dispatch_ready(obs):
+    schema = _schema_with_actions("click_a", "click_b")
+    catalog = compile_catalog_from_surface(schema, obs.snapshot)
+    directive = Directive(1, obs.episode_generation, "i", 30.0, time.monotonic())
+    mask = compile_mask(
+        catalog,
+        directive,
+        gate=MaskGateContext(
+            quality=ObservationQuality.trusted,
+            surface_ids=frozenset(obs.snapshot.surface.action_ids),
+        ),
+    )
+    return catalog, directive, mask
+
+
+def _decision(obs, catalog, directive, now: float):
+    from loop.adaptive.policy import StructuredDecision
+
+    return StructuredDecision(
+        "click_a",
+        1.0,
+        {"click_a": 1.0},
+        now,
+        obs.episode_generation,
+        obs.snapshot_id,
+        directive.revision,
+        catalog.revision,
+    )
+
+
+def test_native_dispatch_rejects_unknown_capture_age() -> None:
+    obs = replace(
+        _observation(),
+        capture_ts_monotonic=0.0,
+        capture_age_known=False,
+        acquisition_origin="buffered-unknown",
+        observation_sequence=None,
+    )
+    catalog, directive, mask = _dispatch_ready(obs)
+    ctx = _native_context(obs, catalog, directive, mask)
+    now = time.monotonic()
+    receipt = Executor().dispatch(
+        _decision(obs, catalog, directive, now),
+        _v2_from_obs(obs),
+        catalog,
+        directive,
+        now=now,
+        native=ctx,
+    )
+    assert not receipt.accepted
+    assert receipt.reason == "unverified_acquisition"
+    assert receipt.lease is None
+
+
+def test_native_dispatch_rejects_missing_observation_sequence() -> None:
+    obs = replace(_observation(), observation_sequence=None)
+    catalog, directive, mask = _dispatch_ready(obs)
+    ctx = _native_context(obs, catalog, directive, mask)
+    now = time.monotonic()
+    receipt = Executor().dispatch(
+        _decision(obs, catalog, directive, now),
+        _v2_from_obs(obs),
+        catalog,
+        directive,
+        now=now,
+        native=ctx,
+    )
+    assert not receipt.accepted
+    assert receipt.reason == "unverified_acquisition"
+
+
+def test_native_dispatch_rejects_future_or_nonfinite_acquisition() -> None:
+    now = time.monotonic()
+    for capture, publication in ((now + 1, now + 1), (float("nan"), now)):
+        obs = replace(
+            _observation(),
+            capture_ts_monotonic=capture,
+            publication_ts_monotonic=publication,
+        )
+        catalog, directive, mask = _dispatch_ready(obs)
+        receipt = Executor().dispatch(
+            _decision(obs, catalog, directive, now),
+            _v2_from_obs(obs),
+            catalog,
+            directive,
+            now=now,
+            native=_native_context(obs, catalog, directive, mask),
+        )
+        assert not receipt.accepted
+        assert receipt.reason == "unverified_acquisition"
+
+
+def test_native_dispatch_recomputes_age_at_dispatch_not_publication() -> None:
+    # Perception produced a small publication age, but dispatch happens 1.2 s
+    # after the real capture: the delayed decision must not rejuvenate it.
+    now = time.monotonic()
+    obs = replace(
+        _observation(),
+        capture_ts_monotonic=now - 1.2,
+        publication_ts_monotonic=now - 1.19,
+    )
+    snap = replace(_v2_from_obs(obs), observation_age_s=0.01, captured_at=now - 1.2)
+    catalog, directive, mask = _dispatch_ready(obs)
+    ctx = _native_context(obs, catalog, directive, mask)
+    receipt = Executor().dispatch(
+        _decision(obs, catalog, directive, now),
+        snap,
+        catalog,
+        directive,
+        now=now,
+        native=ctx,
+    )
+    assert not receipt.accepted
+    assert receipt.reason == "stale_snapshot"
+    assert receipt.lease is None

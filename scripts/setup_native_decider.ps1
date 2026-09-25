@@ -27,11 +27,12 @@ if (Test-Path -LiteralPath $python) {
     uv venv --python 3.12 $venv
 }
 
+uv pip install --python $python --editable "${repoRoot}[dev]"
 uv pip install --python $python `
     --index https://download.pytorch.org/whl/cu130 `
     --default-index https://pypi.org/simple `
+    --index-strategy unsafe-best-match `
     --requirement $lock
-uv pip install --python $python --editable "${repoRoot}[dev]"
 uv pip check --python $python
 
 & $python $smoke

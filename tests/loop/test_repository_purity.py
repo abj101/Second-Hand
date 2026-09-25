@@ -16,7 +16,8 @@ def test_loop_has_only_current_architecture_packages() -> None:
         for path in LOOP_DIR.iterdir()
         if path.is_dir() and path.name != "__pycache__"
     }
-    assert actual == ALLOWED_PACKAGES
+    assert actual == ALLOWED_PACKAGES | {"game_briefs"}
+    assert not list((LOOP_DIR / "game_briefs").rglob("*.py")), "game briefs are data, not a runtime package"
 
 
 def test_all_internal_imports_resolve_to_current_packages() -> None:

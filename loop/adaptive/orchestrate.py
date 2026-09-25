@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from collections.abc import Callable, Iterable
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from loop.adaptive.evidence import iou
 from loop.adaptive.schema import (
@@ -130,6 +131,8 @@ def make_evidence_bundle(
     schema: AdaptiveSchema,
     evidence: Sequence[EvidenceRecord],
     stability: dict,
+    game_brief: Mapping[str, object] | None = None,
+    game_brief_provenance: Mapping[str, str] | None = None,
 ) -> dict:
     nodes = [
         {
@@ -156,6 +159,10 @@ def make_evidence_bundle(
             "modes": [m.mode_id for m in schema.modes],
         },
     }
+    if game_brief is not None:
+        payload["game_brief"] = dict(game_brief)
+        if game_brief_provenance is not None:
+            payload["game_brief_provenance"] = dict(game_brief_provenance)
     payload["digest"] = hash_payload(payload)
     return payload
 
@@ -482,6 +489,229 @@ def hypothesize(
         )
 
     return tuple(out)
+
+
+@dataclass(frozen=True)
+class ProvisionalOffer:
+    offer_id: str
+    label: str
+    node_id: str
+
+
+MAX_OFFER_AREA_FRACTION = 0.25
+
+
+@dataclass(frozen=True)
+class OfferDecision:
+    candidate_id: str
+    node_id: str
+    label: str
+    status: str  # eligible | withheld | rejected
+    reason: str
+
+
+_OFFER_STATE_FORBIDDEN_KEYS = frozenset(
+    {"bbox", "box", "x", "y", "coordinates", "point", "primitive"}
+)
+
+
+def registry_label_set(graph: SceneGraph) -> frozenset[str]:
+    labels: set[str] = set()
+    for node in graph.nodes:
+        if not node.attributes.get("registry_id"):
+            continue
+        label = str(node.attributes.get("label") or "").strip()
+        if label:
+            labels.add(label.casefold())
+    return frozenset(labels)
+
+
+def _bbox_area_fraction(bbox: tuple[float, ...]) -> float | None:
+    if len(bbox) != 4:
+        return None
+    x0, y0, x1, y1 = (float(v) for v in bbox)
+    if not all(math.isfinite(v) for v in (x0, y0, x1, y1)):
+        return None
+    if x0 < 0.0 or y0 < 0.0 or x1 > 1.0 or y1 > 1.0:
+        return None
+    w, h = x1 - x0, y1 - y0
+    if w <= 0.0 or h <= 0.0:
+        return None
+    return w * h
+
+
+def _semantic_eligibility(attrs: dict) -> tuple[str, str] | None:
+    """Return (status, reason) when semantic confirmation is required."""
+
+    status = str(attrs.get("semantic_status") or "").strip().lower()
+    klass = str(attrs.get("semantic_class") or "").strip().lower()
+    if status == "confirmed" and klass == "control":
+        return None
+    if status == "confirmed" and klass == "decoration":
+        return ("withheld", "semantic_decoration")
+    if status == "confirmed" and klass == "unknown":
+        return ("withheld", "semantic_unknown")
+    if status in ("", "missing"):
+        return ("withheld", "semantic_missing")
+    if status == "unresolved":
+        return ("withheld", "semantic_unresolved")
+    if status == "unavailable":
+        return ("withheld", "semantic_unavailable")
+    if status == "exhausted":
+        return ("withheld", "semantic_exhausted")
+    return ("withheld", "semantic_unconfirmed")
+
+
+def offer_decisions(
+    graph: SceneGraph,
+    forbidden: frozenset[str] | set[str] | None = None,
+    *,
+    max_area_fraction: float = MAX_OFFER_AREA_FRACTION,
+    semantic: str = "off",
+) -> tuple[OfferDecision, ...]:
+    blocked = forbidden or frozenset()
+    semantic_mode = str(semantic or "off").strip().lower()
+    candidates: list[tuple[object, str, str, str]] = []
+    id_counts: dict[str, int] = {}
+    for node in graph.nodes:
+        rid = node.attributes.get("registry_id")
+        if not rid:
+            continue
+        label = str(node.attributes.get("label") or "").strip()
+        if not label:
+            continue
+        offer_id = str(rid)
+        candidates.append((node, offer_id, label, node.node_id))
+        id_counts[offer_id] = id_counts.get(offer_id, 0) + 1
+
+    decisions: list[OfferDecision] = []
+    for node, offer_id, label, node_id in candidates:
+        attrs = node.attributes
+        owner = attrs.get("registry_owner")
+        if owner is not None and str(owner) not in {"ocr", "track"}:
+            decisions.append(
+                OfferDecision(offer_id, node_id, label, "rejected", "registry_owner_not_ocr")
+            )
+            continue
+        if str(attrs.get("track_role") or "") == "world":
+            decisions.append(
+                OfferDecision(offer_id, node_id, label, "rejected", "world_target_not_control")
+            )
+            continue
+        source = str(attrs.get("track_source") or "")
+        if "gpa-gui" in source and "card-split" not in source:
+            if label.casefold() in {"icon", "image", "object"}:
+                decisions.append(
+                    OfferDecision(offer_id, node_id, label, "withheld", "unclassified_gui_icon")
+                )
+                continue
+            if attrs.get("numeric") is not None:
+                decisions.append(
+                    OfferDecision(offer_id, node_id, label, "withheld", "gui_value_not_control")
+                )
+                continue
+            if re.search(r"\bv\d+(?:\.\d+)+", label, re.IGNORECASE):
+                decisions.append(
+                    OfferDecision(offer_id, node_id, label, "withheld", "gui_version_not_control")
+                )
+                continue
+        area = _bbox_area_fraction(tuple(node.bbox))
+        if area is None:
+            decisions.append(OfferDecision(offer_id, node_id, label, "rejected", "bbox_invalid"))
+            continue
+        if area > max_area_fraction:
+            decisions.append(OfferDecision(offer_id, node_id, label, "rejected", "oversized"))
+            continue
+        if id_counts.get(offer_id, 0) > 1:
+            decisions.append(
+                OfferDecision(offer_id, node_id, label, "rejected", "ambiguous_registry_id")
+            )
+            continue
+        if offer_id in blocked:
+            decisions.append(OfferDecision(offer_id, node_id, label, "withheld", "forbidden"))
+            continue
+        if semantic_mode == "required":
+            withheld = _semantic_eligibility(attrs)
+            if withheld is not None:
+                status, reason = withheld
+                decisions.append(OfferDecision(offer_id, node_id, label, status, reason))
+                continue
+        decisions.append(OfferDecision(offer_id, node_id, label, "eligible", "eligible"))
+
+    decisions.sort(key=lambda item: (item.candidate_id, item.node_id))
+    return tuple(decisions)
+
+
+def registry_offers(
+    graph: SceneGraph,
+    forbidden: frozenset[str] | set[str] | None = None,
+    *,
+    max_area_fraction: float = MAX_OFFER_AREA_FRACTION,
+    semantic: str = "off",
+) -> tuple[ProvisionalOffer, ...]:
+    offers: list[ProvisionalOffer] = []
+    for decision in offer_decisions(
+        graph,
+        forbidden,
+        max_area_fraction=max_area_fraction,
+        semantic=semantic,
+    ):
+        if decision.status != "eligible":
+            continue
+        offers.append(
+            ProvisionalOffer(decision.candidate_id, decision.label, decision.node_id)
+        )
+    offers.sort(key=lambda item: item.offer_id)
+    return tuple(offers)
+
+
+def offer_model_state(
+    offers: Sequence[ProvisionalOffer],
+    snapshot: object,
+) -> dict[str, object]:
+    fields = getattr(snapshot, "fields", None) or {}
+    state: dict[str, object] = {
+        "offer_ids": [item.offer_id for item in offers],
+        "offer_labels": [item.label for item in offers],
+        "fields": dict(fields),
+    }
+    _assert_no_offer_coordinate_keys(state)
+    return state
+
+
+def _assert_no_offer_coordinate_keys(obj: object) -> None:
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if str(key) in _OFFER_STATE_FORBIDDEN_KEYS:
+                raise ValueError(f"offer state must not expose {key!r}")
+            _assert_no_offer_coordinate_keys(value)
+    elif isinstance(obj, (list, tuple)):
+        for value in obj:
+            _assert_no_offer_coordinate_keys(value)
+
+
+def forbid_unrestored_registry_id(
+    registry_id: str,
+    *,
+    window_gone: bool,
+    labels_returned: bool,
+    forbidden: set[str],
+    ledger: object,
+) -> bool:
+    if labels_returned and not window_gone:
+        return False
+    forbidden.add(registry_id)
+    append = getattr(ledger, "append_event", None)
+    if append is not None:
+        append(
+            "negative_evidence",
+            {
+                "registry_id": registry_id,
+                "window_gone": window_gone,
+                "labels_returned": labels_returned,
+            },
+        )
+    return True
 
 
 def _trace_sequence(world_or_trace: object) -> tuple[Trace, ...] | None:

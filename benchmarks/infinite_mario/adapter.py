@@ -1,9 +1,8 @@
-"""PlayJev Infinite Mario environment adapter (benchmark-only)."""
+"""Infinite Mario environment adapter (benchmark-only)."""
 
 from __future__ import annotations
 
 import io
-import sys
 import time
 from hashlib import sha256
 from pathlib import Path
@@ -14,11 +13,9 @@ from PIL import Image
 from loop.adaptive.candidates import ActionCatalog, CandidateAction
 from loop.adaptive.environment import StepResult
 
-PINNED_PLAYJEV = "2d7a0280841e3244a299c9c640efc8cefc46d476"
 CATALOG_REVISION = "mario-7"
 ENV_REVISION = "infinite-mario-v1"
 GAME_ID = "mario"
-_FETCH_HINT = "Run: python -m loop fetch-playjev"
 
 
 def _frame_digest(frame_bytes: bytes) -> str:
@@ -97,16 +94,6 @@ def _result_from_obs(
     )
 
 
-def _install_playjev(cache: Path) -> None:
-    root = cache.resolve()
-    if not (root / "playjev" / "env.py").is_file():
-        raise FileNotFoundError(
-            f"PlayJev cache missing at {root}. {_FETCH_HINT}"
-        )
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-
-
 class MarioEnvironment:
     def __init__(self, cache: Path, *, headless: bool = True) -> None:
         self._cache = Path(cache)
@@ -129,32 +116,12 @@ class MarioEnvironment:
     async def start(self) -> None:
         if self._started:
             return
-        _install_playjev(self._cache)
-        from playjev.env import GamePage, GameServer, load_spec
+        from benchmarks.test_games import by_name
 
-        self._spec = load_spec(GAME_ID)
-        self._step_frames = int(self._spec.get("step_frames") or 6)
-        self._server = GameServer()
-        from playwright.async_api import async_playwright
-
-        self._pw = await async_playwright().start()
-        self._browser = await self._pw.chromium.launch(
-            headless=self._headless,
-            args=[
-                "--no-sandbox",
-                "--disable-gpu",
-                "--mute-audio",
-                "--disable-dev-shm-usage",
-                "--disable-background-timer-throttling",
-                "--disable-renderer-backgrounding",
-                "--autoplay-policy=no-user-gesture-required",
-            ],
+        upstream = by_name("Infinite Mario").repo
+        raise FileNotFoundError(
+            f"no bundled Mario page server. Upstream: {upstream}"
         )
-        self._context = await self._browser.new_context()
-        gp = GamePage(self._context, self._spec, self._server.base_url)
-        await gp.open()
-        self._page = gp
-        self._started = True
 
     def actions(self) -> ActionCatalog:
         candidates: list[CandidateAction] = []
@@ -262,7 +229,7 @@ class MarioEnvironment:
 
     def fingerprint(self) -> dict:
         fp: dict[str, Any] = {
-            "playjev_commit": PINNED_PLAYJEV,
+            "upstream_repo": "https://github.com/robertkleffner/mariohtml5",
             "environment_revision": ENV_REVISION,
             "action_catalog_revision": CATALOG_REVISION,
             "viewport": (self._spec or {}).get("viewport"),

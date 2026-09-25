@@ -6,7 +6,7 @@ This repository contains one application-agnostic runtime that learns a state sc
 
 `pixels → evidence ledger → scene graph → schema proposals → validation → immutable schema revision → state snapshot → legal action surface → verified effect`
 
-The next product milestone is defined in [the native Decider orchestration plan](docs/native-decider-orchestration-plan.md). PlayJev and Playwright are optional benchmark tooling, not production input providers.
+The control-system vision is [the north star](docs/perception-reaction-orchestration-north-star.md). The build sequence is [the north star build plan](docs/north-star-build-plan.md). Browser fixtures are optional benchmark tooling, not production input providers.
 
 - Perception emits neutral OCR, region, color, motion, and track evidence.
 - The orchestrator proposes fields, entity types, modes, selectors, actions, and effects from evidence.
@@ -18,11 +18,31 @@ The next product milestone is defined in [the native Decider orchestration plan]
 ## Run
 
 ```powershell
-python -m loop collect --workspace .tmp/session --synthetic --steps 12
-python -m loop collect --workspace .tmp/live --window "Window title" --steps 30
+.\.venv\Scripts\python.exe -m loop collect --workspace .tmp/session --synthetic --steps 12
+.\.venv-decider\Scripts\python.exe -m loop collect --workspace .tmp/live --window "Window title" --steps 30 --diagnostics
 ```
 
+Use `.venv` for tests and CPU-only collection. Use `.venv-decider` for every live reaction, direct, or armed run; it is the Python 3.12 CUDA environment created by `scripts/setup_native_decider.ps1`. Calling its `python.exe` directly is more reliable than assuming an agent's shell has activated the right environment.
+
+The complete operator/agent runbook, including perception, shadow, experiment, direct-actuation, and armed commands for arbitrary games, is [docs/runbook.md](docs/runbook.md).
+
 `--arm` is intentionally unavailable for a fresh live workspace until an action has been learned from causal evidence. Never reuse a schema learned against a different window.
+
+The diagnostics panel is read-only and follows `shadow_react.jsonl` in the selected workspace. It can also be opened independently:
+
+```powershell
+.\.venv-decider\Scripts\python.exe -m loop diagnostics --workspace .tmp/live
+```
+
+### Game briefs
+
+The optional game brief supplies background to orchestration without preloading a schema or authorizing input. The bundled [STS2 brief](loop/game_briefs/sts2.json) covers the objective, mechanics, general controls, and what remains unverified locally:
+
+```powershell
+.\.venv-decider\Scripts\python.exe -m loop collect --workspace .tmp/sts2 --window "Slay the Spire 2" --game sts2 --steps 30
+```
+
+Without `--game`, a recognized exact pinned window title selects its brief automatically. An unknown title keeps generic behavior; an unknown explicit game is an error. Only STS2 is bundled initially. Add another game's JSON file under `loop/game_briefs/` to extend selection; no Python game-specific branches are needed. The [north-star contract](docs/perception-reaction-orchestration-north-star.md#game-brief-purpose-and-authority) defines the format, 300–600 word target, 8,000-byte cap, and model-context boundaries. Brief edits take effect in a new run.
 
 ## Verify
 
@@ -44,14 +64,13 @@ To also download the immutable 0.8B model snapshot and run a real `system_one` d
 .\scripts\setup_native_decider.ps1 -DownloadModel
 ```
 
-Use `.venv-decider\Scripts\python.exe` for the Decider-backed runtime. A system `python` or another `.venv` may legitimately point at a CPU-only PyTorch build; the smoke check prevents that interpreter mix-up.
+Use `.venv-decider\Scripts\python.exe` for the Decider-backed runtime. A system `python` or another `.venv` may legitimately point at a CPU-only PyTorch build; the smoke check prevents that interpreter mix-up. Re-running the setup command repairs the environment in place and leaves the locked CUDA packages installed last.
 
 ## Benchmark (optional)
 
-Infinite Mario uses a pinned [PlayJev](https://github.com/OmniJev/PlayJev) checkout in `.cache/` (not committed). Do not redistribute captured Mario frames (Nintendo artwork).
+Bench games are the list in `benchmarks/test_games.py` (the HTML games plus STS2). Do not redistribute captured Mario frames (Nintendo artwork).
 
 ```powershell
-python -m loop fetch-playjev
 pip install -e ".[dev,benchmark]"
 playwright install chromium
 python -m loop react --workspace .tmp/mario --policy baselines --max-steps 20

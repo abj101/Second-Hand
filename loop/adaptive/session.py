@@ -8,8 +8,25 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from loop.adaptive.contracts import ActuationLease, ExecutionReceipt, ExpectedEffectOutcome
-from loop.adaptive.runtime import PrimitivesRunner, invoke, project, verify
+from loop.adaptive.contracts import (
+    EFFECT_STATUS_NOT_EXECUTED,
+    EFFECT_STATUS_NO_EFFECT,
+    EFFECT_STATUS_UNOBSERVABLE,
+    EFFECT_STATUS_VERIFIED,
+    EFFECT_STATUS_WRONG_EFFECT,
+    ActuationLease,
+    ExecutionReceipt,
+    ExpectedEffectOutcome,
+    PostActionObservationPolicy,
+)
+from loop.adaptive.runtime import (
+    PrimitivesRunner,
+    contradicted,
+    effect_evaluable,
+    invoke,
+    project,
+    verify,
+)
 from loop.adaptive.schema import (
     ActionInvocation,
     AdaptiveSchema,
@@ -46,6 +63,73 @@ def identities_compatible(saved: dict, current: dict) -> bool:
     if a["window_class"] and b["window_class"] and a["window_class"] != b["window_class"]:
         return False
     return True
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        return None if value is None else int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _after_capture_trust(
+    lease: ActuationLease,
+    executed_ts: float,
+    evidence: dict,
+    *,
+    previous_ts: float | None,
+    previous_sequence: int | None,
+) -> tuple[bool, str]:
+    """One after-capture must be the same target, later than execution and independent.
+
+    A repeated acquisition marker is not a new observation; unknown markers are
+    accepted (synthetic routes) rather than invented.
+    """
+
+    integrity = str(evidence.get("integrity") or "trusted")
+    if integrity != "trusted":
+        return False, f"after-capture integrity {integrity}"
+    hwnd = _as_int(evidence.get("hwnd"))
+    if hwnd and lease.hwnd and hwnd != int(lease.hwnd):
+        return False, "after-capture target changed"
+    pid = _as_int(evidence.get("pid"))
+    if pid and lease.pid and pid != int(lease.pid):
+        return False, "after-capture process changed"
+    ts = _as_float(evidence.get("capture_ts_monotonic"))
+    if ts is None:
+        ts = _as_float(evidence.get("grab_requested_ts_monotonic"))
+    if ts is not None and ts <= executed_ts:
+        return False, "after-capture not later than execution"
+    sequence = _as_int(evidence.get("observation_sequence"))
+    if sequence is not None and previous_sequence is not None and sequence <= previous_sequence:
+        return False, "repeated observation sequence"
+    if ts is not None and previous_ts is not None and ts <= previous_ts:
+        return False, "repeated acquisition"
+    return True, "ok"
+
+
+def _classify_after(
+    before: StateSnapshot,
+    after: StateSnapshot,
+    spec: Any,
+    bindings: dict | None,
+) -> str:
+    """One trusted after-frame: verified, wrong_effect, no_effect or unobservable."""
+
+    if verify(before, after, spec, bindings=bindings):
+        return EFFECT_STATUS_VERIFIED
+    if contradicted(before, after, spec, bindings=bindings):
+        return EFFECT_STATUS_WRONG_EFFECT
+    if effect_evaluable(before, after, spec, bindings=bindings):
+        return EFFECT_STATUS_NO_EFFECT
+    return EFFECT_STATUS_UNOBSERVABLE
 
 
 class Session:
@@ -148,10 +232,31 @@ class Session:
         owner: Any | None = None,
         pre_dispatch: Callable[[], tuple[bool, str]] | None = None,
         get_scene: Callable[[], SceneGraph | None] | None = None,
+        after_capture: Callable[[], tuple[int | None, int | None, tuple[str, ...]]]
+        | None = None,
+        observation_policy: PostActionObservationPolicy | None = None,
+        after_evidence: Callable[[], dict] | None = None,
     ) -> bool | ExecutionReceipt:
         if before is None:
             raise ValueError("before snapshot required for act()")
         from loop.adaptive.runtime import InvocationError, execute
+
+        def _rejected(reason: str) -> ExecutionReceipt:
+            return ExecutionReceipt(
+                accepted=False,
+                reason=reason,
+                primitive_results=(),
+                release_status="skipped",
+                after_hwnd=None,
+                after_pid=None,
+                after_capture_provenance=(),
+                expected_effect=ExpectedEffectOutcome(
+                    False, reason, status=EFFECT_STATUS_NOT_EXECUTED
+                ),
+            )
+
+        if lease is None:
+            return _rejected("lease required")
 
         invoke(before, invocation)
         primitive_results: tuple[dict[str, Any], ...] = ()
@@ -161,6 +266,9 @@ class Session:
         after_hwnd: int | None = None
         after_pid: int | None = None
         after_provenance: tuple[str, ...] = ()
+        # Lower bound for "strictly later than execution"; refreshed when the
+        # primitives actually run so a slow plan cannot be compared to a stale bound.
+        executed_ts = time.monotonic()
 
         def _guard() -> None:
             nonlocal accepted, reason
@@ -185,52 +293,23 @@ class Session:
                     raise InvocationError(msg)
 
         try:
-            if lease is not None:
-                reject = _lease_reject_reason(lease, self, before, invocation)
-                if reject:
-                    return ExecutionReceipt(
-                        accepted=False,
-                        reason=reject,
-                        primitive_results=(),
-                        release_status="skipped",
-                        after_hwnd=None,
-                        after_pid=None,
-                        after_capture_provenance=(),
-                        expected_effect=ExpectedEffectOutcome(False, reject),
-                    )
-                if owner is None:
-                    return ExecutionReceipt(
-                        accepted=False,
-                        reason="owner required with lease",
-                        primitive_results=(),
-                        release_status="skipped",
-                        after_hwnd=None,
-                        after_pid=None,
-                        after_capture_provenance=(),
-                        expected_effect=ExpectedEffectOutcome(False, "owner required"),
-                    )
-                if pre_dispatch is not None:
-                    ok, msg = pre_dispatch()
-                    if not ok:
-                        return ExecutionReceipt(
-                            accepted=False,
-                            reason=msg,
-                            primitive_results=(),
-                            release_status="skipped",
-                            after_hwnd=None,
-                            after_pid=None,
-                            after_capture_provenance=(),
-                            expected_effect=ExpectedEffectOutcome(False, msg),
-                        )
+            reject = _lease_reject_reason(lease, self, before, invocation)
+            if reject:
+                return _rejected(reject)
+            if owner is None:
+                return _rejected("owner required with lease")
+            if pre_dispatch is not None:
+                ok, msg = pre_dispatch()
+                if not ok:
+                    return _rejected(msg)
 
-                def leased_runner(steps, bindings):
-                    scene = get_scene() if get_scene is not None else None
-                    owner.run_plan(steps, bindings, scene=scene, guard=_guard)
+            def leased_runner(steps, bindings):
+                scene = get_scene() if get_scene is not None else None
+                owner.run_plan(steps, bindings, scene=scene, guard=_guard)
 
-                execute(invocation, self._schema, leased_runner)
-                primitive_results = owner.drain_primitive_results()
-            else:
-                execute(invocation, self._schema, runner)
+            execute(invocation, self._schema, leased_runner)
+            executed_ts = time.monotonic()
+            primitive_results = owner.drain_primitive_results()
         except InvocationError as exc:
             if accepted:
                 accepted = False
@@ -243,36 +322,113 @@ class Session:
                         {"reason": "release_failure", "detail": release_status}
                     )
 
-        scene = after_scene() if callable(after_scene) else after_scene
-        after = project(scene, self._schema)
+        policy = observation_policy or PostActionObservationPolicy()
         spec = next(
             (a for a in self._schema.actions if a.action_id == invocation.action_id),
             None,
         )
-        if spec is None:
-            if lease is None:
-                return False
-            effect = ExpectedEffectOutcome(False, "unknown action")
-            return ExecutionReceipt(
-                accepted=accepted and False,
-                reason=reason if reason != "ok" else "unknown action",
-                primitive_results=primitive_results,
-                release_status=release_status,
-                after_hwnd=after_hwnd,
-                after_pid=after_pid,
-                after_capture_provenance=after_provenance,
-                expected_effect=effect,
+
+        def _next_after() -> tuple[StateSnapshot, dict]:
+            scene = after_scene() if callable(after_scene) else after_scene
+            snap_after = project(scene, self._schema)
+            evidence: dict[str, Any] = {}
+            if after_evidence is not None:
+                declared = after_evidence()
+                if isinstance(declared, dict):
+                    evidence.update(declared)
+            if after_capture is not None and "hwnd" not in evidence:
+                hwnd, pid, provenance = after_capture()
+                evidence["hwnd"] = hwnd
+                evidence["pid"] = pid
+                if provenance:
+                    evidence["source"] = str(provenance[0])
+            return snap_after, evidence
+
+        status = ""
+        effect_reason = ""
+        records: list[dict[str, Any]] = []
+        negative_frames = 0
+        attempts = 0
+        previous_ts: float | None = None
+        previous_sequence: int | None = None
+        deadline = time.monotonic() + max(0.0, float(policy.max_window_s))
+        max_frames = max(1, int(policy.max_frames))
+        while True:
+            after, evidence = _next_after()
+            attempts += 1
+            trusted, trust_reason = _after_capture_trust(
+                lease,
+                executed_ts,
+                evidence,
+                previous_ts=previous_ts,
+                previous_sequence=previous_sequence,
             )
-        effect_ok = verify(before, after, spec, bindings=invocation.bindings)
-        if lease is None:
-            return effect_ok
+            frame_ts = _as_float(evidence.get("capture_ts_monotonic"))
+            if frame_ts is None:
+                frame_ts = _as_float(evidence.get("grab_requested_ts_monotonic"))
+            frame_sequence = _as_int(evidence.get("observation_sequence"))
+            verdict = ""
+            if trusted:
+                if frame_ts is not None:
+                    previous_ts = frame_ts
+                if frame_sequence is not None:
+                    previous_sequence = frame_sequence
+                verdict = (
+                    EFFECT_STATUS_UNOBSERVABLE
+                    if spec is None
+                    else _classify_after(before, after, spec, invocation.bindings)
+                )
+                if verdict == EFFECT_STATUS_VERIFIED:
+                    status, effect_reason = verdict, "verified"
+                elif verdict == EFFECT_STATUS_WRONG_EFFECT:
+                    status, effect_reason = verdict, "expected effect contradicted"
+                elif verdict == EFFECT_STATUS_NO_EFFECT:
+                    negative_frames += 1
+            records.append(
+                {
+                    "before_snapshot_id": before.snapshot_id,
+                    "after_snapshot_id": after.snapshot_id,
+                    "trusted": trusted,
+                    "trust_reason": trust_reason,
+                    "verdict": verdict or "insufficient",
+                    "hwnd": evidence.get("hwnd"),
+                    "pid": evidence.get("pid"),
+                    "source": evidence.get("source"),
+                    "integrity": str(evidence.get("integrity") or "trusted"),
+                    "capture_ts_monotonic": frame_ts,
+                    "observation_sequence": frame_sequence,
+                }
+            )
+            after_hwnd = _as_int(evidence.get("hwnd"))
+            after_pid = _as_int(evidence.get("pid"))
+            source = evidence.get("source")
+            if source:
+                after_provenance = (str(source),)
+            if status:
+                break
+            if attempts >= max_frames or time.monotonic() >= deadline:
+                break
+            if policy.cadence_s > 0:
+                time.sleep(policy.cadence_s)
+        if not status:
+            if spec is None:
+                status, effect_reason = EFFECT_STATUS_UNOBSERVABLE, "unknown action"
+            elif negative_frames >= max(1, int(policy.required_negative_frames)):
+                status, effect_reason = EFFECT_STATUS_NO_EFFECT, "expected effect not observed"
+            else:
+                status, effect_reason = (
+                    EFFECT_STATUS_UNOBSERVABLE,
+                    "insufficient trusted after-capture evidence",
+                )
+        if spec is None:
+            accepted = False
+            reason = reason if reason != "ok" else "unknown action"
         effect = ExpectedEffectOutcome(
-            verified=effect_ok,
-            reason="verified" if effect_ok else "expected effect not observed",
+            verified=status == EFFECT_STATUS_VERIFIED,
+            reason=effect_reason,
+            status=status,
+            evidence=tuple(records),
         )
-        if self.target is not None:
-            after_hwnd = int(self.target.get("hwnd", 0)) or None
-            after_pid = int(self.target.get("pid", 0)) or None
         return ExecutionReceipt(
             accepted=accepted,
             reason=reason,
@@ -297,6 +453,21 @@ def _lease_reject_reason(
     *,
     now: float | None = None,
 ) -> str | None:
+    for field in ("catalog_revision", "policy_revision", "hard_mask_digest"):
+        if not str(getattr(lease, field, "") or "").strip():
+            return f"{field} missing"
+    for session_attr in (
+        "_catalog_revision",
+        "_directive_revision",
+        "_policy_revision",
+        "_episode_generation",
+        "_hard_mask_digest",
+    ):
+        if not hasattr(session, session_attr):
+            return "lease context missing"
+    current_digest = str(getattr(session, "_hard_mask_digest", "") or "")
+    if current_digest != lease.hard_mask_digest:
+        return "mask digest stale"
     now = time.monotonic() if now is None else now
     if now >= lease.expires_at_monotonic:
         return "lease expired"

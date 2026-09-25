@@ -42,7 +42,7 @@ from loop.adaptive.telemetry import TelemetryStore
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ADAPTIVE_DIR = REPO_ROOT / "loop" / "adaptive"
 _BANNED = re.compile(
-    r"playjev|mariohtml5|nintendo|enjine|infinite_mario", re.I
+    r"mariohtml5|nintendo|enjine|infinite_mario", re.I
 )
 
 

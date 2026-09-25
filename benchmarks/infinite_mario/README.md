@@ -1,16 +1,8 @@
-# Infinite Mario benchmark (PlayJev)
+# Infinite Mario benchmark
 
 Optional headless Chromium benchmark for the adaptive react loop. Mario-specific code lives here only; `loop/adaptive/` stays game-agnostic.
 
-## Fetch fixture
-
-PlayJev is **not** vendored in this repository. Populate the ignored cache:
-
-```powershell
-python -m loop fetch-playjev
-```
-
-Cache path: `.cache/benchmarks/playjev/2d7a0280841e3244a299c9c640efc8cefc46d476/`
+The page source is [robertkleffner/mariohtml5](https://github.com/robertkleffner/mariohtml5) (Unlicense), one entry in `benchmarks/test_games.py`. There is no bundled page server in this repo.
 
 ## Install (optional extra)
 
@@ -19,7 +11,7 @@ pip install -e ".[dev,benchmark]"
 playwright install chromium
 ```
 
-Core `pytest -q` does **not** require Chromium or this cache.
+Core `pytest -q` does **not** require Chromium or a game checkout.
 
 ## Run baselines
 
@@ -27,7 +19,7 @@ Core `pytest -q` does **not** require Chromium or this cache.
 python -m loop react --workspace .tmp/mario --policy baselines --max-steps 20
 ```
 
-Report: `.tmp/mario/report.json`
+That command needs a local Mario page cache at `.cache/benchmarks/infinite-mario/`. Report: `.tmp/mario/report.json`
 
 ## Seeds
 
@@ -41,8 +33,5 @@ Immutable manifests under `seed-manifests/`:
 
 ## Licensing
 
-- PlayJev harness: Apache-2.0 (pinned revision in `source-manifest.json`)
-- Upstream mariohtml5: Unlicense (see PlayJev `games/mario/UPSTREAM`)
+- Upstream mariohtml5: Unlicense
 - **Sprite artwork is Nintendo IP** — do not redistribute frames, datasets, or screenshot-heavy artifacts
-
-If Mario assets cannot be used, PlayJev’s MIT Snake fixture is the documented fallback (not implemented in this repo yet).

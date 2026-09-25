@@ -18,7 +18,13 @@ from loop.adaptive.candidates import (
     compile_mask,
     mask_digest,
 )
-from loop.adaptive.contracts import ExecutionReceipt, ObservationQuality
+from loop.adaptive.contracts import (
+    EFFECT_STATUS_NO_EFFECT,
+    EFFECT_STATUS_WRONG_EFFECT,
+    ExecutionReceipt,
+    ObservationQuality,
+    PostActionObservationPolicy,
+)
 from loop.adaptive.controller import (
     GenerationStore,
     NativeShadowConfig,
@@ -29,11 +35,11 @@ from loop.adaptive.controller import (
 )
 from loop.adaptive.orchestrator import OrchestratorConfig, SyncOrchestratorRunner
 from loop.adaptive.executor import Executor, NativeDispatchContext
-from loop.adaptive.orchestrate import Trace
+from loop.adaptive.orchestrate import Trace, registry_offers
 from loop.adaptive.policy import DeterministicPolicy, StructuredDecision, reactive_state_from_native
 from loop.adaptive.policy_worker import PolicyTurnStatus, PolicyWorker
 from loop.adaptive.runtime import select_invocation
-from loop.adaptive.schema import ActionInvocation, StateSnapshot
+from loop.adaptive.schema import ActionInvocation, SceneGraph, StateSnapshot
 from loop.adaptive.session import Session
 from loop.adaptive.snapshot import build_native_observation
 
@@ -48,6 +54,10 @@ class ArmConfig:
     decision_deadline_s: float = 0.25
     snapshot_max_age_s: float = 0.5
     directive_ttl_s: float = 30.0
+    game_brief: dict | None = None
+    # Frozen bounded post-action observation policy for this armed run: the
+    # default is the legacy single immediate after-frame (no settling window).
+    post_action: PostActionObservationPolicy = PostActionObservationPolicy()
 
 
 def create_owner(target: Any) -> Any:
@@ -94,6 +104,64 @@ def _bind_lease_context(session: Session, lease) -> None:
     session._catalog_revision = lease.catalog_revision  # noqa: SLF001
     session._directive_revision = lease.directive_revision  # noqa: SLF001
     session._policy_revision = lease.policy_revision  # noqa: SLF001
+    session._hard_mask_digest = lease.hard_mask_digest  # noqa: SLF001
+
+
+def forbidden_ids_from_ledger(ledger) -> frozenset[str]:
+    ids: set[str] = set()
+    for record in ledger.all():
+        if record.kind != "negative_evidence":
+            continue
+        rid = record.payload.get("registry_id")
+        if rid:
+            ids.add(str(rid))
+        elif record.payload.get("action_id"):
+            ids.add(str(record.payload["action_id"]))
+    return frozenset(ids)
+
+
+def next_offers(scene: SceneGraph, ledger) -> tuple:
+    return registry_offers(scene, forbidden_ids_from_ledger(ledger))
+
+
+def _offer_id_for_inv(
+    inv: ActionInvocation,
+    snap: StateSnapshot,
+    graph: SceneGraph | None,
+) -> str:
+    bound_node_id: str | None = None
+    for inst in snap.surface.actions:
+        if inst.action_id == inv.action_id:
+            bound_node_id = inst.bound_node_id
+            break
+    if graph is not None and bound_node_id:
+        for node in graph.nodes:
+            if node.node_id == bound_node_id:
+                rid = node.attributes.get("registry_id")
+                if rid:
+                    return str(rid)
+    return inv.action_id
+
+
+def append_negative_evidence(
+    session: Session,
+    inv: ActionInvocation,
+    snap: StateSnapshot,
+    graph: SceneGraph | None,
+    *,
+    reason: str,
+    stage: int,
+) -> None:
+    offer_id = _offer_id_for_inv(inv, snap, graph)
+    session.ledger.append_event(
+        "negative_evidence",
+        {
+            "action_id": inv.action_id,
+            "registry_id": offer_id,
+            "reason": reason,
+            "stage": stage,
+        },
+    )
 
 
 def _append_arm_receipt(workspace: Path, payload: dict) -> None:
@@ -115,6 +183,8 @@ def _receipt_payload(
     dispatch_receipt,
     receipt: ExecutionReceipt | None,
     capture_provenance: tuple[str, ...],
+    scene_graph: SceneGraph | None = None,
+    ledger=None,
 ) -> dict:
     row: dict[str, Any] = {
         "stage": stage,
@@ -145,8 +215,23 @@ def _receipt_payload(
             "after_pid": receipt.after_pid,
             "after_capture_provenance": list(receipt.after_capture_provenance),
             "expected_effect_verified": receipt.expected_effect.verified,
+            "expected_effect_status": receipt.expected_effect.status,
             "expected_effect_reason": receipt.expected_effect.reason,
+            "expected_effect_evidence": list(receipt.expected_effect.evidence),
         }
+    if scene_graph is not None and ledger is not None:
+        registry_ids = sorted(
+            {
+                str(node.attributes["registry_id"])
+                for node in scene_graph.nodes
+                if node.attributes.get("registry_id")
+            }
+        )
+        offers = next_offers(scene_graph, ledger)
+        row["registry_ids"] = registry_ids
+        row["offer_ids"] = [item.offer_id for item in offers]
+        if receipt is not None:
+            row["effect_happened"] = receipt.expected_effect.verified
     return row
 
 
@@ -155,6 +240,37 @@ def _pre_dispatch_from_observe(observe: ObserveFn) -> tuple[bool, str]:
     if str(prov.get("integrity") or "trusted") != "trusted":
         return False, "untrusted capture"
     return True, "ok"
+
+
+def _capture_from_observe(observe: ObserveFn) -> tuple[int | None, int | None, tuple[str, ...]]:
+    prov = getattr(observe, "provenance", {}) or {}
+    hwnd = int(prov.get("hwnd") or 0) or None
+    pid = int(prov.get("pid") or 0) or None
+    return hwnd, pid, (str(prov.get("source") or "window"),)
+
+
+def acquisition_from_provenance(prov: dict | None) -> dict[str, Any]:
+    """Truthful acquisition contract carried by an observer's provenance.
+
+    ``capture_age_known`` is True only when a real capture bound exists; a
+    missing bound yields the 0.0 sentinel plus ``unknown`` origin, which the
+    dispatch gate rejects.  Never fabricate a timestamp here.
+    """
+
+    data = prov or {}
+    ts = data.get("capture_ts_monotonic")
+    age_known = bool(data.get("capture_age_known")) and ts is not None
+    sequence = data.get("observation_sequence")
+    return {
+        "capture_ts_monotonic": float(ts) if age_known else None,
+        "capture_age_known": age_known,
+        "acquisition_origin": str(data.get("acquisition_origin") or "unknown"),
+        "observation_sequence": int(sequence) if sequence is not None else None,
+    }
+
+
+def acquisition_from_observe(observe: ObserveFn) -> dict[str, Any]:
+    return acquisition_from_provenance(getattr(observe, "provenance", {}) or {})
 
 
 def _compile_frame(
@@ -169,10 +285,22 @@ def _compile_frame(
     capture_provenance: tuple[str, ...],
     directive_store: GenerationStore,
     config: ArmConfig,
+    capture_ts_monotonic: float | None = None,
+    capture_age_known: bool = False,
+    acquisition_origin: str = "unknown",
+    observation_sequence: int | None = None,
 ):
     now = time.monotonic()
     publication = now
-    capture_ts = max(0.0, publication - 0.001)
+    # Use the observer's real acquisition bound.  If it is unknown, keep the
+    # 0.0 sentinel: the post-perception time must never stand in for capture.
+    if capture_age_known and capture_ts_monotonic is not None:
+        capture_ts = max(0.0, min(float(capture_ts_monotonic), publication))
+        origin = acquisition_origin or "pre-grab-sync"
+    else:
+        capture_age_known = False
+        capture_ts = 0.0
+        origin = acquisition_origin or "unknown"
     quality = (
         ObservationQuality.trusted
         if capture_integrity == "trusted"
@@ -190,6 +318,9 @@ def _compile_frame(
         pid=int(pid),
         target_identity=dict(session.target or {}),
         quality=quality,
+        capture_age_known=capture_age_known,
+        acquisition_origin=origin,
+        observation_sequence=observation_sequence,
     )
     directive = _bootstrap_directive(
         directive_store,
@@ -197,6 +328,7 @@ def _compile_frame(
         config=NativeShadowConfig(
             directive_ttl_s=config.directive_ttl_s,
             policy_revision=config.policy_revision,
+            game_brief=config.game_brief,
         ),
     )
     catalog = compile_catalog_from_surface(session.schema, snap)
@@ -376,6 +508,7 @@ def run_armed_collect(
                     capture_provenance=(str(prov.get("source") or "window"),),
                     directive_store=directive_store,
                     config=cfg,
+                    **acquisition_from_provenance(prov),
                 )
             except CatalogCompileError as exc:
                 owner.release_all("catalog_compile_error")
@@ -416,6 +549,10 @@ def run_armed_collect(
             receipt: ExecutionReceipt | None = None
             if dispatch_receipt.accepted and dispatch_receipt.lease is not None and inv is not None:
                 _bind_lease_context(session, dispatch_receipt.lease)
+
+                def _after_evidence() -> dict:
+                    return dict(getattr(observe, "provenance", None) or {})
+
                 receipt = session.act(
                     inv,
                     lambda _s, _b: None,
@@ -425,6 +562,8 @@ def run_armed_collect(
                     owner=owner,
                     pre_dispatch=lambda: _pre_dispatch_from_observe(observe),
                     get_scene=lambda: scene_holder[0],
+                    observation_policy=cfg.post_action,
+                    after_evidence=_after_evidence,
                 )
                 assert isinstance(receipt, ExecutionReceipt)
 
@@ -441,6 +580,8 @@ def run_armed_collect(
                     dispatch_receipt=dispatch_receipt,
                     receipt=receipt,
                     capture_provenance=native_obs.capture_provenance,
+                    scene_graph=graph,
+                    ledger=session.ledger,
                 ),
             )
 
@@ -460,15 +601,19 @@ def run_armed_collect(
                 owner.release_all("release_failure")
                 return False, "release_failure"
             if not receipt.expected_effect.verified:
-                session.ledger.append_event(
-                    "negative_evidence",
-                    {
-                        "action_id": inv.action_id,
-                        "reason": receipt.expected_effect.reason,
-                        "stage": stage,
-                    },
-                )
+                effect = receipt.expected_effect
+                if effect.status in (EFFECT_STATUS_NO_EFFECT, EFFECT_STATUS_WRONG_EFFECT):
+                    append_negative_evidence(
+                        session,
+                        inv,
+                        snap,
+                        graph,
+                        reason=effect.reason,
+                        stage=stage,
+                    )
                 owner.release_all("expected_effect_failed")
+                if effect.status == "unobservable":
+                    return False, "expected effect unobservable"
                 return False, "expected effect not observed"
             verified += 1
             return True, "ok"
@@ -500,14 +645,16 @@ def run_armed_collect(
                 return stop(msg, stage=3)
         stages_done.append(3)
 
-        # Stages 4–5 — Decider path when >=2 legal promoted actions on surface
+        # Stages 4–5 — deterministic policy path until phase 5 (>=2 legal actions)
         if len(session.schema.actions) >= 2:
             snap, scene_holder, surf_err = _stable_surface(observe)
             if surf_err or snap is None or len(snap.surface.actions) < 2:
                 owner.release_all("multi_surface_unavailable")
             else:
+                armed_policy = DeterministicPolicy()
+                decision_source = type(armed_policy).__name__
                 worker = PolicyWorker(
-                    DeterministicPolicy(), inference_timeout_s=cfg.decision_deadline_s
+                    armed_policy, inference_timeout_s=cfg.decision_deadline_s
                 )
                 try:
                     native_obs, catalog, directive, mask = _compile_frame(
@@ -521,6 +668,7 @@ def run_armed_collect(
                         capture_provenance=("window",),
                         directive_store=directive_store,
                         config=cfg,
+                        **acquisition_from_observe(observe),
                     )
                     filtered = _filtered_candidates(catalog, mask)
                     reactive = reactive_state_from_native(native_obs)
@@ -540,7 +688,7 @@ def run_armed_collect(
                     chosen = result.decision.candidate_id
                     ok, msg = run_leased_act(
                         4,
-                        decision_source="decider",
+                        decision_source=decision_source,
                         candidate_id=chosen,
                     )
                     if not ok:
@@ -564,6 +712,7 @@ def run_armed_collect(
                         capture_provenance=("window",),
                         directive_store=directive_store,
                         config=cfg,
+                        **acquisition_from_observe(observe),
                     )
                     filtered = _filtered_candidates(catalog, mask)
                     turn_id = worker.submit(
@@ -581,7 +730,7 @@ def run_armed_collect(
                         return stop("policy_unavailable", stage=5)
                     ok, msg = run_leased_act(
                         5,
-                        decision_source="decider",
+                        decision_source=decision_source,
                         candidate_id=result2.decision.candidate_id,
                     )
                     if not ok:
@@ -595,8 +744,9 @@ def run_armed_collect(
             directive_store,
             episode_generation=cfg.episode_generation,
             config=OrchestratorConfig(
-                default_intent="armed constant directive",
+                default_intent="" if cfg.game_brief else "armed constant directive",
                 directive_ttl_s=cfg.directive_ttl_s,
+                game_brief=cfg.game_brief,
             ),
         )
         try:
@@ -605,7 +755,14 @@ def run_armed_collect(
                 episode_generation=cfg.episode_generation,
                 config=NativeShadowConfig(directive_ttl_s=cfg.directive_ttl_s),
             ).revision
-            orch.notify("reset", intent="revised armed intent")
+            orch.notify(
+                "schema_change",
+                intent=(
+                    str(cfg.game_brief.get("objective") or "")
+                    if cfg.game_brief
+                    else "revised armed intent"
+                ),
+            )
             time.sleep(0.05)
             after = directive_store.latest()
             assert after is not None and after.revision > before_rev

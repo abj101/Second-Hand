@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
-import os
 from pathlib import Path
 
 import io
@@ -22,7 +22,6 @@ from loop.adaptive.environment import StepResult
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ADAPTER = REPO_ROOT / "benchmarks" / "infinite_mario" / "adapter.py"
 MANIFEST = REPO_ROOT / "benchmarks" / "infinite_mario" / "source-manifest.json"
-PIN = "2d7a0280841e3244a299c9c640efc8cefc46d476"
 
 
 def _jpeg_bytes() -> bytes:
@@ -124,9 +123,10 @@ def test_adapter_ast_no_session_or_runtime():
     assert "Session.act" not in src
 
 
-def test_source_manifest_revision_pin():
+def test_source_manifest_points_at_upstream_mario():
     data = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    assert data["playjev"]["revision"] == PIN
+    assert data["upstream"]["repo"] == "robertkleffner/mariohtml5"
+    assert data["upstream"]["license"] == "Unlicense"
 
 
 def test_seed_manifests_disjoint():
@@ -139,26 +139,11 @@ def test_seed_manifests_disjoint():
     assert sets["val"].isdisjoint(sets["test"])
 
 
-@pytest.mark.benchmark
-def test_live_mario_smoke():
-    if os.environ.get("AVATAR_RUN_MARIO") != "1":
-        pytest.skip("set AVATAR_RUN_MARIO=1 for live Playwright smoke")
-    pytest.importorskip("playwright")
-    cache = REPO_ROOT / ".cache" / "benchmarks" / "playjev" / PIN
-    if not cache.is_dir():
-        pytest.skip("PlayJev cache missing; run fetch-playjev")
+def test_mario_start_has_no_bundled_page_server():
+    env = MarioEnvironment(Path("/nonexistent"), headless=True)
 
     async def _run() -> None:
-        env = MarioEnvironment(cache)
-        try:
-            await env.start()
-            r = await env.reset(1, "live", 1)
-            assert r.frame_digest
-            r2 = await env.step("noop")
-            assert r2.step >= r.step
-        finally:
-            await env.close()
+        await env.start()
 
-    import asyncio
-
-    asyncio.run(_run())
+    with pytest.raises(FileNotFoundError, match="robertkleffner/mariohtml5"):
+        asyncio.run(_run())

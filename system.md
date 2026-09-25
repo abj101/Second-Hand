@@ -6,7 +6,7 @@ Build a reusable screen agent that discovers the state representation it needs w
 
 ## Non-negotiable rules
 
-1. No application names, mechanics, control labels, fixed coordinates, or domain state classes in production code.
+1. No application names, mechanics, control labels, fixed coordinates, or domain state classes hardcoded in production logic. An explicitly selected or exactly matched game brief may supply static advisory prose from a versioned data file. It cannot seed the schema, supply current state or coordinates, grant input authority, or replace visual and causal evidence. See the north-star game-brief contract.
 2. Pixels and executed input are the only environmental boundary. Model output is a hypothesis, never ground truth.
 3. Every schema claim cites evidence. Every accepted action cites a repeated causal trace.
 4. Schema revisions are immutable and linked through `schema/HEAD.json`.

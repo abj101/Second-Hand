@@ -1,4 +1,4 @@
-"""Infinite Mario benchmark (PlayJev adapter); optional Playwright extra."""
+"""Infinite Mario benchmark; optional browser extra."""
 
 from benchmarks.infinite_mario.adapter import MarioEnvironment
 

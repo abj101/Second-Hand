@@ -12,7 +12,7 @@ import httpx
 
 from loop.os.capture import EncodedFrame
 
-DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
+DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:31b-cloud")
 
 
 def _is_ollama_cloud(model_id: str) -> bool:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from loop.adaptive.cli import apply_collect_operating_requests
 from loop.adaptive.contracts import (
     CatalogCompileError,
     NativeCandidate,
@@ -11,10 +12,13 @@ from loop.adaptive.contracts import (
     NativeTrustedConstraints,
     ObservationQuality,
     OperatingState,
+    OperatingTransition,
+    TransitionFacts,
     after_preflight,
     catalog_revision_for,
     compile_native_catalog,
     decider_may_arm,
+    transition_operating_state,
 )
 from loop.adaptive.schema import ActionSurface, StateSnapshot, empty_schema
 from loop.adaptive.snapshot import StateSnapshotV2
@@ -100,3 +104,157 @@ def test_after_preflight_and_decider_may_arm() -> None:
     assert after_preflight(True, True) is OperatingState.Observe
     assert decider_may_arm(False) is False
     assert decider_may_arm(True) is True
+
+
+def test_transition_boot_requires_manifests_and_release() -> None:
+    facts = TransitionFacts(manifests_checked=False, inputs_released=True)
+    assert (
+        transition_operating_state(
+            OperatingState.Boot, OperatingTransition.boot_complete, facts
+        )
+        is OperatingState.Boot
+    )
+
+
+def test_transition_rejects_observe_to_armed_jump() -> None:
+    facts = TransitionFacts(
+        react_gates_pass=True,
+        operator_arms=True,
+        surface_has_promoted_action=True,
+    )
+    assert (
+        transition_operating_state(
+            OperatingState.Observe, OperatingTransition.operator_arm_react, facts
+        )
+        is OperatingState.Observe
+    )
+
+
+def test_transition_shadow_to_armed_requires_gates_and_operator() -> None:
+    base = TransitionFacts(
+        react_gates_pass=True,
+        operator_arms=True,
+    )
+    assert (
+        transition_operating_state(
+            OperatingState.ShadowReact, OperatingTransition.operator_arm_react, base
+        )
+        is OperatingState.ArmedReact
+    )
+    no_arm = TransitionFacts(react_gates_pass=True, operator_arms=False)
+    assert (
+        transition_operating_state(
+            OperatingState.ShadowReact, OperatingTransition.operator_arm_react, no_arm
+        )
+        is OperatingState.ShadowReact
+    )
+
+
+def test_halted_recovery_requires_explicit_release_and_generation() -> None:
+    ok = TransitionFacts(
+        explicit_recovery=True,
+        inputs_released=True,
+        generation_incremented=True,
+    )
+    assert (
+        transition_operating_state(
+            OperatingState.Halted, OperatingTransition.recover_from_halt, ok
+        )
+        is OperatingState.Observe
+    )
+    partial = TransitionFacts(
+        explicit_recovery=True,
+        inputs_released=True,
+        generation_incremented=False,
+    )
+    assert (
+        transition_operating_state(
+            OperatingState.Halted, OperatingTransition.recover_from_halt, partial
+        )
+        is OperatingState.Halted
+    )
+
+
+def test_failed_preflight_blocks_cli_arm_transition() -> None:
+    state = apply_collect_operating_requests(
+        OperatingState.Observe,
+        experiment=False,
+        arm=True,
+        recover=False,
+        observation_stable=True,
+        surface_has_promoted_action=True,
+        preflight_ok=False,
+        target_bound=True,
+    )
+    assert state is OperatingState.ShadowReact
+
+
+def test_cli_arm_from_observe_without_surface_stays_observe() -> None:
+    state = apply_collect_operating_requests(
+        OperatingState.Observe,
+        experiment=False,
+        arm=True,
+        recover=False,
+        observation_stable=True,
+        surface_has_promoted_action=False,
+        preflight_ok=None,
+        target_bound=True,
+    )
+    assert state is OperatingState.Observe
+
+
+def _observation_with(**overrides: object) -> NativeObservation:
+    snap = _verified_snapshot()
+    base = dict(
+        episode_id="ep",
+        episode_generation=1,
+        capture_ts_monotonic=1.0,
+        publication_ts_monotonic=1.1,
+        observation_age_s=0.1,
+        capture_integrity="ok",
+        capture_provenance=("window_capture",),
+        hwnd=100,
+        pid=200,
+        target_identity={"selector": "win"},
+        snapshot_id=snap.snapshot_id,
+        schema_revision_id=snap.schema_revision_id,
+        quality=ObservationQuality.trusted,
+        missing_required_fields=(),
+        snapshot=snap,
+    )
+    base.update(overrides)
+    return NativeObservation(**base)  # type: ignore[arg-type]
+
+
+def test_acquisition_eligibility_fails_closed_on_defaults() -> None:
+    obs = _observation_with()
+    assert obs.capture_age_known is False
+    assert obs.acquisition_origin == "unknown"
+    assert obs.observation_sequence is None
+    assert obs.acquisition_is_actuation_eligible() is False
+
+
+def test_acquisition_eligibility_requires_bound_age_sequence_and_trust() -> None:
+    fresh = _observation_with(
+        capture_age_known=True,
+        acquisition_origin="pre-grab-sync",
+        observation_sequence=1,
+    )
+    assert fresh.acquisition_is_actuation_eligible() is True
+    assert (
+        _observation_with(capture_age_known=True, observation_sequence=None)
+        .acquisition_is_actuation_eligible()
+        is False
+    )
+    assert (
+        _observation_with(observation_sequence=1).acquisition_is_actuation_eligible()
+        is False
+    )
+    assert (
+        _observation_with(
+            capture_age_known=True,
+            observation_sequence=1,
+            quality=ObservationQuality.untrusted,
+        ).acquisition_is_actuation_eligible()
+        is False
+    )

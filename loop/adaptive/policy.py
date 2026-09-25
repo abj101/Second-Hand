@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from loop.adaptive.candidates import ActionCatalog, ActionMask, CandidateAction, Directive
@@ -134,6 +134,18 @@ class StructuredDecision:
     snapshot_id: str
     directive_revision: int
     catalog_revision: str
+    bound_entity_id: str | None = None
+    scene_id: str | None = None
+
+
+def project_reactive_for_model(reactive: ReactiveState, directive: Directive) -> ReactiveState:
+    """Apply directive attention to the model request projection only."""
+
+    if not directive.attention:
+        return reactive
+    keep = frozenset(directive.attention)
+    fields = {name: field for name, field in reactive.fields.items() if name in keep}
+    return replace(reactive, fields=fields)
 
 
 class Policy(Protocol):
@@ -207,6 +219,7 @@ class DeterministicPolicy:
             snapshot_id=snap_id,
             directive_revision=directive.revision,
             catalog_revision=self.catalog_revision,
+            scene_id=snap_id,
         )
 
 
@@ -227,7 +240,7 @@ class RandomPolicy:
         probs = {c.action_id: (1.0 if c.action_id == chosen.action_id else 0.0) for c in candidates}
         snap_id, episode_gen = reactive_episode_meta(snapshot)
         return StructuredDecision(
-            candidate_id=chosen,
+            candidate_id=chosen.action_id,
             confidence=1.0 / len(candidates),
             probabilities=probs,
             decided_at=time.monotonic(),
@@ -235,4 +248,5 @@ class RandomPolicy:
             snapshot_id=snap_id,
             directive_revision=directive.revision,
             catalog_revision=self.catalog_revision,
+            scene_id=snap_id,
         )

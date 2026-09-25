@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from hashlib import sha256
+from typing import Sequence
 
 from loop.adaptive.contracts import (
     CatalogCompileError,
@@ -17,7 +18,14 @@ from loop.adaptive.contracts import (
     ObservationQuality,
     compile_native_catalog,
 )
-from loop.adaptive.schema import ActionSpec, AdaptiveSchema, EffectPredicate, StateSnapshot
+from loop.adaptive.schema import (
+    ActionSpec,
+    AdaptiveSchema,
+    EffectPredicate,
+    ParamSpec,
+    PrimitiveStep,
+    StateSnapshot,
+)
 
 
 @dataclass(frozen=True)
@@ -35,6 +43,71 @@ class CandidateAction:
 class ActionCatalog:
     revision: str
     candidates: tuple[CandidateAction, ...]
+    transient_plans: tuple["TransientClickPlan", ...] = ()
+
+    def transient_plan_for(self, action_id: str) -> "TransientClickPlan | None":
+        return next((p for p in self.transient_plans if p.action_id == action_id), None)
+
+
+@dataclass(frozen=True)
+class TransientClickPlan:
+    """Trusted, one-click plan for a visible provisional registry offer.
+
+    This is deliberately separate from ``AdaptiveSchema``: an offer may be
+    leased once, but only repeated verified effects promote it into durable
+    schema.  The model receives the id and label; this object stays in the
+    trusted runtime/catalog lane.
+    """
+
+    action_id: str
+    registry_id: str
+    node_id: str
+    label: str
+    parameters: tuple[ParamSpec, ...]
+    primitive_plan: tuple[PrimitiveStep, ...]
+    constraints: NativeTrustedConstraints
+
+
+_PROVISIONAL_CONSTRAINTS = NativeTrustedConstraints(
+    risk="low",
+    retry="deny",
+    cooldown_s=0.5,
+    max_plan_duration_s=1.0,
+)
+
+
+def compile_transient_one_click_plan(
+    offer: object,
+    *,
+    constraints: NativeTrustedConstraints = _PROVISIONAL_CONSTRAINTS,
+) -> TransientClickPlan:
+    """Compile exactly one trusted click bound to the offered registry node."""
+
+    action_id = str(getattr(offer, "offer_id", "") or "").strip()
+    node_id = str(getattr(offer, "node_id", "") or "").strip()
+    label = str(getattr(offer, "label", "") or "").strip()
+    if not action_id or not node_id or not label:
+        raise CatalogCompileError("registry offer requires id, label, and node")
+    # Validate the immutable constraint envelope before exposing this to the
+    # dispatch gate.  ``compile_native_catalog`` is the single validator for
+    # native constraints, so use it rather than accepting caller data here.
+    compile_native_catalog(
+        "provisional",
+        (NativeCandidate(action_id, label, constraints),),
+    )
+    return TransientClickPlan(
+        action_id=action_id,
+        registry_id=action_id,
+        node_id=node_id,
+        label=label,
+        parameters=(ParamSpec("target", "entity"),),
+        primitive_plan=(PrimitiveStep("click", ("target",)),),
+        constraints=constraints,
+    )
+
+
+# Short public name used by the capture/steer integration.
+compile_transient_plan = compile_transient_one_click_plan
 
 
 @dataclass(frozen=True)
@@ -51,6 +124,7 @@ class Directive:
     ttl_s: float
     published_at: float
     forbidden_ids: tuple[str, ...] = ()
+    attention: tuple[str, ...] = ()
     required_mode: str | None = None
 
 
@@ -107,6 +181,8 @@ def native_constraints_from_spec(spec: ActionSpec) -> NativeTrustedConstraints:
 def compile_catalog_from_surface(
     schema: AdaptiveSchema,
     snapshot: StateSnapshot,
+    *,
+    provisional_offers: Sequence[object] = (),
 ) -> ActionCatalog:
     """Compile opaque catalog + content hash from the current verified surface only."""
 
@@ -114,11 +190,38 @@ def compile_catalog_from_surface(
     specs = {action.action_id: action for action in schema.actions}
     instances = {inst.action_id: inst for inst in surface.actions}
     native: list[NativeCandidate] = []
+    transient_plans: list[TransientClickPlan] = []
+    plan_by_id: dict[str, TransientClickPlan] = {}
+    for offer in provisional_offers:
+        plan = compile_transient_one_click_plan(offer)
+        plan_by_id[plan.action_id] = plan
+
     for action_id in sorted(surface.action_ids):
         spec = specs.get(action_id)
         inst = instances.get(action_id)
         if spec is None or inst is None:
-            raise CatalogCompileError(f"surface action {action_id!r} missing schema instance")
+            plan = plan_by_id.get(action_id)
+            if plan is None and inst is not None and inst.bound_node_id:
+                # ``runtime.project`` can be used directly by callers that do
+                # not have the orchestrator's ProvisionalOffer value object.
+                # Preserve legality and a trusted click plan; the controller
+                # supplies the human label when it has the scene registry.
+                from types import SimpleNamespace
+
+                plan = compile_transient_one_click_plan(
+                    SimpleNamespace(
+                        offer_id=action_id,
+                        label=action_id,
+                        node_id=inst.bound_node_id,
+                    )
+                )
+            if plan is None:
+                raise CatalogCompileError(f"surface action {action_id!r} missing schema instance")
+            native.append(
+                NativeCandidate(action_id, plan.label, plan.constraints)
+            )
+            transient_plans.append(plan)
+            continue
         description = _effect_description(inst.expected_effects)
         native.append(
             NativeCandidate(
@@ -139,7 +242,11 @@ def compile_catalog_from_surface(
         )
         for nc in compiled.candidates
     )
-    return ActionCatalog(revision=compiled.revision, candidates=candidates)
+    return ActionCatalog(
+        revision=compiled.revision,
+        candidates=candidates,
+        transient_plans=tuple(sorted(transient_plans, key=lambda p: p.action_id)),
+    )
 
 
 def compile_mask(
@@ -150,7 +257,8 @@ def compile_mask(
 ) -> ActionMask:
     blocked: dict[str, str] = {}
     allowed: list[str] = []
-    forbidden = set(directive.forbidden_ids)
+    catalog_ids = {c.action_id for c in catalog.candidates}
+    forbidden = {fid for fid in directive.forbidden_ids if fid in catalog_ids}
 
     if gate is not None:
         if gate.terminal:
@@ -161,9 +269,13 @@ def compile_mask(
             for cand in catalog.candidates:
                 blocked[cand.action_id] = "recovery_locked"
             return ActionMask(allowed_ids=(), blocked=blocked)
-        if gate.quality is ObservationQuality.untrusted:
+        if gate.quality in (ObservationQuality.untrusted, ObservationQuality.degraded):
             for cand in catalog.candidates:
-                blocked[cand.action_id] = "untrusted_capture"
+                blocked[cand.action_id] = (
+                    "untrusted_capture"
+                    if gate.quality is ObservationQuality.untrusted
+                    else "degraded_capture"
+                )
             return ActionMask(allowed_ids=(), blocked=blocked)
         if gate.snapshot_confidence < gate.min_snapshot_confidence:
             for cand in catalog.candidates:

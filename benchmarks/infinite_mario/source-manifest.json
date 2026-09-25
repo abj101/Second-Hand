@@ -1,9 +1,4 @@
 {
-  "playjev": {
-    "url": "https://github.com/OmniJev/PlayJev",
-    "revision": "2d7a0280841e3244a299c9c640efc8cefc46d476",
-    "license": "Apache-2.0"
-  },
   "upstream": {
     "repo": "robertkleffner/mariohtml5",
     "license": "Unlicense",
@@ -28,7 +23,7 @@
     "right run jump"
   ],
   "fingerprint_fields": [
-    "playjev_commit",
+    "upstream_repo",
     "upstream_from_UPSTREAM_file",
     "patch_digest",
     "chromium_revision",

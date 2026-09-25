@@ -15,9 +15,16 @@ from loop.adaptive.experiment import (
     observation_fingerprint,
     preflight,
 )
-from loop.adaptive.orchestrate import SchemaDiff, filter_model_diffs
+from loop.adaptive.orchestrate import (
+    SchemaDiff,
+    _assert_no_offer_coordinate_keys,
+    filter_model_diffs,
+    forbid_unrestored_registry_id,
+    offer_model_state,
+    registry_offers,
+)
 from loop.adaptive.perceive import SceneAssembler
-from loop.adaptive.schema import EvidenceRecord, empty_schema
+from loop.adaptive.schema import EvidenceRecord, SceneGraph, SceneNode, empty_schema
 from loop.adaptive.session import Session
 from loop.adaptive.world import CONTROL_NODE_ID, NeutralWorld
 from loop.os.window import CaptureProvenance, WindowTarget
@@ -285,7 +292,7 @@ def test_collect_experiment_without_arm_emits_no_input(monkeypatch, tmp_path: Pa
     monkeypatch.setattr("loop.adaptive.cli._load_scouts", lambda _dir: _fake_scouts())
     mouse = MagicMock()
     monkeypatch.setattr("loop.os.mouse.Mouse.execute", mouse)
-    rc = cmd_collect(["--workspace", str(tmp_path), "--synthetic", "--experiment", "--steps", "4"])
+    rc = cmd_collect(["--workspace", str(tmp_path), "--synthetic", "--experiment", "--steps", "30"])
     assert rc == 0
     summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
     assert summary["mode"] == "experiment"
@@ -306,7 +313,7 @@ def test_collect_experiment_arm_promotes_one_action(monkeypatch, tmp_path: Path)
             "--experiment",
             "--arm",
             "--steps",
-            "4",
+            "30",
         ]
     )
     assert rc == 0, (tmp_path / "summary.json").read_text(encoding="utf-8")
@@ -323,6 +330,8 @@ def test_live_experiment_without_arm_does_not_click(monkeypatch, tmp_path: Path)
     world.reset(0)
     dummy = WindowTarget(hwnd=1, title="dummy", left=0, top=0, width=320, height=240)
     monkeypatch.setattr("loop.os.window.list_windows", lambda _title: [dummy])
+    monkeypatch.setattr("loop.os.window.focus_window_and_settle", lambda _target: True)
+    monkeypatch.setattr("loop.os.window.is_foreground", lambda _target: True)
     monkeypatch.setattr(
         "loop.os.window.target_identity",
         lambda target, selector="": {
@@ -340,7 +349,7 @@ def test_live_experiment_without_arm_does_not_click(monkeypatch, tmp_path: Path)
         lambda _target: (
             world.observe()[0].convert("RGB"),
             CaptureProvenance(
-                source="test",
+                source="hwnd-imagegrab",
                 client_size=(320, 240),
                 content_box=(0.0, 0.0, 1.0, 1.0),
                 integrity="trusted",
@@ -369,3 +378,60 @@ def test_recovery_lock_blocks_until_baseline(tmp_path: Path):
     fp = observation_fingerprint(snap, graph)
     assert fp != "deadbeef"
     assert session.recovery_state() is not None
+
+
+def test_provisional_offers_forbid_unrestore(tmp_path: Path):
+    from PIL import Image, ImageDraw
+
+    def _menu_frame() -> Image.Image:
+        img = Image.new("RGB", (200, 200), "white")
+        draw = ImageDraw.Draw(img)
+        draw.rectangle((40, 40, 100, 100), fill="blue", outline="blue")
+        draw.rectangle((40, 110, 100, 170), fill="green", outline="green")
+        return img
+
+    def ocr_menu(_: Image.Image) -> list[tuple[str, tuple[float, float, float, float]]]:
+        return [
+            ("Audio", (0.2, 0.2, 0.5, 0.5)),
+            ("Video", (0.2, 0.55, 0.5, 0.85)),
+        ]
+
+    assembler = SceneAssembler()
+    session = Session(tmp_path)
+    _recs, graph = assembler.update(_menu_frame(), ocr=ocr_menu)
+    snap = session.observe(graph)
+
+    forbidden: set[str] = set()
+    offers = registry_offers(graph, forbidden)
+    assert len(offers) == 2
+    labels = {offer.label.casefold() for offer in offers}
+    assert labels == {"audio", "video"}
+    state = offer_model_state(offers, snap)
+    _assert_no_offer_coordinate_keys(state)
+    assert set(state["offer_ids"]) == {offer.offer_id for offer in offers}
+    assert set(state["offer_labels"]) == {"Audio", "Video"}
+
+    by_label = {offer.label.casefold(): offer for offer in offers}
+    audio_id = by_label["audio"].offer_id
+    video_id = by_label["video"].offer_id
+
+    assert forbid_unrestored_registry_id(
+        audio_id,
+        window_gone=False,
+        labels_returned=False,
+        forbidden=forbidden,
+        ledger=session.ledger,
+    )
+    assert audio_id not in {o.offer_id for o in registry_offers(graph, forbidden)}
+    neg = [r for r in session.ledger.all() if r.kind == "negative_evidence"]
+    assert any(r.payload.get("registry_id") == audio_id for r in neg)
+
+    assert not forbid_unrestored_registry_id(
+        video_id,
+        window_gone=False,
+        labels_returned=True,
+        forbidden=forbidden,
+        ledger=session.ledger,
+    )
+    assert video_id in {o.offer_id for o in registry_offers(graph, forbidden)}
+    assert not any(r.payload.get("registry_id") == video_id for r in neg)

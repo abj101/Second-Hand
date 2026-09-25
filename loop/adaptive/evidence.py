@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 import re
-from typing import Iterable
+from collections.abc import Callable, Iterable
 
 import numpy as np
 from PIL import Image
@@ -290,6 +290,51 @@ def assign_track_ids(
             out.append((next_id, curr))
             next_id += 1
     return out
+
+
+def _crop_norm(image: Image.Image, bbox: tuple[float, float, float, float]) -> Image.Image:
+    rgb = image.convert("RGB")
+    w, h = rgb.size
+    x0, y0, x1, y1 = bbox
+    px0 = int(max(0, min(w - 1, x0 * w)))
+    py0 = int(max(0, min(h - 1, y0 * h)))
+    px1 = int(max(px0 + 1, min(w, x1 * w)))
+    py1 = int(max(py0 + 1, min(h, y1 * h)))
+    return rgb.crop((px0, py0, px1, py1))
+
+
+def _tokens_full_frame(
+    tokens: list[OcrToken], bbox: tuple[float, float, float, float]
+) -> bool:
+    for _text, tb in tokens:
+        if iou(tb, bbox) >= 0.25:
+            return True
+    return False
+
+
+def run_ocr_crop(
+    image: Image.Image,
+    bbox: tuple[float, float, float, float],
+    ocr: Callable[[Image.Image], Iterable[OcrToken]],
+) -> list[EvidenceRecord]:
+    crop = _crop_norm(image, bbox)
+    tokens = list(ocr(crop))
+    if _tokens_full_frame(tokens, bbox):
+        mapped = tokens
+    else:
+        x0, y0, x1, y1 = bbox
+        bw, bh = x1 - x0, y1 - y0
+        mapped = [
+            (text, (x0 + cx0 * bw, y0 + cy0 * bh, x0 + cx1 * bw, y0 + cy1 * bh))
+            for text, (cx0, cy0, cx1, cy1) in tokens
+        ]
+    out = run_ocr(image, mapped)
+    kept: list[EvidenceRecord] = []
+    for rec in out:
+        bb = tuple(float(x) for x in rec.payload["bbox"])
+        if iou(bbox, bb) >= 0.05:
+            kept.append(rec)
+    return kept
 
 
 def run_ocr(image: Image.Image, ocr: Iterable[OcrToken] | None) -> list[EvidenceRecord]:

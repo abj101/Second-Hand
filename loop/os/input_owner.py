@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import threading
 import time
 from ctypes import wintypes
 from typing import Any, Callable
@@ -38,7 +39,10 @@ class NativeInputOwner:
         self._armed_keys = armed_keys
         self._actuation_enabled = False
         self._primitive_results: list[dict[str, Any]] = []
-        # ponytail: Keyboard.Timer is the monotonic release supervisor; one owner thread if overlapping holds contend.
+        self._release_deadline: float | None = None
+        self._release_timer: threading.Timer | None = None
+        self._release_lock = threading.Lock()
+        # ponytail: owner Timer thread is the release supervisor; policy worker never owns the deadline.
 
     @classmethod
     def for_target(cls, target: WindowTarget) -> NativeInputOwner:
@@ -65,6 +69,11 @@ class NativeInputOwner:
         return True, "ok"
 
     def release_all(self, reason: str) -> str:
+        with self._release_lock:
+            if self._release_timer is not None:
+                self._release_timer.cancel()
+                self._release_timer = None
+            self._release_deadline = None
         try:
             self._keyboard.release_all()
             self._mouse.release_all()
@@ -160,10 +169,27 @@ class NativeInputOwner:
             duration_ms = int(params["duration_ms"])
             if guard is not None:
                 guard()
-            self._keyboard.hold(key, duration_ms=duration_ms)
+            release_at = self._arm_release_at_input_down(duration_ms)
+            self._keyboard.hold(key, duration_ms=duration_ms, release_at=release_at)
             self._record("key_hold", ok=True, key=key, duration_ms=duration_ms)
             return
         raise InvocationError(f"unsupported primitive op: {step.op!r}")
+
+    def _arm_release_at_input_down(self, duration_ms: int) -> float:
+        deadline = time.monotonic() + max(0.0, duration_ms / 1000.0)
+        with self._release_lock:
+            if self._release_deadline is not None:
+                return self._release_deadline
+            self._release_deadline = deadline
+            delay = max(0.0, deadline - time.monotonic())
+
+            def _fire() -> None:
+                self.release_all("release_deadline")
+
+            self._release_timer = threading.Timer(delay, _fire)
+            self._release_timer.daemon = True
+            self._release_timer.start()
+            return self._release_deadline
 
     def _record(self, kind: str, *, ok: bool, **fields: Any) -> None:
         self._primitive_results.append({"kind": kind, "ok": ok, **fields})

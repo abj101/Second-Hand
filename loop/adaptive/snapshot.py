@@ -11,7 +11,8 @@ from PIL import Image
 from loop.adaptive.environment import StepResult
 from loop.adaptive.evidence import assign_track_ids, detect_regions, motion_bbox
 from loop.adaptive.contracts import NativeObservation, ObservationQuality
-from loop.adaptive.schema import ActionSurface, StateSnapshot, empty_schema
+from loop.adaptive.evidence import iou
+from loop.adaptive.schema import ActionSurface, SceneGraph, SceneNode, StateSnapshot, empty_schema
 
 _SCHEMA_REV = empty_schema().revision.revision_id
 _PRIV_KEYS = frozenset({"privileged_info", "secret"})
@@ -74,6 +75,54 @@ def _to_plain(obj: object) -> object:
     return obj
 
 
+def _scene_node(scene: SceneGraph, node_id: str) -> SceneNode | None:
+    for node in scene.nodes:
+        if node.node_id == node_id:
+            return node
+    return None
+
+
+def binding_rebound_reason(
+    bound_node_id: str,
+    leased_scene: SceneGraph,
+    current_scene: SceneGraph,
+    *,
+    min_same_iou: float = 0.5,
+    occupy_iou: float = 0.3,
+) -> str | None:
+    """Return a rebound reason when the bound node moved, vanished, or was displaced."""
+
+    if not bound_node_id:
+        return "rebound"
+    leased_node = _scene_node(leased_scene, bound_node_id)
+    if leased_node is None:
+        return "rebound"
+    current = _scene_node(current_scene, bound_node_id)
+    if current is None:
+        return "rebound"
+    if iou(leased_node.bbox, current.bbox) < min_same_iou:
+        return "rebound"
+    for node in current_scene.nodes:
+        if node.node_id == bound_node_id:
+            continue
+        if iou(node.bbox, leased_node.bbox) >= occupy_iou:
+            return "rebound"
+    return None
+
+
+def actuation_scene(
+    leased_scene_id: str,
+    frozen_scene: SceneGraph,
+    latest_scene: SceneGraph | None,
+) -> SceneGraph:
+    """Resolve coordinates from the leased scene only, never a newer snapshot."""
+
+    del latest_scene  # ponytail: callers pass latest for tests; resolution ignores it
+    if frozen_scene.snapshot_id != leased_scene_id:
+        raise ValueError("leased scene id mismatch")
+    return frozen_scene
+
+
 def assert_no_privileged(obj: object) -> None:
     if isinstance(obj, dict):
         for k, v in obj.items():
@@ -107,6 +156,9 @@ def build_native_observation(
     target_identity: dict[str, str],
     quality: ObservationQuality,
     missing_required_fields: tuple[str, ...] = (),
+    capture_age_known: bool = False,
+    acquisition_origin: str = "unknown",
+    observation_sequence: int | None = None,
 ) -> NativeObservation:
     age = max(0.0, publication_ts_monotonic - capture_ts_monotonic)
     return NativeObservation(
@@ -125,6 +177,9 @@ def build_native_observation(
         quality=quality,
         missing_required_fields=missing_required_fields,
         snapshot=snapshot,
+        capture_age_known=capture_age_known,
+        acquisition_origin=acquisition_origin,
+        observation_sequence=observation_sequence,
     )
 
 
@@ -161,10 +216,12 @@ def _center(bbox: tuple[float, float, float, float]) -> tuple[float, float]:
 
 
 class MotionPerception:
-    def __init__(self) -> None:
+    def __init__(self, tracker=None) -> None:
+        self._tracker = tracker
         self._prev_image: Image.Image | None = None
         self._prev_regions: list[tuple[float, float, float, float]] = []
         self._prev_track_ids: list[int] = []
+        self._centers: dict[str, tuple[float, float]] = {}
         self._digest_history: list[str] = []
         self._cache_key: tuple | None = None
         self._cache_snap: StateSnapshotV2 | None = None
@@ -173,9 +230,13 @@ class MotionPerception:
         self._prev_image = None
         self._prev_regions = []
         self._prev_track_ids = []
+        self._centers = {}
         self._digest_history = []
         self._cache_key = None
         self._cache_snap = None
+        reset = getattr(self._tracker, "reset", None)
+        if reset is not None:
+            reset()
 
     def qualify(self, step_result: StepResult) -> StateSnapshotV2:
         key = (step_result.episode_generation, step_result.step, step_result.frame_digest)
@@ -189,46 +250,90 @@ class MotionPerception:
         grounded_p = _prov(None, confidence=0.0, unknown=True)
         scroll_p = _prov(0.0, confidence=0.0, unknown=True)
         conf = 0.0
+        tracked = False
 
         if isinstance(obs, Image.Image):
             curr = obs.convert("RGB")
-            regions = detect_regions(curr)
-            mb = motion_bbox(self._prev_image, curr) if self._prev_image is not None else None
-            curr_bbox = mb or (regions[0] if regions else None)
-            if curr_bbox is not None and self._prev_regions:
-                p0 = _center(self._prev_regions[0])
-                c0 = _center(curr_bbox)
-                dx, dy = c0[0] - p0[0], c0[1] - p0[1]
-                dx_p = _prov(dx, confidence=0.7, unknown=False)
-                dy_p = _prov(dy, confidence=0.7, unknown=False)
-                scroll_p = _prov(dx, confidence=0.7, unknown=False)
-                grounded_p = _prov(abs(dy) < 0.02, confidence=0.7, unknown=False)
-                conf = 0.7
-            elif curr_bbox is not None:
-                conf = 0.3 if self._prev_image is None else 0.5
-            else:
-                conf = 0.1
-
-            track_src = [curr_bbox] if curr_bbox is not None else regions
-            if track_src:
-                tracks = assign_track_ids(
-                    self._prev_regions,
-                    track_src,
-                    prev_ids=self._prev_track_ids or None,
-                )
-                if tracks:
-                    tid, bbox = tracks[0]
-                    entities = (
-                        EntityView(
-                            type="tracked",
-                            stable_id=f"track_{tid}",
-                            attributes={},
-                            confidence=0.6 if self._prev_regions else 0.4,
-                        ),
+            tracked = self._tracker is not None and getattr(self._tracker, "status", "unavailable") == "ok"
+            if tracked:
+                hits = self._tracker.update(curr)
+                entities = tuple(
+                    EntityView(
+                        type="tracked",
+                        stable_id=hit.track_id,
+                        attributes={
+                            "track_state": _prov(
+                                hit.state, confidence=1.0, unknown=False, provenance=("tracker",)
+                            ),
+                            "detector_label": _prov(
+                                hit.detector_label,
+                                confidence=hit.confidence,
+                                unknown=not bool(hit.detector_label),
+                                provenance=("tracker",),
+                            ),
+                        },
+                        confidence=hit.confidence,
                     )
-                    self._prev_track_ids = [tid]
-                    self._prev_regions = [bbox]
-            self._prev_image = curr.copy()
+                    for hit in hits
+                )
+                if hits:
+                    prev_c = self._centers.get(hits[0].track_id)
+                    if prev_c is not None:
+                        c0 = _center(hits[0].bbox)
+                        dx, dy = c0[0] - prev_c[0], c0[1] - prev_c[1]
+                        dx_p = _prov(dx, confidence=0.7, unknown=False, provenance=("tracker",))
+                        dy_p = _prov(dy, confidence=0.7, unknown=False, provenance=("tracker",))
+                        scroll_p = _prov(dx, confidence=0.7, unknown=False, provenance=("tracker",))
+                        grounded_p = _prov(
+                            abs(dy) < 0.02, confidence=0.7, unknown=False, provenance=("tracker",)
+                        )
+                        conf = 0.7
+                    else:
+                        conf = 0.4
+                else:
+                    conf = 0.1
+                self._centers = {hit.track_id: _center(hit.bbox) for hit in hits}
+                self._prev_regions = [hit.bbox for hit in hits]
+                self._prev_track_ids = []
+                self._prev_image = curr.copy()
+            else:
+                regions = detect_regions(curr)
+                mb = motion_bbox(self._prev_image, curr) if self._prev_image is not None else None
+                curr_bbox = mb or (regions[0] if regions else None)
+                if curr_bbox is not None and self._prev_regions:
+                    p0 = _center(self._prev_regions[0])
+                    c0 = _center(curr_bbox)
+                    dx, dy = c0[0] - p0[0], c0[1] - p0[1]
+                    dx_p = _prov(dx, confidence=0.7, unknown=False)
+                    dy_p = _prov(dy, confidence=0.7, unknown=False)
+                    scroll_p = _prov(dx, confidence=0.7, unknown=False)
+                    grounded_p = _prov(abs(dy) < 0.02, confidence=0.7, unknown=False)
+                    conf = 0.7
+                elif curr_bbox is not None:
+                    conf = 0.3 if self._prev_image is None else 0.5
+                else:
+                    conf = 0.1
+
+                track_src = [curr_bbox] if curr_bbox is not None else regions
+                if track_src:
+                    tracks = assign_track_ids(
+                        self._prev_regions,
+                        track_src,
+                        prev_ids=self._prev_track_ids or None,
+                    )
+                    if tracks:
+                        tid, bbox = tracks[0]
+                        entities = (
+                            EntityView(
+                                type="tracked",
+                                stable_id=f"track_{tid}",
+                                attributes={},
+                                confidence=0.6 if self._prev_regions else 0.4,
+                            ),
+                        )
+                        self._prev_track_ids = [tid]
+                        self._prev_regions = [bbox]
+                self._prev_image = curr.copy()
         else:
             conf = 0.0
 
@@ -254,6 +359,18 @@ class MotionPerception:
                 "dy": dy_p,
                 "grounded": grounded_p,
                 "scroll_dx": scroll_p,
+                **(
+                    {
+                        "tracker_status": _prov(
+                            "ok" if tracked else "unavailable",
+                            confidence=1.0,
+                            unknown=False,
+                            provenance=("tracker",),
+                        )
+                    }
+                    if self._tracker is not None
+                    else {}
+                ),
             },
             entities=entities,
             relations=(),

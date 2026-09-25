@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import threading
 import time
 
 from .primitives import MouseButton, MousePrimitive
@@ -65,6 +66,8 @@ class Mouse:
     def __init__(self) -> None:
         self._user32 = ctypes.windll.user32
         self._buttons_down: set[MouseButton] = set()
+        self._timers: list[threading.Timer] = []
+        self._lock = threading.Lock()
 
     def execute(
         self,
@@ -116,9 +119,15 @@ class Mouse:
             raise ValueError(f"Unknown mouse op: {prim.op!r}")
 
     def release_all(self) -> None:
-        for button in list(self._buttons_down):
+        with self._lock:
+            for timer in self._timers:
+                timer.cancel()
+            self._timers.clear()
+            buttons = list(self._buttons_down)
+        for button in buttons:
             send_input(mouse_event(dx=0, dy=0, mouse_data=0, flags=_BUTTON_UP[button]))
-            self._buttons_down.discard(button)
+            with self._lock:
+                self._buttons_down.discard(button)
 
     def _virt_screen(self) -> tuple[int, int, int, int]:
         left = self._user32.GetSystemMetrics(SM_XVIRTUALSCREEN)

@@ -22,9 +22,9 @@ _BANNED_BENCHMARK_MODULES = frozenset(
         "loop.os.keyboard",
     }
 )
-_BANNED_NATIVE_VENDOR = frozenset({"playjev", "playwright"})
+_BANNED_NATIVE_VENDOR = frozenset({"playwright"})
 
-_BANNED_IN_ADAPTIVE = re.compile(r"mariohtml5|playjev|nintendo", re.I)
+_BANNED_IN_ADAPTIVE = re.compile(r"mariohtml5|nintendo", re.I)
 
 
 def _import_modules(path: Path) -> list[str]:
@@ -48,12 +48,12 @@ def adaptive_dir() -> Path:
     return ADAPTIVE_DIR
 
 
-def test_adaptive_does_not_import_benchmarks_or_playjev(adaptive_dir: Path) -> None:
+def test_adaptive_does_not_import_benchmarks(adaptive_dir: Path) -> None:
     violations: list[str] = []
     for path in sorted(adaptive_dir.rglob("*.py")):
         rel = path.relative_to(REPO_ROOT).as_posix()
         for mod in _import_modules(path):
-            if mod.startswith("benchmarks") or mod == "playjev" or mod.startswith("playjev."):
+            if mod.startswith("benchmarks"):
                 violations.append(f"{rel}: imports {mod}")
     assert not violations, "\n".join(violations)
 
@@ -100,7 +100,7 @@ def test_benchmarks_tree_does_not_call_session_act_or_native_input() -> None:
     assert not violations, "\n".join(violations)
 
 
-def test_native_control_does_not_import_playjev_or_playwright() -> None:
+def test_native_control_does_not_import_playwright() -> None:
     violations: list[str] = []
     roots = [ADAPTIVE_DIR, LOOP_OS_DIR]
     for root in roots:
@@ -112,7 +112,7 @@ def test_native_control_does_not_import_playjev_or_playwright() -> None:
                 base = mod.split(".", 1)[0]
                 if base in _BANNED_NATIVE_VENDOR:
                     violations.append(f"{rel}: imports {mod}")
-                if mod.startswith("playjev.") or mod.startswith("playwright."):
+                if mod.startswith("playwright."):
                     violations.append(f"{rel}: imports {mod}")
     assert not violations, "\n".join(violations)
 

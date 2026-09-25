@@ -1,6 +1,6 @@
 # Native Decider Orchestration Plan
 
-Status: execution-ready after architecture audit
+Status: stack-proof note. Vision is `perception-reaction-orchestration-north-star.md`. Execution sequence is `north-star-build-plan.md`.
 
 Date: 2026-09-21
 
@@ -8,7 +8,7 @@ Product path: native window capture, in-process local Decider, verified Win32 in
 
 ## Authority and precedence
 
-`system.md` and ADR 0001 remain the product invariants. This document is the canonical execution sequence for the next milestone. It supersedes only the PlayJev-first implementation sequence in `adaptive-orchestrator-plan.md` and `perception-reaction-orchestration-north-star.md`; it does not supersede their safety, freshness, or three-loop control-system requirements.
+`system.md` and ADR 0001 remain the product invariants. The north star is the control-system vision. `north-star-build-plan.md` is the only execution sequence. This file keeps the Windows stack proof, pinned revisions, and the audit those pins came from. It does not override the north star flow.
 
 PlayJev and Playwright remain optional benchmark fixtures. They are not dependencies, acceptance gates, input providers, action authorities, or substitutes for the native product path.
 

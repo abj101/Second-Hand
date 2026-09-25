@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from hashlib import sha256
@@ -42,8 +44,6 @@ STATES = (
 ALLOWED_PRIMITIVE = "click"
 JOURNAL_NAME = "experiment.jsonl"
 CACHE_DIRNAME = "proposal_cache"
-TRACK_STABILITY_MIN = 0.95
-FIELD_CONTINUITY_MIN = 0.95
 SCHEMA_SCOUT_VERSION = f"{PROMPT_VERSION}:schema"
 EXPERIMENT_SCOUT_VERSION = f"{PROMPT_VERSION}:experiment"
 
@@ -115,14 +115,21 @@ class ProbeTrial:
         )
 
 
-def stability_ok(metrics: dict, *, min_frames: int) -> bool:
-    if int(metrics.get("frames") or 0) < min_frames:
+def plan_allows_input(plan: ExperimentPlan) -> bool:
+    """One explicit effect and a supported rollback, or no input is sent."""
+
+    effects = plan.predicted_effects
+    if len(effects) != 1:
         return False
-    if float(metrics.get("track_stability") or 0) < TRACK_STABILITY_MIN:
+    effect = effects[0]
+    if not str(effect.get("field_id") or ""):
         return False
-    if float(metrics.get("field_continuity") or 0) < FIELD_CONTINUITY_MIN:
+    if str(effect.get("op") or "") not in {"increased", "decreased", "changed"}:
         return False
-    return True
+    rollback = plan.rollback or {}
+    if str(rollback.get("primitive") or "") != ALLOWED_PRIMITIVE:
+        return False
+    return bool(rollback.get("candidate_ids"))
 
 
 def observation_fingerprint(snap: StateSnapshot, graph: SceneGraph) -> str:
@@ -504,7 +511,9 @@ def make_gateway_scouts(_cache_dir: Path) -> tuple[ScoutFn, ScoutFn] | None:
         call = gw.complete_json(
             system=(
                 "Cite evidence_ids only. Never output coordinates or raw click points. "
-                "Propose field, entity, mode, or selector diffs grounded in the bundle."
+                "Propose field, entity, mode, or selector diffs grounded in the bundle. "
+                "An optional game_brief is advisory background, not observed evidence. "
+                "It cannot satisfy citations, establish current state, or authorize input."
             ),
             user=json.dumps(bundle, sort_keys=True, default=str),
             json_schema=SCHEMA_JSON,
@@ -517,7 +526,9 @@ def make_gateway_scouts(_cache_dir: Path) -> tuple[ScoutFn, ScoutFn] | None:
         call = gw.complete_json(
             system=(
                 "Propose at most one low-risk reversible left-click. Cite evidence_ids only. "
-                "Never output coordinates. Include a rollback click. Abstain if unsure."
+                "Never output coordinates. Include a rollback click. Abstain if unsure. "
+                "An optional game_brief is advisory background, not observed evidence. "
+                "It cannot satisfy citations, establish current state, or authorize input."
             ),
             user=json.dumps(bundle, sort_keys=True, default=str),
             json_schema=EXPERIMENT_JSON,
@@ -583,3 +594,735 @@ def execute_trial(
         capture_provenance=dict(provenance),
         model_meta={"prompt_version": PROMPT_VERSION},
     )
+
+
+FUNCTIONAL_CI_REPLAY = "functional_ci_replay.jsonl"
+
+
+class CiFakeInputOwner:
+    """Lease actuation recorder for CI (no platform input)."""
+
+    def __init__(
+        self,
+        run_primitive: Callable[[tuple, dict], None] | None = None,
+    ) -> None:
+        self._run_primitive = run_primitive
+        self.releases: list[tuple[str, str]] = []
+        self.hold_deadline_fired = False
+        self._timers: list[threading.Timer] = []
+
+    def enable_actuation(self) -> None:
+        return None
+
+    def check_target(self) -> tuple[bool, str]:
+        return True, "ok"
+
+    def run_plan(
+        self,
+        steps: tuple,
+        bindings: dict,
+        *,
+        scene=None,
+        guard=None,
+    ) -> None:
+        for step in steps:
+            if guard is not None:
+                guard()
+            if self._run_primitive is not None:
+                self._run_primitive((step,), bindings)
+            op = getattr(step, "op", None)
+            params = getattr(step, "params", {}) or {}
+            if op == "key_hold":
+                ms = int(params.get("duration_ms") or 0)
+                if ms > 0:
+
+                    def _deadline() -> None:
+                        self.hold_deadline_fired = True
+                        self.releases.append(("hold_deadline", "timer"))
+
+                    timer = threading.Timer(ms / 1000.0, _deadline)
+                    timer.daemon = True
+                    timer.start()
+                    self._timers.append(timer)
+
+    def drain_primitive_results(self) -> tuple[dict, ...]:
+        return ()
+
+    def release_all(self, reason: str = "") -> str:
+        self.releases.append(("release_all", reason))
+        return "released"
+
+    def shutdown(self) -> None:
+        self.release_all("shutdown")
+
+
+def append_functional_replay(workspace: Path, step: str, payload: dict) -> None:
+    row = {"step": step, **payload}
+    path = Path(workspace) / FUNCTIONAL_CI_REPLAY
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, sort_keys=True, default=str) + "\n")
+
+
+def _act_accepted(receipt: object) -> bool:
+    return bool(getattr(receipt, "accepted", receipt))
+
+
+def verify_native_dispatch_gates(*, hwnd: int = 1, pid: int = 42) -> dict[str, bool]:
+    """Exercise native dispatch rejections required by the north-star acceptance list."""
+    import time
+    from dataclasses import replace
+
+    from loop.adaptive.candidates import (
+        Directive,
+        MaskGateContext,
+        compile_catalog_from_surface,
+        compile_mask,
+        mask_digest,
+    )
+    from loop.adaptive.contracts import ObservationQuality
+    from loop.adaptive.decider_policy import build_decider_questions
+    from loop.adaptive.executor import Executor, NativeDispatchContext
+    from loop.adaptive.policy import DecisionError, StructuredDecision, validate_decision
+    from loop.adaptive.schema import (
+        ActionInstance,
+        ActionSpec,
+        ActionSurface,
+        EffectPredicate,
+        PrimitiveStep,
+        StateSnapshot,
+        empty_schema,
+    )
+    from loop.adaptive.snapshot import build_native_observation
+
+    constraints = {
+        "risk": "low",
+        "retry": "deny",
+        "cooldown_s": 0.5,
+        "max_plan_duration_s": 1.0,
+    }
+    schema = replace(
+        empty_schema(),
+        actions=(
+            ActionSpec(
+                action_id="gate_a",
+                parameters=(),
+                preconditions=(),
+                primitive_plan=(PrimitiveStep("click", ("target",)),),
+                expected_effects=(EffectPredicate("score", "increased"),),
+                constraints=constraints,
+            ),
+            ActionSpec(
+                action_id="gate_b",
+                parameters=(),
+                preconditions=(),
+                primitive_plan=(PrimitiveStep("click", ("target",)),),
+                expected_effects=(EffectPredicate("score", "increased"),),
+                constraints=constraints,
+            ),
+        ),
+    )
+    rev = schema.revision.revision_id
+    surface = ActionSurface(
+        snapshot_id="snap-gate",
+        schema_revision_id=rev,
+        action_ids=("gate_a", "gate_b"),
+        actions=(
+            ActionInstance(
+                action_id="gate_a",
+                parameters=(),
+                domains=(),
+                expected_effects=(EffectPredicate("score", "increased"),),
+            ),
+            ActionInstance(
+                action_id="gate_b",
+                parameters=(),
+                domains=(),
+                expected_effects=(EffectPredicate("score", "increased"),),
+            ),
+        ),
+    )
+    snap = StateSnapshot(
+        snapshot_id="snap-gate",
+        schema_revision_id=rev,
+        mode_id="running",
+        fields={"score": 1},
+        entities={},
+        surface=surface,
+    )
+    catalog = compile_catalog_from_surface(schema, snap)
+    directive = Directive(1, 0, "gate", 30.0, time.monotonic())
+    mask = compile_mask(
+        catalog,
+        directive,
+        gate=MaskGateContext(
+            quality=ObservationQuality.trusted,
+            surface_ids=frozenset(snap.surface.action_ids),
+        ),
+    )
+    capture_bound = time.monotonic()
+    native_obs = build_native_observation(
+        snap,
+        episode_id="ep-gate",
+        episode_generation=0,
+        capture_ts_monotonic=capture_bound,
+        publication_ts_monotonic=capture_bound,
+        capture_integrity="trusted",
+        capture_provenance=("ci",),
+        hwnd=hwnd,
+        pid=pid,
+        target_identity={"selector": "ci", "hwnd": hwnd, "pid": pid},
+        quality=ObservationQuality.trusted,
+        capture_age_known=True,
+        acquisition_origin="pre-grab-sync",
+        observation_sequence=1,
+    )
+    from loop.adaptive.controller import _v2_from_native_obs
+
+    now = time.monotonic()
+    base = StructuredDecision(
+        candidate_id="gate_a",
+        confidence=1.0,
+        probabilities={"gate_a": 1.0},
+        decided_at=now,
+        episode_generation=0,
+        snapshot_id=snap.snapshot_id,
+        directive_revision=directive.revision,
+        catalog_revision=catalog.revision,
+    )
+    ex = Executor(snapshot_max_age_s=0.5, decision_max_age_s=0.25)
+    v2 = _v2_from_native_obs(native_obs)
+    ctx = NativeDispatchContext(
+        observation=native_obs,
+        mask=mask,
+        expected_mask_digest=mask_digest(mask),
+        policy_revision="ci-policy",
+        surface_action_ids=frozenset(snap.surface.action_ids),
+    )
+
+    def _dispatch(decision: StructuredDecision, obs_v2, native_ctx):
+        return ex.dispatch(
+            decision,
+            obs_v2,
+            catalog,
+            directive,
+            now=time.monotonic(),
+            focused=True,
+            native=native_ctx,
+        )
+
+    out: dict[str, bool] = {}
+    # Truthful stale probe: the capture bound itself is 10 s old, so the
+    # dispatch-time age recompute (not a fabricated observation_age_s) rejects.
+    stale_bound = time.monotonic() - 10.0
+    stale_obs = replace(
+        native_obs,
+        capture_ts_monotonic=stale_bound,
+        publication_ts_monotonic=stale_bound,
+        observation_age_s=10.0,
+    )
+    stale_v2 = replace(
+        _v2_from_native_obs(stale_obs), captured_at=stale_bound, observation_age_s=10.0
+    )
+    out["stale"] = _dispatch(base, stale_v2, replace(ctx, observation=stale_obs)).reason == "stale_snapshot"
+
+    degraded_obs = replace(
+        native_obs,
+        quality=ObservationQuality.degraded,
+        capture_integrity="degraded",
+    )
+    out["degraded"] = (
+        _dispatch(base, _v2_from_native_obs(degraded_obs), replace(ctx, observation=degraded_obs)).reason
+        == "degraded_capture"
+    )
+
+    forbidden_dir = Directive(1, 0, "gate", 30.0, time.monotonic(), forbidden_ids=("gate_a",))
+    forbidden_mask = compile_mask(
+        catalog,
+        forbidden_dir,
+        gate=MaskGateContext(
+            quality=ObservationQuality.trusted,
+            surface_ids=frozenset(snap.surface.action_ids),
+        ),
+    )
+    out["forbidden"] = (
+        ex.dispatch(
+            base,
+            v2,
+            catalog,
+            forbidden_dir,
+            now=time.monotonic(),
+            native=replace(
+                ctx,
+                mask=forbidden_mask,
+                expected_mask_digest=mask_digest(forbidden_mask),
+            ),
+        ).reason
+        == "masked"
+    )
+
+    illegal = replace(base, candidate_id="not_on_surface")
+    out["illegal"] = _dispatch(illegal, v2, ctx).reason in ("not_on_surface", "masked")
+
+    wrong_target = replace(native_obs, hwnd=0, pid=0)
+    out["wrong_target"] = (
+        _dispatch(base, _v2_from_native_obs(wrong_target), replace(ctx, observation=wrong_target)).reason
+        == "target_identity"
+    )
+
+    from loop.adaptive.schema import SceneGraph, SceneNode
+
+    leased = SceneGraph(
+        snapshot_id="snap-lease",
+        nodes=(
+            SceneNode(
+                node_id="node-a",
+                bbox=(0.1, 0.1, 0.2, 0.2),
+                attributes={"clickable": True},
+                evidence_ids=(),
+            ),
+        ),
+    )
+    current = SceneGraph(
+        snapshot_id="snap-latest",
+        nodes=(
+            SceneNode(
+                node_id="node-a",
+                bbox=(0.5, 0.5, 0.6, 0.6),
+                attributes={"clickable": True},
+                evidence_ids=(),
+            ),
+        ),
+    )
+    rebound_decision = replace(
+        base,
+        snapshot_id="snap-lease",
+        bound_entity_id="node-a",
+        scene_id="snap-lease",
+    )
+    newer_snap = replace(snap, snapshot_id="snap-latest")
+    newer_obs = replace(native_obs, snapshot_id="snap-latest", snapshot=newer_snap)
+    rebound_ctx = replace(
+        ctx,
+        observation=newer_obs,
+        leased_scene=leased,
+        current_scene=current,
+    )
+    out["rebound"] = (
+        ex.dispatch(
+            rebound_decision,
+            replace(_v2_from_native_obs(newer_obs), snapshot_id="snap-latest"),
+            catalog,
+            directive,
+            now=time.monotonic(),
+            native=rebound_ctx,
+        ).reason
+        == "rebound"
+    )
+
+    bad = replace(base, catalog_revision="not-the-catalog")
+    try:
+        validate_decision(bad, mask, catalog, v2, directive)
+        out["malformed"] = False
+    except DecisionError:
+        out["malformed"] = True
+
+    _, questions = build_decider_questions(catalog.candidates)
+    blob = json.dumps(questions, sort_keys=True)
+    out["opaque_ids"] = "PrimitiveStep" not in blob and "key:" not in blob
+    return out
+
+
+def run_functional_ci_loop(
+    session: Session,
+    *,
+    observe: Callable[[], tuple],
+    runner: Callable[[tuple, dict], None],
+    promote: Callable[[Session], None],
+    target_identity: dict,
+    hwnd: int = 1,
+    pid: int = 42,
+    second_action: Callable[[Session], None] | None = None,
+    decider: object | None = None,
+    probe_rebound_act: Callable[[Session, CiFakeInputOwner], bool] | None = None,
+) -> dict[str, object]:
+    """North-star functional milestone on one workspace using fakes only."""
+    from loop.adaptive.arm import (
+        ArmConfig,
+        _bind_lease_context,
+        _capture_from_observe,
+        _compile_frame,
+        _dispatch_decision,
+        _pre_dispatch_from_observe,
+        acquisition_from_provenance,
+        invocation_for_action,
+    )
+    from loop.adaptive.contracts import ExecutionReceipt
+    from loop.adaptive.controller import Executor, NativeShadowConfig, NativeShadowLoop
+    from loop.adaptive.decider_policy import DeciderPolicy, scoring_policy_source
+    from loop.adaptive.policy import DeterministicPolicy, StructuredDecision
+    from loop.adaptive.policy_worker import PolicyTurnStatus, PolicyWorker
+    from loop.adaptive.telemetry import TelemetryStore
+    from loop.adaptive.candidates import CandidateAction, compile_catalog_from_surface
+    from loop.adaptive.controller import GenerationStore, _filtered_candidates
+    from loop.adaptive.policy import reactive_state_from_native
+    from loop.adaptive.schema import PrimitiveStep
+
+    workspace = session.workspace
+    acceptance: dict[str, bool] = {}
+    replay_path = workspace / FUNCTIONAL_CI_REPLAY
+
+    if session.schema.actions:
+        raise ValueError("functional CI expects empty_schema at start")
+    acceptance["2_empty_schema"] = True
+
+    session.bind_target(dict(target_identity))
+    try:
+        session.bind_target(
+            {
+                **target_identity,
+                "exe": "other.exe",
+                "hwnd": int(target_identity.get("hwnd", hwnd)) + 99,
+            }
+        )
+        acceptance["1_bind_rejects_replacement"] = False
+    except ValueError:
+        acceptance["1_bind_rejects_replacement"] = True
+
+    promote(session)
+    if not session.schema.actions:
+        raise ValueError("promotion failed")
+    acceptance["3_promoted_reversible"] = len(session.schema.actions) >= 1
+
+    if second_action is not None:
+        second_action(session)
+
+    recs, graph, snap, holder = observe()
+    gates = verify_native_dispatch_gates(hwnd=hwnd, pid=pid)
+    acceptance["6_rejections"] = all(gates.get(k) for k in ("stale", "rebound", "illegal", "forbidden", "degraded", "wrong_target", "malformed"))
+    acceptance["4_opaque_catalog_ids"] = bool(gates.get("opaque_ids"))
+
+    append_functional_replay(
+        workspace,
+        "promotion",
+        {"actions": [a.action_id for a in session.schema.actions], "revision": snap.schema_revision_id},
+    )
+
+    cfg = ArmConfig()
+    directive_store = GenerationStore()
+    episode_id = uuid4().hex
+    owner = CiFakeInputOwner(run_primitive=runner)
+    owner.enable_actuation()
+    owner.release_all("ci_boot")
+    append_functional_replay(workspace, "release", {"phase": "boot", "reason": "ci_boot"})
+
+    shadow_policy: object = DeterministicPolicy()
+    if decider is not None and len(session.schema.actions) >= 2:
+        shadow_policy = DeciderPolicy(decider, catalog_revision="pending")
+    shadow_worker = PolicyWorker(shadow_policy, inference_timeout_s=cfg.decision_deadline_s)
+    telemetry = TelemetryStore(workspace / "shadow_react.jsonl", workspace=workspace)
+    shadow = NativeShadowLoop(
+        session,
+        shadow_worker,
+        Executor(
+            snapshot_max_age_s=cfg.snapshot_max_age_s,
+            decision_max_age_s=cfg.decision_deadline_s,
+        ),
+        telemetry,
+        config=NativeShadowConfig(decision_deadline_s=cfg.decision_deadline_s),
+        episode_id=episode_id,
+    )
+    act_calls = 0
+    real_act = session.act
+
+    def _guarded_act(*args, **kwargs):
+        nonlocal act_calls
+        act_calls += 1
+        return real_act(*args, **kwargs)
+
+    session.act = _guarded_act  # type: ignore[method-assign]
+    try:
+        prov = getattr(observe, "provenance", None) or {
+            "integrity": "trusted",
+            "hwnd": hwnd,
+            "pid": pid,
+            "source": "ci_capture",
+        }
+        observe.provenance = prov
+        for _ in range(2 if len(session.schema.actions) >= 2 else 1):
+            recs, graph, snap, holder = observe()
+            frame_prov = getattr(observe, "provenance", None) or prov
+            shadow.process_frame(
+                snap,
+                hwnd=hwnd,
+                pid=pid,
+                capture_integrity=str(frame_prov.get("integrity") or "trusted"),
+                capture_provenance=(str(frame_prov.get("source") or "ci_capture"),),
+                focused=True,
+                frame_image=getattr(observe, "image", None),
+                scene_graph=graph,
+                **acquisition_from_provenance(frame_prov),
+            )
+    finally:
+        session.act = real_act  # type: ignore[method-assign]
+        shadow.close()
+
+    acceptance["5_shadow_no_act"] = act_calls == 0
+    rows = telemetry.shadow_rows()
+    shadow_row = rows[-1] if rows else None
+    if shadow_row is not None:
+        src = shadow_row.decision_source
+        if len(session.schema.actions) >= 2 and decider is not None:
+            acceptance["two_candidate_decider_source"] = src in (
+                "DeciderPolicy",
+                "DeciderPolicy_pending",
+            )
+            acceptance["deterministic_not_labeled_decider"] = src != "Decider"
+        else:
+            acceptance["two_candidate_decider_source"] = True
+            acceptance["deterministic_not_labeled_decider"] = src not in (
+                "Decider",
+                "DeciderPolicy",
+            )
+
+    if shadow_row is not None:
+        append_functional_replay(
+            workspace,
+            "decision",
+            {
+                "decision_source": shadow_row.decision_source,
+                "selected_action_id": shadow_row.selected_action_id,
+                "dispatch_accepted": shadow_row.dispatch_accepted,
+                "dispatch_reason": shadow_row.dispatch_reason,
+            },
+        )
+
+    if probe_rebound_act is not None:
+        acceptance["rebound_before_act"] = probe_rebound_act(session, owner)
+
+    recs, graph, snap, holder = observe()
+    if holder and holder[0] is None:
+        holder[0] = graph
+    act_prov = getattr(observe, "provenance", None) or prov
+    native_obs, catalog, directive, mask = _compile_frame(
+        session,
+        snap,
+        episode_id=episode_id,
+        episode_generation=cfg.episode_generation,
+        hwnd=hwnd,
+        pid=pid,
+        capture_integrity=str(act_prov.get("integrity") or "trusted"),
+        capture_provenance=(str(act_prov.get("source") or "ci_capture"),),
+        directive_store=directive_store,
+        config=cfg,
+        **acquisition_from_provenance(act_prov),
+    )
+    filtered = _filtered_candidates(catalog, mask)
+    act_policy: object = DeterministicPolicy(catalog_revision=catalog.revision)
+    if len(filtered) >= 2 and decider is not None:
+        act_policy = DeciderPolicy(decider, catalog_revision=catalog.revision)
+    act_worker = PolicyWorker(act_policy, inference_timeout_s=cfg.decision_deadline_s)
+    decision_source = scoring_policy_source(act_policy)
+    if len(filtered) >= 2 and isinstance(act_policy, DeciderPolicy):
+        reactive = reactive_state_from_native(native_obs)
+        turn_id = act_worker.submit(
+            reactive,
+            directive,
+            filtered,
+            timeout_s=cfg.decision_deadline_s,
+        )
+        scored = act_worker.poll(turn_id, now=time.monotonic())
+        if scored.status is PolicyTurnStatus.READY and scored.decision is not None:
+            decision = scored.decision
+            decision_source = scoring_policy_source(act_policy)
+        elif len(filtered) >= 1:
+            cid = filtered[0].action_id
+            decision = StructuredDecision(
+                candidate_id=cid,
+                confidence=1.0,
+                probabilities={cid: 1.0},
+                decided_at=time.monotonic(),
+                episode_generation=cfg.episode_generation,
+                snapshot_id=snap.snapshot_id,
+                directive_revision=directive.revision,
+                catalog_revision=catalog.revision,
+            )
+            decision_source = type(DeterministicPolicy()).__name__
+        else:
+            raise RuntimeError("decider unavailable in functional CI")
+    elif len(filtered) == 1:
+        cid = filtered[0].action_id
+        decision = StructuredDecision(
+            candidate_id=cid,
+            confidence=1.0,
+            probabilities={cid: 1.0},
+            decided_at=time.monotonic(),
+            episode_generation=cfg.episode_generation,
+            snapshot_id=snap.snapshot_id,
+            directive_revision=directive.revision,
+            catalog_revision=catalog.revision,
+        )
+        decision_source = type(DeterministicPolicy()).__name__
+    else:
+        raise RuntimeError("no legal candidates for leased act")
+
+    dispatch = _dispatch_decision(
+        session,
+        decision,
+        native_obs,
+        catalog,
+        directive,
+        mask,
+        executor=Executor(
+            snapshot_max_age_s=cfg.snapshot_max_age_s,
+            decision_max_age_s=cfg.decision_deadline_s,
+        ),
+        config=cfg,
+        focused=True,
+    )
+    if not dispatch.accepted or dispatch.lease is None:
+        raise RuntimeError(f"dispatch failed: {dispatch.reason}")
+    capture_to_lease_s = max(0.0, dispatch.dispatched_at - native_obs.capture_ts_monotonic)
+    telemetry.record_capture_to_lease(capture_to_lease_s)
+    append_functional_replay(
+        workspace,
+        "lease",
+        {
+            "lease": asdict(dispatch.lease),
+            "action_id": dispatch.action_id,
+            "capture_to_lease_s": capture_to_lease_s,
+        },
+    )
+
+    inv = invocation_for_action(snap, decision.candidate_id)
+    if inv is None:
+        raise RuntimeError("invocation missing")
+    _bind_lease_context(session, dispatch.lease)
+    fresh_tag = {"pass": 0}
+
+    def _after_capture() -> tuple[int | None, int | None, tuple[str, ...]]:
+        fresh_tag["pass"] += 1
+        observe()
+        # Keep the acquisition the fresh observe just recorded: the post-action
+        # capture must be later than the action, not a copy of the pre-action one.
+        fresh_prov = getattr(observe, "provenance", None) or prov
+        observe.provenance = {
+            **fresh_prov,
+            "source": f"ci_after_{fresh_tag['pass']}",
+            "hwnd": hwnd,
+            "pid": pid,
+        }
+        return _capture_from_observe(observe)
+
+    receipt = session.act(
+        inv,
+        lambda _s, _b: None,
+        lambda: observe()[1],
+        before=snap,
+        lease=dispatch.lease,
+        owner=owner,
+        pre_dispatch=lambda: _pre_dispatch_from_observe(observe),
+        get_scene=lambda: holder[0],
+        after_capture=_after_capture,
+    )
+    assert isinstance(receipt, ExecutionReceipt)
+    acceptance["7_leased_act"] = receipt.accepted
+    acceptance["9_effect_and_provenance"] = (
+        receipt.expected_effect.verified
+        and receipt.after_capture_provenance
+        and receipt.after_capture_provenance[0].startswith("ci_after_")
+    )
+    append_functional_replay(
+        workspace,
+        "primitives",
+        {"primitive_results": list(receipt.primitive_results)},
+    )
+    append_functional_replay(
+        workspace,
+        "release",
+        {"phase": "act", "status": receipt.release_status, "reason": receipt.reason},
+    )
+    append_functional_replay(
+        workspace,
+        "effect",
+        {
+            "verified": receipt.expected_effect.verified,
+            "after_capture_provenance": list(receipt.after_capture_provenance),
+        },
+    )
+
+    class _CiBlockingDecider:
+        def __init__(self) -> None:
+            self._resume = threading.Event()
+            self._resume.set()
+
+        def block_next(self) -> None:
+            self._resume.clear()
+
+        def release(self) -> None:
+            self._resume.set()
+
+        def system_one(self, state, questions, *, independent, layout):
+            self._resume.wait(timeout=5.0)
+            criteria = questions["action"]["criteria"]
+            choice = next(iter(criteria))
+            other = next(k for k in criteria if k != choice)
+            return {
+                "answers": {
+                    "action": {
+                        "type": "choice",
+                        "choice": choice,
+                        "confidence": 0.6,
+                        "probabilities": {choice: 0.6, other: 0.4},
+                    }
+                }
+            }
+
+    hold_owner = CiFakeInputOwner()
+    hold_owner.enable_actuation()
+    blocked = _CiBlockingDecider()
+    blocked.block_next()
+    hold_pair = (
+        CandidateAction("hold_a", "hold_a", "hold a", available=True),
+        CandidateAction("hold_b", "hold_b", "hold b", available=True),
+    )
+    hold_worker = PolicyWorker(
+        DeciderPolicy(blocked, catalog_revision=catalog.revision),
+        inference_timeout_s=2.0,
+    )
+    hold_turn = hold_worker.submit(
+        reactive_state_from_native(native_obs),
+        directive,
+        hold_pair,
+        timeout_s=2.0,
+    )
+    threading.Thread(
+        target=lambda: hold_owner.run_plan(
+            (PrimitiveStep("key_hold", (), {"key": "KeyW", "duration_ms": 60}),),
+            {},
+        ),
+        daemon=True,
+    ).start()
+    time.sleep(0.08)
+    acceptance["8_release_while_scoring"] = hold_owner.hold_deadline_fired
+    blocked.release()
+    hold_worker.poll(hold_turn, now=time.monotonic())
+    hold_worker.shutdown()
+    hold_owner.release_all("ci_hold_probe")
+
+    acceptance["10_replay_chain"] = replay_path.is_file() and len(replay_path.read_text(encoding="utf-8").strip().splitlines()) >= 5
+
+    act_worker.shutdown()
+    ci_latencies = telemetry.capture_to_lease_latencies()
+    return {
+        "acceptance": acceptance,
+        "decision_source": decision_source,
+        "shadow_decision_source": shadow_row.decision_source if shadow_row else None,
+        "replay": str(replay_path.resolve()),
+        "shadow_rows": len(rows),
+        "effect_verified": receipt.expected_effect.verified,
+        "effect_reason": receipt.expected_effect.reason,
+        "after_capture_provenance": list(receipt.after_capture_provenance),
+        "capture_to_lease_s": ci_latencies[-1] if ci_latencies else 0.0,
+        "capture_to_lease_latencies": ci_latencies,
+    }

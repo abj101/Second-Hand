@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from loop.adaptive.evidence import iou
+from loop.adaptive.orchestrate import registry_offers as eligible_registry_offers
 from loop.adaptive.schema import (
     ActionInstance,
     ActionInvocation,
@@ -278,6 +279,8 @@ def _build_surface(
     schema: AdaptiveSchema,
     snapshot: StateSnapshot,
     scene: SceneGraph,
+    *,
+    registry_offers: Sequence[object] = (),
 ) -> ActionSurface:
     instances: list[ActionInstance] = []
     for action in schema.actions:
@@ -308,6 +311,32 @@ def _build_surface(
             )
         )
     instances.sort(key=lambda i: i.action_id)
+    # Registry controls are intentionally provisional.  They become legal on
+    # the same frame they are seen, without mutating the durable schema.  The
+    # trusted click plan is compiled by ``candidates``; the runtime only
+    # contributes a frozen target domain to the legal surface.
+    existing = {instance.action_id for instance in instances}
+    for offer in registry_offers:
+        offer_id = str(getattr(offer, "offer_id", "") or "")
+        node_id = str(getattr(offer, "node_id", "") or "")
+        if not offer_id or not node_id or offer_id in existing:
+            continue
+        if not any(node.node_id == node_id for node in scene.nodes):
+            continue
+        instances.append(
+            ActionInstance(
+                action_id=offer_id,
+                parameters=(ParamSpec("target", "entity"),),
+                domains=(BindingDomain("target", "entity", (node_id,)),),
+                # A provisional action has no promoted effect yet.  This
+                # sentinel keeps invocation validation strict while ensuring
+                # promotion, not this transient offer, owns verification.
+                expected_effects=(EffectPredicate("__registry_offer__", "changed"),),
+                bound_node_id=node_id,
+            )
+        )
+        existing.add(offer_id)
+    instances.sort(key=lambda i: i.action_id)
     action_ids = tuple(i.action_id for i in instances)
     return ActionSurface(
         snapshot_id=scene.snapshot_id,
@@ -317,7 +346,13 @@ def _build_surface(
     )
 
 
-def project(scene: SceneGraph, schema: AdaptiveSchema) -> StateSnapshot:
+def project(
+    scene: SceneGraph,
+    schema: AdaptiveSchema,
+    *,
+    registry_offers: Sequence[object] | None = None,
+    forbidden_registry_ids: set[str] | frozenset[str] = frozenset(),
+) -> StateSnapshot:
     fields = _collect_global_fields(scene, schema)
     entities = _collect_entities(scene, schema)
     mode_id = _infer_mode(schema, fields, entities)
@@ -329,7 +364,23 @@ def project(scene: SceneGraph, schema: AdaptiveSchema) -> StateSnapshot:
         entities=entities,
         surface=ActionSurface("", schema.revision.revision_id, ()),
     )
-    surface = _build_surface(schema, draft, scene)
+    if not isinstance(scene, SceneGraph):
+        # A few receipt paths pass the already projected snapshot back as the
+        # post-capture value.  It has no scene nodes to offer, but remains
+        # sufficient for field-only projection and existing schema surfaces.
+        registry_offers = ()
+    elif registry_offers is None and not schema.actions:
+        registry_offers = eligible_registry_offers(scene, forbidden_registry_ids)
+    elif registry_offers is None:
+        registry_offers = ()
+    else:
+        registry_offers = tuple(
+            offer
+            for offer in registry_offers
+            if str(getattr(offer, "offer_id", "") or "") not in forbidden_registry_ids
+            and str(getattr(offer, "label", "") or "").strip()
+        )
+    surface = _build_surface(schema, draft, scene, registry_offers=registry_offers)
     return StateSnapshot(
         snapshot_id=scene.snapshot_id,
         schema_revision_id=schema.revision.revision_id,
@@ -337,6 +388,23 @@ def project(scene: SceneGraph, schema: AdaptiveSchema) -> StateSnapshot:
         fields=fields,
         entities=entities,
         surface=surface,
+    )
+
+
+def project_registry_offers(
+    scene: SceneGraph,
+    schema: AdaptiveSchema,
+    offers: Sequence[object],
+    *,
+    forbidden_registry_ids: set[str] | frozenset[str] = frozenset(),
+) -> StateSnapshot:
+    """Explicit projection entry point for the capture/steer Offer phase."""
+
+    return project(
+        scene,
+        schema,
+        registry_offers=offers,
+        forbidden_registry_ids=forbidden_registry_ids,
     )
 
 
@@ -478,6 +546,76 @@ def _pred_with_bindings(pred: EffectPredicate, bindings: dict | None) -> EffectP
             return pred
         return replace(pred, entity_id=str(eid), binding=None)
     return pred
+
+
+_OPPOSITE_OPS: dict[str, Callable[[Any, Any], bool]] = {
+    "increased": lambda aval, bval: aval < bval,
+    "decreased": lambda aval, bval: aval > bval,
+}
+
+
+def contradicted(
+    before: StateSnapshot,
+    after: StateSnapshot,
+    spec: ActionSpec,
+    bindings: dict | None = None,
+) -> bool:
+    """Positive contrary evidence for this after-frame.
+
+    Only ordering predicates define an opposite direction, so a strictly
+    reversed value is a contradiction.  Missing, unreadable or disappeared
+    readings are never a contradiction: failed perception must not be reported
+    as a wrong effect.
+    """
+
+    for pred in (_pred_with_bindings(p, bindings) for p in spec.expected_effects):
+        opposite = _OPPOSITE_OPS.get(pred.op)
+        if opposite is None:
+            continue
+        if pred.entity_id is not None and pred.entity_id not in after.entities:
+            continue
+        bval = _field_value(before, pred)
+        aval = _field_value(after, pred)
+        if bval is _MISSING or aval is _MISSING:
+            continue
+        try:
+            if opposite(aval, bval):
+                return True
+        except TypeError:
+            continue
+    return False
+
+
+def effect_evaluable(
+    before: StateSnapshot,
+    after: StateSnapshot,
+    spec: ActionSpec,
+    bindings: dict | None = None,
+) -> bool:
+    """True when every expected predicate can be read from this after-frame.
+
+    Distinguishes "observed and unchanged" (-> no_effect) from unreadable or
+    missing perception (-> unobservable).
+    """
+
+    if not spec.expected_effects:
+        return False
+    preds = [_pred_with_bindings(p, bindings) for p in spec.expected_effects]
+    disappeared_ids = {
+        p.entity_id for p in preds if p.op == "disappeared" and p.entity_id is not None
+    }
+    if set(before.entities) - set(after.entities) - disappeared_ids:
+        return False
+    for pred in preds:
+        if pred.op in ("appeared", "disappeared"):
+            if pred.entity_id is None:
+                return False
+            continue
+        if pred.entity_id is not None and pred.entity_id not in after.entities:
+            return False
+        if _field_value(before, pred) is _MISSING or _field_value(after, pred) is _MISSING:
+            return False
+    return True
 
 
 def verify(

@@ -5,6 +5,7 @@ description = "Application-agnostic visual state discovery and verified action l
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "accelerate>=1.0.0",
     "httpx>=0.27.0",
     "mss>=9.0.1",
     "numpy>=1.26.0",
@@ -12,11 +13,13 @@ dependencies = [
     "pillow>=10.4.0",
     "pytesseract>=0.3.13",
     "rapidocr>=3.0.0",
+    "windows-capture>=2.0.1; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3.0"]
 benchmark = ["playwright==1.63.0"]
+track = ["ultralytics>=8.3.0"]
 
 [project.scripts]
 adaptive-loop = "loop.__main__:main"
@@ -24,12 +27,15 @@ adaptive-loop = "loop.__main__:main"
 [tool.setuptools.packages.find]
 include = ["loop*", "benchmarks*"]
 
+[tool.setuptools.package-data]
+loop = ["game_briefs/*.json"]
+
 [tool.pytest.ini_options]
 addopts = ["--import-mode=importlib", "-m", "not benchmark and not native_input and not soak and not gpu"]
 testpaths = ["tests", "benchmarks/infinite_mario/tests"]
 pythonpath = ["."]
 markers = [
-    "benchmark: needs PlayJev cache, Chromium, and Playwright (deselected by default)",
+    "benchmark: needs a local game page, Chromium, and Playwright (deselected by default)",
     "native_input: sends real Win32 input to an instrumented window (deselected by default)",
     "soak: long-running shadow or armed qualification (deselected by default)",
     "gpu: requires CUDA Decider weights (deselected by default)",
