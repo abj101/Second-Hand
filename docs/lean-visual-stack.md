@@ -2,8 +2,6 @@
 
 Date: 2026-09-23. Scope confirmed by the user: turn-based games and mostly static interfaces first, retaining a general pixels-only architecture. Three independent GPT-6 Luna agents at high reasoning effort reviewed detectors/OCR, tracking research, and local implementation. Recommendations below were checked against the local code and saved reports. No new GPU accuracy benchmark was run for this decision.
 
-Execution handoff: [Sol 6 / DeepSeek 4.1 Flash implementation plan](lean-perception-implementation-plan.md), including package ownership, acceptance tests and qualification boundaries.
-
 ## Decision and implementation boundary
 
 Use **GPA GUI proposals + RapidOCR Small + one CPU identity registry** as the next experimental visual baseline. Keep neutral scene evidence, the adaptive schema, current-frame binding, and action-effect verification. Spend the next engineering effort on temporal identity, card/hover geometry, and honest timing rather than another resident model.
@@ -29,7 +27,7 @@ The September 22 [offline report](../.tmp/fusion_eval/offline_qualification.json
 - The earlier 20-frame detector comparison recorded YOLO-World at 19/24 ms median/p95 but only 1.3 boxes per frame with weak UI coverage. SAM2 plus YOLO proposals was 156/164 ms and accumulated duplicate regions. These are separate detector experiments, not end-to-end accuracy qualifications.
 - The OmniParser CPU comparison covered no card bodies and cost roughly 1.0–1.2 seconds per frame; its GPU path failed in the tested environment. No evidence supports integrating it now.
 
-The [repair log](gate-e-repair-plan.md) and [coresidency check](../.tmp/fusion_eval/qwen_coresident_check.json) document limitations. Only two adjacent control-ID comparisons underlie the apparent 100% retention. No claim of preserved overall accuracy or production temporal reliability follows from this sample.
+The [repair log](perception-qualification.md) and [coresidency check](../.tmp/fusion_eval/qwen_coresident_check.json) document limitations. Only two adjacent control-ID comparisons underlie the apparent 100% retention. No claim of preserved overall accuracy or production temporal reliability follows from this sample.
 
 ## Why this architecture fits the research
 

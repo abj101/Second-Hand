@@ -6,7 +6,7 @@ This repository contains one application-agnostic runtime that learns a state sc
 
 `pixels → evidence ledger → scene graph → schema proposals → validation → immutable schema revision → state snapshot → legal action surface → verified effect`
 
-The control-system vision is [the north star](docs/perception-reaction-orchestration-north-star.md). The build sequence is [the north star build plan](docs/north-star-build-plan.md). Browser fixtures are optional benchmark tooling, not production input providers.
+The control-system vision is [the north star](docs/perception-reaction-orchestration-north-star.md). The agreed direction and build sequence is [the architecture review](docs/architecture-review.md). Browser fixtures are optional benchmark tooling, not production input providers.
 
 - Perception emits neutral OCR, region, color, motion, and track evidence.
 - The orchestrator proposes fields, entity types, modes, selectors, actions, and effects from evidence.

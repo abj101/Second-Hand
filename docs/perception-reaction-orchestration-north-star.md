@@ -3,9 +3,9 @@
 Status: canonical vision
 Date: 2026-09-22
 Hardware target: NVIDIA GeForce RTX 4060, 8 GB VRAM
-Build sequence: [`perception-play-plan.md`](perception-play-plan.md)
+Build sequence: [`architecture-review.md`](architecture-review.md) (agreed direction; its perception and memory sections supersede the ones below)
 
-`system.md` and ADR 0001 are the product invariants. This document is the control-system vision. The build plan is the only execution sequence. `native-decider-orchestration-plan.md` keeps the stack proof and the earlier wave audit; it does not override this vision. `adaptive-orchestrator-plan.md` is the optional PlayJev benchmark note.
+`system.md` and ADR 0001 are the product invariants. This document is the control-system vision. `perception-qualification.md` holds the current gate and status.
 
 PlayJev and Playwright are fixtures. They are not input providers, action authorities, or acceptance gates for the product path.
 
