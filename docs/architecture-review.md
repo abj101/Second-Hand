@@ -187,6 +187,16 @@ The peak is roughly 6 GB with the teacher loaded, so it fits only if the teacher
   - *If it fails:* try a stronger teacher, then more exemplars per concept, then the linear-probe student, before changing the architecture.
   - **Result (2026-10-01; details in `.tmp/phase0/PROGRESS.md`):** gate partly met. Teacher = Gemma4 + SAM2 box tightening (finds 98% of cards). Student = training-free DINOv2 feature templates, ≤0.2 s and <0.3 GB: player, enemy, End Turn, energy and piles at ~0.9–1.0 precision and recall. Cards reach 0.95 precision / 0.78 recall, missing Defend cards that one shared "card" threshold cuts off; small icons and HP bars fail. YOLOE visual prompts are weaker; fine-tuning on 3 frames is worse; local Qwen is too slow (74 s/frame). Phase 1 must add: several appearance prototypes per concept, each with its own threshold; instance-level duplicate suppression; a high-resolution second pass for small objects. Only one STS2 encounter exists on disk, so generalization to new encounters and games is still unmeasured.
 - **Phase 1:** concept library (schema v2) and teach API; student in See behind a flag; embedding identity. *Gate:* the Phase 0 numbers reproduced through the real `SceneAssembler`.
+  - **Result (2026-10-01; details in `.tmp/phase1/REPORT.md`):**
+    - **Gate met for the core concepts.** Phase 0 is reproduced exactly (bit-identical kernels). `concepts.py` (schema v2) and `student.py` sit behind `--tracker student:<dir>`; the default is unchanged.
+    - **Protocol:** thresholds come from teacher labels, scored on the frozen key with 2-fold splits.
+    - **Accuracy through `SceneAssembler`:** card 0.99/0.90; player, enemy, End Turn, energy, piles and settings 0.96–1.00.
+    - **Main fix:** instance duplicate suppression (card precision 0.70 → 0.99). Several prototypes per concept made no difference on one encounter.
+    - **Below the gate:**
+      - menu buttons (recall 0.80) and intents (precision 0.77);
+      - HP bars (0.59), which need attribute recipes;
+      - map and deck icons, where the teacher's exemplars landed on the wrong icon, so teacher errors need a correction loop.
+    - **Latency:** the student meets p95 ≤ 500 ms (488 ms with Qwen3.5-0.8B resident and generating). Full See is about 1.9 s, dominated by the existing CPU OCR (baseline 1.4 s without the student).
 - **Phase 2:** teacher loop on Steer (wakes on unknowns); perceptual promotion; teachability gate on held-out frames plus a 30-frame identity sequence. Run the same gate on a **second game with a different art style** now rather than in Phase 4, so STS2 can't shape the design.
 - **Phase 3:** instance-bound fields and two-step skills (card → target) with causal verification. *Gate:* one armed STS2 combat turn played end to end from pixels, every action receipted.
 - **Phase 4:** Learn-clock student fine-tunes, effect/goal world models (Twin/PoE-style), and a second game to prove generality.

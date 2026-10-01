@@ -156,6 +156,12 @@ def _valid_field_value(value: object) -> bool:
     return value is not None and value != ""
 
 
+def _tracker_arg(value: str) -> str:
+    if value in ("none", "fused-gpa") or (value.startswith("student:") and len(value) > len("student:")):
+        return value
+    raise argparse.ArgumentTypeError("expected none, fused-gpa or student:<concept library dir>")
+
+
 def _assembler_perception_diagnostics(assembler) -> dict:
     """Cache and source counters. Missing tracker diagnostics stay unavailable."""
 
@@ -1893,9 +1899,9 @@ def cmd_collect(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--tracker",
-        choices=("none", "fused-gpa"),
+        type=_tracker_arg,
         default="none",
-        help="live perception: none (legacy) or fused-gpa (experimental GPA+OCR+cards); other detector arms are benchmark-only",
+        help="live perception: none (legacy), fused-gpa (experimental GPA+OCR+cards) or student:<concept library dir> (taught concepts); other detector arms are benchmark-only",
     )
     parser.add_argument(
         "--recover",

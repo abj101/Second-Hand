@@ -52,7 +52,19 @@ class TrackMemory:
     new id instead of transferring an arbitrary identity.
     """
 
-    def __init__(self, window: int = RETURN_WINDOW, *, max_lost: int = MAX_LOST) -> None:
+    def __init__(
+        self,
+        window: int = RETURN_WINDOW,
+        *,
+        max_lost: int = MAX_LOST,
+        distance=None,
+        max_distance: float = APPEARANCE_MAX_DISTANCE,
+        return_margin: float = RETURN_MARGIN,
+    ) -> None:
+        # `distance` swaps the 8x8 RGB descriptor for e.g. a feature-embedding metric.
+        self.distance = distance or appearance_distance
+        self.max_distance = max_distance
+        self.return_margin = return_margin
         self.window = window
         self.max_lost = max_lost
         self.live: dict[str, tuple[BBox, bytes, str]] = {}
@@ -83,8 +95,8 @@ class TrackMemory:
         if self.max_lost > 0:
             self.lost = self.lost[-self.max_lost :]
 
-    @staticmethod
     def _plausible(
+        self,
         remembered: tuple[BBox, bytes, str],
         remembered_role: str,
         bbox: BBox,
@@ -98,7 +110,7 @@ class TrackMemory:
             return False
         if not _scale_ok(prev_bbox, bbox):
             return False
-        return appearance_distance(prev_app, app) <= APPEARANCE_MAX_DISTANCE
+        return self.distance(prev_app, app) <= self.max_distance
 
     def reconcile(
         self,
@@ -160,7 +172,7 @@ class TrackMemory:
                     continue
                 if not _scale_ok(prev_bbox, bbox):
                     continue
-                if appearance_distance(prev_app, app) > APPEARANCE_MAX_DISTANCE:
+                if self.distance(prev_app, app) > self.max_distance:
                     continue
                 score = iou(prev_bbox, bbox)
                 if score < OCR_TRACK_IOU:
@@ -184,11 +196,11 @@ class TrackMemory:
                     continue
                 if not _scale_ok(lost_bbox, bbox) or not _nearby(lost_bbox, bbox):
                     continue
-                distance = appearance_distance(lost_app, app)
-                if distance > APPEARANCE_MAX_DISTANCE:
+                distance = self.distance(lost_app, app)
+                if distance > self.max_distance:
                     continue
                 returning.append((index, tid, -distance))
-        for index, tid in _assign_one_to_one(returning, margin=RETURN_MARGIN):
+        for index, tid in _assign_one_to_one(returning, margin=self.return_margin):
             used_lost.add(tid)
             claimed.add(index)
             bbox, label, conf, app, _pref, role = rows[index]
@@ -424,4 +436,8 @@ def open_tracker(name: str, *, prompts: list[str] | None = None):
         from loop.adaptive.fused_perception import FusedPerceptionTracker
 
         return FusedPerceptionTracker(name, prompts=prompts)
+    if name.startswith("student:"):
+        from loop.adaptive.student import StudentTracker
+
+        return StudentTracker(name.split(":", 1)[1])
     raise ValueError(f"unknown tracker: {name}")

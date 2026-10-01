@@ -40,7 +40,7 @@ def test_optional_vlm_probes_native_ollama_url(monkeypatch):
     assert vlm is not None and vlm.model == "gemma4:31b-cloud"
 
 
-@pytest.mark.parametrize("tracker", ["fused", "fused-base", "sam2", "yolo-world"])
+@pytest.mark.parametrize("tracker", ["fused", "fused-base", "sam2", "yolo-world", "student:"])
 def test_benchmark_only_trackers_rejected_before_live_setup(tracker, monkeypatch, capsys):
     from loop.adaptive.cli import cmd_collect
 
@@ -51,7 +51,7 @@ def test_benchmark_only_trackers_rejected_before_live_setup(tracker, monkeypatch
     with pytest.raises(SystemExit) as exc:
         cmd_collect(["--workspace", "unused", "--window", "unused", "--tracker", tracker])
     assert exc.value.code == 2
-    assert "invalid choice" in capsys.readouterr().err
+    assert "expected none, fused-gpa or student:" in capsys.readouterr().err
 
 
 def test_stamp_capture_carries_acquisition_provenance():
