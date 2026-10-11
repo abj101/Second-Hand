@@ -60,13 +60,16 @@ def effects(before: dict, after: dict, res, place_before: str, place_after: str,
             "to": place_after if scene_cut and not place_after_candidate else None}
 
 
-def verdict(pred: dict | None, outcome: dict | None) -> str:
+def verdict(pred: dict | None, outcome: dict | None, *, blocked: bool = False) -> str:
     if not outcome or not outcome.get("effects"):
         return "unobservable"
     actual = outcome["effects"]
     if not pred or not pred.get("effect"):
         return "unobservable"
     expected = pred["effect"]
+    if blocked:
+        unexpected = set(actual) - {expected, "no_change", "screen_changes", "view_scrolled"}
+        return "surprise" if unexpected else "miss"
     if expected in actual:
         detail = pred.get("detail")
         if detail is not None and expected == "place_changes" and outcome.get("to") != detail:

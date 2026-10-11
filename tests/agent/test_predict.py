@@ -35,6 +35,13 @@ def test_verdict_hit_partial_surprise_miss_and_unobservable():
     assert verdict(pred, {}) == "unobservable"
 
 
+def test_blocked_exit_walk_misses_even_with_incidental_movement_effects():
+    pred = {"effect": "place_changes"}
+    assert verdict(pred, {"effects": ["screen_changes", "view_scrolled"]}, blocked=True) == "miss"
+    assert verdict(pred, {"effects": ["place_changes"]}, blocked=True) == "miss"
+    assert verdict(pred, {"effects": ["entity_appears"]}, blocked=True) == "surprise"
+
+
 def test_predict_ignores_model_claims_and_picks_highest_confidence(tmp_path):
     mem = Memory(tmp_path)
     mem.upsert("relations", {"id": "r_model", "s": "e_door", "p": "leads_to", "o": "p_fake",

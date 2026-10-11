@@ -23,8 +23,16 @@ def test_normalize_scales_clamps_and_drops_bad_points():
         {"verb": "drag", "target": "card", "at": [100, 900], "to": [700, 300]},
     ]})
     assert out["affordances"][0] == {"verb": "click", "target": "node", "at": [0.5, 1.0], "why": ""}
+    assert out["screen"] == "other"
     assert len(out["affordances"]) == 2 and out["affordances"][1]["to"] == [0.7, 0.3]
     assert normalize(None)["affordances"] == []
+
+def test_screen_labels_follow_the_enum():
+    from agent.perceive import SCHEMA
+    labels = ("world", "dialogue", "menu", "keyboard", "battle", "title", "other")
+    assert SCHEMA["properties"]["screen"]["enum"] == list(labels)
+    assert [normalize({"screen": label})["screen"] for label in labels] == list(labels)
+    assert normalize({"screen": "top-down room view"})["screen"] == "other"
 
 
 def test_normalize_splits_string_text_into_lines():

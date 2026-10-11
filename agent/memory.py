@@ -137,7 +137,13 @@ class Memory:
                       and _distance(r.get("name", ""), name) <= 1]
         exact = [r for r in candidates if _base(r.get("name", "")) == _base(name)]
         pool = exact or candidates
-        return pool[0]["id"] if len(pool) == 1 else None
+        if len(pool) == 1:
+            return pool[0]["id"]
+        if not pool:
+            return self.upsert("entities", {"id": self._id("entities", name), "kind": "affordance",
+                "name": name, "place": place, "at": None, "attrs": {}, "first": 0, "last": 0,
+                "seen": 0, "src": "model"})["id"]
+        return None
 
     def add_edge(self, src_place: str, verb: str, via: str, dst_place: str, ok: bool) -> None:
         place = self.get("places", src_place)

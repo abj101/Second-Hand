@@ -20,6 +20,13 @@ def test_single_non_press_action_skips_model():
     assert (choice.i, choice.called, choice.effect) == (1, False, "screen_changes")
 
 
+def test_exit_always_expects_place_change():
+    aff = {"verb": "approach", "target": "exit: door mat"}
+    model = StubModel([type("Reply", (), {"data": {"i": 0, "effect": "screen_changes"}})()])
+    choice = choose(model, "", {"affordances": [aff, _affordances()[0]]}, {}, [], {"name": "Hand"})
+    assert choice.effect == "place_changes"
+
+
 def test_invalid_choice_uses_first_untried_and_screen_changes():
     model = StubModel([type("Reply", (), {"data": {"i": 0, "effect": "bogus"}})()])
     view = "Recent: click door → miss\nFailed here: click door"
@@ -84,7 +91,7 @@ def test_default_curiosity_overrides_repeat_with_first_untried_action():
     recent = "Recent: interact console → hit"
     choice = choose(model, recent, {"affordances": affs}, {"src": "default"}, [], {"name": "Hand"})
     assert choice.i == 1
-    assert choice.effect == "screen_changes"
+    assert choice.effect == "place_changes"
     assert choice.used == ["e_console"]
     assert "tried action" in choice.why
 
@@ -103,6 +110,11 @@ def test_code_choice_prefers_untried_then_least_tried():
     choice = code_choice({"affordances": affs}, ["e_door", "e_rival"], recent)
     assert choice.i == 1
     assert choice.used == ["e_rival"]
+
+
+def test_code_choice_handles_empty_affordances():
+    choice = code_choice({}, [], [])
+    assert (choice.i, choice.effect, choice.used) == (0, "screen_changes", [])
 
 
 def test_escalate_drops_unknown_condition_kinds():

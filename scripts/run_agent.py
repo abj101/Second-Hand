@@ -17,7 +17,7 @@ def _ledger(run, stage, cap):
         try:
             data = json.loads(path.read_text()) if path.exists() else {"total": 0, "smoke": 0, "m1": 0}
             bucket = "m1" if "m1" in str(run).lower() else "smoke"
-            base = {"a":180,"b":300,"c":590}.get(stage)
+            base = {"a":180,"b":300,"p":30,"c":481}.get(stage)
             key, limit = (f"stage_{stage}", min(cap, base)) if stage and base else (None, None)
             if data["total"] >= 1000 or data[bucket] >= (950 if bucket == "m1" else 50) or (key and data.get(key,0) >= limit): raise CallCap("persistent call budget exhausted")
             data["total"] += 1; data[bucket] += 1
@@ -44,7 +44,7 @@ def _boot_reset(run, rewind):
 def main(argv=None):
     ap = argparse.ArgumentParser(); ap.add_argument("--game", default="pokemon_red"); ap.add_argument("--steps", type=int, required=True)
     ap.add_argument("--max-calls", type=int, required=True); ap.add_argument("--run", type=Path, required=True)
-    ap.add_argument("--resume", action="store_true"); ap.add_argument("--from-step", type=int); ap.add_argument("--stage", choices="abc")
+    ap.add_argument("--resume", action="store_true"); ap.add_argument("--from-step", type=int); ap.add_argument("--stage", choices="abpc")
     ap.add_argument("--stage-b-cap", type=int, choices=(180, 300), default=180)
     a = ap.parse_args(argv); run = a.run
     if a.steps < 1 or a.max_calls < 1: ap.error("steps and max-calls must be positive")
@@ -71,7 +71,7 @@ def main(argv=None):
         with (run / "calls.jsonl").open("a", encoding="utf8") as f: f.write(json.dumps({**row, "step": active_step[0], "requests":n})+"\n")
     model = Ollama("gemma4:31b-cloud", cache_dir=Path(".cache/model"), log=log); post = model._post
     def guarded(payload):
-        stage_cap={"a":180,"b":a.stage_b_cap,"c":590}.get(a.stage,a.max_calls)
+        stage_cap={"a":180,"b":a.stage_b_cap,"p":30,"c":481}.get(a.stage,a.max_calls)
         cap=min(a.max_calls,stage_cap)
         if invocation[0] >= cap: raise CallCap("invocation call cap")
         _ledger(run, a.stage, stage_cap); invocation[0] += 1; return post(payload)
@@ -97,7 +97,7 @@ def main(argv=None):
             if loop.step_no % 25 == 0: _checkpoint(env, loop, run)
             truth=read(env)
             if a.stage == "a" and str(truth.get("player_name","")).casefold()=="hand" and str(truth.get("rival_name","")).casefold()=="blue" and truth.get("map")==0x26 and not truth.get("text_box"): break
-            if a.stage == "b" and truth.get("map")==0x00 or a.stage == "c" and truth.get("party",0)>=1: break
+            if a.stage in ("b", "p") and truth.get("map")==0x00 or a.stage == "c" and truth.get("party",0)>=1: break
         with (run / "truth.jsonl").open("a", encoding="utf8") as f: f.write(json.dumps({"step":loop.step_no+1,**read(env)})+"\n")
         _checkpoint(env, loop, run); return 0
     except KeyboardInterrupt:

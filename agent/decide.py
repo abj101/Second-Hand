@@ -38,6 +38,8 @@ def _custom_name(affs: list[dict], perception: dict, defaults: dict, view: str) 
     return next((i for i, a in enumerate(affs) if a.get("verb") == "select" and any(m in f"{a.get('target', '')} {a.get('why', '')}".casefold() for m in markers)), None)
 def _key(aff: dict) -> tuple[str, str]:
     return str(aff.get("verb", "")).casefold(), str(aff.get("target", "")).casefold()
+def _effect(aff: dict, effect: str) -> str:
+    return "place_changes" if str(aff.get("target", "")).startswith("exit") else effect
 def _fallback(affs: list[dict], recent: list[dict]) -> tuple[int | None, set[tuple[str, str]]]:
     tried = {_key(c) for r in recent if isinstance((c := r.get("choice")), dict)}
     return next((i for i, a in enumerate(affs) if _key(a) not in tried), None), tried
@@ -57,7 +59,7 @@ def choose(model, view: str, perception: dict, task: dict, preds: list[dict | No
         i = eligible[0]
         pred = preds[i] if i < len(preds) and isinstance(preds[i], dict) else {}
         effect = pred.get("effect") if pred.get("effect") in EFFECTS else "screen_changes"
-        return Choice(i, effect, str(pred.get("detail") or ""), [], "only available action", False,
+        return Choice(i, _effect(affs[i], effect), str(pred.get("detail") or ""), [], "only available action", False,
                       _text(affs[i], defaults, perception))
     lines = ["View:", view, f"Task: {task}", "Affordances:"]
     lines.extend(f"{i}: {a}" for i, a in enumerate(affs))
@@ -82,7 +84,7 @@ def choose(model, view: str, perception: dict, task: dict, preds: list[dict | No
         i, effect, detail, why = custom, "screen_changes", "", "No preset matches the required name; use the custom entry."
     if task.get("src") == "default" and fallback is not None and _key(affs[i]) in tried:
         i, effect, detail, why = fallback, "screen_changes", "", "Default curiosity avoids repeating a tried action while an untried affordance remains."
-    return Choice(i, effect, detail, used, why, True, _text(affs[i], defaults, perception))
+    return Choice(i, _effect(affs[i], effect), detail, used, why, True, _text(affs[i], defaults, perception))
 def code_choice(perception: dict, view_ids: list[str], recent: list[dict]) -> Choice:
     affs = perception.get("affordances") or []
     counts = Counter((str(c.get("verb", "")).casefold(), str(c.get("target", "")).casefold())
@@ -90,7 +92,7 @@ def code_choice(perception: dict, view_ids: list[str], recent: list[dict]) -> Ch
     i = min(range(len(affs)), key=lambda n: (counts[(str(affs[n].get("verb", "")).casefold(),
              str(affs[n].get("target", "")).casefold())], n)) if affs else 0
     ident = view_ids[i] if i < len(view_ids) else ""
-    return Choice(i, "screen_changes", "", [ident] if ident else [], "least tried action", False)
+    return Choice(i, _effect(affs[i] if affs else {}, "screen_changes"), "", [ident] if ident else [], "least tried action", False)
 def _conditions(rows) -> list[dict]:
     if not isinstance(rows, list):
         return []

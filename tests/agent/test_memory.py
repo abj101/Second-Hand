@@ -90,6 +90,25 @@ def test_view_budget_ids_and_recent_failed_affordances(tmp_path):
         "chooser", {"place": place, "task": None, "on_screen": [], "recent": [], "step": 4}
     )[0]
 
+def test_unresolved_exit_gets_place_identity_and_failed_view(tmp_path):
+    mem = Memory(tmp_path)
+    place = mem.match_place({"screen": "world", "entities": []}, 1, prev=None, cut=True)
+    target = "exit: door mat"
+    entity = mem.resolve(target, place)
+    assert entity and mem.resolve(target, place) == entity
+    recent = [{"step": 2, "place": place, "choice": {"verb": "approach", "target": target},
+               "verdict": "miss", "outcome": {"effects": ["no_change"]}}]
+    view, ids = mem.view("chooser", {"place": place, "task": None, "on_screen": [], "recent": recent})
+    assert entity in ids and "Failed here: approach exit: door mat" in view
+    from agent.decide import choose
+    class Repeat:
+        def ask(self, *args, **kwargs):
+            return type("Reply", (), {"data": {"i": 0, "effect": "place_changes"}})()
+    choice = choose(Repeat(), view, {"affordances": [
+        {"verb": "approach", "target": target}, {"verb": "approach", "target": "exit: stairs"}]},
+        {"src": "default"}, [], {})
+    assert choice.i == 1
+
 
 def test_refuted_view_cap_and_chooser_history_survives_crowded_memory(tmp_path):
     mem = Memory(tmp_path)

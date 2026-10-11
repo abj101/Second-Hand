@@ -19,7 +19,7 @@ SYSTEM = (
 )
 
 PROMPT = """Return JSON with:
-- "screen": a short name for this kind of screen, in your own words.
+- "screen": one of world, dialogue, menu, keyboard, battle, title, other.
 - "text": every piece of readable text on screen, verbatim.
 - "entities": each distinct thing on screen (characters, objects, buttons, icons, cards, menu items), as
   {"kind": short category, "name": its name or visible label, "at": [x, y]}.
@@ -30,13 +30,13 @@ Coordinates are the centre of the thing on a 0-1000 grid: [0, 0] is top-left, [1
 List each clickable thing separately (each card, each button, each menu item, each map node), including small icons.
 Report only what is visible.
 If the player's own character is visible, list it as an entity with kind "player".
-List walkable paths or exits at the screen edges as approach affordances with target "exit up/down/left/right".""" % ", ".join(VERBS)
+Name every visible passage "exit: <what it is>" (for example, "exit: door mat", "exit: stairs", or "exit: path north") and place it on the tile to step onto. Use a bare screen-edge exit only where walkable ground visibly continues offscreen.""" % ", ".join(VERBS)
 
 _POINT = {"type": "array", "items": {"type": "number"}}
 SCHEMA = {
     "type": "object",
     "properties": {
-        "screen": {"type": "string"},
+        "screen": {"type": "string", "enum": ["world", "dialogue", "menu", "keyboard", "battle", "title", "other"]},
         "text": {"type": "array", "items": {"type": "string"}},
         "entities": {"type": "array", "items": {"type": "object", "properties": {
             "kind": {"type": "string"}, "name": {"type": "string"}, "at": _POINT},
@@ -74,7 +74,8 @@ def normalize(data: dict | None) -> dict:
     data = data or {}
     text = data.get("text") or []
     if isinstance(text, str): text = text.splitlines()  # Gemma sometimes ignores the array schema
-    out = {"screen": str(data.get("screen") or ""), "text": [str(t) for t in text if t],
+    screen = data.get("screen")
+    out = {"screen": screen if screen in ("world", "dialogue", "menu", "keyboard", "battle", "title", "other") else "other", "text": [str(t) for t in text if t],
            "entities": [], "affordances": []}
     for e in data.get("entities") or []:
         if isinstance(e, dict) and (at := _point(e.get("at"))):

@@ -42,8 +42,97 @@ def test_perceiver_guides_whole_name_entry(tmp_path):
     assert "visible editable text field with its on-screen keyboard" in model.prompt
     assert "dialogue questions alone are advance" in model.prompt and "preset name menus are select" in model.prompt
     assert "A visible modal dialogue or selection menu blocks world movement" in model.prompt
-    assert "doors, stairs, ladders, passages, or walkable floor continuing offscreen" in model.prompt and "never invent exits across solid walls" in model.prompt
     assert "Previous-place memory is reference only" in model.prompt
+    assert 'Name every visible passage "exit: <what it is>"' in model.prompt
+    assert loop.prompt_version == "e3-perceiver-5"
+
+def test_dialogue_opening_over_world_keeps_place(tmp_path, monkeypatch):
+    from agent import loop as loop_module
+    env = GridEnv()
+    start = perception(); start["screen"] = "world"
+    start["affordances"][0]["verb"] = "interact"
+    destination = perception(); destination["screen"] = "dialogue"; destination["text"] = ["Hello!"]
+    model = StubModel([reply(start), reply(destination)])
+    loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
+    def interact(ctx, aff, per, text=None):
+        env.scene = 1
+        return SimpleNamespace(status="done", reason="", inputs=4, calls=0,
+                               before=env.screenshot(), after=env.screenshot(), scroll=(0, 0), blank_seen=False)
+    monkeypatch.setattr(loop_module, "run_affordance", interact)
+    monkeypatch.setattr(loop_module, "cut", lambda *args: True)
+    row = loop.step()
+    assert not row["scene_cut"] and row["next_place"] == row["place"]
+
+def test_interact_scroll_with_new_text_is_not_a_cut(tmp_path, monkeypatch):
+    from agent import loop as loop_module
+    env = GridEnv()
+    start = perception(); start["screen"] = "world"
+    start["affordances"][0]["verb"] = "interact"
+    destination = perception(); destination["screen"] = "world"; destination["text"] = ["Hello!"]
+    model = StubModel([reply(start), reply(destination)])
+    loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
+    def interact(ctx, aff, per, text=None):
+        env.scene = 1
+        return SimpleNamespace(status="done", reason="", inputs=12, calls=0,
+                               before=GridEnv().screenshot(), after=env.screenshot(), scroll=(48, 0), blank_seen=False)
+    monkeypatch.setattr(loop_module, "run_affordance", interact)
+    monkeypatch.setattr(loop_module, "cut", lambda *args: True)
+    row = loop.step()
+    assert not row["scene_cut"] and row["next_place"] == row["place"]
+
+def test_modal_overlay_at_step_start_keeps_place(tmp_path, monkeypatch):
+    from agent import loop as loop_module
+    env = GridEnv()
+    world = perception(); world["screen"] = "world"
+    dialogue = perception(); dialogue["screen"] = "dialogue"
+    model = StubModel([reply(world), reply(world), reply(dialogue)])
+    loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
+    monkeypatch.setattr(loop_module, "cut", lambda *args: True)
+    moves = [0]
+    def stay(ctx, aff, per, text=None):
+        before = env.screenshot()
+        if moves[0] == 0: env.scene = 1
+        moves[0] += 1; frame = env.screenshot()
+        return SimpleNamespace(status="done", reason="", inputs=1, calls=0,
+                               before=before, after=frame, scroll=(0, 0), blank_seen=False)
+    monkeypatch.setattr(loop_module, "run_affordance", stay)
+    first = loop.step()
+    env.scene = 0
+    second = loop.step()
+    assert second["place"] == first["place"]
+
+def test_explicit_transition_into_dialogue_creates_place(tmp_path, monkeypatch):
+    from agent import loop as loop_module
+    env = GridEnv()
+    world = perception(); world["screen"] = "world"
+    dialogue = perception(); dialogue["screen"] = "dialogue"
+    model = StubModel([reply(world), reply(dialogue)])
+    loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
+    def transition(ctx, aff, per, text=None):
+        before = env.screenshot(); env.scene = 1; after = env.screenshot()
+        return SimpleNamespace(status="done", reason="scene cut", inputs=1, calls=0,
+                               before=before, after=after, scroll=(0, 0), blank_seen=False)
+    monkeypatch.setattr(loop_module, "run_affordance", transition)
+    row = loop.step()
+    assert row["scene_cut"] and row["next_place"] != row["place"]
+
+def test_blocked_exit_overrides_pixel_prediction_and_cannot_hit(tmp_path, monkeypatch):
+    from agent import loop as loop_module
+    env = GridEnv()
+    start = perception(); start["screen"] = "world"
+    start["affordances"] = [{"verb": "approach", "target": "exit: door mat", "at": [0.3, 0.9]}]
+    model = StubModel([reply(start), reply(start)])
+    loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
+    monkeypatch.setattr(loop_module, "predict", lambda *args: {"effect": "screen_changes", "detail": "movement"})
+    monkeypatch.setattr(loop_module, "cut", lambda *args: False)
+    def blocked(ctx, aff, per, text=None):
+        before = env.screenshot(); env.scene = 1; after = env.screenshot()
+        return SimpleNamespace(status="blocked", reason="exit not crossed", inputs=8, calls=0,
+                               before=before, after=after, scroll=(0, 0), blank_seen=False)
+    monkeypatch.setattr(loop_module, "run_affordance", blocked)
+    row = loop.step()
+    assert row["pred"]["effect"] == "place_changes" and row["pred"]["detail"] is None
+    assert "screen_changes" in row["outcome"]["effects"] and row["verdict"] == "miss"
 
 def test_malformed_parse_gets_one_repair_and_resumes(tmp_path):
     class Captures(StubModel):
@@ -126,12 +215,13 @@ def test_tracked_approach_scroll_does_not_split_but_real_cuts_do(tmp_path, monke
     assert not mem.get("places", row["place"])["edges"]
 
     for name, verb, reason, blank in (("skill", "approach", "scene cut", False),
-                                      ("blank", "approach", "", True),
-                                      ("interact", "interact", "", False)):
+                                      ("blank", "approach", "", True)):
         loop, mem, row = run_case(tmp_path/name, verb, reason, blank)
         assert row["scene_cut"] is True and row["next_place"] != row["place"]
         assert mem.get("places", row["next_place"])["state"] == "candidate"
         assert len(mem.get("places", row["place"])["edges"]) == 1
+    loop, mem, row = run_case(tmp_path/"interact", "interact")
+    assert row["scene_cut"] is False and row["next_place"] == row["place"]
 
 def test_runner_press_exception_and_truncation(tmp_path, monkeypatch):
     from scripts import run_agent
@@ -275,3 +365,56 @@ def test_keyboard_interrupt_writes_checkpoint(tmp_path, monkeypatch):
     run=tmp_path/"interrupted"
     assert run_agent.main(["--steps","1","--max-calls","5","--run",str(run)]) == 0
     assert (run/"checkpoint/000000/harness.json").exists()
+
+def test_probe_stage_stops_at_thirty_invocations(tmp_path, monkeypatch):
+    from scripts import run_agent
+    class Saved(GridEnv):
+        def save(self, path): Path(path).write_text("state")
+        def close(self): pass
+    class Model(StubModel):
+        def __init__(self): super().__init__([])
+        def _post(self, payload): self.calls += 1
+    class ManyRequests:
+        def __init__(self, env, model, mem, game): self.env, self.model, self.mem = env, model, mem; self.step_no = 0
+        def step(self):
+            for _ in range(31): self.model._post({})
+            self.step_no += 1
+            return {"step": self.step_no, "place": "p", "task": "t", "choice": {}, "verdict": ""}
+        def state(self): return {"step": self.step_no}
+    ledger = []
+    monkeypatch.setattr(run_agent, "PyBoyEnv", lambda *a, **k: Saved()); monkeypatch.setattr(run_agent, "find_rom", lambda: "rom")
+    monkeypatch.setattr(run_agent, "Loop", ManyRequests); monkeypatch.setattr(run_agent, "read", lambda env: {"map": 1})
+    monkeypatch.setattr(run_agent, "_ledger", lambda *a: ledger.append(a)); monkeypatch.setattr(run_agent, "Ollama", lambda *a, **k: Model())
+    assert run_agent.main(["--steps", "1", "--max-calls", "100", "--stage", "p", "--run", str(tmp_path/"m1")]) == 3
+    assert len(ledger) == 30
+
+def test_probe_stage_stops_after_reaching_town(tmp_path, monkeypatch):
+    from scripts import run_agent
+    class Saved(GridEnv):
+        def save(self, path): Path(path).write_text("state")
+        def close(self): pass
+    class OneStep:
+        def __init__(self, env, model, mem, game): self.env, self.mem, self.step_no = env, mem, 0
+        def step(self): self.step_no += 1; return {"step": self.step_no, "place": "p", "task": "t", "choice": {}, "verdict": ""}
+        def state(self): return {"step": self.step_no}
+    steps = []
+    class CountStep(OneStep):
+        def step(self): steps.append(1); return super().step()
+    monkeypatch.setattr(run_agent, "PyBoyEnv", lambda *a, **k: Saved()); monkeypatch.setattr(run_agent, "find_rom", lambda: "rom")
+    monkeypatch.setattr(run_agent, "Loop", CountStep); monkeypatch.setattr(run_agent, "read", lambda env: {"map": 0})
+    monkeypatch.setattr(run_agent, "_ledger", lambda *a: pytest.fail("Town stop should precede any model call"))
+    class Model(StubModel):
+        def _post(self, payload): self.calls += 1
+    monkeypatch.setattr(run_agent, "Ollama", lambda *a, **k: Model([]))
+    run = tmp_path/"m1"
+    assert run_agent.main(["--steps", "15", "--max-calls", "30", "--stage", "p", "--run", str(run)]) == 0
+    assert steps == [1] and json.loads((run/"checkpoint/000001/harness.json").read_text())["step"] == 1
+
+def test_probe_stage_ledger_persists_thirty_request_cap(tmp_path, monkeypatch):
+    from scripts import run_agent
+    monkeypatch.chdir(tmp_path)
+    for _ in range(30): run_agent._ledger(Path("runs/m1"), "p", 30)
+    data = json.loads(Path("runs/e3_budget.json").read_text())
+    assert (data["total"], data["m1"], data["stage_p"]) == (30, 30, 30)
+    with pytest.raises(run_agent.CallCap): run_agent._ledger(Path("runs/m1"), "p", 30)
+    assert json.loads(Path("runs/e3_budget.json").read_text()) == data
