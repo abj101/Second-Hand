@@ -1,0 +1,396 @@
+# Frozen contracts
+
+The single source of truth for every signature and data shape that a phase builds against. Phase packets link to these anchors and never restate them.
+
+Orchestrators **never edit this file**. If a contract needs to change, they stop and propose the change in their packet's Result section. Only the user applies it.
+
+**Conventions:**
+- Points are `[x, y]` screen fractions in `[0, 1]`, with `[0, 0]` at top-left. Models answer on a 0–1000 grid, and code converts.
+- Ids are short strings: `e_` for entities, `p_` for places, `r` for relations, `pt` for patterns, `k` for knowledge, `t` for tasks, `s` for shortcuts.
+- `Image` means `PIL.Image.Image`, in RGB.
+- Each section names the phase that builds it. A later phase may only **add** optional parameters or fields. Anything else is a contract change.
+
+| Section | File | Built in |
+|---|---|---|
+| [model](#model) | `agent/model.py` | E1, hardened in E2 |
+| [perception](#perception) | `agent/perceive.py` | E1 (E1b additions deferred) |
+| [locate](#locate) | `agent/locate.py` | E1 (E1b additions deferred) |
+| [env](#env) | `agent/env.py`, `agent/env_pyboy.py` | E2 (window adapter in E5) |
+| [observer](#observer) | `agent/observer.py` | E2 |
+| [skills](#skills) | `agent/skills.py` | E2 (`type_text` in E3) |
+| [brief](#brief) | `agent/brief.py`, `agent/briefs/*.json` | E2 |
+| [trace](#trace) | `agent/trace.py` | E2 |
+| [memory](#memory) | `agent/memory.py` | E3 (patterns and shortcuts in E4) |
+| [predict](#predict) | `agent/predict.py` | E2 (`effects`, `verdict`), E3 (`predict`), E4 (patterns) |
+| [tasks](#tasks) | `agent/tasks.py` | E3 |
+| [chooser and orchestrator](#chooser-and-orchestrator) | `agent/decide.py` | E3 (reflection in E4) |
+| [run directory and truth](#run-directory-and-truth) | `agent/loop.py`, `scripts/` | E2 (truth) and E3 (loop) |
+
+## model
+
+```python
+@dataclass
+class Reply:
+    text: str
+    data: dict | None          # parsed JSON object, or None
+    ms: float
+    prompt_tokens: int | None
+    output_tokens: int | None
+
+class ModelUnavailable(RuntimeError): ...       # E2: raised once the retry budget is spent
+
+class Ollama:
+    def __init__(self, model: str, *, temperature: float = 0.2, max_tokens: int = 4096,
+                 num_ctx: int = 16384, timeout_s: float | None = None,
+                 log: Callable[[dict], None] | None = None,          # `log` added in E2
+                 cache_dir: Path | None = None) -> None              # E2: response cache
+    calls: int                                                         # E2: successful calls so far
+    def ask(self, system: str, user: str, images: list[Image] = (), schema: dict | None = None,
+            *, role: str = "") -> Reply                                # `role` added in E2
+```
+
+E2 hardens `ask`:
+- **Retries:** on HTTP 429, HTTP 5xx, connect errors and timeouts, it backs off 5, 10, 20 … seconds, capped at 300 s per wait, and honours `Retry-After`. Once `MAX_WAIT_S = 900` of total waiting is spent, it raises `ModelUnavailable`.
+- **Logging:** each finished call sends `log` one row: `{"role", "model", "ms", "prompt_tokens", "output_tokens", "retries", "ok", "cached"}`.
+- **Response cache (E2).** With `cache_dir` set, `ask` keys each call by `sha256(model, system, user, schema, image bytes)` and stores the reply as one JSON file. A hit returns the stored `Reply` with no network call, and is not counted in `calls`. Replies with `data is None` are **not** cached. Writes go to a temp file, then `os.replace` (atomic). Small frames (long side < 1024) are sent as PNG, which is lossless for pixel art; larger frames as JPEG. The emulator is deterministic, so re-running from a checkpoint costs nothing until the run diverges. All runners use `.cache/model/`, which is gitignored.
+
+## perception
+
+```python
+def perceive(model: Ollama, image: Image, context: str = "", *,
+             with_rulers: bool = False) -> tuple[Perception, Reply]
+
+Perception = {"screen": str, "text": list[str],
+              "entities": list[{"kind": str, "name": str, "at": [x, y]}],
+              "affordances": list[Affordance]}
+Affordance = {"verb": str, "target": str, "at": [x, y], "why": str, "to": [x, y]}   # "to" only for drag
+VERBS = ("approach", "interact", "select", "click", "drag", "advance", "cancel", "type", "press")
+```
+
+- `normalize()` never raises, and drops any row without a usable point.
+- The player character should come back as an entity with `kind == "player"`. The E2 prompt line asks for it, and `approach` relies on it.
+- For `verb == "press"`, `target` holds the input name, for example `"START"`.
+- E2 adds one prompt line: walkable paths or exits at the screen edges are listed as `approach` affordances, with the target `"exit <direction>"`. Without that line, curiosity never finds the way out of a town.
+
+**Added in E1b (deferred, not built yet):**
+
+```python
+EDGE_STRIPS: tuple[Box, ...]                 # ((0, 0, 1, .15), (0, .85, 1, 1)): game-neutral HUD regions
+DEDUP_DIST = 0.03
+def second_look(model, image, box: Box, known: list[Affordance]) -> tuple[list[Affordance], Reply]
+def merge(base: list[Affordance], extra: list[Affordance], min_dist: float = DEDUP_DIST) -> list[Affordance]
+```
+
+- `second_look` re-lists one region in a magnified view. It returns only rows that `merge` would add, with points in full-frame fractions.
+- `merge` is pure. It appends each extra row that is farther than `min_dist` from every base point and whose target name differs (case-insensitive).
+- Whether `second_look` runs at runtime is decided by the E1b gate. Check `handoff-notes.md` for the outcome.
+
+## locate
+
+```python
+Box = tuple[float, float, float, float]            # x0, y0, x1, y1 as frame fractions
+ZOOM_FRAC = 0.25; ZOOM_LONG_SIDE = 768
+def crop_box(size, at, frac=ZOOM_FRAC) -> tuple[int, int, int, int]
+def magnify(image, box: Box) -> tuple[Image, tuple[int, int, int, int]]                 # E1b (deferred)
+def to_frame(p: list[float], px_box: tuple[int, int, int, int], size) -> list[float]    # E1b (deferred): 0-1000 crop point -> frame fractions
+def zoom(image, at, frac=ZOOM_FRAC) -> tuple[Image, tuple[int, int, int, int]]
+def refine(model, image, target: str, at: list[float], *,
+           retry_frac: float | None = None) -> tuple[list[float] | None, Reply]
+```
+
+- (E1b, deferred: today's `refine` has no `retry_frac`.) If the first answer is "not visible" and `retry_frac` is set, `refine` retries once with a crop of side `retry_frac`. The returned `Reply` is the last one, with `ms` summed over both calls.
+- Rulers and `snap_to_text` exist only to reproduce E1. They are never used at runtime.
+- Tile games snap with `observer.snap` rather than `refine`; [observer](#observer) has it.
+
+## env
+
+Defined in `agent/env.py`:
+
+```python
+class Env(Protocol):
+    name: str                      # game id, matching the brief file name
+    pointer: bool                  # True: click() works (mouse games); False: pad or keys only
+    def screenshot(self) -> Image  # native resolution, RGB, no scaling
+    def inputs(self) -> tuple[str, ...]
+    def press(self, key: str, frames: int = 8, on_frame: Callable[[Image], None] | None = None) -> None
+        # hold, then release; never leaves a key held. on_frame(screenshot) runs after every
+        # emulated frame while held, plus 8 frames after release, so callers can track scroll frame by frame
+    def click(self, at: list[float]) -> None             # pointer envs only, else NotImplementedError
+    def tick(self, frames: int = 1) -> None              # advance time (emulator: run frames; window: sleep frames/60 s)
+```
+
+- `press` and `click` may raise (for example when the window lost focus, or the kill switch is on). The loop then writes a checkpoint and exits; it never retries input blindly.
+- **Pad input names** are `UP DOWN LEFT RIGHT A B START SELECT`.
+- **Keyboard input names** (E5) are virtual-key names such as `ENTER`, `ESCAPE`, `SPACE`, `LEFT` and `A`.
+
+Defined in `agent/env_pyboy.py`:
+
+```python
+def find_rom() -> str              # $POKERED_ROM if set, else the first Rom/*.gb (Rom/ is gitignored); raises if none
+
+class PyBoyEnv:                    # implements Env; pointer = False
+    def __init__(self, rom: str | None = None, *, state: str | None = None, name: str = "pokemon_red") -> None   # rom defaults to find_rom()
+    def save(self, path: str) -> None    # not on Env: the runner checkpoints, never agent/loop.py
+    def load(self, path: str) -> None    # runner only (resume)
+    def ram(self, addr: int) -> int      # EVALUATOR ONLY: not on the Env protocol
+    def close(self) -> None
+```
+
+**Rule, enforced by `tests/agent/test_boundaries.py`:**
+- Outside `agent/env_pyboy.py`, no file under `agent/` may contain `.ram(`, `.memory[`, `load_state`, `save_state`, `.save(` or `.load(` on an env.
+- No `agent/` file may import from `loop/`. Check import statements with a regex such as `^\s*(from|import)\s+loop\b`, not a substring.
+- PyBoy notes: `screen.image` is a live view, so always use `.convert("RGB")` (a copy). `save_state` and `load_state` take file objects. Run with `window="null"` and `set_emulation_speed(0)`.
+
+## observer
+
+Defined in `agent/observer.py`:
+
+```python
+@dataclass
+class Settle:
+    frame: Image
+    settled: bool                  # False means max_frames was hit
+    waited: int                    # frames ticked
+    blank_seen: bool               # a near-uniform frame (fade or map load) occurred while waiting
+
+def changed(a: Image, b: Image, thresh: int = 16) -> float      # share of pixels whose max channel diff > thresh
+def wait_settled(env: Env, *, quiet: int = 24, max_frames: int = 600) -> Settle
+def scroll(a: Image, b: Image, max_shift: int = 4) -> tuple[int, int] | None
+    # shift of b relative to a, by brute-force search over [-max_shift, max_shift]^2 minimising mean abs diff
+    # on the overlap. None = unsure (the best and second-best shifts are too close). (0, 0) = confidently no shift.
+    # Meant for consecutive frames: callers add the shifts up during a move (via Env.press on_frame).
+def for_model(img: Image, long_side: int = 640) -> Image        # nearest-neighbour upscale; no-op if already larger
+def snap(at: list[float], size: tuple[int, int], tile_px: int, phase: tuple[int, int] = (0, 0)) -> list[float]
+def cut(a: Image, b: Image, blank_seen: bool = False) -> bool    # scene cut: blank_seen, or changed(a, b) > 0.5 with no consistent scroll
+```
+
+- **Settling:** a frame is quiet if its hash equals a frame already seen in the last `quiet` frames. Animated tiles cycle through the same frames, while text printing and fades don't. The screen is settled after `quiet` consecutive quiet frames. **Never** settle on a near-uniform frame (≥ 95% one colour).
+- **Places before E3 memory exists:** callers keep a counter and start a new place id on every `cut()`. From E3 on, `Memory.match_place` uses the same `cut` as its trigger (see [memory](#memory)).
+
+## skills
+
+Defined in `agent/skills.py`:
+
+```python
+@dataclass
+class SkillResult:
+    status: Literal["done", "failed", "blocked"]
+    reason: str
+    inputs: int                    # presses or clicks sent
+    calls: int                     # model calls made inside the skill
+    before: Image                  # settled frame before
+    after: Image                   # settled frame after
+    scroll: tuple[int, int]        # total view shift during the skill, in pixels (summed frame by frame)
+    blank_seen: bool               # a fade or blank frame occurred (feeds cut())
+
+@dataclass
+class Ctx:
+    env: Env
+    model: Ollama
+    tile_px: int | None = None     # the smallest non-zero |scroll| seen per step; None until known
+    move_frames: int = 16          # press length that moves one tile. Calibrated in E2, recorded in handoff-notes
+    max_inputs: int = 30           # hard cap per skill call
+
+def approach(ctx, target_at: list[float], player_at: list[float] | None) -> SkillResult
+def interact(ctx, target_at: list[float], player_at: list[float] | None) -> SkillResult
+def select(ctx, item: str) -> SkillResult
+def advance(ctx) -> SkillResult
+def cancel(ctx) -> SkillResult
+def press(ctx, key: str) -> SkillResult
+def type_text(ctx, text: str) -> SkillResult         # E3
+def wait_until(ctx, max_frames: int = 240) -> SkillResult
+
+def run_affordance(ctx, aff: Affordance, perception: Perception, text: str | None = None) -> SkillResult
+    # verb -> skill dispatch; `text` is used by verb "type"
+```
+
+- On a pointer env, `approach` and `interact` click (after `refine`), and `player_at` is ignored.
+- On a pad env, `approach` returns `blocked` if `player_at` is None. A move whose scroll is `None` is re-measured, never treated as blocked. A confident `(0, 0)` scroll is blocked.
+- When the delta is 0 and no cut happened, `approach` presses once more in the last direction, because door mats and edge warps trigger on a push.
+- `select` uses one model call (read the items and cursor), then the presses, then A. The step's own post-perception verifies it.
+- A skill never loops past `ctx.max_inputs`. It returns `failed` or `blocked` with a reason instead.
+
+## brief
+
+```python
+GENERAL: str                                  # general prompt (spec §3)
+DEFAULTS = {"name": "Hand"}                  # the player's own name, for every game
+def load_brief(game_id: str) -> str           # agent/briefs/<game_id>.json -> compact text, ≤ 8 KB
+def defaults(game_id: str) -> dict            # DEFAULTS merged with the brief's optional "defaults" object, e.g. {"rival": "Blue"}
+```
+
+A brief is JSON `{"controls": [str], "notes": [str], "defaults": {role: name}}`, ≤ 8 KB. It has no objective or strategy fields, so it can't drift into walkthrough text. `GENERAL` plus the brief go once into the Perceiver context, and the Chooser gets `defaults`.
+
+## trace
+
+`agent/trace.py`:
+
+```python
+class Trace:
+    def __init__(self, path: Path) -> None
+    def write(self, row: dict) -> None                   # append + flush, one JSON line
+    def tail(self, n: int) -> list[dict]                 # last n rows, without loading the whole file
+```
+
+A trace row, one per step. Every key is always present; use `null` when a value doesn't apply.
+
+```json
+{"step": 331, "t": 1730000000.1, "place": "p_pallet", "screen": "overworld", "task": "t4",
+ "frame": "frames/000331.png", "options": 6,
+ "choice": {"i": 2, "verb": "approach", "target": "lab door", "id": "e_lab_door"},
+ "pred": {"basis": "pattern", "id": "pt3", "effect": "place_changes", "detail": "p_lab", "conf": 0.67},
+ "used": ["pt3", "r17"],
+ "skill": {"status": "done", "reason": "", "inputs": 5, "calls": 0},
+ "outcome": {"effects": ["view_scrolled", "place_changes"], "basis": {"view_scrolled": "pixel", "place_changes": "pixel"}, "to": "p_lab"},
+ "verdict": "hit", "calls": 2, "ms": 7400, "shortcut": null}
+```
+
+- `effects` and `pred.effect` come from `EFFECTS = ("place_changes", "text_appears", "screen_changes", "entity_appears", "entity_disappears", "view_scrolled", "no_change")`.
+- `verdict` is one of `hit`, `partial`, `surprise`, `miss` or `unobservable`.
+- `basis` per effect: `pixel` (from scroll, cut, a blank frame or a changed region) or `model` (only from a difference between the VLM's lists). Only `pixel` effects may produce `src = "observed"` facts.
+- A step with zero affordances runs `wait_until`, records the verdict `unobservable`, and counts toward `Stuck`.
+
+## memory
+
+`agent/memory.py`. Stores are JSONL upsert files under `<run>/memory/`. The last row for an `id` wins. Files are replayed on start. **Any store name is accepted**, so E4 adds stores without changing the code. Record shapes follow spec §8, with the changes below:
+
+```
+entities   {"id","kind","name","place","at","attrs":{k:{"v","src","step"}},"first","last","seen","src"}
+places     {"id","name","screen","state":"candidate|place","visits","landmarks":[[name, kind]],"edges":[{"verb","via","to","n","ok"}],"blocked":[...]}
+relations  {"id","s","p","o","src","sup","con","ev":[steps],"state":"live|refuted|expired","why","step"}
+knowledge  {"id","text","src":"game_text|observed|model","step"}
+patterns   {"id","s","p","o","verb","sup","con","inst":[relation ids],"state":"candidate|promoted|demoted","name"}   # E4
+shortcuts  {"id","place","seq":[{"verb","target"}],"runs","state":"live|broken"}                                # deferred (was E4)
+```
+
+`src` is one of `observed`, `text` or `model`.
+
+```python
+class Memory:
+    def __init__(self, root: Path) -> None
+    def get(self, store: str, id: str) -> dict | None
+    def rows(self, store: str) -> list[dict]
+    def upsert(self, store: str, row: dict) -> dict
+    def match_place(self, perception: Perception, step: int, *, prev: str | None, cut: bool,
+                    via: str | None = None) -> str
+        # no cut -> prev (continuity). On a cut: the known edge (prev, via) -> its destination; else
+        # landmark (name, kind) overlap >= 0.6 with a known place of the same screen type; else a new
+        # *candidate* place. A candidate becomes a place on its first view_scrolled; until then it is a
+        # screen (battle, menu, naming) and a move into it records screen_changes, not place_changes.
+    def observe(self, perception: Perception, place: str, step: int) -> dict[int, str]  # perception entity index -> entity id
+    def resolve(self, name: str, place: str) -> str | None                                 # affordance target string -> entity id
+    def add_edge(self, src_place: str, verb: str, via: str, dst_place: str, ok: bool) -> None
+    def relate(self, s: str, p: str, o: str, *, src: str, step: int, hit: bool | None = None) -> dict
+    def know(self, text: str, *, src: str, step: int) -> str                               # dedup by normalized text
+    def expire(self, step: int) -> None                                                    # model claims > 200 steps unobserved
+    def view(self, caller: Literal["perceiver", "chooser", "orchestrator"], ctx: dict) -> tuple[str, list[str]]
+        # ctx = {"place", "task", "on_screen": [entity ids], "recent": Trace.tail(5), "step"}
+        # The trace-derived parts (last actions, already-failed affordances here, surprises) come from ctx["recent"].
+
+def conf(rel: dict) -> float     # (sup + 1) / (sup + con + 2)
+```
+
+- **Identity:**
+  - World things are keyed by `(name, place)`, with `kind` kept as an attribute (the model's kinds drift: "mom", "woman", "npc").
+  - Recurring types (`menu_item`, `move`, `item`, `option`) are keyed by `(kind, name)` globally.
+  - Edit distance ≤ 1 counts as the same name. A tie creates a `#2` record.
+  - The Perceiver view lists the known names and kinds for this place, so the model reuses them.
+  - `route()` and `compact()` are deferred until something calls them.
+- **Relations from effects:** `PRED = {"place_changes": "leads_to", "text_appears": "says", "screen_changes": "opens", "entity_appears": "reveals", "entity_disappears": "removes", "view_scrolled": "moves_view", "no_change": "does_nothing"}`. The relation is `(target id, PRED[effect], to or detail)`, and `predict` reads `PRED` in reverse. It lives in `agent/predict.py`.
+- **Refuted** means `con ≥ 2` and `con > sup`. An observed fact with `sup ≥ 3` is not overturned by one contradiction.
+- **`view`:**
+  - It returns the rendered text and the list of ids it showed.
+  - Budgets: perceiver ≈ 400 tokens, chooser ≈ 1.2k, orchestrator ≈ 3k. Estimate tokens as `len(text) / 4`.
+  - Model claims render with "(unverified)". At most two refuted items render, under "don't believe".
+  - Selection order: on screen or in this place, then tied to the task, then recent, then important.
+
+## predict
+
+`agent/predict.py`:
+
+```python
+EFFECTS: tuple[str, ...]                        # as in [trace](#trace)
+def predict(mem: Memory, aff: Affordance, target_id: str | None, place: str) -> dict | None
+    # {"basis": "instance"|"pattern", "id", "effect", "detail", "conf"}, or None (the chooser guesses).
+    # Model-sourced relations are never used.
+def effects(before: Perception, after: Perception, res: SkillResult, place_before: str, place_after: str) -> dict
+    # E2. {"effects": [...], "basis": {effect: "pixel"|"model"}, "to": place_after or None}. Pure code, no model call.
+    # text_appears is "pixel" only if the frame also changed in the region where the new text sits.
+def verdict(pred: dict, outcome: dict) -> str
+    # E2. hit | partial | surprise | miss | unobservable
+```
+
+## tasks
+
+`agent/tasks.py`. Task records live in `<run>/memory/tasks.jsonl` and use the same upsert format.
+
+```
+task  {"id","goal","done_when":[Cond],"fail_when":[Cond],"parent","status":"active|done|failed|blocked",
+       "budget","used","attempts","last_failure","src":"default|orchestrator|user"}
+Cond  {"place_is": place id or name} | {"entity_known": name} | {"text_seen": substring}
+    | {"relation": [s, p, o]} | {"steps_over": n}
+```
+
+```python
+class Tasks:
+    def __init__(self, mem: Memory) -> None
+    def add(self, goal: str, done_when: list, fail_when: list = (), *, parent: str | None = None,
+            budget: int = 100, src: str = "orchestrator") -> dict
+    def active(self) -> dict                       # deepest active task; creates the default curiosity task if none
+        # The default task has budget 150 steps. When exhausted it fails, so Stuck escalates, and a fresh default replaces it.
+    def check(self, step: int) -> list[dict]       # status changes; done needs the condition true on 2 consecutive settled steps
+    def wake(self, row: dict, step: int) -> str | None
+        # E4. "task_end" | "new_place" | "surprise" | "stuck" | "periodic" (every 50 steps), or None
+class Stuck:
+    def update(self, row: dict) -> str | None      # "no_change" (8 steps), "same_action" (3 times on the same frame), "budget"
+```
+
+## chooser and orchestrator
+
+`agent/decide.py`:
+
+```python
+@dataclass
+class Choice:
+    i: int                          # index into perception["affordances"]
+    effect: str                     # one of EFFECTS
+    detail: str
+    used: list[str]                 # memory ids the model says it used
+    why: str
+    called: bool                    # False when no model call was needed
+    text: str | None = None         # for verb "type": the text to enter, taken from `defaults`
+
+def choose(model: Ollama, view: str, perception: Perception, task: dict,
+           preds: list[dict | None], defaults: dict) -> Choice
+def code_choice(perception: Perception, view_ids: list[str], recent: list[dict]) -> Choice
+    # E3: 0-call baseline (untried first, then least tried); used by compare_chooser
+def escalate(model: Ollama, view: str, reason: str) -> list[dict]
+    # E3: new subtasks as Tasks.add kwargs
+def reflect(model: Ollama, view: str) -> dict
+    # E4: {"tasks": [...], "pattern_names": {pattern_id: name}, "notes": str}
+```
+
+- `choose` skips the model call when there is exactly one non-`press` affordance (most dialogue boxes).
+- For a curiosity task, untried affordances rank first in the view. That is a ranking rule, not extra task records.
+- `reflect` never promotes a pattern; it only names them.
+
+## run directory and truth
+
+```
+runs/<run_id>/
+  frames/NNNNNN.png      settled frame before each step (native resolution)
+  trace.jsonl            the agent's trace (see trace above)
+  calls.jsonl            one row per model call (Ollama `log`)
+  chooser.jsonl          E3: {step, view, affordances, task, preds, choice} for each step where choose() called the model; used for the offline Chooser comparison
+  memory/*.jsonl         the stores
+  truth.jsonl            EVALUATOR ONLY: written by the runner from env.ram(); never read by agent/
+  checkpoint/<step:06d>/ pyboy.state + memory/ copy + harness.json (step, tile_px, move_frames, prev place, Stuck counters, active task); every 25 steps
+  summary.json           written by scripts/eval_run.py
+```
+
+- **A Pokémon truth row** is `{"step", "map", "x", "y", "party", "battle", "text_box", "player_name", "rival_name"}`. Names are decoded from the game's charmap.
+- **Every runner** takes `--max-calls N`. When `Ollama.calls` reaches N, the runner writes a checkpoint and exits with **code 3**. On `ModelUnavailable` it checkpoints and exits with **code 4**: the orchestrator reports to the user and stops, rather than polling a free-tier window that may last hours.
+- **`--steps N` always means N more steps.** `--resume [--from-step K]` loads the newest checkpoint, or the newest at or before K, then **truncates** `trace`, `chooser`, `calls` and `truth` rows with `step >` the checkpoint step before continuing.
+- **Checkpointing belongs to the runner** (`scripts/run_agent.py`), not to `agent/loop.py`. The loop exposes its harness state through `state()` and `restore()`.
+- **RAM addresses** live only in `scripts/truth_pokered.py`. They are taken from the pokered disassembly symbol file, and E2 verifies them.
+- **Resuming** is allowed only when the PyBoy state and the memory are loaded together from one checkpoint. That continues the same run. Loading a state without its memory is debugging, not a run.

@@ -91,9 +91,26 @@ Each settled frame produces:
                  {"verb": "press", "input": "START", "why": "open menu"}]}
 ```
 
-- Positions are normalized screen coordinates. The frame is upscaled, with a grid overlay for tile games.
+- Positions are normalized screen coordinates. Models answer on their native 0–1000 grid, which code converts.
 - Text is copied verbatim, because tutorials are a primary source of knowledge.
 - Nothing here is treated as fact until it is verified or seen again on later frames.
+
+### Locating precisely
+
+Precision matters only for the action actually being executed, so the expensive steps run once per action, not once per frame. Grid cells are not used as the precision mechanism: a cell grid caps precision at the cell size, and the lines cover the content.
+
+1. **Rough:** the perception call lists affordances with approximate points.
+2. **Zoom:** a built-in tool. It crops around the target, upscales the crop, and asks the model to point inside it. Code maps the answer back to the full screen. Any model may call `zoom(region)` at any time.
+3. **Snap (deterministic):** tile games snap to the tile lattice, found from how far the screen scrolls.
+4. **Check (optional):** show the crop with a crosshair and ask "is this *target*? yes/no". Act only on a yes.
+
+**Across steps, things are referenced by world-model id, never by coordinates.** Each new frame re-resolves where an entity is.
+
+**Measured in E1** (Gemma, 40 STS2 frames):
+- Zoom-refine cut the median point error from 1.2% to 0.5% of the frame width and raised precision from 0.66 to 0.73.
+- Rulers in the margins made points worse.
+- Snapping to OCR text added nothing on top of zoom-refine.
+- So: no rulers, and no OCR at runtime.
 
 ## 7. Skills
 
@@ -210,7 +227,7 @@ The Chooser returns the ids of the memory items it `used`. These are logged so r
 
 | Role | Candidate | Chosen by |
 |---|---|---|
-| Perceiver | qwen3.5:9b or 4b (local), or Gemma 4 31B (cloud) | E1 |
+| Perceiver | **Gemma 4 31B (cloud)**. Local qwen3.5:4b was too slow and too weak in E1 (19 s per frame, recall 0.28) | E1 (decided) |
 | Chooser | the Perceiver's model, or decider-2b zero-shot over the described affordances | E3 |
 | Orchestrator | Gemma 4 31B (cloud, free tier) | fixed |
 
@@ -255,7 +272,7 @@ To check that memory is actually useful:
 | `model.py` | `loop/model/gateway.py`: the Ollama chat client (cloud and local), JSON mode, timeouts | 90 |
 | `observer.py` | `loop/os/profile.py` (frame diff), plus new code for upscaling, the grid overlay and a pixel-fraction check for tiny sprites | 60 |
 | `brief.py` | `loop/adaptive/game_brief.py`, trimmed | 35 |
-| `perceive.py` | new prompt; the 0–1000 coordinate parsing and the zoom-in "second look" come from `git show 'stash@{0}^3:loop/adaptive/gemma_teacher.py'` | 80 |
+| `perceive.py`, `locate.py` | built in E1: the perception prompt and zoom-refine. Rulers and OCR snapping exist only to reproduce E1; neither is used at runtime | 220 |
 | `memory.py`, `predict.py`, `tasks.py` | new (§8–§9) | 550 |
 | `skills.py`, `loop.py`, `trace.py` | new | 250 |
 

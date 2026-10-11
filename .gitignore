@@ -29,6 +29,9 @@ benchmarks/infinite_mario/.cache/
 bios/
 roms/
 ROMs/
+Rom/
+*.sav
+*.state
 
 # Python
 __pycache__/
@@ -36,6 +39,7 @@ __pycache__/
 *$py.class
 .venv/
 .venv-perception/
+.venv-agent/
 venv/
 *.egg-info/
 dist/
