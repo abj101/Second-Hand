@@ -342,7 +342,8 @@ class Tasks:
     def wake(self, row: dict, step: int) -> str | None
         # E4. "task_end" | "new_place" | "surprise" | "stuck" | "periodic" (every 50 steps), or None
 class Stuck:
-    def update(self, row: dict) -> str | None      # "no_change" (8 steps), "same_action" (3 times on the same frame), "budget"
+    def update(self, row: dict) -> str | None      # "no_change" (8 steps), "same_action" (3 times on the same frame), "budget",
+        # "no_progress": 25 steps with no new place and no new verified edge (user-approved 2026-10-11, E3 repair)
 ```
 
 ## chooser and orchestrator
