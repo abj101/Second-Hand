@@ -1,0 +1,16 @@
+from __future__ import annotations
+
+from typing import Callable, Protocol
+
+from PIL import Image
+
+
+class Env(Protocol):
+    name: str
+    pointer: bool
+
+    def screenshot(self) -> Image.Image: ...
+    def inputs(self) -> tuple[str, ...]: ...
+    def press(self, key: str, frames: int = 8, on_frame: Callable[[Image.Image], None] | None = None) -> None: ...
+    def click(self, at: list[float]) -> None: ...
+    def tick(self, frames: int = 1) -> None: ...

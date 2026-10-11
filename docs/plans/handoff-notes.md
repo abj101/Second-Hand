@@ -1,60 +1,68 @@
 # Handoff notes
 
-The compacted memory passed between phase orchestrators. Each phase **rewrites** this file at its end, following section 10 of its packet. Read it before the contracts and your packet.
-
-Last written by: the planning session, before E2 (E1b deferred).
+Last written by: E2 orchestrator, 2026-10-11; E2 completed at its passed gate.
 
 ## State of the code
-- `agent/`: `model.py` (85 lines, Ollama client), `perceive.py` (85), `locate.py` (90). Built in E1.
-- `scripts/e1_perceive.py`: run and score variants v0–v3 on the frozen STS2 key.
-- `tests/agent/test_perceive.py`: 5 tests.
-- `loop/` is the old harness. It is frozen: copy and trim from it, never import it.
+- E2 is complete on `feat/lean-agent`; E1 baseline commit is `3eaf994`. E3 has not started.
+- All six work packages passed their acceptance commands; final `tests/agent` suite: 37 passed, with no skipped PyBoy smoke test.
+- `agent/` has env/PyBoy, observer, model/cache, perception/locate, brief, trace, skills and effects/verdict; 705 Python lines, within packet budgets.
+- `scripts/make_fixture.py`, `scripts/truth_pokered.py` and `scripts/run_goal.py` are evaluator-only.
+- `loop/` and `docs/plans/contracts.md` are unchanged; never import the old harness or edit frozen contracts.
 
 ## Decisions in force
-- **Perceiver:** `gemma4:31b-cloud` via the local Ollama daemon. Local qwen3.5:4b was too slow (19 s per frame) and too weak (recall 0.28).
-- **Locating:** rough point, then `refine` (zoom), once per executed action. Rulers and OCR snapping are dropped at runtime.
-- **The first game is Pokémon Red in PyBoy.** RAM and save states are for evaluation only.
-- **Names:** the player is "Hand" and the rival is "Blue" (Pokémon brief `defaults`). The default goal is curiosity.
-- **Scope:** Pokémon Red only. E1b (STS2 small icons) and E5 (second game) are deferred.
-- **Cloud calls are scarce** until the architecture settles:
-  - use the response cache (`.cache/model/`) and `--max-calls` on every run;
-  - build the smallest gate run first, and grow it by resuming from its checkpoint;
-  - unit tests never call the cloud.
-- **Commits:** orchestrators commit their phase's files at a passed gate. They never push.
-- **`loop/`:** may be deleted on this branch after M1. It stays on older branches, and E5 copies sources from `git show e860812:loop/...`.
+- Registration is trusted on the measured sample: pad approach uses summed scroll without model calls per tile.
+- `tile_px=16`, `move_frames=16`; short 4/8-frame presses move one tile after settling, rather than only turning.
+- Settling uses quiet=24, max_frames=600 and a frame-hash ring; near-uniform frames set blank_seen and cannot settle.
+- Model frames use nearest-neighbor upscale to long side 640; the player-kind and edge-exit prompt lines remain enabled.
+- Place IDs advance from pixel cuts, never RAM; RAM and save states are evaluator-only.
+- Perceiver is `gemma4:31b-cloud` through local Ollama; all six E2 work packages used `gpt-6-luna`, high effort, per user override.
+- Runtime names are Hand/Blue and default goal curiosity; debug fixtures use RED/BLUE.
+- Pokémon Red is first; E1b and E5 remain deferred. Commit phases only at passed gates, never push.
+- Locating remains rough point then refine once per pointer action; no runtime rulers or OCR snapping.
 
 ## Measured numbers
-On 40 STS2 frames:
-
-| Variant | Recall | Precision | Centre error | "Not visible" rate |
-|---|---|---|---|---|
-| v0 plain | 0.70 | 0.66 | 0.012 | — |
-| v2 zoom-refine | 0.713 | 0.728 | 0.005 | 0.198 |
-
-- Gemma latency: p50 3.5 s, p95 5.7 s per perception call.
-- The v2 misses were never listed at all: `deck_button` 23, `map_button` 13, piles 10, `enemy` 6.
+- Full gate exited 0: stairs to 0x25, menu shows TEXT SPEED, Mom opens dialogue, door to Pallet Town 0x00; 4/4 goals.
+- Pixel verdict agreement: 3/3 (100%); same-map registration: 17/17 (100%), including 12 nonzero moves and 5 blocked presses.
+- Sprite recall: 15/15 (100%), matching unique entity centers within 12 native pixels.
+- Player kind: 7/10 perceptions (70%); text token match: 7/25 (28%). These are report-only metrics.
+- Mean tiles per same-map press: stairs 1, Mom 0.25, door 0.778; menu navigation is excluded from map registration.
+- Phase total: 18 uncached asks and 18 actual HTTP attempts, 0 retries; durable phase cap 60.
+- Final gate used 10 cached asks and 1 uncached ask; perceptions are reused through `.cache/model/`.
+- Stairs takes 5 inputs; OPTION selection takes 5 inputs and one menu-read call; Mom interaction takes 3 inputs after approach; door takes 10 inputs and zero skill model calls.
+- Rectangle-wall regression and a zero-model real-PyBoy door probe validate the sidestep repair; the full gate also passes with it.
+- E1 STS2 v2 recall/precision were 0.713/0.728, center error 0.005; local qwen recall was 0.28 and latency 19 s.
 
 ## Environment and gotchas
-- **`.venv-agent`** (Python 3.12) has httpx, pillow, numpy and pytest, but **no pip**. Install with `uv pip install --python .venv-agent/Scripts/python.exe <pkg>`.
-- **pyboy is not installed yet.** E2 installs it.
-- **ROM:** the user puts it in `Rom/` at the repo root (gitignored). Use `find_rom()`; `POKERED_ROM` overrides it. Never commit ROMs, saves or states. `Rom/` also holds a FireRed `.gba` (GBA; PyBoy can't run it), kept for later. `find_rom()` must glob `*.gb` only, never `.gba`. Red is present: `Rom/Pokemon - Red Version (USA, Europe) (SGB Enhanced).gb`, SHA-1 `ea9bcae617fdf159b045185467ae58b2e4a48b9a`, the USA/Europe release that pokered builds.
-- **E1 is uncommitted** as of 2026-10-10. E2's entry step commits it first.
-- **PyBoy:** `screen.image` is a live view, so use `.convert("RGB")`. `save_state` and `load_state` take file objects.
-- **Tests** import fakes as `from tests.agent.fakes import ...` (`pyproject.toml` uses importlib import mode).
-- **`.venv-decider`** holds torch cu130 and `decider`, for the offline Chooser comparison in E3. `Mapika/decider-2b` is cached at revision `b37f7e1ba3fbc9238004cf531fabbee2619973fd` (3.8 GB). Load it with `local_files_only=True`.
-- **E1 data** lives in `.tmp/phase2/key/labels/`, `.tmp/phase2/key_sets/` and `.tmp/e1/` (gitignored).
-- **Free-tier cloud throttles.** All scripts that make many calls are resumable; re-run them instead of shrinking `--n`.
+- `.venv-agent` is Python 3.12 with PyBoy 2.8.1, httpx, Pillow, numpy and pytest; no pip. Install with `uv pip install --python .venv-agent/Scripts/python.exe`.
+- ROM: `Rom/Pokemon - Red Version (USA, Europe) (SGB Enhanced).gb`; find_rom honors POKERED_ROM and globs only *.gb.
+- `.tmp/e2/red_2f.state` is settled map 0x26 at (5,4); `.tmp/e2/red_1f.state` is settled map 0x25 at (4,3).
+- `runs/e2_summary.json` holds latest-goal metrics; `runs/e2_stairs/`, `runs/e2_menu/`, `runs/e2_mom/`, `runs/e2_door/` retain trace/call/truth/frame history, including failed attempts.
+- `.tmp/e2/cloud_budget.json` records 18 requests; preserve it and the 60-call E2 cap for any E2 diagnostic continuation.
+- Runner exits 3 on cap and 4 on unavailable cloud; checkpoint/harness under `.tmp/e2/`. Stop on either, no polling or raised cap.
+- Verified RAM: map D35E, y D361, x D362, party D163, battle D057, player D158, rival D34A, tilemap C3A0, sprites C100.
+- Sprite slots are 16 bytes; picture +0, hidden image index FF at +2, y byte +4, x byte +6; add (8,8) for screen centers.
+- Text box uses border tiles 79–7E in tilemap rows 12–17; unknown charmap tiles decode as ?. Room graphics provide no readable text signal.
+- PyBoy screenshot is a live view: always convert RGB. save_state/load_state take file objects; release inputs in finally.
+- Tests import fakes as `tests.agent.fakes`; test configuration uses importlib mode.
+- `.venv-decider` retains torch/decider for E3; cached Mapika/decider-2b revision b37f7e1ba3fbc9238004cf531fabbee2619973fd must load local_files_only=True.
+- E1 data paths still exist: `.tmp/phase2/key/labels/`, `.tmp/phase2/key_sets/`, `.tmp/e1/`.
 
 ## Deviations from plan and contracts
-- None yet.
+- No contract changes. Text-appearance evidence stays model-based because perception has no text-region bounds.
+- Perception context adds the scripted target query; runner matcher prefers concrete door/mat names over generic exits.
+- Runner forwards actual settling frames through on_frame so evaluator instrumentation preserves fade evidence.
+- Boundaries prohibit env RAM/state access; PIL image.save is permitted for image encoding.
+- The user authorized the additional full gate after the packet's original one-rerun allowance; it passed with one additional uncached call.
 
 ## Do not retry
-- FFT phase correlation for scroll (it ties 0 with ±16 on repeating floors). Use the frame-by-frame brute-force search.
-- Copying retry code from `loop/model/gateway.py` (it has none), or settling from `loop/os/profile.py` (it uses wall-clock time).
-- Rulers in the margins made the centre error worse (0.012 → 0.021).
-- OCR text snapping added nothing on top of zoom-refine.
-- Small local VLMs as the Perceiver.
+- Do not reset the E2 request ledger, raise phase caps, or make cloud calls from unit tests; all runners use response caching.
+- FFT scroll correlation ties on repeating floors; use frame-by-frame brute-force registration.
+- Old gateway has no retry code and old settling is wall-clock based; do not copy them.
+- Margin rulers worsened E1 center error; OCR snapping added nothing; small local VLMs were weak.
 
-## Open issues for E2
-- STS2 listing recall is 0.71 against a 0.80 gate. Parked in E1b (deferred); it isn't a blocker for Pokémon.
-- How well Gemma perceives Game Boy frames is unmeasured. E2 measures it on 10 frames.
+## Open issues for E3
+- Player-kind labeling and text reading remain weak; raw sprite recall does not imply reliable semantic labels.
+- Handle target-not-listed, unknown player, scroll unsure, malformed menu JSON, blocked axes, input limits and scene cut explicitly.
+- Approach remembers successful sidestep direction when alternate-axis delta is zero, avoiding obstacle-induced left/right oscillation.
+- Registration trust is based on one deterministic run per goal; retain bounded inputs and uncertainty handling outside the measured sample.
+- E1b STS2 recall remains below its separate 0.80 gate; deferred, not a Pokémon blocker.

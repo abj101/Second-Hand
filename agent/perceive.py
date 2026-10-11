@@ -28,7 +28,9 @@ PROMPT = """Return JSON with:
 
 Coordinates are the centre of the thing on a 0-1000 grid: [0, 0] is top-left, [1000, 1000] is bottom-right.
 List each clickable thing separately (each card, each button, each menu item, each map node), including small icons.
-Report only what is visible.""" % ", ".join(VERBS)
+Report only what is visible.
+If the player's own character is visible, list it as an entity with kind "player".
+List walkable paths or exits at the screen edges as approach affordances with target "exit up/down/left/right".""" % ", ".join(VERBS)
 
 _POINT = {"type": "array", "items": {"type": "number"}}
 SCHEMA = {
@@ -53,7 +55,7 @@ RULER_NOTE = ("\n\nThe screenshot is framed by rulers marking its 0-1000 grid. "
 
 def perceive(model: Ollama, image: Image.Image, context: str = "", *, with_rulers: bool = False) -> tuple[dict, Reply]:
     prompt = PROMPT + (RULER_NOTE if with_rulers else "") + (f"\n\n{context}" if context else "")
-    reply = model.ask(SYSTEM, prompt, [rulers(image) if with_rulers else image], SCHEMA)
+    reply = model.ask(SYSTEM, prompt, [rulers(image) if with_rulers else image], SCHEMA, role="perceiver")
     return normalize(reply.data), reply
 
 
