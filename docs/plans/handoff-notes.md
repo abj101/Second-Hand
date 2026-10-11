@@ -1,6 +1,6 @@
 # Handoff notes
 
-Last written by: E2 orchestrator, 2026-10-11; E2 completed at its passed gate.
+Last written by: E2 orchestrator, 2026-10-11; E2 completed at its passed gate.; amended after the post-E2 audit (98460ef perceive fix; E3 subagents on gpt-6-luna high).
 
 ## State of the code
 - E2 is complete on `feat/lean-agent`; E1 baseline commit is `3eaf994`. E3 has not started.
@@ -24,7 +24,7 @@ Last written by: E2 orchestrator, 2026-10-11; E2 completed at its passed gate.
 - Full gate exited 0: stairs to 0x25, menu shows TEXT SPEED, Mom opens dialogue, door to Pallet Town 0x00; 4/4 goals.
 - Pixel verdict agreement: 3/3 (100%); same-map registration: 17/17 (100%), including 12 nonzero moves and 5 blocked presses.
 - Sprite recall: 15/15 (100%), matching unique entity centers within 12 native pixels.
-- Player kind: 7/10 perceptions (70%); text token match: 7/25 (28%). These are report-only metrics.
+- Player kind: 7/10 perceptions (70%). Text match logged 7/25 (28%), but that was a normalize bug (string `text` split into characters), fixed in 98460ef; cached replies read menus and Mom's dialogue verbatim.
 - Mean tiles per same-map press: stairs 1, Mom 0.25, door 0.778; menu navigation is excluded from map registration.
 - Phase total: 18 uncached asks and 18 actual HTTP attempts, 0 retries; durable phase cap 60.
 - Final gate used 10 cached asks and 1 uncached ask; perceptions are reused through `.cache/model/`.
@@ -61,7 +61,7 @@ Last written by: E2 orchestrator, 2026-10-11; E2 completed at its passed gate.
 - Margin rulers worsened E1 center error; OCR snapping added nothing; small local VLMs were weak.
 
 ## Open issues for E3
-- Player-kind labeling and text reading remain weak; raw sprite recall does not imply reliable semantic labels.
+- Player-kind labeling remains weak (70%); raw sprite recall does not imply reliable semantic labels. Text reading is good since 98460ef.
 - Handle target-not-listed, unknown player, scroll unsure, malformed menu JSON, blocked axes, input limits and scene cut explicitly.
 - Approach remembers successful sidestep direction when alternate-axis delta is zero, avoiding obstacle-induced left/right oscillation.
 - Registration trust is based on one deterministic run per goal; retain bounded inputs and uncertainty handling outside the measured sample.
