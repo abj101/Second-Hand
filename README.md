@@ -1,5 +1,7 @@
 # Adaptive Screen Agent
 
+> **Branch `feat/lean-agent`: the main spec is [docs/spec.md](docs/spec.md).** A lean agent is being rebuilt from that spec. Everything below, and the code in `loop/`, describes the previous harness. It stays for reference until the lean agent reaches milestone M1.
+
 This repository contains one application-agnostic runtime that learns a state schema from pixels and validates actions from observed causal changes. It starts with an empty schema. No application ontology, control name, fixed coordinate, or prewritten state model is accepted as truth.
 
 ## Architecture
