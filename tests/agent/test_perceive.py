@@ -27,6 +27,10 @@ def test_normalize_scales_clamps_and_drops_bad_points():
     assert normalize(None)["affordances"] == []
 
 
+def test_normalize_splits_string_text_into_lines():
+    assert normalize({"text": "MOM: Right.\nAll boys leave"})["text"] == ["MOM: Right.", "All boys leave"]
+
+
 def test_score_frame_recall_and_precision():
     label = {"size": [1000, 1000], "objects": [
         {"category": "button", "bbox": [100, 100, 200, 200]},

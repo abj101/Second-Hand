@@ -72,7 +72,9 @@ def _point(value) -> list[float] | None:
 def normalize(data: dict | None) -> dict:
     """Model JSON -> screen fractions; drops rows without a usable point. Never raises on bad output."""
     data = data or {}
-    out = {"screen": str(data.get("screen") or ""), "text": [str(t) for t in data.get("text") or [] if t],
+    text = data.get("text") or []
+    if isinstance(text, str): text = text.splitlines()  # Gemma sometimes ignores the array schema
+    out = {"screen": str(data.get("screen") or ""), "text": [str(t) for t in text if t],
            "entities": [], "affordances": []}
     for e in data.get("entities") or []:
         if isinstance(e, dict) and (at := _point(e.get("at"))):
