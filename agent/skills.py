@@ -1,5 +1,6 @@
 """Game-neutral, closed-loop input skills."""
-from dataclasses import dataclass; from typing import Literal
+from dataclasses import dataclass, replace; from typing import Literal
+import re
 from PIL import Image
 from agent.env import Env
 from agent.locate import refine
@@ -67,6 +68,7 @@ def approach(ctx: Ctx, target_at: list[float], player_at: list[float] | None) ->
             return _result("done" if near else "blocked", "adjacent" if near else "both axes blocked", inputs, 0, initial, before, total, blank)
         axis = max(axes, key=lambda a: abs(d[a]))
         direction = axis_dirs.get(axis, ("RIGHT" if axis == 0 else "DOWN")) if abs(delta[axis]) < .5 else (("RIGHT" if delta[0] > 0 else "LEFT") if axis == 0 else ("DOWN" if delta[1] > 0 else "UP"))
+        if blocked: direction = axis_dirs.get(axis, direction)
         old = before; end, move, saw_blank = _step(ctx, direction, old); inputs += 1
         if cut(old, end.frame, saw_blank): return _result("done", "scene cut", inputs, 0, initial, end.frame, total, blank or saw_blank)
         if move is None: return _result("failed", "scroll unsure", inputs, 0, initial, end.frame, total, blank or saw_blank)
@@ -121,8 +123,9 @@ def select(ctx: Ctx, item: str) -> SkillResult:
     ctx.env.press("A", ctx.move_frames); end = _settled(ctx)
     return _result("done", "", n, 1, start.frame, end.frame, blank=start.blank_seen or end.blank_seen)
 def press(ctx: Ctx, key: str) -> SkillResult:
-    start = _settled(ctx)
-    if ctx.max_inputs < 1: return _result("blocked", "input limit", 0, 0, start.frame, start.frame, blank=start.blank_seen)
+    start = _settled(ctx); keys = ctx.env.inputs(); words = set(re.findall(r"[a-z0-9]+", key.casefold())); matches = [k for k in keys if k.casefold() in words]
+    key = key if key in keys else matches[0] if len(matches) == 1 else None
+    if key is None or ctx.max_inputs < 1: return _result("blocked", "unsupported input" if key is None else "input limit", 0, 0, start.frame, start.frame, blank=start.blank_seen)
     ctx.env.press(key, ctx.move_frames); end = _settled(ctx)
     return _result("done", "", 1, 0, start.frame, end.frame, blank=start.blank_seen or end.blank_seen)
 def advance(ctx: Ctx) -> SkillResult: return press(ctx, "A")
@@ -130,6 +133,53 @@ def cancel(ctx: Ctx) -> SkillResult: return press(ctx, "B")
 def wait_until(ctx: Ctx, max_frames: int = 240) -> SkillResult:
     start = _settled(ctx); end = wait_settled(ctx.env, max_frames=max_frames)
     return _result("done" if end.settled else "failed", "" if end.settled else "not settled", 0, 0, start.frame, end.frame, blank=start.blank_seen or end.blank_seen)
+def type_text(ctx: Ctx, text: str) -> SkillResult:
+    limit = min(60, max(0, ctx.max_inputs)); start = _settled(ctx); frame = start.frame; inputs = calls = 0; reason = ""; blank = start.blank_seen
+    layout, readback = ({"type": "object", "properties": {"rows": {"type": "array", "items": {"type": "string"}}, "cursor": {"type": "array", "items": {"type": "integer"}}, "case_toggle": {"anyOf": [{"type": "array", "items": {"type": "integer"}}, {"type": "null"}]}, "done_key": {"type": "array", "items": {"type": "integer"}}, "presets": {"type": "array", "items": {"type": "string"}}}, "required": ["presets"]}, {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]})
+    for attempt in range(2):
+        reply = ctx.model.ask("Read the visible on-screen name keyboard and return only its layout as JSON.", 'Return rows as strings with one character per cell, cursor/case_toggle/done_key as [row,column] (case_toggle may be null), and presets as visible preset names. Text to enter: ' + text, [for_model(frame)], layout, role="skill")
+        calls += 1; data = reply.data or {}; rows, cursor, done = data.get("rows") or data.get("layout"), data.get("cursor"), data.get("done_key")
+        preset = next((p for p in data.get("presets", []) if isinstance(p, str) and p.casefold() == text.casefold()), None) if isinstance(data.get("presets"), list) else None
+        if preset is not None:
+            selected = select(ctx, preset); inputs += selected.inputs; calls += selected.calls; frame = selected.after
+            return _result(selected.status, selected.reason, inputs, calls, start.frame, frame, blank=blank or selected.blank_seen)
+        valid = lambda p: isinstance(p, list) and len(p) == 2 and all(type(v) is int for v in p) and 0 <= p[0] < len(rows) and 0 <= p[1] < len(rows[p[0]])
+        if not isinstance(rows, list) or not rows or any(not isinstance(r, str) or not r for r in rows) or not valid(cursor) or not valid(done):
+            return _result("failed", "keyboard not identified", inputs, calls, start.frame, frame, blank=blank)
+        cur = list(cursor)
+        def press(key):
+            nonlocal inputs
+            if inputs >= limit: return False
+            ctx.env.press(key, ctx.move_frames); inputs += 1; return True
+        def go(dest):
+            nonlocal cur
+            if not valid(dest): return False
+            for key, count in (("RIGHT" if dest[1] > cur[1] else "LEFT", abs(dest[1]-cur[1])), ("DOWN" if dest[0] > cur[0] else "UP", abs(dest[0]-cur[0]))):
+                for _ in range(count):
+                    if not press(key): return False
+            cur = list(dest); return True
+        toggle = data.get("case_toggle"); lower = False
+        if not valid(toggle): reason = "uppercase fallback"
+        for char in text:
+            want_lower = char.islower() and not reason
+            if want_lower != lower and valid(toggle):
+                if not go(toggle) or not press("A"): return _result("blocked", "input limit", inputs, calls, start.frame, frame, blank=blank)
+                lower = want_lower
+            target = char.lower() if want_lower else char.upper()
+            dest = next(([ri, ci] for ri, row in enumerate(rows) for ci, cell in enumerate(row) if cell.upper() == target.upper()), None)
+            if dest is None or not go(dest) or not press("A"): return _result("failed" if dest is None else "blocked", "character missing" if dest is None else "input limit", inputs, calls, start.frame, frame, blank=blank)
+        settled = _settled(ctx); frame = settled.frame; blank |= settled.blank_seen
+        check = ctx.model.ask("Read only the name currently shown in the name field.", 'Return JSON with the current name as "name".', [for_model(frame)], readback, role="skill")
+        calls += 1; name = (check.data or {}).get("name")
+        if isinstance(name, str) and name.casefold() == text.casefold():
+            if not go(done) or not press("A"): return _result("blocked", "input limit", inputs, calls, start.frame, frame, blank=blank)
+            settled = _settled(ctx); frame = settled.frame; blank |= settled.blank_seen
+            return _result("done", reason, inputs, calls, start.frame, frame, blank=blank)
+        if attempt or not isinstance(name, str): return _result("failed", "name read-back mismatch", inputs, calls, start.frame, frame, blank=blank)
+        erase = next((key for key in ("B", "BACKSPACE", "DELETE") if key in ctx.env.inputs()), None)
+        if erase is None: return _result("failed", "cannot clear name for retry", inputs, calls, start.frame, frame, blank=blank)
+        if not all(press(erase) for _ in name): return _result("blocked", "input limit", inputs, calls, start.frame, frame, blank=blank)
+        frame = _settled(ctx).frame
 def run_affordance(ctx: Ctx, aff: dict, perception: dict, text: str | None = None) -> SkillResult:
     verb, target, at = aff.get("verb"), aff.get("target", ""), aff.get("at")
     player = next((e.get("at") for e in perception.get("entities", []) if e.get("kind", "").lower() == "player"), None)
@@ -140,8 +190,8 @@ def run_affordance(ctx: Ctx, aff: dict, perception: dict, text: str | None = Non
     if verb == "cancel": return cancel(ctx)
     if verb == "press": return press(ctx, target)
     if verb == "wait_until": return wait_until(ctx)
+    if verb == "type": return type_text(replace(ctx, max_inputs=60), text or target)
     if verb == "click":
         if ctx.env.pointer: return _pointer(ctx, at, target)
         frame = ctx.env.screenshot(); return _result("blocked", "no pointer", 0, 0, frame, frame)
-    frame = ctx.env.screenshot()
-    return _result("blocked" if verb == "type" else "failed", "typing is not implemented" if verb == "type" else f"unknown affordance: {verb}", 0, 0, frame, frame)
+    frame = ctx.env.screenshot(); return _result("failed", f"unknown affordance: {verb}", 0, 0, frame, frame)

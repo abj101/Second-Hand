@@ -1,0 +1,127 @@
+from agent.memory import Memory
+from agent.tasks import Stuck, Tasks
+
+
+def test_place_is_needs_two_settled_steps_and_accepts_place_name(tmp_path):
+    mem = Memory(tmp_path)
+    mem.upsert("places", {"id": "p_house", "name": "House"})
+    tasks = Tasks(mem)
+    task = tasks.add("visit house", [{"place_is": "House"}])
+    tasks.current_place = "p_house"
+
+    assert tasks.check(1) == []
+    assert mem.get("tasks", task["id"])["status"] == "active"
+    assert tasks.check(2)[0]["status"] == "done"
+
+
+def test_unsettled_step_does_not_advance_done_streak(tmp_path):
+    tasks = Tasks(Memory(tmp_path))
+    task = tasks.add("see prompt", [{"text_seen": "Ready"}])
+    tasks.perception = {"text": ["Ready"]}
+    tasks.check(1)
+    tasks.settled = False
+    tasks.check(2)
+    tasks.settled = True
+    assert tasks.check(3) == []
+    assert tasks.check(4)[0]["id"] == task["id"]
+
+
+def test_confirmation_needs_consecutive_distinct_steps_and_survives_restore(tmp_path):
+    mem = Memory(tmp_path)
+    tasks = Tasks(mem)
+    task = tasks.add("see prompt", [{"text_seen": "Ready"}])
+    tasks.perception = {"text": ["Ready"]}
+    tasks.check(1)
+    tasks.check(1)
+    resumed = Tasks(mem)
+    resumed.perception = tasks.perception
+    assert resumed.check(100) == []
+    assert mem.get("tasks", task["id"])["status"] == "active"
+    assert resumed.check(101)[0]["status"] == "done"
+
+
+def test_steps_over_fails_task(tmp_path):
+    tasks = Tasks(Memory(tmp_path))
+    task = tasks.add("wait", [{"text_seen": "never"}], [{"steps_over": 2}])
+    assert tasks.check(1) == []
+    assert tasks.check(2) == []
+    failed = tasks.check(3)[0]
+    assert failed["id"] == task["id"]
+    assert failed["status"] == "failed"
+
+
+def test_default_fails_at_150_and_active_replaces_it(tmp_path):
+    tasks = Tasks(Memory(tmp_path))
+    first = tasks.active()
+    assert first["budget"] == 150
+    for step in range(1, 150):
+        assert tasks.check(step) == []
+    assert tasks.check(150)[0]["status"] == "failed"
+    replacement = tasks.active()
+    assert replacement["id"] != first["id"]
+    assert replacement["budget"] == 150
+    assert replacement["src"] == "default"
+
+
+def test_active_returns_deepest_task(tmp_path):
+    tasks = Tasks(Memory(tmp_path))
+    root = tasks.add("root", [{"steps_over": 500}])
+    child = tasks.add("child", [{"steps_over": 500}], parent=root["id"])
+    grandchild = tasks.add("grandchild", [{"steps_over": 500}], parent=child["id"])
+    assert tasks.active()["id"] == grandchild["id"]
+
+
+def test_known_entities_and_game_text_are_global_but_model_relations_are_not(tmp_path):
+    mem = Memory(tmp_path)
+    mem.upsert("entities", {"id": "e_npc", "name": "Guide", "place": "p_other"})
+    mem.know("The gate is locked", src="game_text", step=1)
+    mem.upsert("relations", {"id": "r_claim", "s": "e_gate", "p": "opens", "o": "p_room",
+                              "src": "model", "state": "live", "sup": 0, "con": 0, "ev": []})
+    tasks = Tasks(mem)
+    task = tasks.add("check facts", [{"entity_known": "Guide"},
+                                      {"text_seen": "gate is locked"},
+                                      {"relation": ["e_gate", "opens", "p_room"]}])
+    assert tasks.check(1) == []
+    assert mem.get("tasks", task["id"])["done_streak"] == 0
+    mem.relate("e_gate", "opens", "p_room", src="observed", step=2, hit=True)
+    tasks.check(2)
+    assert tasks.check(3)[0]["status"] == "done"
+
+
+def test_stuck_counts_zero_affordance_and_eight_no_change_steps():
+    stuck = Stuck()
+    assert [stuck.update({"options": 0}) for _ in range(7)] == [None] * 7
+    assert stuck.update({"options": 0}) == "no_change"
+    assert stuck.n == 8
+
+
+def test_stuck_fires_on_third_same_action_on_same_frame_and_roundtrips():
+    stuck = Stuck()
+    row = {"choice": {"verb": "approach", "target": "door"}, "frame_hash": "abc"}
+    assert stuck.update(row) is None
+    assert stuck.update(row) is None
+    assert stuck.update(row) == "same_action"
+
+    restored = Stuck()
+    restored.restore(stuck.state())
+    assert restored.action == stuck.action
+    assert restored.hash == "abc"
+
+    legacy = Stuck()
+    legacy.restore({"n": 2, "action": ["approach", "door", None],
+                   "hash": "abc", "same_action": 2})
+    assert legacy.update(row) == "same_action"
+
+
+def test_stuck_counts_nonconsecutive_action_frame_repeats_across_restore():
+    stuck = Stuck()
+    repeat = {"choice": {"verb": "interact", "target": "console"}, "frame_hash": "abc"}
+    other = {"choice": {"verb": "wait"}, "frame_hash": "abc"}
+    assert stuck.update(repeat) is None
+    assert stuck.update(other) is None
+
+    restored = Stuck()
+    restored.restore(stuck.state())
+    assert restored.update(repeat) is None
+    assert restored.update(repeat) == "same_action"
+    assert restored.update(repeat) is None
