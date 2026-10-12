@@ -1,21 +1,24 @@
 """One game-neutral perception, choice, action, and learning cycle."""
 import hashlib, json, time
+from agent.act import act
 from agent.brief import GENERAL, _load, defaults, load_brief
 from agent.decide import Choice, choose, known_routes, next_test, navigation_candidates, plan, related_target_ids, resolve_target
+from agent.notebook import Notebook
 from agent.observer import cut, for_model, wait_settled
 from agent.perceive import perceive
 from agent.predict import PRED, effects, predict, verdict
-from agent.skills import Ctx, run_affordance, wait_until
+from agent.skills import Ctx, press_seq, run_affordance, wait_until
 from agent.tasks import Stuck, Tasks
 from agent.trace import Trace
 from agent.space import DIRS, describe, exit_to, fold, frontier, mark_exit, outward, route, tile_of
 class Loop:
-    def __init__(self, env, model, mem, game):
+    def __init__(self, env, model, mem, game, act_mode=False):
         self.env, self.model, self.mem, self.game = env, model, mem, game
+        self.act_mode, self.notebook, self.flags = act_mode, Notebook(mem.root) if act_mode else None, []
         self.trace = Trace(mem.root.parent / "trace.jsonl"); self.step_no = 0
         self.place = self.commit = None; self.prev = None; self.tile_px = getattr(env, "tile_px", None)
         self.move_frames = 16; self.stuck = Stuck(); self.tasks = Tasks(mem)
-        self.recent = self.trace.tail(5); self.cached = None; self.cached_hash = None; self.prev_frame = None; self.prompt_version = "e3-perceiver-7"; self.cached_version = self.prompt_version
+        self.recent = self.trace.tail(5); self.cached = None; self.cached_hash = None; self.prev_frame = None; self.prompt_version = "e5-perceiver-8"; self.cached_version = self.prompt_version
         self.pending_cut, self.pending_via, self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = False, None, False, 0, False, False
         self.last_plan_step, self.pending_plan_reason = None, None
         self.last_plan_text_count = sum(r.get("src") == "game_text" for r in mem.rows("knowledge"))
@@ -60,8 +63,31 @@ class Loop:
         affs = list(per.get("affordances", [])); targets = [resolve_target(self.mem, a.get("target", ""), place, proj(a.get("at"))) for a in affs]
         preds = [predict(self.mem, a, targets[i], place) for i, a in enumerate(affs)]
         choice, exit_test, player = None, False, next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
-        candidate = None
-        if any(c == {"new_place": True} for c in task.get("done_when", [])) and per.get("screen") == "world" and player:
+        candidate = act_route = None
+        if self.act_mode:
+            a = act(self.model, before, per, self.notebook.render(), view, self.flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()))
+            applied = self.notebook.apply(a.ops, self.step_no + 1)
+            named = self.mem.name_place(place, a.place, self.step_no + 1)
+            if named != place:  # model says this new arrival is a known place
+                arrive = next(((r["x"], r["y"]) for r in self.mem.rows("tiles") if r.get("place") == named and (r.get("exit") or {}).get("to") == prior), None)
+                place = self.place = named; ctx["place"] = place
+                if arrive: self.pos = arrive
+                tiles = {i: t for i, e in enumerate(per.get("entities", [])) if e.get("kind", "").casefold() != "player" and (t := proj(e.get("at")))}
+                ids = self.mem.observe(per, place, self.step_no + 1, tiles); self.entity_ids = ids
+                targets = [resolve_target(self.mem, x.get("target", ""), place, proj(x.get("at"))) for x in affs]; preds = [predict(self.mem, x, targets[j], place) for j, x in enumerate(affs)]
+            action, i = a.action, None
+            if action and "go_to" in action:
+                norm = lambda s: str(s or "").casefold().removeprefix("exit:").strip()
+                e = next((e for e in per.get("entities", []) if norm(e.get("name")) == norm(action["go_to"])), None)
+                if e:
+                    affs.append({"verb": "approach", "target": e["name"], "at": e.get("at")}); targets.append(resolve_target(self.mem, e["name"], place, proj(e.get("at")))); preds.append(None); i = len(affs) - 1
+                    if self.tile_px and player and (t := proj(e.get("at"))) and (dirs := route(self.mem, place, self.pos, t)) is not None: act_route = {"dirs": dirs, "push": outward(self.mem, place, t, None)}
+                else: action = None
+            if action and "buttons" in action:
+                affs.append({"verb": "buttons", "target": " ".join(action["buttons"])}); targets.append(None); preds.append(None); i = len(affs) - 1
+            if action and "i" in action: i = action["i"]
+            if action: choice = Choice(i, a.expect, "", [], a.why, True, a.text)
+        if not self.act_mode and any(c == {"new_place": True} for c in task.get("done_when", [])) and per.get("screen") == "world" and player:
             entity_ids = {i: resolve_target(self.mem, e.get("name", ""), place, tiles.get(i)) if str(e.get("name", "")).casefold().startswith("exit:") else ids.get(i) for i, e in enumerate(per.get("entities", []))}
             candidates = navigation_candidates(per, targets, entity_ids, player_at=pa, tile_frac=(self.tile_px / before.width, self.tile_px / before.height) if self.tile_px else None)
             visited = {p["id"] for p in self.mem.rows("places")}; exits = [(r["x"],r["y"]) for r in self.mem.rows("tiles") if r.get("place")==place and (r.get("exit") or {}).get("to") in visited]
@@ -82,7 +108,7 @@ class Loop:
                         candidate = {"id":None, "tile":tile, "affordance":aff, "route":{"dirs":dirs,"push":direction}, "push":direction}
             if candidate:
                 affs.append(candidate["affordance"]); targets.append(candidate.get("id")); preds.append(None); choice = Choice(len(affs) - 1, "place_changes", "", [], "goal-directed target test", False); exit_test = True
-        if choice is None:
+        if choice is None and not self.act_mode:
             choice = choose(self.model, view, per, task, preds, defaults(self.game), controls="\n".join(_load(self.game).get("controls", []))) if affs else None
         if choice and choice.called:
             row = {"step": self.step_no + 1, "view": view, "affordances": affs, "task": task, "preds": preds,
@@ -92,8 +118,10 @@ class Loop:
         unknown = bool(choice and affs[choice.i].get("verb") in ("approach", "interact") and not self.env.pointer and
                        not any(e.get("kind", "").casefold() == "player" for e in per.get("entities", [])))
         skillctx = Ctx(self.env, self.model, self.tile_px, self.move_frames)
-        planned_route = candidate.get("route") if exit_test and candidate else None
-        try: skill = wait_until(skillctx) if not affs else run_affordance(skillctx, affs[choice.i], per, text=choice.text, exit=exit_test or bool(planned_route), **({"route": planned_route} if planned_route else {}))
+        planned_route = act_route or (candidate.get("route") if exit_test and candidate else None)
+        try:
+            if self.act_mode: skill = wait_until(skillctx) if not affs or choice is None else press_seq(skillctx, affs[choice.i]["target"].split()) if affs[choice.i].get("verb") == "buttons" else run_affordance(skillctx, affs[choice.i], per, text=choice.text, exit=False, **({"route": planned_route} if planned_route else {}))
+            else: skill = wait_until(skillctx) if not affs else run_affordance(skillctx, affs[choice.i], per, text=choice.text, exit=exit_test or bool(planned_route), **({"route": planned_route} if planned_route else {}))
         except BaseException: self.pending_cut, self.pending_via = cut(before, self.env.screenshot()), affs[choice.i].get("target") if choice else None; self.cached = self.cached_hash = None; raise
         self.tile_px = skillctx.tile_px
         scene_cut = skill.blank_seen or skill.reason == "scene cut" or (cut(skill.before, skill.after) and (self.env.pointer or not choice or affs[choice.i].get("verb") not in ("approach", "interact") or skill.scroll == (0, 0)))
@@ -118,7 +146,7 @@ class Loop:
             pred = {**pred, "effect": "place_changes", "detail": None}
         elif choice and str(affs[choice.i].get("target", "")).startswith("exit"):
             pred = {**pred, "effect": "place_changes", "detail": pred.get("detail") if pred.get("effect") == "place_changes" else None}
-        v = "unobservable" if not affs else verdict(pred, outcome, blocked=skill.status == "blocked", inputs=skill.inputs)
+        v = "unobservable" if not affs or not choice else verdict(pred, outcome, blocked=skill.status == "blocked", inputs=skill.inputs)
         if choice and targets[choice.i]:
             for effect in outcome["effects"]:
                 detail = outcome.get("to") if effect == "place_changes" else choice.detail or effect
@@ -147,7 +175,8 @@ class Loop:
             "outcome": outcome, "verdict": v, "calls": self.model.calls-calls, "ms": int((time.perf_counter()-start)*1000), "shortcut": None,
             "ranker": None, "perception_reused": reused, "frame_hash": frame_hash,
             "scene_cut": scene_cut, "next_place": next_place, "verified_edge": verified_edge, "view_ids": view_ids, "tile": self.pos if self.tile_px else None, "drift_fix": list(drift_fix) if drift_fix else None, **({"exit": list(exit_key)} if scene_cut and not modal and next_place != place and exit_key else {}),
-            "task_budget_exhausted": any(t.get("last_failure") == "budget exhausted" for t in changed_tasks), "wake": None}
+            "task_budget_exhausted": any(t.get("last_failure") == "budget exhausted" for t in changed_tasks), "wake": None,
+            **({"act": {"place": a.place, "ops": applied, "why": a.why, "action": a.action}} if self.act_mode else {})}
         self.step_no += 1
         (self.mem.root.parent / row["frame"]).parent.mkdir(parents=True, exist_ok=True); before.save(self.mem.root.parent / row["frame"])
         arrival = next((e for e in after_per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
@@ -169,12 +198,13 @@ class Loop:
         self.place, self.prev, self.prev_frame, self.cached, self.cached_hash = next_place, after_per, after, after_per, after_hash
         self.pending_cut, self.pending_via = False, None; reason = self.stuck.update(row); self.repair_pending = self.parse_failed and self.empty_streak >= 8 and not self.repair_used; self.repair_used |= self.repair_pending
         if unknown: reason = "player position unknown"
+        if self.act_mode: self.flags = [x for x in (reason, f"last action {skill.status}: {skill.reason}" if skill.status != "done" else None, f"verdict {v}" if v in ("miss", "surprise") else None) if x]
         ended = changed_tasks[-1] if changed_tasks else {}; game_text_count = sum(r.get("src") == "game_text" for r in self.mem.rows("knowledge"))
         self.pending_plan_reason = (f"goal {ended.get('status')}: {ended.get('goal', '')}" if changed_tasks else reason or self.pending_plan_reason or ("new game text" if game_text_count > self.last_plan_text_count else None))
         if not self.pending_plan_reason: self.pending_plan_reason = "surprise" if v == "surprise" else "new_place" if verified_edge and next_place not in known_places else "periodic" if self.step_no % 50 == 0 else None
         if self.pending_plan_reason and (self.last_plan_step is None or self.step_no - self.last_plan_step >= 15): row["wake"] = self.pending_plan_reason
         self.trace.write(row); self.recent = [*self.recent, row][-5:]
-        if self.pending_plan_reason and (self.last_plan_step is None or self.step_no - self.last_plan_step >= 15):
+        if not self.act_mode and self.pending_plan_reason and (self.last_plan_step is None or self.step_no - self.last_plan_step >= 15):
             ended = changed_tasks[-1] if changed_tasks else next((t for t in reversed(self.mem.rows("tasks")) if self.pending_plan_reason == f"goal {t.get('status')}: {t.get('goal', '')}"), {})
             plan_view, _ = self.mem.view("orchestrator", {**ctx, "task": task.get("id")}); planned = plan(self.model, plan_view + "\n" + describe(self.mem, place, self.pos), self.pending_plan_reason, ended.get("goal", task.get("goal", "")), ended.get("status", ""), per.get("text", []), pattern_names={p["id"]: p.get("name", "") for p in self.mem.rows("patterns") if p.get("id")})
             parent = task.get("id")
@@ -189,7 +219,7 @@ class Loop:
         return row
     def state(self):
         task = next((r.get("id") for r in reversed(self.mem.rows("tasks")) if r.get("status")=="active"),None)
-        return {"step": self.step_no, "place": self.place, "pos": self.pos, "drift": self.drift, "drift_ref": self.drift_ref, "entity_tiles": self.entity_tiles, "entity_ids": self.entity_ids, "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "perception": self.cached, "frame_hash": self.cached_hash, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "pending_via": self.pending_via, "task": task, "last_plan_step": self.last_plan_step, "last_plan_text_count": self.last_plan_text_count, "pending_plan_reason": self.pending_plan_reason, "commit": self.commit, "anchors": self.anchors}
+        return {"step": self.step_no, "place": self.place, "pos": self.pos, "drift": self.drift, "drift_ref": self.drift_ref, "entity_tiles": self.entity_tiles, "entity_ids": self.entity_ids, "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "perception": self.cached, "frame_hash": self.cached_hash, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "pending_via": self.pending_via, "task": task, "last_plan_step": self.last_plan_step, "last_plan_text_count": self.last_plan_text_count, "pending_plan_reason": self.pending_plan_reason, "commit": self.commit, "anchors": self.anchors, "flags": self.flags}
     def restore(self, state):
         self.step_no, self.place, self.last_plan_step = int(state.get("step", 0)), state.get("place"), state.get("last_plan_step")
         self.last_plan_text_count, self.pending_plan_reason = int(state.get("last_plan_text_count", sum(r.get("src") == "game_text" for r in self.mem.rows("knowledge")))), state.get("pending_plan_reason")
@@ -198,5 +228,5 @@ class Loop:
         self.stuck.restore(state.get("stuck", {})); self.prev = state.get("perception"); self.prev_frame = self.env.screenshot()
         digest = hashlib.sha256(self.prev_frame.tobytes()).hexdigest()
         self.cached, self.cached_hash, self.cached_version = state.get("perception"), state.get("frame_hash"), state.get("perception_version")
-        self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = bool(state.get("parse_failed")), int(state.get("empty_streak", 0)), bool(state.get("repair_used")), bool(state.get("repair_pending")); self.pending_cut, self.pending_via = bool(state.get("pending_cut")), state.get("pending_via"); self.commit = tuple(state["commit"]) if state.get("commit") else None; self.anchors = state.get("anchors", [])
+        self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = bool(state.get("parse_failed")), int(state.get("empty_streak", 0)), bool(state.get("repair_used")), bool(state.get("repair_pending")); self.pending_cut, self.pending_via = bool(state.get("pending_cut")), state.get("pending_via"); self.commit = tuple(state["commit"]) if state.get("commit") else None; self.anchors = state.get("anchors", []); self.flags = state.get("flags", [])
         if self.cached_version != self.prompt_version or digest != self.cached_hash: self.cached = self.cached_hash = None

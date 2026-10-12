@@ -241,7 +241,7 @@ def test_perceiver_guides_whole_name_entry(tmp_path):
     assert "A visible modal dialogue or selection menu blocks world movement" in model.prompt
     assert "Previous-place memory is reference only" in model.prompt
     assert 'Name every visible passage "exit: <what it is>"' in model.prompt
-    assert loop.prompt_version == "e3-perceiver-7"
+    assert loop.prompt_version == "e5-perceiver-8"
 
 def test_dialogue_opening_over_world_keeps_place(tmp_path, monkeypatch):
     from agent import loop as loop_module
@@ -728,3 +728,42 @@ def test_idless_target_routes_to_its_own_tile_not_another_idless_entitys(tmp_pat
     loop = Loop(env, StubModel([reply({"tasks": []})]), Memory(tmp_path / "memory"), "grid"); loop.tile_px = 16
     row = loop.step()
     assert env.scene == 1 and row["scene_cut"]
+
+
+def test_act_mode_names_place_edits_notebook_and_skips_planner(tmp_path):
+    class Roles(StubModel):
+        def __init__(self, replies): super().__init__(replies); self.roles = []
+        def ask(self, *args, **kwargs): self.roles.append(kwargs.get("role")); return super().ask(*args, **kwargs)
+    act_reply = reply({"place": "Hall", "notebook": [{"op": "set", "section": "goals", "key": "g1", "value": {"text": "leave", "source": "assumed"}}],
+                       "action": {"i": 0}, "text": None, "expect": "screen_changes", "why": "try"})
+    model = Roles([reply(perception()), act_reply, reply(perception()), reply(perception())])
+    loop = Loop(GridEnv(), model, Memory(tmp_path / "memory"), "grid", act_mode=True)
+
+    row = loop.step()
+
+    assert row["act"]["ops"] == 1 and row["act"]["why"] == "try"
+    assert json.loads((tmp_path / "memory" / "notebook.json").read_text())["goals"]["g1"]["text"] == "leave"
+    assert loop.mem.get("places", row["place"])["name"] == "Hall"
+    assert model.roles[:2] == ["perceiver", "act"] and "plan" not in model.roles and "chooser" not in model.roles
+
+
+def test_act_buttons_are_pressed_in_order(tmp_path):
+    class Recording(GridEnv):
+        def __init__(self): super().__init__(); self.keys = []
+        def press(self, key, frames=8, on_frame=None): self.keys.append(key); super().press(key, frames, on_frame)
+    env = Recording()
+    act_reply = reply({"place": "Hall", "notebook": [], "action": {"buttons": ["up", "a"]}, "text": None, "expect": "screen_changes", "why": "walk"})
+    loop = Loop(env, StubModel([reply(perception()), act_reply, reply(perception()), reply(perception())]), Memory(tmp_path / "memory"), "grid", act_mode=True)
+
+    row = loop.step()
+
+    assert env.keys == ["UP", "A"] and row["choice"]["verb"] == "buttons"
+
+
+def test_act_invalid_action_waits_and_is_unobservable(tmp_path):
+    act_reply = reply({"place": "Hall", "notebook": [], "action": {"i": 9}, "text": None, "expect": "screen_changes", "why": "?"})
+    loop = Loop(GridEnv(), StubModel([reply(perception()), act_reply, reply(perception()), reply(perception())]), Memory(tmp_path / "memory"), "grid", act_mode=True)
+
+    row = loop.step()
+
+    assert row["choice"] is None and row["act"]["action"] is None and row["verdict"] == "unobservable"

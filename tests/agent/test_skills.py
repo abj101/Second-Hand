@@ -1,5 +1,5 @@
 from agent.model import Reply
-from agent.skills import Ctx, approach, interact, run_affordance, select
+from agent.skills import Ctx, approach, interact, press_seq, run_affordance, select
 from tests.agent.fakes import GridEnv, StubModel
 
 
@@ -159,6 +159,13 @@ def test_interact_and_directional_press_preserve_move_records():
     env = GridEnv(); env.player = (9, 8)
     result = run_affordance(ctx(env), {"verb": "press", "target": "RIGHT"}, {"entities": []})
     assert env.scene == 1 and result.moves[-1][0] == "RIGHT"
+
+
+def test_press_seq_presses_in_order_and_stops_at_blocked_key():
+    env = RecordingEnv()
+    result = press_seq(ctx(env), ["UP", "RIGHT", "NOPE", "A"])
+    assert env.keys == ["UP", "RIGHT"] and result.status == "blocked"
+    assert result.reason == "unsupported input" and result.inputs == 2
 
 
 def test_exit_blocked_by_walls_reports_not_crossed():

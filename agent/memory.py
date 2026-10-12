@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 
+TRANSIENT = frozenset({"player", "exit", "cursor", "dialogue_box", "ui_element", "icon", "text", "menu_item", "input_field", "keyboard", "logo"})  # not landmarks
 RECURRING = ("menu_item", "move", "item", "option")
 _BUDGETS = {"perceiver": 400, "chooser": 1200, "orchestrator": 3000}
 THRESHOLDS = {"candidate": 2, "promote": 3, "contradiction_rate": .10,
@@ -21,7 +22,7 @@ def _key(value: str) -> str:
 
 
 def _base(value: str) -> str:
-    return re.sub(r"#\d+$", "", _key(value))
+    return re.sub(r"#\d+$", "", _key(value)).removeprefix("exit:").strip()  # "exit: path south" == "path south"
 
 
 def _via(value) -> str: return _key(value or "").removeprefix("exit:").strip()
@@ -101,13 +102,13 @@ class Memory:
             if known: return known
         screen = str(perception.get("screen", "unknown"))
         landmarks = sorted({(str(e.get("name", "")).casefold(), str(e.get("kind", "")).casefold())
-                            for e in perception.get("entities", []) if e.get("name")})
+                            for e in perception.get("entities", []) if e.get("name") and normalize_kind(e.get("kind")) not in TRANSIENT})
         best, score = None, 0.0
         current = set(landmarks)
-        for place in self.rows("places"):
-            known = set(map(tuple, place.get("landmarks", [])))
+        for place in (p for p in self.rows("places") if p.get("state") != "merged"):
+            known = {tuple(l) for l in place.get("landmarks", []) if normalize_kind(l[1]) not in TRANSIENT}  # rows saved before TRANSIENT
             union = current | known
-            overlap = len(current & known) / len(union) if union else 0
+            overlap = len(current & known) / len(union) if union else 1  # both empty (only transients seen): same screen
             if place.get("screen") == screen and overlap >= .6 and overlap > score:
                 best, score = place, overlap
         if best:
@@ -121,6 +122,28 @@ class Memory:
                                "first": step, "last": step})
         return pid
 
+    def name_place(self, place: str, name: str, step: int) -> str:
+        name, row = str(name or "").strip(), self.get("places", place)
+        if not name or not row: return place
+        key = name.casefold()
+        target = next((r for r in self.rows("places") if r.get("state") != "merged" and r["id"] != place
+                       and any(str(v).casefold() == key for v in [r.get("name"), *r.get("aliases", [])])), None)
+        if target and row.get("first") == step:
+            self.upsert("places", {**row, "state": "merged", "into": target["id"]})
+            for other in self.rows("places"):
+                if any(e.get("to") == place for e in other.get("edges", [])):
+                    self.upsert("places", {**other, "edges": [{**e, "to": target["id"]} if e.get("to") == place else e for e in other["edges"]]})
+            for tile in self.rows("tiles"):
+                if (tile.get("exit") or {}).get("to") == place: self.upsert("tiles", {**tile, "exit": {**tile["exit"], "to": target["id"]}})
+            for rel in self.rows("relations"):
+                if rel.get("o") == place: self.upsert("relations", {**rel, "o": target["id"]})
+            return target["id"]
+        if target: return place  # ponytail: two established places claimed equal; merge only new arrivals, full merge needs entity/tile re-keying
+        aliases = row.get("aliases", [])
+        if key not in {str(a).casefold() for a in aliases}: aliases = [*aliases, name]
+        self.upsert("places", {**row, "name": name, "aliases": aliases})
+        return place
+
     def observe(self, perception: dict, place: str, step: int,
                 tiles: dict[int, tuple[int, int]] | None = None) -> dict[int, str]:
         result, used = {}, set()
@@ -129,18 +152,20 @@ class Memory:
             if not name:
                 continue
             global_key = kind in RECURRING
-            tile = tiles.get(i) if tiles and not global_key else None
+            nk, at = normalize_kind(kind), entity.get("at")
+            border = nk == "exit" and bool(at) and any(c <= .02 or c >= .98 for c in at[:2])  # screen-relative: tile moves with the player
+            tile = tiles.get(i) if tiles and not global_key and not border else None
             all_candidates = [r for r in self.rows("entities")
-                          if (r.get("kind") == kind and _distance(r.get("name", ""), name) <= 1
+                          if (normalize_kind(r.get("kind")) == nk and _distance(r.get("name", ""), name) <= 1
                               if global_key else r.get("place") == place and _distance(r.get("name", ""), name) <= 1)]
             candidates = [r for r in all_candidates if r["id"] not in used and (not tile or not r.get("tile") or max(abs(tile[0] - r["tile"][0]), abs(tile[1] - r["tile"][1])) <= 1)]
             exact = [r for r in candidates if _base(r.get("name", "")) == _base(name)]
             pool = exact or candidates
-            row = pool[0] if len(pool) == 1 else min(pool, key=lambda r: max(abs(tile[0] - r["tile"][0]), abs(tile[1] - r["tile"][1])) if r.get("tile") else 2) if tile and pool else None  # several same-name: nearest tile, like resolve()
+            row = pool[0] if len(pool) == 1 else min(pool, key=lambda r: max(abs(tile[0] - r["tile"][0]), abs(tile[1] - r["tile"][1])) if r.get("tile") else 2) if tile and pool else max(exact, key=lambda r: r.get("seen", 0), default=None)  # several same-name: nearest tile, like resolve(); no tile = no evidence of a distinct object (fuzzy ties still mint)
             if row is None:
                 eid = self._id("entities", name)
                 duplicate = bool(all_candidates) or any(
-                    r.get("kind") == kind and _base(r.get("name", "")) == _base(name)
+                    normalize_kind(r.get("kind")) == nk and _base(r.get("name", "")) == _base(name)
                     and (global_key or r.get("place") == place) for r in self.rows("entities"))
                 suffix = max(2, sum(1 for r in self.rows("entities") if _base(r.get("name", "")) == _base(name)) + 1)
                 label = f"{name}#{suffix}" if duplicate else name

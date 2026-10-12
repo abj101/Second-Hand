@@ -39,7 +39,7 @@ def _checkpoint(env, loop, run):
     (root / "harness.json").write_text(json.dumps(loop.state(), default=str))
     return root
 def _boot_reset(run, rewind):
-    for p in (run / "memory").glob("*.jsonl"): p.unlink()
+    for p in (run / "memory").glob("*"): p.unlink()
     base=(run / "checkpoint").resolve()
     if base.exists():
         for p in base.iterdir():
@@ -51,7 +51,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(); ap.add_argument("--game", default="pokemon_red"); ap.add_argument("--steps", type=int, required=True)
     ap.add_argument("--max-calls", type=int, required=True); ap.add_argument("--run", type=Path, required=True)
     ap.add_argument("--resume", action="store_true"); ap.add_argument("--from-step", type=int); ap.add_argument("--stage", choices="abpqc")
-    ap.add_argument("--stage-b-cap", type=int, choices=(180, 300), default=180)
+    ap.add_argument("--stage-b-cap", type=int, choices=(180, 300), default=180); ap.add_argument("--act", action="store_true")
     a = ap.parse_args(argv); run = a.run
     if a.steps < 1 or a.max_calls < 1: ap.error("steps and max-calls must be positive")
     if "m1" in str(run).lower() and a.steps > 600: ap.error("m1 runs are limited to 600 cumulative steps")
@@ -68,7 +68,7 @@ def main(argv=None):
             base=(run / "checkpoint").resolve(); [shutil.rmtree(p) for p in base.iterdir() if p.is_dir() and p.name.isdigit() and p.resolve().parent == base and int(p.name) > int(cp.name)]
             if "m1" in str(run).lower() and int(state.get("step",0))+a.steps > 600: ap.error("m1 runs are limited to 600 cumulative steps")
             for name in ("trace.jsonl", "chooser.jsonl", "calls.jsonl", "truth.jsonl"): _truncate(run / name, int(cp.name))
-            for file in (run / "memory").glob("*.jsonl"): file.unlink()
+            for file in (run / "memory").glob("*"): file.unlink()
             shutil.copytree(cp / "memory", run / "memory", dirs_exist_ok=True)
     elif boot: _boot_reset(run, False)
     env = PyBoyEnv(find_rom(), state=str(cp / "pyboy.state") if cp else None); env.tile_px = 16; invocation = [0]; active_step = [1]; logged_requests = [0]
@@ -81,7 +81,7 @@ def main(argv=None):
         cap=min(a.max_calls,stage_cap)
         if invocation[0] >= cap: raise CallCap("invocation call cap")
         _ledger(run, a.stage, stage_cap); invocation[0] += 1; return post(payload)
-    model._post = guarded; loop = Loop(env, model, Memory(run / "memory"), a.game)
+    model._post = guarded; loop = Loop(env, model, Memory(run / "memory"), a.game, **({"act_mode": True} if a.act else {}))  # kwarg only with --act: existing test fakes take 4 args
     if cp: loop.restore(state)
     press = env.press; failed = [False]
     def guarded_press(*args, **kwargs):

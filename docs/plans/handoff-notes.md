@@ -7,7 +7,11 @@ Last written by: Codex E4 orchestrator, 2026-10-11, after the first stage-M eval
 - A: directional world→world exit into a new place now scores place_changes (loop.py `world_exit`, reused for mark_exit); dialogue/menu cuts unchanged.
 - B: space.route()/frontier() never step through a tile's recorded exit direction (step-68 re-entry into house).
 - C1: memory.observe() resolves an ambiguous same-name pool to the nearest-tile record (as resolve() does); fixes the 52 shelf duplicates / shelf loop.
-- tests/agent: 211 passed (.tmp/e4/full-suite-abc.txt). Uncommitted. Next: user decides on a 20-step live resume from checkpoint 74 (~25 requests of 503 M1 left).
+- tests/agent: 211 passed (.tmp/e4/full-suite-abc.txt). Committed 53a1e03.
+- Live resume 74→94 (stage c, 20 steps, 20 requests; ledger 585, M1 567, c 43; M1 left 483). Backup of pre-run state .tmp/e4/m1-before-abc/; output .tmp/e4/stage-m2-*.
+- Result: stuck all 20 steps in house 2F (truth map 0x26; agent calls it p_world_2, a second id for 2F). 2F is closed; its only exit (stairs) leads to visited 1F, which the new_place goal filters out (pre-existing loop.py candidate filter + B). 13/20 steps "route blocked" with retries on one target (computer desk x8, "exit: path south" x5); 31 new entities, 18 #-suffixed (mostly invented "exit: path south").
+- User rejected more mechanical gating (2026-10-12): agent must infer goals from game text. Redesign: docs/plans/autonomy-redesign.md (approved: ~1.5-2 req/step OK, names Hand/Blue as prompt preferences, old path kept behind flag, stay on gemma4:31b, Haiku workers).
+- P0 memory fixes done (normalize_kind, border exits untiled, exit: prefix in _base, TRANSIENT landmarks). P1 done, uncommitted: agent/notebook.py, agent/act.py, skills.press_seq, perceive exit wording, memory.name_place (model-asserted place merge), loop act branch + run_agent --act. tests/agent 222 passed. Next: P2 prompt eval on ~15 recorded frames (15-30 requests) after user approval.
 
 ## State of the code
 - Branch feat/lean-agent; HEAD remains ff485d6, with E4 changes uncommitted and nothing pushed.

@@ -33,7 +33,7 @@ Coordinates are the centre of the thing on a 0-1000 grid: [0, 0] is top-left, [1
 List each clickable thing separately (each card, each button, each menu item, each map node), including small icons.
 Report only what is visible.
 If the player's own character is visible, list it as an entity with kind "player".
-Name every visible passage "exit: <what it is>" (for example, "exit: door mat", "exit: stairs", or "exit: path north") and place it on the tile to step onto. Use a bare screen-edge exit only where walkable ground visibly continues offscreen.""" % ", ".join(VERBS)
+Name every visible passage "exit: <what it is>" (for example, "exit: door", "exit: stairs", or "exit: door mat") and place it on the tile to step onto. Name an exit at the screen edge only where open walkable ground visibly runs off the screen; never inside a walled room.""" % ", ".join(VERBS)
 
 _POINT = {"type": "array", "items": {"type": "number"}}
 SCHEMA = {

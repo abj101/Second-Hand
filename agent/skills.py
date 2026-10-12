@@ -154,6 +154,14 @@ def press(ctx: Ctx, key: str) -> SkillResult:
     end, move, blank = _step(ctx, key, start.frame) if key in ("UP", "DOWN", "LEFT", "RIGHT") else (None, None, False)
     if end is None: ctx.env.press(key, ctx.move_frames); end = _settled(ctx)
     return _result("done", "", 1, 0, start.frame, end.frame, blank=start.blank_seen or end.blank_seen or blank, moves=[(key, move)] if key in ("UP", "DOWN", "LEFT", "RIGHT") else [])
+def press_seq(ctx: Ctx, keys: list[str]) -> SkillResult:
+    if not keys: frame = ctx.env.screenshot(); return _result("failed", "no keys", 0, 0, frame, frame)
+    results = []
+    for key in keys[:8]:
+        results.append(press(ctx, key))
+        if results[-1].status != "done": break
+    first, last = results[0], results[-1]
+    return _result(last.status, last.reason, sum(r.inputs for r in results), sum(r.calls for r in results), first.before, last.after, blank=any(r.blank_seen for r in results), moves=[m for r in results for m in r.moves])
 def advance(ctx: Ctx) -> SkillResult: return press(ctx, "A")
 def cancel(ctx: Ctx) -> SkillResult: return press(ctx, "B")
 def wait_until(ctx: Ctx, max_frames: int = 240) -> SkillResult:

@@ -14,8 +14,9 @@ Each phase is one packet in `docs/plans/`, and each packet runs in its own orche
 | E1 | (this file, below) | done | Perceiver chosen: Gemma; recall 0.71, precision 0.73 | — | — |
 | E1b | [E1b.md](plans/E1b.md) | **deferred**: STS2 small icons; run before any mouse game | recall ≥ 0.80 at precision ≥ 0.75 | 2 | ~450 |
 | E2 | [E2.md](plans/E2.md) | **done** | 4/4 truth goals; verdict 3/3; registration 17/17; 18 uncached calls, 0 retries | 6 | **60** |
-| E3 (M1) | [E3.md](plans/E3.md) | **M1 open; E4.5 stopped at evaluator CLI failure, 2026-10-11** | Town reached after step67, re-entered at68; party0, checkpoint74; prescribed eval exits1 (agent import path). 565 phase requests / M1 547, M1 503 left; no gate commit or old-harness deletion | 7 | **1,100** |
-| E4 | [E4.md](plans/E4.md) | **build complete; stage M stopped, stage E unstarted** | 205 unit tests pass; agent 1,826 lines (+86), all WP growth budgets hold. Direct evaluator CLI fails despite units; E4 learning gates unmeasured, no live E4 spend | 5 | **600** (own ledger) |
+| E3 (M1) | [E3.md](plans/E3.md) | **M1 open; paused for autonomy redesign, 2026-10-12** | Evaluator CLI fixed. Resume 74→94 stuck in house 2F (template goal forbade revisiting places). Best so far: Town at step 68; party 0. 585 phase requests / M1 567, M1 483 left; no gate commit or old-harness deletion | 7 | **1,100** |
+| E4 | [E4.md](plans/E4.md) | **built and committed (53a1e03); gate waits for M1** | 222 unit tests pass. E4 learning gates unmeasured, no live E4 spend | 5 | **600** (own ledger) |
+| R1 autonomy | [autonomy-redesign.md](plans/autonomy-redesign.md) | **P0 + P1 done, 2026-10-12; P2 next** | Model-owned notebook + one act call per step behind `--act`; gated code paths kept for comparison. P2 prompt eval ~15 frames, P3 40-step live comparison, P4 delete gates if better | 4 phases | from M1 budget (~90) |
 | E5 | [E5.md](plans/E5.md) | **deferred**: Pokémon only for now (game 2 = STS2) | second game with no core changes | 4 | ~1,300 |
 
 **Call policy until the architecture settles:**

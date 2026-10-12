@@ -185,3 +185,35 @@ def test_observe_same_name_block_keeps_stable_ids(tmp_path):
         assert m.observe(frame, "p", step, tiles) == first
     rows = [r for r in m.rows("entities") if r["name"].startswith("shelf")]
     assert len(rows) == 4 and all(r["seen"] == 4 for r in rows)
+
+
+def test_border_exit_pools_across_kind_strings_resolves_and_places_ignore_transients(tmp_path):
+    m = Memory(tmp_path)
+    for step, (kind, tile) in enumerate([("exit", (1, 1)), ("exit: path south", (4, 2)), ("Exits", (7, 3)), ("exit: path south", (9, 5))]):
+        m.observe({"entities": [{"name": "exit: path south", "kind": kind, "at": [.5, .99]}]}, "p", step, {0: tile})
+    exits = [r for r in m.rows("entities") if "path south" in r["name"]]
+    assert len(exits) == 1 and exits[0]["seen"] == 4 and "tile" not in exits[0]
+    assert m.resolve("path south", "p") == exits[0]["id"] and not [r for r in m.rows("entities") if r.get("src") == "model"]
+    tree = {"name": "tree", "kind": "object"}
+    first = m.match_place({"screen": "world", "entities": [tree, {"name": "red", "kind": "player"}]}, 1, prev=None, cut=True)
+    again = m.match_place({"screen": "world", "entities": [tree, {"name": "hi", "kind": "dialogue_box"}, {"name": "x", "kind": "exit: east"}]}, 2, prev=None, cut=True)
+    assert first == again and len(m.rows("places")) == 1
+
+
+def test_name_place_merges_new_arrival_retargets_refs_and_keeps_established_places(tmp_path):
+    mem = Memory(tmp_path)
+    mem.upsert("places", {"id": "new", "name": "screen", "screen": "room", "state": "candidate", "first": 3, "landmarks": [["oak", "npc"]], "edges": []})
+    mem.upsert("places", {"id": "hall", "name": "Hall", "screen": "room", "state": "place", "first": 1, "landmarks": [["oak", "npc"]], "edges": []})
+    mem.upsert("places", {"id": "start", "name": "start", "screen": "room", "state": "place", "first": 1, "landmarks": [], "edges": [{"verb": "approach", "via": "door", "to": "new", "n": 1, "ok": 1}]})
+    mem.upsert("tiles", {"id": "t1", "place": "start", "x": 1, "y": 2, "exit": {"to": "new"}})
+    mem.upsert("relations", {"id": "r1", "s": "e1", "p": "leads_to", "o": "new", "state": "live"})
+    assert mem.name_place("new", "hall", 3) == "hall"
+    assert mem.get("places", "new")["state"] == "merged" and mem.get("places", "new")["into"] == "hall"
+    assert mem.get("places", "start")["edges"][0]["to"] == "hall"
+    assert mem.get("tiles", "t1")["exit"]["to"] == "hall" and mem.get("relations", "r1")["o"] == "hall"
+    assert mem.match_place({"screen": "room", "entities": [{"name": "Oak", "kind": "npc"}]}, 4, prev=None, cut=True) == "hall"
+    mem.upsert("places", {"id": "old", "name": "Cave", "screen": "room", "state": "place", "first": 1, "landmarks": [], "edges": []})
+    mem.upsert("places", {"id": "other", "name": "Lake", "screen": "room", "state": "place", "first": 5, "landmarks": [], "edges": []})
+    assert mem.name_place("other", "cave", 6) == "other" and mem.get("places", "other")["state"] == "place"
+    assert mem.name_place("other", "Lakeside", 6) == "other"
+    assert mem.get("places", "other")["name"] == "Lakeside" and mem.get("places", "other")["aliases"] == ["Lakeside"]
