@@ -41,7 +41,7 @@ def route(mem, place, start, goal):
         for direction, (dx, dy) in DIRS.items():
             nxt = (at[0] + dx, at[1] + dy)
             cell = _get(mem, place, nxt)
-            if direction in row.get("blocked", []) or nxt in seen or cell and cell.get("floor") is False and nxt != goal or not (bounds[0] <= nxt[0] <= bounds[1] and bounds[2] <= nxt[1] <= bounds[3]): continue
+            if direction in row.get("blocked", []) or direction == (row.get("exit") or {}).get("dir") or nxt in seen or cell and cell.get("floor") is False and nxt != goal or not (bounds[0] <= nxt[0] <= bounds[1] and bounds[2] <= nxt[1] <= bounds[3]): continue
             seen.add(nxt); queue.append((nxt, path + [direction]))
     return None
 def outward(mem, place, tile, placement=None):
@@ -55,6 +55,6 @@ def frontier(mem, place):
     for row in mem.rows("tiles"):
         if row.get("place") != place or row.get("floor") is not True: continue
         for direction, (dx, dy) in DIRS.items():
-            if direction not in row.get("blocked", []) and direction not in row.get("pushed", []) and not _get(mem, place, (row["x"] + dx, row["y"] + dy)): result.append(((row["x"], row["y"]), direction))
+            if direction not in row.get("blocked", []) and direction not in row.get("pushed", []) and direction != (row.get("exit") or {}).get("dir") and not _get(mem, place, (row["x"] + dx, row["y"] + dy)): result.append(((row["x"], row["y"]), direction))
     return result
 def describe(mem, place, pos): links = " ".join(f"({r['x']},{r['y']}) {e['dir']} -> {((mem.get('places', e['to']) or {}).get('name') or e['to'])}" for r in mem.rows("tiles") if r.get("place") == place and (e := r.get("exit"))); return f"Here: {place} ({pos[0]},{pos[1]}). Exits: {links or 'none'}. Untried edges: {len(frontier(mem, place))}."

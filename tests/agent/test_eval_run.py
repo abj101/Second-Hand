@@ -248,3 +248,80 @@ def test_legacy_trace_without_spatial_values_is_unmeasured(tmp_path):
     assert metric["accuracy"] is None
     assert metric["total"] == 0
     assert metric["visits"] == []
+
+
+def test_e4_metrics_and_offline_repredict_preserve_chooser_guess(tmp_path):
+    run = tmp_path / "e4"
+    trace = [
+        {"step": 1, "place": "p", "frame_hash": "same", "wake": "periodic", "task": "goal",
+         "choice": {"verb": "approach", "target": "door", "id": "door1"},
+         "outcome": {"effects": ["place_changes"], "basis": {"place_changes": "pixel"}, "to": "p2"}},
+        {"step": 2, "place": "p", "frame_hash": "same", "task": "goal",
+         "choice": {"verb": "approach", "target": "door", "id": "door1"},
+         "pred": {"basis": "instance", "id": "future", "effect": "screen_changes", "detail": None},
+         "skill": {"status": "done"},
+         "outcome": {"effects": ["place_changes"], "basis": {"place_changes": "pixel"}, "to": "p2"}},
+        {"step": 3, "place": "p2", "frame_hash": "other",
+         "choice": {"verb": "approach", "target": "table", "id": "table1"},
+         "outcome": {"effects": ["place_changes"], "basis": {"place_changes": "pixel"}, "to": "p3"}},
+        {"step": 4, "place": "p", "frame_hash": "same",
+         "choice": {"verb": "approach", "target": "door", "id": "door1"},
+         "outcome": {"effects": ["place_changes"], "basis": {"place_changes": "pixel"}, "to": "p2"}},
+        {"step": 5, "place": "p2", "frame_hash": "unknown-kind",
+         "choice": {"verb": "approach", "target": "unknown", "id": "ghost1"},
+         "outcome": {"effects": ["screen_changes"], "basis": {"screen_changes": "pixel"}}},
+        {"step": 6, "place": "p2", "frame_hash": "battle",
+         "choice": {"verb": "select", "target": "move"}},
+    ]
+    write(run / "trace.jsonl", trace)
+    write(run / "truth.jsonl", [{"step": 1, "battle": 0}, {"step": 2, "battle": 2},
+                                 {"step": 3, "battle": 2}, {"step": 4, "battle": 2},
+                                 {"step": 5, "battle": 2}, {"step": 6, "battle": 2},
+                                 {"step": 7, "battle": 0}])
+    write(run / "memory" / "entities.jsonl", [
+        {"id": "door1", "kind": "door", "name": "Door", "place": "p", "first": 1, "last": 1},
+        {"id": "door1", "kind": "door", "name": "Door", "place": "p", "first": 1, "last": 4},
+        {"id": "table1", "kind": "furniture", "name": "Table", "place": "p", "first": 3, "last": 3}])
+    write(run / "memory" / "tasks.jsonl", [{"id": "planned-goal", "plan_step": 1, "status": "active"}])
+    write(run / "memory" / "patterns.jsonl", [{"id": "pat1", "state": "promoted"}])
+    write(run / "chooser.jsonl", [{"step": 2, "choice": {"effect": "no_change", "detail": None}},
+                                   {"step": 5, "choice": {"effect": "screen_changes", "detail": None}}])
+
+    before_done = evaluate(run)
+    write(run / "memory" / "tasks.jsonl", [{"id": "planned-goal", "plan_step": 1, "status": "done"}])
+    full = evaluate(run, repredict=True)
+    hidden = evaluate(run, repredict=True, hide_memory=True)
+
+    assert full["doors_verified"] == 1
+    assert full["patterns_promoted"] == 1
+    assert full["battles"] == 1 and full["moves_selected"] == 1
+    assert before_done["reflection_usefulness"]["goals_completed"] == 0
+    assert full["repeat_sequences"] == {"length": 2, "count": 0}
+    assert full["reflection_usefulness"] == {"plan_calls": 1, "goals_completed": 1}
+    assert (full["acc_first"], full["acc_repeat"], full["n_first"], full["n_repeat"]) == (None, 1.0, 0, 1)
+    assert hidden["acc_repeat"] == 0.0 and hidden["n_repeat"] == full["n_repeat"]
+    assert hidden["n"] == full["n"] == 1 and full["excluded"] == 5
+
+
+def test_repeat_sequences_count_repeated_verified_action_pairs(tmp_path):
+    run = tmp_path / "sequences"
+    action = {"verb": "approach", "target": "door"}
+    outcome = {"effects": ["screen_changes"], "basis": {"screen_changes": "pixel"}}
+    trace = [{"step": i, "place": "p", "choice": action, "outcome": outcome} for i in (1, 2, 4, 5)]
+    trace.insert(2, {"step": 3, "place": "p", "choice": action})
+    write(run / "trace.jsonl", trace)
+
+    result = evaluate(run)["repeat_sequences"]
+
+    assert result == {"length": 2, "count": 1}
+
+
+def test_cli_runs_standalone_outside_repo(tmp_path):
+    import subprocess, sys
+    from pathlib import Path
+    run = tmp_path / "cli"
+    write(run / "trace.jsonl", [{"step": 1, "place": "p", "choice": {"verb": "press", "target": "a"}}])
+    script = Path(__file__).resolve().parents[2] / "scripts" / "eval_run.py"
+    done = subprocess.run([sys.executable, str(script), str(run)], cwd=tmp_path, capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert (run / "summary.json").exists()

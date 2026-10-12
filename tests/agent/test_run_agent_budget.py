@@ -27,3 +27,20 @@ def test_phase_and_m1_caps_preserve_spend(tmp_path, monkeypatch, key, limit, ini
     data = json.loads(path.read_text()); assert data[key] == limit
     with pytest.raises(CallCap): _ledger("runs/m1", None, 1000)
     assert json.loads(path.read_text()) == data
+
+
+def test_e4_uses_separate_600_request_ledger(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    e3 = tmp_path / "runs/e3_budget.json"; e3.parent.mkdir()
+    e3.write_text('{"total":1100,"smoke":50,"m1":1050}')
+    e3_before = e3.read_bytes()
+    e4 = tmp_path / "runs/e4_budget.json"
+    e4.write_text('{"total":598}')
+
+    _ledger("runs/e4", None, 1000)
+    _ledger("runs/e4", None, 1000)
+
+    assert json.loads(e4.read_text()) == {"total": 600}
+    with pytest.raises(CallCap): _ledger("runs/e4", None, 1000)
+    assert json.loads(e4.read_text()) == {"total": 600}
+    assert e3.read_bytes() == e3_before

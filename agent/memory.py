@@ -6,6 +6,14 @@ from pathlib import Path
 
 RECURRING = ("menu_item", "move", "item", "option")
 _BUDGETS = {"perceiver": 400, "chooser": 1200, "orchestrator": 3000}
+THRESHOLDS = {"candidate": 2, "promote": 3, "contradiction_rate": .10,
+              "demote_misses": 2, "use_window": 5}
+
+
+def normalize_kind(kind: str) -> str:
+    value = str(kind or "").casefold().split(":", 1)[0].strip()
+    value = value[:-1] if value.endswith("s") else value
+    return {"doorway": "door"}.get(value, value)
 
 
 def _key(value: str) -> str:
@@ -128,7 +136,7 @@ class Memory:
             candidates = [r for r in all_candidates if r["id"] not in used and (not tile or not r.get("tile") or max(abs(tile[0] - r["tile"][0]), abs(tile[1] - r["tile"][1])) <= 1)]
             exact = [r for r in candidates if _base(r.get("name", "")) == _base(name)]
             pool = exact or candidates
-            row = pool[0] if len(pool) == 1 else None
+            row = pool[0] if len(pool) == 1 else min(pool, key=lambda r: max(abs(tile[0] - r["tile"][0]), abs(tile[1] - r["tile"][1])) if r.get("tile") else 2) if tile and pool else None  # several same-name: nearest tile, like resolve()
             if row is None:
                 eid = self._id("entities", name)
                 duplicate = bool(all_candidates) or any(
@@ -179,11 +187,13 @@ class Memory:
         self.upsert("places", place)
 
     def relate(self, s: str, p: str, o: str, *, src: str, step: int,
-               hit: bool | None = None) -> dict:
+               hit: bool | None = None, verb: str | None = None,
+               pattern_id: str | None = None) -> dict:
         pixel = src in ("pixel", "observed")
         source = "observed" if pixel else src
         row = next((r for r in self.rows("relations")
-                    if (r.get("s"), r.get("p"), r.get("o")) == (s, p, o)), None)
+                    if (r.get("s"), r.get("p"), r.get("o")) == (s, p, o)
+                    and (not verb or r.get("verb", verb) == str(verb).casefold())), None)
         if row is None:
             row = {"id": self._id("relations", "relation"), "s": s, "p": p, "o": o,
                    "src": source, "sup": 0, "con": 0, "ev": [], "state": "live", "why": "", "step": step}
@@ -194,6 +204,8 @@ class Memory:
             row["src"] = "model"
         elif pixel:
             row["src"] = "observed"
+        if verb:
+            row["verb"] = str(verb).casefold()
         row["step"] = step
         row["state"] = "refuted" if row["con"] >= 2 and row["con"] > row["sup"] else "live"
         if row["state"] == "refuted":
@@ -207,7 +219,50 @@ class Memory:
             if place and place.get("state") == "candidate":
                 place["state"] = "place"
                 self.upsert("places", place)
-        return self.upsert("relations", row)
+        row = self.upsert("relations", row)
+        entity = self.get("entities", s) or {}
+        target = ("place" if p == "leads_to" and self.get("places", o)
+                  else (self.get("entities", o) or {}).get("kind", ""))
+        source_kind, target_kind = normalize_kind(entity.get("kind")), normalize_kind(target)
+        key = (source_kind, p, target_kind, str(verb or "").casefold())
+        if pixel and hit is not None and source_kind and verb:
+            patterns = self.rows("patterns")
+            pattern = next((r for r in patterns if
+                            (r.get("s"), r.get("p"), r.get("o"), r.get("verb")) == key), None)
+            if hit and target_kind:
+                instances, seen = [], set()
+                for rel in self.rows("relations"):
+                    src = self.get("entities", rel.get("s")) or {}
+                    dst = ("place" if rel.get("p") == "leads_to" and self.get("places", rel.get("o"))
+                           else (self.get("entities", rel.get("o")) or {}).get("kind", ""))
+                    if (rel.get("src") == "observed" and rel.get("sup", 0) and rel.get("verb") == key[3]
+                            and (normalize_kind(src.get("kind")), rel.get("p"), normalize_kind(dst), key[3]) == key
+                            and rel.get("s") not in seen):
+                        seen.add(rel["s"]); instances.append(rel["id"])
+                if pattern or len(instances) >= THRESHOLDS["candidate"]:
+                    pattern = pattern or {"id": self._id("patterns", "_".join(key)), "s": source_kind,
+                        "p": p, "o": target_kind, "verb": key[3], "con": 0, "state": "candidate",
+                        "name": f"{source_kind} {p} {target_kind} via {key[3]}", "uses": []}
+                    pattern.update(inst=instances, sup=len(instances))
+            elif not hit and pattern_id:
+                pattern = self.get("patterns", pattern_id)
+                if not pattern or (pattern.get("s"), pattern.get("p"), pattern.get("verb")) != (source_kind, p, key[3]):
+                    pattern = None
+            if pattern:
+                if not hit:
+                    missed = pattern.setdefault("missed", [])
+                    if s not in missed:
+                        missed.append(s)
+                    pattern["con"] = len(missed)
+                if pattern_id == pattern.get("id"):
+                    pattern["uses"] = [*pattern.get("uses", []), bool(hit)][-THRESHOLDS["use_window"]:]
+                uses = pattern.get("uses", [])
+                misses = uses.count(False)
+                rate = pattern.get("con", 0) / max(1, pattern.get("sup", 0) + pattern.get("con", 0))
+                pattern["state"] = ("demoted" if misses >= THRESHOLDS["demote_misses"] else
+                                    "promoted" if pattern.get("sup", 0) >= THRESHOLDS["promote"] and rate <= THRESHOLDS["contradiction_rate"] else "candidate")
+                self.upsert("patterns", pattern)
+        return row
 
     def know(self, text: str, *, src: str, step: int) -> str:
         key = _key(text)
@@ -249,6 +304,10 @@ class Memory:
             return "\n".join(lines), ids
         if task:
             add(f"Task: {task}", str(task))
+        if caller == "orchestrator":
+            for row in self.rows("patterns"):
+                if row.get("state") in ("candidate", "promoted"):
+                    add(f"Pattern: {row['name']} ({row.get('sup', 0)} hits, {row.get('con', 0)} misses)", row["id"])
         history = []
         if caller in ("chooser", "orchestrator"):
             for row in recent:

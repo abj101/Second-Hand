@@ -11,10 +11,16 @@ from scripts.truth_pokered import read
 class CallCap(RuntimeError): pass
 def _ledger(run, stage, cap):
     import msvcrt
-    path = Path("runs/e3_budget.json"); path.parent.mkdir(parents=True, exist_ok=True)
+    e4 = "e4" in str(run).lower(); path = Path("runs/e4_budget.json" if e4 else "runs/e3_budget.json"); path.parent.mkdir(parents=True, exist_ok=True)
     with path.with_suffix(".lock").open("a+b") as lock:
         lock.seek(0); msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
         try:
+            if e4:
+                data = json.loads(path.read_text()) if path.exists() else {"total": 0}
+                if data["total"] >= 600: raise CallCap("persistent call budget exhausted")
+                data["total"] += 1
+                tmp = path.with_suffix(".tmp"); tmp.write_text(json.dumps(data)); tmp.replace(path)
+                return
             data = json.loads(path.read_text()) if path.exists() else {"total": 0, "smoke": 0, "m1": 0}
             bucket = "m1" if "m1" in str(run).lower() else "smoke"
             base = {"a":180,"b":300,"p":30,"q":60,"c":546}.get(stage)

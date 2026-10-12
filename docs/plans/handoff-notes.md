@@ -1,68 +1,71 @@
 # Handoff notes
 
-Last written by: planning session, 2026-10-11, before the E4 kickoff. E3 is parked with M1 open; its gate moves into E4.5 stage M (user decision; E3.md §R4.8, E4.md).
+Last written by: Codex E4 orchestrator, 2026-10-11, after the first stage-M evaluator failure. M1 remains open; E4 build is complete, stage E unstarted.
+
+## Update 2026-10-12 (Claude orchestrator; Sonnet fixes, Haiku verify; 0 cloud calls)
+- Evaluator CLI fixed (repo-root sys.path in scripts/eval_run.py) + standalone subprocess test; `eval_run.py runs/m1` exits 0, output identical to the diagnostic; runs/m1/summary.json refreshed.
+- A: directional world→world exit into a new place now scores place_changes (loop.py `world_exit`, reused for mark_exit); dialogue/menu cuts unchanged.
+- B: space.route()/frontier() never step through a tile's recorded exit direction (step-68 re-entry into house).
+- C1: memory.observe() resolves an ambiguous same-name pool to the nearest-tile record (as resolve() does); fixes the 52 shelf duplicates / shelf loop.
+- tests/agent: 211 passed (.tmp/e4/full-suite-abc.txt). Uncommitted. Next: user decides on a 20-step live resume from checkpoint 74 (~25 requests of 503 M1 left).
 
 ## State of the code
-- Branch feat/lean-agent; E3R3–E3R5 and option A are in the latest WIP commit (`git log -1`); nothing is pushed.
-- `tests/agent`: 191 passed (about 5 minutes), with one existing SDL warning.
-- `agent/` is 1,740 lines. E4 adds about +135 (E4.md §7), and the user has seen the overrun against spec §12's 1,500.
-- **Goals:** `decide.plan` sets model goals (≤ 2 tasks), and its prompt states the JSON answer shape. Plan triggers live in the loop (`pending_plan_reason`, 15-step throttle).
-- **Fallback goal:** "Reach a place not visited yet", `done_when new_place`, budget 40.
-- **Spatial memory:** `agent/space.py` plus the `tiles` store, player tile `pos`, BFS routes, `outward` pushes, and frontier pushes; contracts.md#space.
-- **Navigation:** code order only (wall or edge placement first, then distance). The decider ranker is unwired; `agent/judge.py` and `scripts/decider_worker.py` remain on disk, unused.
-- **Exit tests:** an id-less candidate uses its own projected tile (option A). A route blocked by a newly learned wall before its target records no failed test and keeps the same target (`self.commit`).
-- **Robustness:** a stable player anchor (median of recent world samples) survives a perceiver mislabelling another sprite as the player.
-- **Identity:** `resolve(..., tile=)` breaks name ties by tile; `match_place` strips the `exit:` prefix and follows live `leads_to` relations (`via_id`).
-- **Trace:** rows carry `tile`, `drift_fix`, `ranker` (now always null) and the optional `exit`.
-- **Dead code:** `decide.escalate` has no callers; it is a deletion candidate together with the judge files.
+- Branch feat/lean-agent; HEAD remains ff485d6, with E4 changes uncommitted and nothing pushed.
+- E4.0 ledger, E4.1 patterns, E4.2 reflection/wake and E4.4 metrics are built; each WP used explicitly selected gpt-6-luna at high effort.
+- Parent acceptances: ledger 5, patterns 6, reflection/loop 45, evaluator 15; full tests/agent: 205 passed in 263.77 s, one existing SDL warning.
+- Source growth: runner+6; memory+59/70, predict+9/30, decide+10/20, loop+8/15, evaluator+90/90 (97 inserted,7 replaced/deleted).
+- Agent total 1,826 (+86 from 1,740), 326 over spec headline; budgets hold, no unrelated code compacted.
+- Patterns count distinct observed source instances; optional verb/pattern_id distinguish actions and true pattern uses; inferred/model rows never support them.
+- Reflection returns list-compatible PlanResult metadata; existing ids alone may be named; code alone promotes; plan_step tags created tasks.
+- New wake reasons surprise/new_place/periodic use the existing checkpointed trigger and 15-step throttle; a known destination is not new_place.
+- Offline replay learns pixel outcomes after scoring, pairs full/hidden on independent guesses, and reports excluded samples/coverage; repeat sequences are length-two action/outcome pairs.
 
 ## Decisions in force
-- **Order:** build E4.0–E4.4 first; E4.5 stage M gates M1 on `runs/m1`, then stage E runs E4 on `runs/e4`.
-- **Tiers (user):** Sonnet orchestrator; Sonnet for E4.1 and E4.2; Haiku for E4.0 and E4.4 (escalate to Sonnet after two failed acceptances). Never Opus; always set the model explicitly.
-- **E3 ledger** `runs/e3_budget.json`: caps are phase 1,100 / M1 1,050 / q 60 / c 546 / smoke 50. Never reset, refund or raise; abandoned requests count.
-- **E4 gets its own ledger** (`runs/e4_budget.json`, cap 600), built in E4.0.
-- **Resume M1 only** with `--resume --from-step 54`. Checkpoint 54 is merged and re-migrated (backups in `.tmp/e3r3/pre-merge/` and `.tmp/e3r4/pre-remigrate/`).
-- **Stage M early stop:** no Pallet Town within its first 40 requests means stop and report.
-- **Boundaries:** no target hints, no RAM truth in agent choices, nothing game-specific in `agent/`.
-- **Commits:** after a passed gate only (except user-approved WIPs), explicit paths, never `.claude/`, never push.
+- Stop enforced at the prescribed evaluator failure; no mid-check repair, further live chunk, E3.7 comparison/review, loop deletion, commits or E5.
+- E3 caps unchanged: phase 1,100 / M1 1,050 / q 60 / c 546 / smoke 50; never reset, refund or raise.
+- E4 has separate 600-request ledger support; runs/e4 and its ledger were not created, 0 requests spent.
+- Preserve runs/m1/checkpoint/000074 with matching memory; any next resume needs a new instruction after the failed check.
+- No target hints, no evaluation RAM for agent choices, no game-specific agent code; never start the local decider worker.
+- Final THRESHOLDS unchanged: candidate 2, promote 3, contradiction_rate 0.10, demote_misses 2, use_window 5; no offline tuning ran.
+- Alias map doorway->door after singularization; no game-specific alias; colon kinds use their prefix (exit: door->exit).
+- No view items pruned; deletion candidates remain user decisions: agent/judge.py (26 lines), scripts/decider_worker.py (28), decide.escalate (6).
 
 ## Measured numbers
-- **E3 ledger:** 542 = smoke 18 + M1 524 (a142 / b297 / p25 / q60 / c0). M1 has 526 left; the phase has 558.
-- **Offline exit check** (`.tmp/e3r4/offline.py`, 0 cloud calls): Pallet Town reached; 1 reached exit test; 12 inputs.
-- **Perception check:** the rug is placed on the bottom wall. **Plan check:** valid but generic goal ("Reach a place not visited yet").
-- **Probe 1** (20 requests): the perceiver labelled Mom as the player, so tiles shifted 3 rows; 17 duplicates; the stairs were taken; upstairs became the new place `p_world`.
-- **Probe 2** (20 requests): the anchor held (tile accuracy 21/21).
-  - The ranker scored the door mat 0.12 against a shelf 0.55, and invented "exit: screen edge" targets 0.62–0.72.
-  - At step 62 an id-less target walked to the stairs (bug fixed by option A).
-  - 39 duplicates, mostly perceiver inventions.
-- **Retained run metrics at 75 steps:**
-  - Execution 0.613.
-  - Prediction 0.64 (0.88 on steps 1–50, 0.16 on steps 51–100).
-  - Cost: 1.467 asks per step and 5.15 s per step.
-  - Perception reuse 0.933; no-call choices 0.693.
-- **Places:** only the 2F–1F edge is verified; M1 false; places_matched false.
+- Exact initial stage-M command resumed 54 for 20 steps/max 40 requests; exit 0, steps 55-74, checkpoint 74, 23 actual requests.
+- Town reached after step 67, truth 68 map 0x00 (5,6), within 14 requests; path north immediately re-entered house 1F at 68.
+- Final truth 75: house 2F 0x26 (7,1), party 0, HAND/BLUE correct; M1 is not passed.
+- E3 ledger 565 = smoke 18 + M1 547; a 142 / b 297 / p 25 / q 60 / c 23; remaining phase 535 / M1 503 / c 523.
+- Prescribed eval_run.py runs/m1 exits 1: ModuleNotFoundError for agent.memory in _e4_metrics; runs/m1/summary.json is stale.
+- Separate root-imported diagnostic evaluator, 0 calls: m1_gate_pass=false, places_matched=false; house purities 1.0, Town/lab unconfirmed, all three gate edges false; 66 game_text rows.
+- Diagnostic spatial: 20/20 tile samples; 52 new duplicates (53 total); known-exit id reuse 1/1.
+- Diagnostic execution 48/74; prediction 49/74; 1.5 asks/step, 1.392 successful uncached asks/step, 4.780 s/step; repeated mistakes 7.
+- Diagnostic retrieval 0/1094 and poison 0/88; reflection 1 completed goal/2 wakes; 12 repeated action/outcome pairs, promoted patterns 0.
+- E4 gate learning accuracies, paired memory proxy, trainer/move and door promotion checks remain unmeasured; no E4 run or threshold tuning.
 
 ## Environment and gotchas
-- Use `.venv-agent/Scripts/python.exe` with forward-slash paths. Unit tests use StubModel/GridEnv and make 0 cloud calls.
-- The cloud perceiver (`gemma4:31b-cloud`, prompt `e3-perceiver-7`) ignores the `format` schema, so every prompt must state its JSON shape.
-- Preserve `.cache/model/`: a resume from checkpoint 54 replays cached replies for free until the run diverges.
-- Evidence: `.tmp/e3r5/probe1/`, `.tmp/e3r5/probe2/` (trace, truth, frames, checkpoints), `.tmp/e3r5/probe2-eval.json`, `.tmp/e3r4/replay_55_57.py`.
-- `runs/m1` currently holds checkpoints 0–54 plus the failed probe's 75; `--from-step 54` prunes 75.
-- `scripts/eval_run.py` has the M1 and spatial metrics; E4.4 adds the learning metrics.
+- Use .venv-agent/Scripts/python.exe; unit tests use StubModel/GridEnv and make 0 cloud calls; full-suite evidence .tmp/e4/full-suite.txt.
+- New evaluator agent imports need repository-root sys.path for direct script execution; pytest/imported evaluate concealed this CLI bug.
+- Headroom 0.40.0 installed outside repo at C:/Users/Abj1/.codex/tools/headroom, globally registered/enabled with Codex MCP; CodeGraph MCP is registered/enabled too.
+- This session used real MCP tools through C:/Users/Abj1/.codex/tools/headroom/mcp_call.py; Headroom retained protected/no-op reads, no measured savings; no model proxy was started.
+- Preserve .cache/model/; abandoned requests count even when resume truncates logs.
+- Failed command output .tmp/e4/stage-m-eval.json is a traceback; diagnostic numbers are separately .tmp/e4/stage-m-diagnostic-eval.json.
+- Live output .tmp/e4/stage-m-output.txt; trace with before/after truth .tmp/e4/stage-m-evidence.json; final frame .tmp/e4/stage-m-final.png.
+- Frames runs/m1/frames/000067.png before exit, 000068.png visibly Town, 000069.png after re-entry, 000074.png before stairs.
+- Pre-resume evidence .tmp/e4/pre-stage-m/; original ledger .tmp/e4/e3-budget-before.json; previous probe evidence .tmp/e3r5/probe2/.
 
 ## Deviations from plan and contracts
-- M1 is not passed; its gate moved into E4 (user decision 2026-10-11).
-- The contracts.md E4 entries were revised the same day: reflection is an extension of `plan`, wake reasons live in the loop trigger (no `Tasks.wake`), and pattern kinds are normalized.
-- `agent/` is over the spec's line headline; deletion candidates are reported in E4.
+- All WP models changed by user to GPT-6 Luna high; no Sonnet/Haiku/Opus agents were used.
+- Optional parameters/metadata follow contracts' additive convention; contracts.md is unchanged and no further contract change is needed.
+- Evaluator diagnostic API invocation was reporting only and did not turn the failed prescribed CLI into a passed check.
+- Initial reflection fixture failures were corrected for frame reuse/new plan replies; metric fixes briefly exceeded budget, then only new code was reduced to +90.
+- Commits made: none; M1 and E4 gates remain unpassed; loop/ still exists.
 
 ## Do not retry
-- Do not re-probe the house outside E4.5 stage M; stage M's early stop bounds the cost.
-- Never rescue a failed live check with a mid-check code patch; stop and report.
-- Never re-wire the decider ranker or add game-specific exit rules.
+- Do not patch/restart the stopped live check or rerun the kickoff blindly; first plan an offline CLI repair and obtain the next instruction.
+- Never rescue agent decisions with truth, game-specific exit rules or the unused ranker; never overwrite the retained checkpoint/ledger/cache.
 
 ## Open issues for E4
-- **House exit (stage M risk):** perceiver-invented exits ("exit: screen edge" indoors) and furniture may be tested before the real door mat.
-- **Re-entry by a new route** restarts a place frame at (0, 0); drift checks compare consecutive perceptions, not memory.
-- **Duplicates** stay high from perceiver inventions, so the 0-duplicates metric is report-only.
-- **Deletion candidates:** `agent/judge.py`, `scripts/decider_worker.py`, `decide.escalate`.
-- **Deferred:** shortcuts, the live ablation, E1b, E5, perception skipping on known views, tile-based landmark matching.
+- Fix the evaluator import path and add a real standalone CLI check before any newly authorized live continuation.
+- Candidate Town never confirms before re-entry; rug exit is scored screen_changes/surprise; repeated shelf inventions create 52 duplicates; later upstairs becomes p_world_2.
+- New-route re-entry framing, perception inventions and generic goals remain risks; tile accuracy alone does not establish stable place identity.
+- Defer shortcuts, live ablation, E1b, E5, perception skipping, tile landmark matching and fixed-camera games.

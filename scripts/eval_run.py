@@ -5,6 +5,8 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 MAPS = {"0x26": "Red's house 2F", "0x25": "Red's house 1F",
         "0x00": "Pallet Town", "0x28": "Oak's lab"}
 EDGES = (("0x26", "0x25"), ("0x25", "0x00"), ("0x00", "0x28"))
@@ -172,7 +174,90 @@ def _known_exit_reuse(trace, truth_rows, tile_history):
             "pass": reused == total if total else None}
 
 
-def evaluate(run):
+def _e4_metrics(run, trace, truth_rows):
+    from agent.memory import normalize_kind
+    kinds = {r["id"]: normalize_kind(r.get("kind")) for r in replay(run / "memory" / "entities.jsonl")}
+    verified = {c.get("id") for r in trace if (c := r.get("choice") or {}).get("verb") == "approach" and
+                kinds.get(c.get("id")) in {"door", "exit"} and "place_changes" in (o := r.get("outcome") or {}).get("effects", []) and
+                (o.get("basis") or {}).get("place_changes") == "pixel"}
+    truth_rows = sorted(truth_rows, key=lambda x: x.get("step", 0))
+    battles = sum(r.get("battle") == 2 and (i == 0 or truth_rows[i-1].get("battle") != 2) for i, r in enumerate(truth_rows))
+    moves = sum((r.get("choice") or {}).get("verb") == "select" and
+                 (truth := next((t for t in truth_rows if t.get("step") == r.get("step")), {})).get("battle") == 2
+                 for r in trace)
+    action = lambda r: (r.get("place"), str((r.get("choice") or {}).get("verb", "")).casefold(),
+                        str((r.get("choice") or {}).get("target", "")).casefold())
+    observed = lambda r: (tuple(sorted(e for e in (r.get("outcome") or {}).get("effects", [])
+                        if ((r.get("outcome") or {}).get("basis") or {}).get(e) == "pixel")),
+                        str((r.get("outcome") or {}).get("to") or ""))
+    ordered = sorted(trace, key=lambda x: x.get("step", 0))
+    repeats = Counter((action(a), action(b), observed(a), observed(b)) for a, b in zip(ordered, ordered[1:]) if action(a)[1] and action(b)[1] and observed(a)[0] and observed(b)[0])
+    plans = [(i, r) for i, r in enumerate(trace) if r.get("wake")]
+    done_plans = {t.get("plan_step") for t in replay(run / "memory" / "tasks.jsonl") if t.get("status") == "done" and isinstance(t.get("plan_step"), int)}
+    completed = sum(row.get("step") in done_plans for _, row in plans)
+    return {"doors_verified": len(verified - {None}),
+            "patterns_promoted": sum(r.get("state") == "promoted" for r in replay(run / "memory" / "patterns.jsonl")),
+            "battles": battles, "moves_selected": moves,
+            "repeat_sequences": {"length": 2, "count": sum(n > 1 for n in repeats.values())},
+            "reflection_usefulness": {"plan_calls": len(plans), "goals_completed": completed}}
+
+
+def _repredict(run, trace, hide_memory=False):
+    from tempfile import TemporaryDirectory
+    from agent.memory import Memory, normalize_kind
+    from agent.predict import PRED, predict, verdict
+
+    history = read(run / "memory" / "entities.jsonl")
+    chooser = {r.get("step"): r.get("choice") or {} for r in read(run / "chooser.jsonl")}
+    counts, verified, excluded = {"repeat": [0, 0, 0], "first": [0, 0, 0]}, set(), 0
+    with TemporaryDirectory() as temp:
+        mem = Memory(Path(temp))
+        for row in sorted(trace, key=lambda x: x.get("step", 0)):
+            step, choice = row.get("step", 0), row.get("choice") or {}
+            for entity in history:
+                if entity.get("last", entity.get("first", 0)) <= step:
+                    mem.upsert("entities", entity)
+            eid, verb = choice.get("id"), str(choice.get("verb") or "").casefold()
+            entity = mem.get("entities", eid) or {}
+            key = (normalize_kind(entity.get("kind")), verb)
+            was_repeat = key in verified
+            learned = predict(mem, {"verb": verb}, eid, row.get("place")) if eid else None
+            logged = row.get("pred") or {}
+            saved = chooser.get(step, {})
+            guess = logged if logged.get("basis") == "guess" else (
+                {"basis": "guess", "effect": saved.get("effect"), "detail": saved.get("detail")} if saved.get("effect") else None)
+            outcome = row.get("outcome") or {}
+            pixel = [e for e in outcome.get("effects", [])
+                     if (outcome.get("basis") or {}).get(e) == "pixel"]
+            pred = learned or guess
+            actual = {"effects": pixel, "to": outcome.get("to")}
+            if not key[0] or not verb or not guess or not guess.get("effect") or not pixel: excluded += 1
+            else:
+                selected = guess if hide_memory else pred
+                result, baseline = verdict(selected, actual), verdict(guess, actual)
+                slot = counts["repeat" if was_repeat else "first"]
+                slot[0] += result == "hit"; slot[1] += baseline == "hit"; slot[2] += 1
+            if eid and key[0] and verb and pixel: verified.add(key)
+            if eid:
+                for effect in pixel:
+                    detail = outcome.get("to") if effect == "place_changes" else outcome.get("detail") or ""
+                    if effect == "place_changes" and detail: mem.upsert("places", {"id": detail, "state": "place"})
+                    if effect in PRED:
+                        mem.relate(eid, PRED[effect], str(detail or ""), src="observed", step=step,
+                                   hit=True, verb=verb, pattern_id=pred.get("id") if pred and pred.get("effect") == effect and pred.get("basis") == "pattern" else None)
+            effect = (pred or {}).get("effect")
+            if eid and effect in PRED and pixel and verdict(pred, actual) != "hit":
+                mem.relate(eid, PRED[effect], str(pred.get("detail") or ""), src="observed", step=step,
+                           hit=False, verb=verb, pattern_id=pred.get("id") if pred.get("basis") == "pattern" else None)
+    first, repeat = counts["first"], counts["repeat"]
+    n = repeat[2] + first[2]
+    return {"acc_repeat": rate(repeat[1] if hide_memory else repeat[0], repeat[2]),
+            "acc_first": rate(first[1] if hide_memory else first[0], first[2]),
+            "n": n, "n_repeat": repeat[2], "n_first": first[2],
+            "excluded": excluded, "coverage": rate(n, len(trace))}
+
+
+def evaluate(run, *, repredict=False, hide_memory=False):
     run = Path(run)
     trace, truth_rows = read(run / "trace.jsonl"), read(run / "truth.jsonl")
     truth = {r.get("step"): r for r in truth_rows}
@@ -287,7 +372,7 @@ def evaluate(run):
                            m1["places_matched"] and all(p is not None and p >= .9 for p in purity.values()) and
                            all(edges_found.values()) and game_text >= 10 and
                            m1["player_name_match"] and m1["rival_name_match"])
-    return {**m1,
+    result = {**m1,
             "execution_success": {"done": done, "total": len(skills), "rate": rate(done, len(skills))},
             "prediction_accuracy": {"overall": accuracy(verdict_rows),
                                     "by_50_steps": {f"{k}-{k+49}": accuracy(v) for k, v in sorted(buckets.items())}},
@@ -311,12 +396,19 @@ def evaluate(run):
                         "entity_duplicates": {"total": duplicates,
                                               "legacy": legacy_duplicates,
                                               "new_after_resume": new_duplicates},
-                        "known_exit_id_reuse": exit_reuse}}
+                        "known_exit_id_reuse": exit_reuse},
+            **_e4_metrics(run, trace, truth_rows)}
+    if repredict:
+        result.update(_repredict(run, trace, hide_memory))
+    return result
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: eval_run.py runs/<id>")
-    result = evaluate(sys.argv[1])
-    (Path(sys.argv[1]) / "summary.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    args = sys.argv[1:]
+    flags = {arg for arg in args if arg.startswith("--")}
+    paths = [arg for arg in args if not arg.startswith("--")]
+    if len(paths) != 1 or flags - {"--repredict", "--hide-memory"} or ("--hide-memory" in flags and "--repredict" not in flags):
+        raise SystemExit("usage: eval_run.py runs/<id> [--repredict [--hide-memory]]")
+    result = evaluate(paths[0], repredict="--repredict" in flags, hide_memory="--hide-memory" in flags)
+    (Path(paths[0]) / "summary.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, indent=2))

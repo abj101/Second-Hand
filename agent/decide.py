@@ -10,7 +10,7 @@ from agent.predict import EFFECTS
 SYSTEM = "Choose a useful next action from the visible options. Return only JSON."
 COND_KINDS = {"place_is", "entity_known", "text_seen", "relation", "steps_over", "new_place"}
 _COND = {"type": "object", "anyOf": [{"type": "object", "properties": {k: {"type": "string"}}, "required": [k], "additionalProperties": False} for k in ("place_is", "entity_known", "text_seen")] + [{"type": "object", "properties": {"relation": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 3}}, "required": ["relation"], "additionalProperties": False}, {"type": "object", "properties": {"new_place": {"type": "boolean", "enum": [True]}}, "required": ["new_place"], "additionalProperties": False}, {"type": "object", "properties": {"steps_over": {"type": "integer"}}, "required": ["steps_over"], "additionalProperties": False}]}
-_TASKS = {"type": "object", "properties": {"tasks": {"type": "array", "items": {"type": "object", "properties": {"goal": {"type": "string"}, "done_when": {"type": "array", "items": _COND}, "fail_when": {"type": "array", "items": _COND}, "budget": {"type": "integer"}}, "required": ["goal", "done_when"]}}}, "required": ["tasks"]}
+_TASKS = {"type": "object", "properties": {"tasks": {"type": "array", "items": {"type": "object", "properties": {"goal": {"type": "string"}, "done_when": {"type": "array", "items": _COND}, "fail_when": {"type": "array", "items": _COND}, "budget": {"type": "integer"}}, "required": ["goal", "done_when"]}}, "pattern_names": {"type": "object", "additionalProperties": {"type": "string"}}, "notes": {"type": "string"}}, "required": ["tasks"]}
 
 
 @dataclass
@@ -176,15 +176,25 @@ def next_test(judge, goal: str, known: list[str], candidates: list[dict], tested
     try: return labels.get(judge.rank({"goal": goal, "known": known, "things": things}, question).get("answers", {}).get("target", {}).get("choice"), options[0]) if judge else options[0]
     except (AttributeError, TypeError): return options[0]
 
-def plan(model, view: str, reason: str, last_goal: str = "", last_end: str = "", screen_text: str | list[str] = "") -> list[dict]:
+class PlanResult(list):
+    def __init__(self, tasks, pattern_names=None, notes=""):
+        super().__init__(tasks); self.pattern_names = pattern_names or {}; self.notes = notes
+
+
+def plan(model, view: str, reason: str, last_goal: str = "", last_end: str = "", screen_text: str | list[str] = "", pattern_names: dict | None = None) -> list[dict]:
     text = "\n".join(screen_text) if isinstance(screen_text, list) else str(screen_text or "")
+    known = {str(k): str(v) for k, v in (pattern_names or {}).items() if isinstance(k, str) and isinstance(v, str)}
     data = model.ask("Set a useful, verifiable next goal from the memory and current screen. Return only JSON.",
                      f"Memory:\n{view}\nTrigger: {reason}\nLast goal: {last_goal}\nEnded: {last_end}\n"
-                     f"Screen text: {text}\nReturn one main goal and an optional child first step toward it; "
+                     f"Screen text: {text}\nExisting pattern ids and names: {known}\nReturn one main goal and an optional child first step toward it; "
                      "use new_place, text_seen, entity_known, relation, steps_over; prefer new_place for travel. "
-                     'Answer exactly as {"tasks":[{"goal":str,"done_when":[{"new_place":true}],"fail_when":[{"steps_over":40}]}]}.',
+                     'Answer as {"tasks":[{"goal":str,"done_when":[{"new_place":true}],"fail_when":[{"steps_over":40}]}],"pattern_names":{"existing_id":"short name"},"notes":"brief useful observation"}. '
+                     "Only name ids listed above; omit unknown ids and never promote patterns.",
                      schema=_TASKS, role="plan").data
-    return _task_results(data, 2, {"new_place", "text_seen", "entity_known", "relation", "steps_over"}, 40)
+    names = data.get("pattern_names", {}) if isinstance(data, dict) else {}
+    names = {k: v for k, v in names.items() if isinstance(k, str) and isinstance(v, str)} if isinstance(names, dict) else {}
+    return PlanResult(_task_results(data, 2, {"new_place", "text_seen", "entity_known", "relation", "steps_over"}, 40), names,
+                      data.get("notes", "") if isinstance(data, dict) and isinstance(data.get("notes", ""), str) else "")
 
 def escalate(model, view: str, reason: str) -> list[dict]:
     prompt = (f"View:\n{view}\nReason: {reason}\n" 

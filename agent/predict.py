@@ -1,7 +1,7 @@
 """Game-neutral effect labels and prediction verdicts."""
 
 from agent.observer import changed, cut
-from agent.memory import conf
+from agent.memory import conf, normalize_kind
 
 EFFECTS = ("place_changes", "text_appears", "screen_changes", "entity_appears",
            "entity_disappears", "view_scrolled", "no_change")
@@ -15,14 +15,23 @@ def predict(mem, aff: dict, target_id: str | None, place: str) -> dict | None:
     if not target_id:
         return None
     effects_by_pred = {predicate: effect for effect, predicate in PRED.items()}
+    verb = str(aff.get("verb") or "").casefold()
     matches = [row for row in mem.rows("relations")
                if row.get("s") == target_id and row.get("p") in effects_by_pred
+               and (not verb or not row.get("verb") or row.get("verb") == verb)
                and row.get("src") == "observed" and row.get("state") == "live"]
     if matches:
         row = max(matches, key=conf)
         return {"basis": "instance", "id": row["id"], "effect": effects_by_pred[row["p"]],
                 "detail": row["o"], "conf": conf(row)}
-    # E4: patterns
+    kind = normalize_kind((mem.get("entities", target_id) or {}).get("kind", ""))
+    patterns = [row for row in mem.rows("patterns") if row.get("state") == "promoted"
+                and row.get("s") == kind and row.get("verb") == verb
+                and row.get("p") in effects_by_pred]
+    if patterns:
+        row = max(patterns, key=conf)
+        return {"basis": "pattern", "id": row["id"],
+                "effect": effects_by_pred[row["p"]], "detail": None, "conf": conf(row)}
     return None
 
 

@@ -174,3 +174,14 @@ def test_match_place_ignores_exit_prefix_and_follows_leads_to(tmp_path):
     assert mem.match_place({"screen": "world"}, 5, via=" Exit: Stairs", **cut) == "p_2f"
     mem.relate("e_door", "leads_to", "p_2f", src="inferred", step=1)
     assert mem.match_place({"screen": "world"}, 5, prev="p_out", cut=True, via="exit: door", via_id="e_door") == "p_2f"
+
+
+def test_observe_same_name_block_keeps_stable_ids(tmp_path):
+    m = Memory(tmp_path)
+    frame = {"entities": [{"name": "shelf", "kind": "object"} for _ in range(4)]}
+    tiles = {0: (-5, -3), 1: (-4, -3), 2: (-5, -2), 3: (-4, -2)}
+    first = m.observe(frame, "p", 1, tiles)
+    for step in range(2, 5):
+        assert m.observe(frame, "p", step, tiles) == first
+    rows = [r for r in m.rows("entities") if r["name"].startswith("shelf")]
+    assert len(rows) == 4 and all(r["seen"] == 4 for r in rows)

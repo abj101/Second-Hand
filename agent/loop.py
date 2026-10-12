@@ -37,7 +37,7 @@ class Loop:
         return per, key, False, ids
     def step(self):
         start, calls = time.perf_counter(), self.model.calls
-        before_set = wait_settled(self.env); before = before_set.frame; prior = self.place
+        before_set = wait_settled(self.env); before = before_set.frame; prior = self.place; known_places = {p.get("id") for p in self.mem.rows("places")}
         per, frame_hash, reused, _ = self._see(before, prior); self.empty_streak = self.empty_streak + 1 if self.parse_failed else 0; self.repair_used = self.repair_used if self.parse_failed else False
         via = next((a.get("target") for a in per.get("affordances", []) if a.get("verb") == "approach"), None)
         modal = self.prev and {self.prev.get("screen"), per.get("screen")} <= {"world", "dialogue", "menu"} and self.prev.get("screen") != per.get("screen") and "world" in (self.prev.get("screen"), per.get("screen")) and not (self.pending_cut or before_set.blank_seen)
@@ -109,7 +109,8 @@ class Loop:
         if scene_cut and not modal and next_place != place: self.pos = tuple(known_exit["arrive"]) if known_exit else (0, 0); self.drift = self.drift_ref = None; self.entity_tiles = self.entity_ids = {}
         if skill.scroll != (0, 0) and next_place == place and self.mem.get("places", place).get("state") == "candidate":
             source = self.mem.get("places", place); source["state"] = "place"; self.mem.upsert("places", source)
-        outcome = effects(per, after_per, skill, place, next_place, place_after_candidate=bool(self.mem.get("places", next_place).get("state") == "candidate"), scene_cut=scene_cut)
+        world_exit = bool(scene_cut and next_place != place and cut_dir and per.get("screen") == after_per.get("screen") == "world")
+        outcome = effects(per, after_per, skill, place, next_place, place_after_candidate=not world_exit and self.mem.get("places", next_place).get("state") == "candidate", scene_cut=scene_cut)
         blocked = skill.reason == "route blocked" and planned_route and len(moves) < len(planned_route["dirs"])
         if blocked and candidate and next_place == place: self.commit = (place, candidate.get("id"), candidate.get("name"))  # keep the target after a wall bump; the ranker would wander
         pred = (preds[choice.i] or {"effect": choice.effect, "detail": choice.detail, "basis": "guess"}) if choice else None
@@ -123,17 +124,19 @@ class Loop:
                 detail = outcome.get("to") if effect == "place_changes" else choice.detail or effect
                 self.mem.relate(targets[choice.i], PRED[effect], str(detail or ""),
                     src=outcome["basis"].get(effect, "model"), step=self.step_no + 1,
-                    hit=True if outcome["basis"].get(effect) == "pixel" else None)
+                    hit=True if outcome["basis"].get(effect) == "pixel" else None,
+                    verb=affs[choice.i]["verb"], pattern_id=pred.get("id") if pred and pred.get("basis") == "pattern" and effect == pred.get("effect") else None)
             # A route stopped by a newly learned wall before the target says nothing about the target; replan next step.
             if pred and pred["effect"] not in outcome["effects"] and not blocked:
                 self.mem.relate(targets[choice.i], PRED[pred["effect"]], str(pred.get("detail") or ""),
-                                src="observed", step=self.step_no+1, hit=False)
+                                src="observed", step=self.step_no+1, hit=False, verb=affs[choice.i]["verb"],
+                                pattern_id=pred.get("id") if pred.get("basis") == "pattern" else None)
         edge_rows = self.mem.get("places", place).get("edges", [])
         verified_edge = bool(choice and scene_cut and next_place != place and any(outcome["basis"].get(e) == "pixel" for e in ("place_changes", "screen_changes")) and
             not any((e.get("verb"), e.get("via"), e.get("to")) == (affs[choice.i]["verb"], affs[choice.i].get("target", ""), next_place) and e.get("ok") for e in edge_rows))
         if choice and scene_cut:
             self.mem.add_edge(place, affs[choice.i]["verb"], affs[choice.i].get("target", ""), next_place, True)
-            if next_place != place and cut_dir and per.get("screen") == after_per.get("screen") == "world": mark_exit(self.mem, place, exit_source, cut_dir, next_place, tuple(known_exit["arrive"]) if known_exit else (0,0), self.step_no+1)
+            if world_exit: mark_exit(self.mem, place, exit_source, cut_dir, next_place, tuple(known_exit["arrive"]) if known_exit else (0,0), self.step_no+1)
         if skill.reason == "exit not crossed" and candidate and candidate.get("push") and planned_route and len(moves) > len(planned_route["dirs"]):
             pushed = self.mem.get("tiles", f"{place}@{(candidate.get('tile') or self.pos)[0]},{(candidate.get('tile') or self.pos)[1]}")
             if pushed: pushed["pushed"] = list(dict.fromkeys([*pushed.get("pushed", []), candidate["push"]])); self.mem.upsert("tiles", pushed)
@@ -144,7 +147,7 @@ class Loop:
             "outcome": outcome, "verdict": v, "calls": self.model.calls-calls, "ms": int((time.perf_counter()-start)*1000), "shortcut": None,
             "ranker": None, "perception_reused": reused, "frame_hash": frame_hash,
             "scene_cut": scene_cut, "next_place": next_place, "verified_edge": verified_edge, "view_ids": view_ids, "tile": self.pos if self.tile_px else None, "drift_fix": list(drift_fix) if drift_fix else None, **({"exit": list(exit_key)} if scene_cut and not modal and next_place != place and exit_key else {}),
-            "task_budget_exhausted": any(t.get("last_failure") == "budget exhausted" for t in changed_tasks)}
+            "task_budget_exhausted": any(t.get("last_failure") == "budget exhausted" for t in changed_tasks), "wake": None}
         self.step_no += 1
         (self.mem.root.parent / row["frame"]).parent.mkdir(parents=True, exist_ok=True); before.save(self.mem.root.parent / row["frame"])
         arrival = next((e for e in after_per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
@@ -161,7 +164,6 @@ class Loop:
                 else: self.drift,self.drift_ref=drift,anchor if drift else None
         self.entity_ids = self.mem.observe(after_per, next_place, self.step_no, after_tiles); self.entity_tiles = {self.entity_ids[i]:p for i,p in after_tiles.items() if i in self.entity_ids}
         row["tile"], row["drift_fix"] = self.pos if self.tile_px else None, list(drift_fix) if drift_fix else None
-        self.trace.write(row); self.recent = [*self.recent, row][-5:]
         for text in after_per.get("text", []):
             if text not in per.get("text", []): self.mem.know(text, src="game_text", step=self.step_no)
         self.place, self.prev, self.prev_frame, self.cached, self.cached_hash = next_place, after_per, after, after_per, after_hash
@@ -169,13 +171,20 @@ class Loop:
         if unknown: reason = "player position unknown"
         ended = changed_tasks[-1] if changed_tasks else {}; game_text_count = sum(r.get("src") == "game_text" for r in self.mem.rows("knowledge"))
         self.pending_plan_reason = (f"goal {ended.get('status')}: {ended.get('goal', '')}" if changed_tasks else reason or self.pending_plan_reason or ("new game text" if game_text_count > self.last_plan_text_count else None))
+        if not self.pending_plan_reason: self.pending_plan_reason = "surprise" if v == "surprise" else "new_place" if verified_edge and next_place not in known_places else "periodic" if self.step_no % 50 == 0 else None
+        if self.pending_plan_reason and (self.last_plan_step is None or self.step_no - self.last_plan_step >= 15): row["wake"] = self.pending_plan_reason
+        self.trace.write(row); self.recent = [*self.recent, row][-5:]
         if self.pending_plan_reason and (self.last_plan_step is None or self.step_no - self.last_plan_step >= 15):
             ended = changed_tasks[-1] if changed_tasks else next((t for t in reversed(self.mem.rows("tasks")) if self.pending_plan_reason == f"goal {t.get('status')}: {t.get('goal', '')}"), {})
-            plan_view, _ = self.mem.view("orchestrator", {**ctx, "task": task.get("id")}); planned = plan(self.model, plan_view + "\n" + describe(self.mem, place, self.pos), self.pending_plan_reason, ended.get("goal", task.get("goal", "")), ended.get("status", ""), per.get("text", []))
+            plan_view, _ = self.mem.view("orchestrator", {**ctx, "task": task.get("id")}); planned = plan(self.model, plan_view + "\n" + describe(self.mem, place, self.pos), self.pending_plan_reason, ended.get("goal", task.get("goal", "")), ended.get("status", ""), per.get("text", []), pattern_names={p["id"]: p.get("name", "") for p in self.mem.rows("patterns") if p.get("id")})
             parent = task.get("id")
             for sub in planned:
-                try: parent = self.tasks.add(**sub, parent=parent)["id"]
+                try:
+                    added = self.tasks.add(**sub, parent=parent); added["plan_step"] = self.step_no; self.mem.upsert("tasks", added); parent = added["id"]
                 except ValueError: continue
+            for pattern in self.mem.rows("patterns"):
+                name = getattr(planned, "pattern_names", {}).get(pattern.get("id"))
+                if isinstance(name, str) and name.strip(): pattern["name"] = name.strip(); self.mem.upsert("patterns", pattern)
             self.last_plan_step, self.last_plan_text_count, self.pending_plan_reason = self.step_no, game_text_count, None
         return row
     def state(self):

@@ -13,6 +13,57 @@ def perception(*, two=False, press=False):
         [{"verb":"approach","target":"player","at":[500,500]}] * (2 if two else 1))
     return {"screen":"room","text":[],"entities":[{"kind":"player","name":"Hand","at":[500,500]}],"affordances":affs}
 
+
+@pytest.mark.parametrize(("start", "surprise"), [(0, True), (49, False)])
+def test_reflection_wake_calls_plan_once_and_ignores_unknown_pattern(tmp_path, monkeypatch, start, surprise):
+    from agent import loop as loop_module
+
+    calls = 0
+    def verdict(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return "surprise" if surprise and calls == 1 else "hit"
+    monkeypatch.setattr(loop_module, "verdict", verdict)
+    class Captures(StubModel):
+        def __init__(self, replies): super().__init__(replies); self.roles = []
+        def ask(self, *args, **kwargs):
+            self.roles.append(kwargs.get("role")); return super().ask(*args, **kwargs)
+    model = Captures([reply(perception()), reply({"tasks": [], "pattern_names": {"p1": "named", "missing": "ignored"}}), reply(perception())])
+    mem = Memory(tmp_path / "memory"); mem.upsert("patterns", {"id": "p1", "name": "old", "state": "candidate"})
+    loop = Loop(GridEnv(), model, mem, "grid"); loop.step_no = start
+
+    first, second = loop.step(), loop.step()
+
+    assert first["wake"] == ("surprise" if surprise else "periodic") and second["wake"] is None
+    assert mem.get("patterns", "p1")["name"] == "named" and mem.get("patterns", "missing") is None
+    assert model.roles.count("plan") == 1 and model.calls == 2
+
+
+@pytest.mark.parametrize(("known", "wake"), [(False, "new_place"), (True, None)])
+def test_verified_edge_wakes_only_for_previously_unknown_place(tmp_path, monkeypatch, known, wake):
+    from agent import loop as loop_module
+
+    monkeypatch.setattr(loop_module, "cut", lambda *args, **kwargs: True)
+    monkeypatch.setattr(loop_module, "effects", lambda *args, **kwargs: {"effects": ["place_changes"], "basis": {"place_changes": "pixel"}, "to": "destination"})
+    monkeypatch.setattr(loop_module, "verdict", lambda *args, **kwargs: "hit")
+    replies = [reply(perception())] + ([reply({"tasks": []})] if not known else [])
+    model = StubModel(replies); mem = Memory(tmp_path / "memory")
+    mem.upsert("places", {"id": "source", "name": "Source", "edges": []})
+    if known: mem.upsert("places", {"id": "destination", "name": "Destination", "edges": []})
+    loop = Loop(GridEnv(), model, mem, "grid")
+    matches = 0
+    def match_place(*args, **kwargs):
+        nonlocal matches
+        matches += 1
+        if matches % 2 == 0 and not known: mem.upsert("places", {"id": "destination", "name": "Destination", "edges": []})
+        return "source" if matches % 2 else "destination"
+    loop.mem.match_place = match_place
+
+    row = loop.step()
+
+    assert row["verified_edge"] and row["wake"] == wake
+    assert model.calls == (1 if known else 2)
+
 def test_twenty_steps_have_contract_keys_and_reuse(tmp_path):
     model=StubModel([reply(perception()), *[reply({"tasks":[]}) for _ in range(10)]]); loop=Loop(GridEnv(),model,Memory(tmp_path/"memory"),"grid")
     rows=[loop.step() for _ in range(20)]
@@ -163,7 +214,7 @@ def test_grid_loop_pushes_bottom_wall_mat_down_within_three_steps(tmp_path, monk
     def record(*args,**kwargs):
         result=run(*args,**kwargs); seen.extend(result.moves); return result
     monkeypatch.setattr(module,"perceive",perceive); monkeypatch.setattr(module,"run_affordance",record)
-    loop=Loop(env,StubModel([]),Memory(tmp_path/"memory"),"grid"); loop.tasks.add("Find another room",[{"new_place":True}])
+    loop=Loop(env,StubModel([reply({"tasks":[]})]),Memory(tmp_path/"memory"),"grid"); loop.tasks.add("Find another room",[{"new_place":True}])
     rows=[loop.step()]
     assert rows[-1]["choice"]["target"]=="mat" and rows[-1]["scene_cut"] and env.scene==1
     assert seen[-1][0]=="DOWN" and rows[-1]["step"]<=3
@@ -252,7 +303,7 @@ def test_explicit_transition_into_dialogue_creates_place(tmp_path, monkeypatch):
     env = GridEnv()
     world = perception(); world["screen"] = "world"
     dialogue = perception(); dialogue["screen"] = "dialogue"
-    model = StubModel([reply(world), reply(dialogue)])
+    model = StubModel([reply(world), reply(dialogue), reply({"tasks": []})])
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
     def transition(ctx, aff, per, text=None, exit=False):
         before = env.screenshot(); env.scene = 1; after = env.screenshot()
@@ -261,6 +312,24 @@ def test_explicit_transition_into_dialogue_creates_place(tmp_path, monkeypatch):
     monkeypatch.setattr(loop_module, "run_affordance", transition)
     row = loop.step()
     assert row["scene_cut"] and row["next_place"] != row["place"]
+
+@pytest.mark.parametrize(("screen", "moves", "expect"), [("world", [("DOWN", 1)], True), ("world", [], False), ("dialogue", [("DOWN", 1)], False)])
+def test_directional_world_exit_into_new_place_is_place_changes(tmp_path, monkeypatch, screen, moves, expect):
+    from agent import loop as loop_module
+    env = GridEnv()
+    world = perception(); world["screen"] = "world"
+    dest = perception(); dest["screen"] = screen; dest["entities"] = [{"kind": "tree", "name": "Oak", "at": [500, 500]}]
+    model = StubModel([reply(world), reply(dest), reply({"tasks": []})])
+    loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
+    def transition(ctx, aff, per, text=None, exit=False):
+        before = env.screenshot(); env.scene = 1; after = env.screenshot()
+        return SimpleNamespace(status="done", reason="scene cut", inputs=1, calls=0, moves=moves,
+                               before=before, after=after, scroll=(0, 0), blank_seen=False)
+    monkeypatch.setattr(loop_module, "run_affordance", transition)
+    row = loop.step()
+    assert row["scene_cut"] and row["next_place"] != row["place"]
+    assert ("place_changes" in row["outcome"]["effects"]) == expect
+    if expect: assert row["outcome"]["to"] == row["next_place"]
 
 def test_blocked_exit_overrides_pixel_prediction_and_cannot_hit(tmp_path, monkeypatch):
     from agent import loop as loop_module
@@ -295,7 +364,7 @@ def test_new_place_tests_bottom_wall_entity_third_and_records_failed_targets(tmp
         data = {"screen": "other room" if env.scene else "world", "text": [], "entities": entities, "affordances": []}
         return data, reply(data)
     monkeypatch.setattr(loop_module, "perceive", perceive)
-    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop = Loop(env, StubModel([reply({"tasks": []})]), Memory(tmp_path / "memory"), "grid")
     rows = [loop.step() for _ in range(3)]
     assert [r["choice"]["target"] for r in rows] == order
     assert [r["pred"]["effect"] for r in rows] == ["place_changes"] * 3
@@ -620,7 +689,7 @@ def test_route_blocked_mid_way_replans_instead_of_ruling_out_target(tmp_path, mo
                              {"kind": "object", "name": "floor patch", "at": at, "placement": "bottom wall"}]}
         return data, reply(data)
     monkeypatch.setattr(loop_module, "perceive", perceive)
-    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid"); loop.tile_px = 16
+    loop = Loop(env, StubModel([reply({"tasks": []})]), Memory(tmp_path / "memory"), "grid"); loop.tile_px = 16
     first = loop.step()
     assert first["skill"]["reason"] == "route blocked"
     assert not [r for r in loop.mem.rows("relations") if r["p"] == "leads_to"]
@@ -639,7 +708,7 @@ def test_route_blocked_mid_way_commits_to_target_instead_of_taking_nearer_decoy(
                              {"kind": "object", "name": "decoy", "at": [0 if env.player == (8, 8) else .45, .5], "placement": "left wall"}]}
         return data, reply(data)
     monkeypatch.setattr(loop_module, "perceive", perceive)
-    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid"); loop.tile_px = 16
+    loop = Loop(env, StubModel([reply({"tasks": []})]), Memory(tmp_path / "memory"), "grid"); loop.tile_px = 16
     assert loop.step()["skill"]["reason"] == "route blocked" and loop.commit
     assert loop.restore(loop.state()) is None and loop.commit
     second = loop.step()
@@ -656,6 +725,6 @@ def test_idless_target_routes_to_its_own_tile_not_another_idless_entitys(tmp_pat
                              {"kind": "object", "name": "", "at": at(*env.door), "placement": "bottom wall"}]}
         return data, reply(data)
     monkeypatch.setattr(loop_module, "perceive", perceive)
-    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid"); loop.tile_px = 16
+    loop = Loop(env, StubModel([reply({"tasks": []})]), Memory(tmp_path / "memory"), "grid"); loop.tile_px = 16
     row = loop.step()
     assert env.scene == 1 and row["scene_cut"]

@@ -60,3 +60,11 @@ def test_mark_exit_records_observed_and_inferred_reverse(tmp_path):
     assert exit_to(mem, "east", (0, 2), "LEFT") == {"dir": "LEFT", "to": "west", "arrive": [1, 2], "src": "inferred"}
     assert exit_to(mem, "west", (1, 2), "UP") is None
     assert "(1,2) RIGHT -> East Hall" in describe(mem, "west", (1, 2))
+
+
+def test_route_and_frontier_never_cross_known_exit(tmp_path):
+    mem = Memory(tmp_path)
+    mark_exit(mem, "town", (0, 0), "UP", "house", (0, 1), 1)
+    for pos in [(1, 0), (1, -1), (1, -2), (0, -2)]: tile(mem, "town", pos)
+    assert route(mem, "town", (0, 0), (0, -2))[0] != "UP"  # detours (4 steps), never UP through the exit
+    assert ((0, 0), "UP") not in frontier(mem, "town")
