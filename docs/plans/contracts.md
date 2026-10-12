@@ -63,7 +63,8 @@ def perceive(model: Ollama, image: Image, context: str = "", *,
 Perception = {"screen": str, "text": list[str],
               "entities": list[{"kind": str, "name": str, "at": [x, y]}],
               "affordances": list[Affordance]}
-Affordance = {"verb": str, "target": str, "at": [x, y], "why": str, "to": [x, y]}   # "to" only for drag
+Affordance = {"verb": str, "target": str, "at": [x, y], "why": str, "to": [x, y],   # "to" only for drag
+              "placement": str}   # optional (E3R3, approved 2026-10-11): top wall | bottom wall | left wall | right wall | room edge | screen edge | middle
 VERBS = ("approach", "interact", "select", "click", "drag", "advance", "cancel", "type", "press")
 ```
 
@@ -200,7 +201,8 @@ def press(ctx, key: str) -> SkillResult
 def type_text(ctx, text: str) -> SkillResult         # E3
 def wait_until(ctx, max_frames: int = 240) -> SkillResult
 
-def run_affordance(ctx, aff: Affordance, perception: Perception, text: str | None = None) -> SkillResult
+def run_affordance(ctx, aff: Affordance, perception: Perception, text: str | None = None, *, exit: bool = False) -> SkillResult
+    # exit=True (E3R3): approach in exit mode (refine, step onto, push outward) whatever the target is called
     # verb -> skill dispatch; `text` is used by verb "type"
 ```
 
@@ -219,7 +221,7 @@ def load_brief(game_id: str) -> str           # agent/briefs/<game_id>.json -> c
 def defaults(game_id: str) -> dict            # DEFAULTS merged with the brief's optional "defaults" object, e.g. {"rival": "Blue"}
 ```
 
-A brief is JSON `{"controls": [str], "notes": [str], "defaults": {role: name}}`, ≤ 8 KB. It has no objective or strategy fields, so it can't drift into walkthrough text. `GENERAL` plus the brief go once into the Perceiver context, and the Chooser gets `defaults`.
+A brief is JSON `{"controls": [str], "notes": [str], "defaults": {role: name}}`, ≤ 8 KB. It has no objective or strategy fields, so it can't drift into walkthrough text. `GENERAL` plus the brief go once into the Perceiver context. The Chooser gets `GENERAL`, the brief's controls and `defaults` (E3R3, approved 2026-10-11).
 
 ## trace
 
@@ -329,6 +331,7 @@ task  {"id","goal","done_when":[Cond],"fail_when":[Cond],"parent","status":"acti
        "budget","used","attempts","last_failure","src":"default|orchestrator|user"}
 Cond  {"place_is": place id or name} | {"entity_known": name} | {"text_seen": substring}
     | {"relation": [s, p, o]} | {"steps_over": n}
+    | {"new_place": true}   # E3R3: true once a pixel-verified ok edge reaches a place beyond those known when the task was created; latches
 ```
 
 ```python
@@ -337,7 +340,9 @@ class Tasks:
     def add(self, goal: str, done_when: list, fail_when: list = (), *, parent: str | None = None,
             budget: int = 100, src: str = "orchestrator") -> dict
     def active(self) -> dict                       # deepest active task; creates the default curiosity task if none
-        # The default task has budget 150 steps. When exhausted it fails, so Stuck escalates, and a fresh default replaces it.
+        # E3R3: goals are set by the orchestrator model (decide.plan). The fallback default, used only when no model goal is active,
+        # is "Reach a place not visited yet", done_when [{"new_place": true}], budget 40, re-armed when done or failed.
+        # An active model goal sets the default to "blocked". Every model goal carries fail_when steps_over (default 40).
     def check(self, step: int) -> list[dict]       # status changes; done needs the condition true on 2 consecutive settled steps
     def wake(self, row: dict, step: int) -> str | None
         # E4. "task_end" | "new_place" | "surprise" | "stuck" | "periodic" (every 50 steps), or None
