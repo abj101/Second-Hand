@@ -16,6 +16,9 @@ def _base(value: str) -> str:
     return re.sub(r"#\d+$", "", _key(value))
 
 
+def _via(value) -> str: return _key(value or "").removeprefix("exit:").strip()
+
+
 def _distance(a: str, b: str) -> int:
     a, b = _base(a), _base(b)
     if abs(len(a) - len(b)) > 1:
@@ -72,13 +75,22 @@ class Memory:
         return candidate
 
     def match_place(self, perception: dict, step: int, *, prev: str | None,
-                    cut: bool, via: str | None = None) -> str:
+                    cut: bool, via: str | None = None,
+                    exit: tuple[int, int, str] | None = None, via_id: str | None = None) -> str:
         if not cut and prev is not None:
             return prev
+        if cut and prev and exit:
+            from agent.space import exit_to
+            edge = exit_to(self, prev, exit[:2], exit[2])
+            if edge and edge.get("to"):
+                return edge["to"]
         if cut and prev:
             for edge in self.get("places", prev).get("edges", []) if self.get("places", prev) else ():
-                if via and edge.get("via") == via and edge.get("to"):
+                if via and _via(edge.get("via")) == _via(via) and edge.get("to"):
                     return edge["to"]
+        if cut and via_id:
+            known = next((r["o"] for r in self.rows("relations") if r.get("s") == via_id and r.get("p") == "leads_to" and r.get("state") == "live" and self.get("places", r.get("o"))), None)
+            if known: return known
         screen = str(perception.get("screen", "unknown"))
         landmarks = sorted({(str(e.get("name", "")).casefold(), str(e.get("kind", "")).casefold())
                             for e in perception.get("entities", []) if e.get("name")})
@@ -101,17 +113,19 @@ class Memory:
                                "first": step, "last": step})
         return pid
 
-    def observe(self, perception: dict, place: str, step: int) -> dict[int, str]:
+    def observe(self, perception: dict, place: str, step: int,
+                tiles: dict[int, tuple[int, int]] | None = None) -> dict[int, str]:
         result, used = {}, set()
         for i, entity in enumerate(perception.get("entities", [])):
             name, kind = str(entity.get("name", "")).strip(), str(entity.get("kind", "unknown"))
             if not name:
                 continue
             global_key = kind in RECURRING
+            tile = tiles.get(i) if tiles and not global_key else None
             all_candidates = [r for r in self.rows("entities")
                           if (r.get("kind") == kind and _distance(r.get("name", ""), name) <= 1
                               if global_key else r.get("place") == place and _distance(r.get("name", ""), name) <= 1)]
-            candidates = [r for r in all_candidates if r["id"] not in used]
+            candidates = [r for r in all_candidates if r["id"] not in used and (not tile or not r.get("tile") or max(abs(tile[0] - r["tile"][0]), abs(tile[1] - r["tile"][1])) <= 1)]
             exact = [r for r in candidates if _base(r.get("name", "")) == _base(name)]
             pool = exact or candidates
             row = pool[0] if len(pool) == 1 else None
@@ -127,11 +141,13 @@ class Memory:
                        "seen": 0, "src": "observed"}
             row.update(kind=kind, name=row.get("name", name), at=entity.get("at"), last=step,
                        seen=row.get("seen", 0) + 1)
+            if tile:
+                row["tile"] = list(tile)
             eid = self.upsert("entities", row)["id"]
             result[i], _ = eid, used.add(eid)
         return result
 
-    def resolve(self, name: str, place: str) -> str | None:
+    def resolve(self, name: str, place: str, tile=None) -> str | None:
         candidates = [r for r in self.rows("entities")
                       if (r.get("place") == place or r.get("kind") in RECURRING)
                       and _distance(r.get("name", ""), name) <= 1]
@@ -139,6 +155,9 @@ class Memory:
         pool = exact or candidates
         if len(pool) == 1:
             return pool[0]["id"]
+        if tile and pool:  # several records share the name: pick the one standing on this tile
+            d, eid = min(((max(abs(tile[0] - r["tile"][0]), abs(tile[1] - r["tile"][1])), r["id"]) for r in pool if r.get("tile")), default=(2, None))
+            if d <= 1: return eid
         if not pool:
             return self.upsert("entities", {"id": self._id("entities", name), "kind": "affordance",
                 "name": name, "place": place, "at": None, "attrs": {}, "first": 0, "last": 0,

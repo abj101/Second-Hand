@@ -1,5 +1,5 @@
 """Game-neutral, closed-loop input skills."""
-from dataclasses import dataclass, replace; from typing import Literal
+from dataclasses import dataclass, field, replace; from typing import Literal
 import re
 from PIL import Image
 from agent.env import Env
@@ -16,6 +16,7 @@ class SkillResult:
     after: Image.Image
     scroll: tuple[int, int]
     blank_seen: bool
+    moves: list[tuple[str, tuple[int, int] | None]] = field(default_factory=list)
 @dataclass
 class Ctx:
     env: Env
@@ -24,8 +25,8 @@ class Ctx:
     move_frames: int = 16
     max_inputs: int = 30
 def _settled(ctx): return wait_settled(ctx.env)
-def _result(status, reason, inputs, calls, before, after, total=(0, 0), blank=False):
-    return SkillResult(status, reason, inputs, calls, before, after, tuple(total), blank)
+def _result(status, reason, inputs, calls, before, after, total=(0, 0), blank=False, moves=None):
+    return SkillResult(status, reason, inputs, calls, before, after, tuple(total), blank, moves or [])
 def _step(ctx, direction, before):
     frames = []
     ctx.env.press(direction, ctx.move_frames, on_frame=frames.append)
@@ -40,64 +41,76 @@ def _pointer(ctx, at, target):
         return _result("failed", "target not visible", 0, 1, first.frame, first.frame, blank=first.blank_seen)
     ctx.env.click(point); last = _settled(ctx)
     return _result("done", "", 1, 1, first.frame, last.frame, blank=first.blank_seen or last.blank_seen)
-def approach(ctx: Ctx, target_at: list[float], player_at: list[float] | None, *, exit_target=None) -> SkillResult:
+def approach(ctx: Ctx, target_at: list[float], player_at: list[float] | None, *, exit_target=None, route=None) -> SkillResult:
     first = _settled(ctx)
     if ctx.env.pointer: return _pointer(ctx, target_at, "")
     if player_at is None: return _result("blocked", "player position unknown", 0, 0, first.frame, first.frame, blank=first.blank_seen)
     initial, before, blank = first.frame, first.frame, first.blank_seen
     calls = 0  # exit tests walk to the tile-snapped perceived point; a miss shows as no scene cut, so no refine call
     w, h = before.size; delta = [(target_at[0] - player_at[0]) * w, (target_at[1] - player_at[1]) * h]
-    if max(map(abs, delta)) <= (ctx.tile_px or 1) / 2: return _result("failed", "already there", 0, calls, initial, before, blank=blank)
+    if route is None and max(map(abs, delta)) <= (ctx.tile_px or 1) / 2: return _result("failed", "already there", 0, calls, initial, before, blank=blank)
     if ctx.tile_px: delta[:] = [round(v / ctx.tile_px) * ctx.tile_px for v in delta]
-    total, blocked, inputs, last_dir, pushed, axis_dirs = [0, 0], set(), 0, None, False, {}
-    while inputs < max(0, ctx.max_inputs):
+    total, blocked, inputs, last_dir, pushed, axis_dirs, moves = [0, 0], set(), 0, None, False, {}, []
+    result = lambda *args: _result(*args, moves=moves)
+    def step(direction, old):
+        end, move, saw_blank = _step(ctx, direction, old); moves.append((direction, move)); return end, move, saw_blank
+    if route is not None:
+        dirs = route.get("dirs", [])[:max(0, ctx.max_inputs)]
+        for direction in dirs:
+            end, move, saw_blank = step(direction, before); inputs += 1
+            if cut(before, end.frame, saw_blank): return result("done", "scene cut", inputs, calls, initial, end.frame, total, blank or saw_blank)
+            if move == (0, 0): return result("blocked", "route blocked", inputs, calls, initial, end.frame, total, blank or saw_blank)
+            if move is not None: total[:] = [total[i] + move[i] for i in (0, 1)]
+            blank |= saw_blank; before = end.frame; last_dir = direction
+    while route is None and inputs < max(0, ctx.max_inputs):
         if max(map(abs, delta)) <= .5:
             if last_dir and not pushed and inputs < ctx.max_inputs:
                 old = before
-                end, move, saw_blank = _step(ctx, last_dir, old)
+                end, move, saw_blank = step(last_dir, old)
                 inputs += 1
-                if move is None and not saw_blank: return _result("blocked" if exit_target is not None else "failed", "exit not crossed" if exit_target is not None else "scroll unsure", inputs, calls, initial, end.frame, total, blank or saw_blank)
+                if move is None and not saw_blank: return result("blocked" if exit_target is not None else "failed", "exit not crossed" if exit_target is not None else "scroll unsure", inputs, calls, initial, end.frame, total, blank or saw_blank)
                 if move is not None: total[:] = [total[i] + move[i] for i in (0, 1)]
                 blank |= saw_blank
-                if cut(old, end.frame, saw_blank): return _result("done", "scene cut", inputs, calls, initial, end.frame, total, blank)
+                if cut(old, end.frame, saw_blank): return result("done", "scene cut", inputs, calls, initial, end.frame, total, blank)
                 before, pushed = end.frame, True
-            if exit_target is None: return _result("done", "", inputs, calls, initial, before, total, blank)
+            if exit_target is None: return result("done", "", inputs, calls, initial, before, total, blank)
             break
         tile = ctx.tile_px or 1
         d = [v / tile for v in delta]
         axes = [a for a in (0, 1) if a not in blocked]
         if not axes:
             near = ctx.tile_px is not None and sum(round(abs(v)) for v in d) <= 1
-            if not near or exit_target is None: return _result("done" if near else "blocked", "adjacent" if near else "exit not crossed" if exit_target is not None else "both axes blocked", inputs, calls, initial, before, total, blank)
+            if not near or exit_target is None: return result("done" if near else "blocked", "adjacent" if near else "exit not crossed" if exit_target is not None else "both axes blocked", inputs, calls, initial, before, total, blank)
             break
         axis = max(axes, key=lambda a: abs(d[a]))
         direction = axis_dirs.get(axis, ("RIGHT" if axis == 0 else "DOWN")) if abs(delta[axis]) < .5 else (("RIGHT" if delta[0] > 0 else "LEFT") if axis == 0 else ("DOWN" if delta[1] > 0 else "UP"))
         if blocked: direction = axis_dirs.get(axis, direction)
-        old = before; end, move, saw_blank = _step(ctx, direction, old); inputs += 1
-        if cut(old, end.frame, saw_blank): return _result("done", "scene cut", inputs, calls, initial, end.frame, total, blank or saw_blank)
-        if move is None: return _result("blocked" if exit_target is not None else "failed", "exit not crossed" if exit_target is not None else "scroll unsure", inputs, calls, initial, end.frame, total, blank or saw_blank)
+        old = before; end, move, saw_blank = step(direction, old); inputs += 1
+        if cut(old, end.frame, saw_blank): return result("done", "scene cut", inputs, calls, initial, end.frame, total, blank or saw_blank)
+        if move is None: return result("blocked" if exit_target is not None else "failed", "exit not crossed" if exit_target is not None else "scroll unsure", inputs, calls, initial, end.frame, total, blank or saw_blank)
         if sizes := [abs(v) for v in move if v]: ctx.tile_px = min(sizes + ([ctx.tile_px] if ctx.tile_px else []))
         if ctx.tile_px: delta[:] = [round(v / ctx.tile_px) * ctx.tile_px for v in delta]
         total[:] = [total[i] + move[i] for i in (0, 1)]; blank |= saw_blank
         if move == (0, 0):
             blocked.add(axis)
             near = ctx.tile_px is not None and sum(round(abs(v / ctx.tile_px)) for v in delta) <= 1
-            if near and exit_target is None: return _result("done", "adjacent", inputs, calls, initial, end.frame, total, blank)
+            if near and exit_target is None: return result("done", "adjacent", inputs, calls, initial, end.frame, total, blank)
         else:
             delta[0] += move[0]; delta[1] += move[1]
             if ctx.tile_px: delta[:] = [round(v / ctx.tile_px) * ctx.tile_px for v in delta]
             blocked.clear()
             if move[axis]: axis_dirs[axis] = direction
         before, last_dir = end.frame, direction
+    if route is not None and exit_target is not None and inputs < ctx.max_inputs and route.get("push"): last_dir = route["push"]
     if exit_target is not None and inputs < ctx.max_inputs and last_dir:
         side = ("UP", "DOWN") if last_dir in ("LEFT", "RIGHT") else ("LEFT", "RIGHT")
-        for direction in (side[0], last_dir, side[1], side[1], last_dir):
+        for direction in ((last_dir,) if route is not None and route.get("push") else ()) + (side[0], last_dir, side[1], side[1], last_dir):
             if inputs >= ctx.max_inputs: break
-            old = before; end, move, saw_blank = _step(ctx, direction, old); inputs += 1
-            if cut(old, end.frame, saw_blank): return _result("done", "scene cut", inputs, calls, initial, end.frame, total, blank or saw_blank)
+            old = before; end, move, saw_blank = step(direction, old); inputs += 1
+            if cut(old, end.frame, saw_blank): return result("done", "scene cut", inputs, calls, initial, end.frame, total, blank or saw_blank)
             if move is not None: total[:] = [total[j] + move[j] for j in (0, 1)]
             blank |= saw_blank; before = end.frame
-    return _result("blocked", "exit not crossed" if exit_target is not None else "input limit", inputs, calls, initial, before, total, blank)
+    return result("done" if route is not None and exit_target is None and len(route.get("dirs", [])) <= inputs else "blocked", "" if route is not None and exit_target is None and len(route.get("dirs", [])) <= inputs else "exit not crossed" if exit_target is not None else "input limit", inputs, calls, initial, before, total, blank)
 def interact(ctx: Ctx, target_at: list[float], player_at: list[float] | None) -> SkillResult:
     if ctx.env.pointer: return _pointer(ctx, target_at, "")
     start = _settled(ctx)
@@ -109,16 +122,16 @@ def interact(ctx: Ctx, target_at: list[float], player_at: list[float] | None) ->
         dy = (target_at[1] - player_at[1]) * start.frame.height + total[1]
         face = ("RIGHT" if dx > 0 else "LEFT") if abs(dx) >= abs(dy) and dx else ("DOWN" if dy > 0 else "UP")
         if face in ctx.env.inputs() and inputs < ctx.max_inputs:
-            end, move, saw_blank = _step(ctx, face, moved.after); inputs += 1
+            end, move, saw_blank = _step(ctx, face, moved.after); inputs += 1; moved.moves.append((face, move))
             face_blank = saw_blank
             if move is not None: total[:] = [total[i] + move[i] for i in (0, 1)]
             if cut(moved.after, end.frame, saw_blank):
-                return _result("done", "scene cut", inputs, moved.calls, start.frame, end.frame, total, start.blank_seen or moved.blank_seen or saw_blank)
+                return _result("done", "scene cut", inputs, moved.calls, start.frame, end.frame, total, start.blank_seen or moved.blank_seen or saw_blank, moved.moves)
     if inputs < ctx.max_inputs: ctx.env.press("A", ctx.move_frames); inputs += 1
     end = _settled(ctx)
     return _result("done" if changed(start.frame, end.frame) else "failed",
                    "" if changed(start.frame, end.frame) else "nothing changed", inputs, moved.calls,
-                   start.frame, end.frame, total, start.blank_seen or moved.blank_seen or face_blank or end.blank_seen)
+                   start.frame, end.frame, total, start.blank_seen or moved.blank_seen or face_blank or end.blank_seen, moved.moves)
 def select(ctx: Ctx, item: str) -> SkillResult:
     start = _settled(ctx)
     schema = {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "string"}},
@@ -138,8 +151,9 @@ def press(ctx: Ctx, key: str) -> SkillResult:
     start = _settled(ctx); keys = ctx.env.inputs(); words = set(re.findall(r"[a-z0-9]+", key.casefold())); matches = [k for k in keys if k.casefold() in words]
     key = key if key in keys else matches[0] if len(matches) == 1 else None
     if key is None or ctx.max_inputs < 1: return _result("blocked", "unsupported input" if key is None else "input limit", 0, 0, start.frame, start.frame, blank=start.blank_seen)
-    ctx.env.press(key, ctx.move_frames); end = _settled(ctx)
-    return _result("done", "", 1, 0, start.frame, end.frame, blank=start.blank_seen or end.blank_seen)
+    end, move, blank = _step(ctx, key, start.frame) if key in ("UP", "DOWN", "LEFT", "RIGHT") else (None, None, False)
+    if end is None: ctx.env.press(key, ctx.move_frames); end = _settled(ctx)
+    return _result("done", "", 1, 0, start.frame, end.frame, blank=start.blank_seen or end.blank_seen or blank, moves=[(key, move)] if key in ("UP", "DOWN", "LEFT", "RIGHT") else [])
 def advance(ctx: Ctx) -> SkillResult: return press(ctx, "A")
 def cancel(ctx: Ctx) -> SkillResult: return press(ctx, "B")
 def wait_until(ctx: Ctx, max_frames: int = 240) -> SkillResult:
@@ -192,10 +206,10 @@ def type_text(ctx: Ctx, text: str) -> SkillResult:
         if erase is None: return _result("failed", "cannot clear name for retry", inputs, calls, start.frame, frame, blank=blank)
         if not all(press(erase) for _ in name): return _result("blocked", "input limit", inputs, calls, start.frame, frame, blank=blank)
         frame = _settled(ctx).frame
-def run_affordance(ctx: Ctx, aff: dict, perception: dict, text: str | None = None, *, exit: bool = False) -> SkillResult:
+def run_affordance(ctx: Ctx, aff: dict, perception: dict, text: str | None = None, *, exit: bool = False, route: dict | None = None) -> SkillResult:
     verb, target, at = aff.get("verb"), aff.get("target", ""), aff.get("at")
     player = next((e.get("at") for e in perception.get("entities", []) if e.get("kind", "").lower() == "player"), None)
-    if verb == "approach": return _pointer(ctx, at, target) if ctx.env.pointer else approach(ctx, at, player, exit_target=(target or "visible target") if exit else target if target.startswith("exit") else None)
+    if verb == "approach": return _pointer(ctx, at, target) if ctx.env.pointer else approach(ctx, at, player, exit_target=(target or "visible target") if exit else target if target.startswith("exit") else None, route=route)
     if verb == "interact": return _pointer(ctx, at, target) if ctx.env.pointer else interact(ctx, at, player)
     if verb == "select": return select(ctx, target)
     if verb == "advance": return advance(ctx)

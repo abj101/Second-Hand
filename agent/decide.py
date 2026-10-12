@@ -127,7 +127,7 @@ def _task_results(data: dict, limit: int = 3, kinds: set[str] | None = None, tim
 
 def navigation_candidates(perception: dict, affordance_ids: list[str | None], entity_ids: dict[int, str], *, tile_frac: tuple[float, float] | None = None, player_at: list[float] | None = None) -> list[dict]:
     entities, affs = perception.get("entities") or [], perception.get("affordances") or []
-    by_id, aff_ids = {entity_ids.get(i): e for i, e in enumerate(entities)}, {x for x in affordance_ids if x}
+    by_id, aff_ids = {entity_ids[i]: e for i, e in enumerate(entities) if entity_ids.get(i)}, {x for x in affordance_ids if x}
     rows = [(affordance_ids[i] if i < len(affordance_ids) else None, by_id.get(affordance_ids[i] if i < len(affordance_ids) else None, {}), a) for i, a in enumerate(affs) if a.get("verb") == "approach" and str(a.get("target", "")).strip().casefold() not in {"player", "the player", "player character"}]
     rows += [(entity_ids.get(i), e, {"verb": "approach", "target": e.get("name", ""), "at": e.get("at"), "why": "visible entity", **({"placement": e["placement"]} if e.get("placement") else {})}) for i, e in enumerate(entities) if e.get("kind", "").casefold() != "player" and entity_ids.get(i) not in aff_ids]
     candidates, seen = [], set()
@@ -146,9 +146,9 @@ def navigation_candidates(perception: dict, affordance_ids: list[str | None], en
     return candidates
 
 
-def resolve_target(mem, target: str, place: str) -> str | None:
+def resolve_target(mem, target: str, place: str, tile=None) -> str | None:
     name = str(target or "").strip()
-    return mem.resolve(name.split(":", 1)[1].strip() if name.casefold().startswith("exit:") else name, place) if name else None
+    return mem.resolve(name.split(":", 1)[1].strip() if name.casefold().startswith("exit:") else name, place, tile) if name else None
 
 
 def related_target_ids(mem, place: str) -> set[str]:
@@ -166,20 +166,10 @@ def known_routes(mem) -> list[str]:
     return out
 
 
-def arrival_entrance(perception: dict, via: str, reach: float = 0.2) -> str | None:
-    """The passage the player most likely came through: an exit named like `via`, else the exit nearest the player."""
-    ents, bare = perception.get("entities") or [], lambda n: str(n).split(":", 1)[-1].strip().casefold()
-    exits = [e for e in ents if e.get("kind", "").casefold() == "exit" or str(e.get("name", "")).casefold().startswith("exit:")]
-    if named := [e for e in exits if bare(e.get("name", "")) == bare(via)]: return named[0]["name"]
-    player = next((e.get("at") for e in ents if e.get("kind", "").casefold() == "player"), None)
-    near = [(abs(e["at"][0] - player[0]) + abs(e["at"][1] - player[1]), e["name"]) for e in exits if player and isinstance(e.get("at"), list) and len(e["at"]) == 2]
-    return min(near)[1] if near and min(near)[0] <= reach else None
-
-
 def next_test(judge, goal: str, known: list[str], candidates: list[dict], tested: set[str]) -> dict | None:
     pending = [c for c in candidates if not c.get("id") or c["id"] not in tested]
     if not pending: return None
-    edge = {"top wall", "bottom wall", "left wall", "right wall", "room edge", "screen edge"}; pending.sort(key=lambda c: (c.get("placement") not in edge, c.get("distance", 0))); options = pending[:10]
+    edge = {"top wall", "bottom wall", "left wall", "right wall", "room edge", "screen edge"}; walls = [c for c in pending if c.get("placement") in edge]; pending = walls or pending; pending.sort(key=lambda c: c.get("distance", 0)); options = pending[:10]
     names = [c["name"] for c in options]; labels = {c["name"] if names.count(c["name"]) == 1 else f"{c['name']} ({i + 1})": c for i, c in enumerate(options)}
     things = {n: {"kind": c.get("kind", "object"), "position": c.get("position", "unknown position"), "placement": c.get("placement") or "unknown placement"} for n, c in labels.items()}
     question = {"target": {"type": "choice", "instructions": f"Which thing should the player walk to next to {goal}?", "criteria": {n: f"walk to the {n} ({c['position']}; {c['placement']})" for n, c in things.items()}}}
@@ -191,7 +181,8 @@ def plan(model, view: str, reason: str, last_goal: str = "", last_end: str = "",
     data = model.ask("Set a useful, verifiable next goal from the memory and current screen. Return only JSON.",
                      f"Memory:\n{view}\nTrigger: {reason}\nLast goal: {last_goal}\nEnded: {last_end}\n"
                      f"Screen text: {text}\nReturn one main goal and an optional child first step toward it; "
-                     "use new_place, text_seen, entity_known, relation, steps_over; prefer new_place for travel.",
+                     "use new_place, text_seen, entity_known, relation, steps_over; prefer new_place for travel. "
+                     'Answer exactly as {"tasks":[{"goal":str,"done_when":[{"new_place":true}],"fail_when":[{"steps_over":40}]}]}.',
                      schema=_TASKS, role="plan").data
     return _task_results(data, 2, {"new_place", "text_seen", "entity_known", "relation", "steps_over"}, 40)
 

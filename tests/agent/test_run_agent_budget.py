@@ -4,7 +4,7 @@ import pytest
 from scripts.run_agent import CallCap, _ledger
 
 
-@pytest.mark.parametrize("stage,spent,cap", [("q",39,40), ("c",545,546)])
+@pytest.mark.parametrize("stage,spent,cap", [("q",59,60), ("c",545,546)])
 def test_repair_stage_caps_preserve_prior_spend(tmp_path, monkeypatch, stage, spent, cap):
     monkeypatch.chdir(tmp_path)
     path = tmp_path / "runs/e3_budget.json"; path.parent.mkdir()

@@ -1,5 +1,6 @@
 """Summarize one agent run and evaluate the Pokémon M1 gate."""
 import json
+import re
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -33,9 +34,148 @@ def rate(n, d):
     return n / d if d else None
 
 
+def _position(row):
+    try:
+        return int(row["x"]), int(row["y"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _tile_metrics(trace, truth):
+    visits, visit_no, prior = {}, Counter(), None
+    for row in trace:
+        after_place = row.get("next_place") or row.get("place")
+        actual = truth.get((row.get("step") or 0) + 1, {})
+        mid = map_id(actual["map"]) if actual.get("map") is not None else None
+        key = (after_place, mid)
+        if key != prior:
+            visit_no[key] += 1
+        prior = key
+        if row.get("screen") != "world" or mid is None:
+            continue
+        tpos = _position(actual)
+        tile = row.get("tile")
+        visit = (after_place, mid, visit_no[key])
+        samples = visits.setdefault(visit, [])
+        if tpos is None or not (isinstance(tile, (list, tuple)) and len(tile) == 2):
+            samples.append((row.get("step", 0), None))
+            continue
+        try:
+            tile = (int(tile[0]), int(tile[1]))
+        except (TypeError, ValueError):
+            samples.append((row.get("step", 0), None))
+            continue
+        samples.append((row.get("step", 0), (tile, tpos)))
+
+    rows = []
+    for (place, mid, number), samples in visits.items():
+        measured = [(step, sample) for step, sample in samples if sample is not None]
+        offset = ([measured[0][1][1][0] - measured[0][1][0][0],
+                   measured[0][1][1][1] - measured[0][1][0][1]] if measured else None)
+
+        def score(selected):
+            valid = [sample for _, sample in selected if sample is not None]
+            correct = sum((tile[0] + offset[0], tile[1] + offset[1]) == actual
+                          for tile, actual in valid) if offset else 0
+            return {"correct": correct, "total": len(selected) if valid else 0,
+                    "measured": len(valid),
+                    "world_steps": len(selected), "unmeasured": len(selected) - len(valid),
+                    "accuracy": rate(correct, len(selected)) if valid else None}
+
+        all_steps = score(samples)
+        resumed = score([(step, sample) for step, sample in samples if step > 54])
+        rows.append({"place": place, "map": mid, "visit": number, **all_steps,
+                     "post_resume": resumed, "offset": offset})
+
+    def totals(selected):
+        correct = sum(r[selected]["correct"] if selected else r["correct"] for r in rows)
+        total = sum(r[selected]["total"] if selected else r["total"] for r in rows)
+        measured = sum(r[selected]["measured"] if selected else r["measured"] for r in rows)
+        world_steps = sum(r[selected]["world_steps"] if selected else r["world_steps"] for r in rows)
+        unmeasured = sum(r[selected]["unmeasured"] if selected else r["unmeasured"] for r in rows)
+        return {"accuracy": rate(correct, total), "correct": correct, "total": total,
+                "measured": measured, "world_steps": world_steps, "unmeasured": unmeasured}
+
+    rates = [r["accuracy"] for r in rows if r["accuracy"] is not None]
+    return {**totals(None), "visits": rows,
+            "visits_measured": sum(r["measured"] > 0 for r in rows),
+            "worst_visit_accuracy": min(rates, default=None),
+            "post_resume": totals("post_resume")}
+
+
+def _entity_duplicates(rows):
+    entities = replay_rows(rows)
+    recurring = {"menu_item", "move", "item", "option"}
+    groups = []
+    for row in entities:
+        name = re.sub(r"(?:#\d+)+$", "", str(row.get("name", "")).casefold()).strip()
+        if not name or str(row.get("kind", "")).casefold() == "player":
+            continue
+        kind = str(row.get("kind", "")).casefold()
+        tile = row.get("tile")
+        if kind in recurring:
+            identity = ("global", kind, name)
+        else:
+            identity = (row.get("place"), name)
+        matched = False
+        for group in groups:
+            if group[0] != identity:
+                continue
+            old_tile = group[1]
+            if kind in recurring or (isinstance(tile, (list, tuple)) and len(tile) == 2 and
+                    isinstance(old_tile, (list, tuple)) and len(old_tile) == 2 and
+                    max(abs(int(tile[i]) - int(old_tile[i])) for i in (0, 1)) <= 1):
+                group[2].append(row)
+                matched = True
+                break
+        if not matched:
+            groups.append([identity, tile, [row]])
+    return sum(len(group[2]) - 1 for group in groups), entities
+
+
+def replay_rows(rows):
+    return list({r.get("id"): r for r in rows if r.get("id")}.values())
+
+
+def _known_exit_reuse(trace, truth_rows, tile_history):
+    truth = {r.get("step"): r for r in truth_rows}
+    place_maps, known_tiles, total, reused, unmeasured = {}, {}, 0, 0, 0
+    for row in sorted(trace, key=lambda r: r.get("step", 0)):
+        step = row.get("step", 0)
+        for tile in tile_history:
+            if tile.get("id") and isinstance(tile.get("step"), int) and tile["step"] < step:
+                known_tiles[tile["id"]] = tile
+        before_place = row.get("place")
+        after_place = row.get("next_place") or before_place
+        actual = truth.get(step + 1, {})
+        mid = map_id(actual["map"]) if actual.get("map") is not None else None
+        cut_exit = row.get("exit")
+        if row.get("scene_cut") is True and not isinstance(cut_exit, (list, tuple)):
+            unmeasured += 1
+        elif row.get("scene_cut") is True and len(cut_exit) == 3:
+            try:
+                x, y, direction = int(cut_exit[0]), int(cut_exit[1]), str(cut_exit[2]).upper()
+            except (TypeError, ValueError):
+                x = y = None
+                direction = ""
+            tile = next((r for r in known_tiles.values() if r.get("place") == before_place and
+                         r.get("x") == x and r.get("y") == y), None)
+            edge = (tile or {}).get("exit") or {}
+            expected = edge.get("to")
+            if edge.get("dir") == direction and expected in place_maps:
+                total += 1
+                reused += after_place == expected
+        if after_place and mid is not None:
+            place_maps.setdefault(after_place, mid)
+    return {"known_exit_revisits": total, "reused": reused, "mismatches": total - reused,
+            "unmeasured_transitions": unmeasured,
+            "pass": reused == total if total else None}
+
+
 def evaluate(run):
     run = Path(run)
-    trace, truth = read(run / "trace.jsonl"), {r.get("step"): r for r in read(run / "truth.jsonl")}
+    trace, truth_rows = read(run / "trace.jsonl"), read(run / "truth.jsonl")
+    truth = {r.get("step"): r for r in truth_rows}
     places = {r["id"]: r for r in read(run / "memory" / "places.jsonl") if r.get("id")}
     step_places = defaultdict(Counter)
     for row in trace:
@@ -126,6 +266,14 @@ def evaluate(run):
     player = next((r.get("player_name") for r in ordered_truth if r.get("player_name")), None)
     rival = next((r.get("rival_name") for r in ordered_truth if r.get("rival_name")), None)
     knowledge = replay(run / "memory" / "knowledge.jsonl")
+    entity_rows = read(run / "memory" / "entities.jsonl")
+    duplicates, unique_entities = _entity_duplicates(entity_rows)
+    new_duplicates, _ = _entity_duplicates([r for r in unique_entities
+                                             if isinstance(r.get("first"), int) and r["first"] > 54])
+    legacy_duplicates, _ = _entity_duplicates([r for r in unique_entities
+                                                if isinstance(r.get("first"), int) and r["first"] <= 54])
+    tile_accuracy = _tile_metrics(trace, truth)
+    exit_reuse = _known_exit_reuse(trace, truth_rows, read(run / "memory" / "tiles.jsonl"))
     game_text = sum(r.get("src") == "game_text" for r in knowledge)
     m1 = {"m1_starter": bool(party_steps), "steps_to_starter": max(0, min(party_steps) - 1) if party_steps else None,
           "place_purity": purity, "places_matched": len(set(distinct_places)) == 4,
@@ -158,7 +306,12 @@ def evaluate(run):
             "repeated_mistakes": {"count": repeated, "rate": rate(repeated, len(trace))},
             "retrieval_use": {"used_shown_ids": used, "shown_ids": shown, "rate": rate(used, shown)},
             "poison_rate": {"refuted_model_claims": poisoned, "model_claims": len(claims),
-                            "rate": rate(poisoned, len(claims))}}
+                            "rate": rate(poisoned, len(claims))},
+            "spatial": {"tile_accuracy_per_visit": tile_accuracy,
+                        "entity_duplicates": {"total": duplicates,
+                                              "legacy": legacy_duplicates,
+                                              "new_after_resume": new_duplicates},
+                        "known_exit_id_reuse": exit_reuse}}
 
 
 if __name__ == "__main__":

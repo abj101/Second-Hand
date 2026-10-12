@@ -12,6 +12,14 @@ def ctx(env, tile_px=16, max_inputs=30, replies=None):
     return Ctx(env, StubModel(replies or []), tile_px=tile_px, max_inputs=max_inputs)
 
 
+class RecordingEnv(GridEnv):
+    def __init__(self):
+        super().__init__(); self.keys = []
+
+    def press(self, key, frames=8, on_frame=None):
+        self.keys.append(key); super().press(key, frames, on_frame)
+
+
 class MenuEnv(GridEnv):
     items = ["one", "two", "OPTION"]
 
@@ -110,6 +118,47 @@ def test_exit_without_scene_cut_is_blocked():
                             {"verb": "approach", "target": "exit down", "at": point(env, (10, 8))},
                             {"entities": [{"kind": "player", "at": [.5, .5]}]})
     assert result.status == "blocked" and result.reason == "exit not crossed"
+
+
+def test_route_presses_directions_in_order_and_records_moves():
+    env = RecordingEnv(); dirs = ["UP", "RIGHT"]
+    result = run_affordance(ctx(env), {"verb": "approach", "at": point(env, (10, 6))},
+                            {"entities": [{"kind": "player", "at": [.5, .5]}]}, route={"dirs": dirs})
+    assert env.keys == dirs and [move[0] for move in result.moves] == dirs
+    assert result.status == "done"
+
+
+def test_route_confident_zero_shift_is_blocked():
+    env = RecordingEnv(); env.walls.add((9, 8))
+    result = run_affordance(ctx(env), {"verb": "approach", "at": point(env, (10, 8))},
+                            {"entities": [{"kind": "player", "at": [.5, .5]}]}, route={"dirs": ["RIGHT"]})
+    assert result.status == "blocked" and result.reason == "route blocked"
+
+
+def test_exit_route_pushes_before_side_steps():
+    env = RecordingEnv(); env.player = (9, 8); env.door = (10, 8); env.npc = (-5, -5)
+    result = run_affordance(ctx(env), {"verb": "approach", "at": point(env, (10, 8))},
+                            {"entities": [{"kind": "player", "at": [.5, .5]}]}, exit=True,
+                            route={"dirs": [], "push": "RIGHT"})
+    assert result.status == "done" and env.keys[0] == "RIGHT" and result.moves[0][0] == "RIGHT"
+
+
+def test_blocked_exit_push_continues_into_side_steps():
+    env = RecordingEnv(); env.walls.add((9, 8)); env.door = (-5, -5); env.npc = (-6, -6)
+    result = run_affordance(ctx(env), {"verb": "approach", "at": point(env, (10, 8))},
+                            {"entities": [{"kind": "player", "at": [.5, .5]}]}, exit=True,
+                            route={"dirs": [], "push": "RIGHT"})
+    assert result.status == "blocked" and result.reason == "exit not crossed"
+    assert env.keys[:2] == ["RIGHT", "UP"]
+
+
+def test_interact_and_directional_press_preserve_move_records():
+    env = GridEnv()
+    result = interact(ctx(env), point(env, env.npc), [.5, .5])
+    assert result.moves and all(direction in {"UP", "DOWN", "LEFT", "RIGHT"} for direction, _ in result.moves)
+    env = GridEnv(); env.player = (9, 8)
+    result = run_affordance(ctx(env), {"verb": "press", "target": "RIGHT"}, {"entities": []})
+    assert env.scene == 1 and result.moves[-1][0] == "RIGHT"
 
 
 def test_exit_blocked_by_walls_reports_not_crossed():

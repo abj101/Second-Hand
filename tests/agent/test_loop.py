@@ -7,10 +7,6 @@ from agent.memory import Memory
 from tests.agent.fakes import GridEnv, StubModel
 from agent.model import ModelUnavailable
 
-@pytest.fixture(autouse=True)
-def no_local_judge(monkeypatch):
-    monkeypatch.setattr("agent.loop.Judge.rank", lambda self, state, questions: None)
-
 def reply(data): return type("Reply", (), {"data": data})()
 def perception(*, two=False, press=False):
     affs = ([{"verb":"press","target":"A","at":[500,500]}] if press else
@@ -106,6 +102,84 @@ def test_restore_and_parse_failure(tmp_path):
     restored=Loop(loop.env,model,loop.mem,"grid"); restored.restore(loop.state())
     assert restored.state()["step"] == loop.state()["step"] and restored.cached == loop.cached
 
+def test_position_checkpoint_defaults_and_restores(tmp_path):
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path/"memory"), "grid"); loop.pos = (4, -2)
+    state = loop.state(); resumed = Loop(loop.env, loop.model, loop.mem, "grid"); resumed.restore(state)
+    assert resumed.pos == (4, -2)
+    resumed.restore({}); assert resumed.pos == (0, 0)
+
+def test_stationary_two_fresh_frames_confirm_drift(tmp_path, monkeypatch):
+    from agent import loop as module
+    env = GridEnv(); env.phase = 0; original = env.screenshot
+    def screenshot():
+        frame = original(); frame.putpixel((0, 0), (env.phase, 0, 0)); return frame
+    env.screenshot = screenshot; offset = [0.6]
+    def perceive(*_):
+        return {"screen":"world","text":[],"affordances":[{"verb":"approach","target":"lamp","at":[offset[0],.5]}],"entities":[{"name":"player","kind":"player","at":[.5,.5]}, {"name":"lamp","kind":"object","at":[offset[0],.5]}]}, reply({"screen":"world","text":[],"entities":[],"affordances":[]})
+    monkeypatch.setattr(module, "perceive", perceive)
+    monkeypatch.setattr(module, "choose", lambda *a, **k: module.Choice(0,"screen_changes","",[],"test",False))
+    def still(*a,**k):
+        before=env.screenshot(); env.phase+=1; after=env.screenshot()
+        return SimpleNamespace(status="done",reason="",inputs=0,calls=0,before=before,after=after,scroll=(0,0),blank_seen=False,moves=[])
+    monkeypatch.setattr(module, "run_affordance", still)
+    loop = Loop(env, StubModel([]), Memory(tmp_path/"memory"), "grid")
+    loop.step(); offset[0] = .75; first = loop.step()
+    assert loop.pos == (0, 0) and first["drift_fix"] is None and loop.drift == (-1, 0)
+    second = loop.step()
+    assert loop.pos == (-1, 0) and second["drift_fix"] == [-1, 0]
+
+def test_grid_loop_reuses_two_spatial_exits_between_floors(tmp_path, monkeypatch):
+    from agent import loop as module
+    class TwoFloor(GridEnv):
+        def __init__(self):
+            super().__init__(); self.door = (-5, -5)
+        def _frame(self):
+            if self._transition:
+                self._transition += 1
+                if self._transition > 2:
+                    self.scene, self.player, self._transition = 1-self.scene, (8,9), 0
+                return
+            super()._frame()
+            if not self._moving and self.player == ((8,10) if self.scene == 0 else (8,8)): self._transition = 1
+    env = TwoFloor(); floors = ("2F", "1F")
+    def perceive(*_):
+        floor = floors[env.scene]
+        dy = (2 if env.scene == 0 else -1) * 16/144
+        return {"screen":"world","text":[],"affordances":[{"verb":"approach","target":"exit: passage","at":[.5,.5+dy]}],
+                "entities":[{"name":"player","kind":"player","at":[.5,.5]}, {"name":floor,"kind":"object","at":[.7,.5]}]}, reply({})
+    monkeypatch.setattr(module, "perceive", perceive)
+    loop=Loop(env,StubModel([]),Memory(tmp_path/"memory"),"grid"); loop.last_plan_step=0; ids=[]
+    loop.tasks.add("Find the marker", [{"text_seen":"unreachable text"}])
+    for _ in range(4): ids.append(loop.step()["next_place"])
+    assert ids[0] == ids[2] and ids[1] == ids[3] and ids[0] != ids[1]
+
+def test_grid_loop_pushes_bottom_wall_mat_down_within_three_steps(tmp_path, monkeypatch):
+    from agent import loop as module
+    from agent.skills import run_affordance as run
+    env=GridEnv(); env.door=(8,12); seen=[]
+    mat={"name":"mat","kind":"object","at":[.5,.5+3*16/144],"placement":"bottom wall"}
+    def perceive(*_):
+        return {"screen":"world" if env.scene==0 else "other room","text":[],"affordances":[],"entities":[{"name":"player","kind":"player","at":[.5,.5]},mat]},reply({})
+    def record(*args,**kwargs):
+        result=run(*args,**kwargs); seen.extend(result.moves); return result
+    monkeypatch.setattr(module,"perceive",perceive); monkeypatch.setattr(module,"run_affordance",record)
+    loop=Loop(env,StubModel([]),Memory(tmp_path/"memory"),"grid"); loop.tasks.add("Find another room",[{"new_place":True}])
+    rows=[loop.step()]
+    assert rows[-1]["choice"]["target"]=="mat" and rows[-1]["scene_cut"] and env.scene==1
+    assert seen[-1][0]=="DOWN" and rows[-1]["step"]<=3
+
+def test_visited_spatial_exit_filters_neighbor_without_relation(tmp_path, monkeypatch):
+    from agent import loop as module
+    env=GridEnv(); mem=Memory(tmp_path/"memory")
+    for pid in ("p_room","p_seen"): mem.upsert("places",{"id":pid,"name":pid,"screen":"world","landmarks":[],"edges":[]})
+    mem.upsert("tiles",{"id":"p_room@0,0","place":"p_room","x":0,"y":0,"floor":True,"blocked":[],"pushed":[],"exit":{"dir":"UP","to":"p_seen","arrive":[0,0],"src":"observed"},"step":1})
+    data={"screen":"world","text":[],"affordances":[],"entities":[{"name":"player","kind":"player","at":[.5,.5]}, {"name":"door","kind":"object","at":[.5,.5],"placement":"room edge"}, {"name":"lamp","kind":"object","at":[.75,.5]}]}
+    monkeypatch.setattr(module,"perceive",lambda *a:(data,reply({"screen":"world","text":[],"entities":[],"affordances":[]})))
+    monkeypatch.setattr(module,"run_affordance",lambda *a,**k:SimpleNamespace(status="done",reason="",inputs=0,calls=0,before=env.screenshot(),after=env.screenshot(),scroll=(0,0),blank_seen=False,moves=[]))
+    loop=Loop(env,StubModel([]),mem,"grid"); loop.place="p_room"; loop.prev_frame=env.screenshot(); loop.tasks.add("Find a new room",[{"new_place":True}]); loop.last_plan_step=0
+    row=loop.step()
+    assert row["choice"]["target"]=="lamp" and all(r["s"]!="e_door" for r in mem.rows("relations"))
+
 def test_perceiver_guides_whole_name_entry(tmp_path):
     class CapturesPrompt(StubModel):
         def ask(self, *args, **kwargs): self.prompt=args[1]; return super().ask(*args, **kwargs)
@@ -197,7 +271,7 @@ def test_blocked_exit_overrides_pixel_prediction_and_cannot_hit(tmp_path, monkey
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
     monkeypatch.setattr(loop_module, "predict", lambda *args: {"effect": "screen_changes", "detail": "movement"})
     monkeypatch.setattr(loop_module, "cut", lambda *args: False)
-    def blocked(ctx, aff, per, text=None, exit=False):
+    def blocked(ctx, aff, per, text=None, exit=False, **kwargs):
         before = env.screenshot(); env.scene = 1; after = env.screenshot()
         return SimpleNamespace(status="blocked", reason="exit not crossed", inputs=8, calls=0,
                                before=before, after=after, scroll=(0, 0), blank_seen=False)
@@ -209,23 +283,14 @@ def test_blocked_exit_overrides_pixel_prediction_and_cannot_hit(tmp_path, monkey
 def test_new_place_tests_bottom_wall_entity_third_and_records_failed_targets(tmp_path, monkeypatch):
     from agent import loop as loop_module
     env = GridEnv(); env.door = (8, 12); env.npc = (-5, -5)
-    order = ["marker A", "marker B", "floor patch"]
-    class Ranker:
-        def __init__(self): self.states = []
-        def rank(self, state, questions):
-            self.states.append(state)
-            name = order[len(self.states) - 1]
-            assert name in state["things"]
-            return {"answers": {"target": {"choice": name}}}
-    ranker = Ranker()
-    monkeypatch.setattr(loop_module, "Judge", lambda **_: ranker)
-    points = {"marker A": (8, 6), "marker B": (6, 8), "floor patch": env.door}
+    order = ["marker A", "marker B", "floor patch"]  # code order: wall things, nearest first
+    points = {"marker A": (4, 8), "marker B": (4, 10), "floor patch": env.door}
     def perceive(_model, _image, _context):
         def at(pos): return [.5 + (pos[0] - env.player[0]) * 16 / 160,
                             .5 + (pos[1] - env.player[1]) * 16 / 144]
         entities = [{"kind": "player", "name": "player", "at": [.5, .5]}]
         entities += [{"kind": "object", "name": name, "at": at(pos),
-                      "placement": "bottom wall" if name == "floor patch" else "middle"}
+                      "placement": "bottom wall" if name == "floor patch" else "left wall"}
                      for name, pos in points.items()]
         data = {"screen": "other room" if env.scene else "world", "text": [], "entities": entities, "affordances": []}
         return data, reply(data)
@@ -235,14 +300,29 @@ def test_new_place_tests_bottom_wall_entity_third_and_records_failed_targets(tmp
     assert [r["choice"]["target"] for r in rows] == order
     assert [r["pred"]["effect"] for r in rows] == ["place_changes"] * 3
     assert [e["id"] for e in loop.mem.rows("entities") if e["name"] in order]
-    assert len(ranker.states) == 3
-    assert set(ranker.states[0]["things"]) == set(order)
-    assert set(ranker.states[1]["things"]) == {"marker B", "floor patch"}
-    assert set(ranker.states[2]["things"]) == {"floor patch"}
+    assert [r["ranker"] for r in rows] == [None] * 3
     assert rows[0]["verdict"] == rows[1]["verdict"] == "miss"
     assert rows[2]["scene_cut"] and rows[2]["verified_edge"] and env.scene == 1
     tested = {r["s"] for r in loop.mem.rows("relations") if r.get("p") == "leads_to"}
     assert len(tested) == 3
+
+def test_mislabelled_player_does_not_shift_tiles_or_duplicate_entities(tmp_path, monkeypatch):
+    from agent import loop as module
+    env, seen, shot = GridEnv(), [], GridEnv.screenshot; env.phase = 0
+    env.screenshot = lambda: (f := shot(env), f.putpixel((0, 0), (env.phase, 0, 0)))[0]
+    def perceive(*_):
+        seen.append(1); player = [.5, .5] if len(seen) == 1 else [.5, .5 + 3 * 16 / 144]  # second view labels another sprite as the player
+        data = {"screen":"world","text":[],"affordances":[],"entities":[{"name":"player","kind":"player","at":player}, {"name":"lamp","kind":"object","at":[.7,.5]}]}
+        return data, reply(data)
+    monkeypatch.setattr(module, "perceive", perceive)
+    def still(*a, **k):
+        before = env.screenshot(); env.phase += 1
+        return SimpleNamespace(status="done",reason="",inputs=0,calls=0,before=before,after=env.screenshot(),scroll=(0,0),blank_seen=False,moves=[])
+    monkeypatch.setattr(module, "run_affordance", still)
+    loop = Loop(env, StubModel([]), Memory(tmp_path/"memory"), "grid"); loop.step()
+    lamps = [e for e in loop.mem.rows("entities") if e["name"].startswith("lamp")]
+    assert len(seen) == 2 and len(lamps) == 1 and lamps[0]["tile"] == [2, 0] and loop.anchors == [[.5, .5]]
+    resumed = Loop(env, StubModel([]), loop.mem, "grid"); resumed.restore(loop.state()); assert resumed.anchors == [[.5, .5]]
 
 def test_malformed_parse_gets_one_repair_and_resumes(tmp_path):
     class Captures(StubModel):
@@ -330,8 +410,7 @@ def test_tracked_approach_scroll_does_not_split_but_real_cuts_do(tmp_path, monke
         assert row["scene_cut"] is True and row["next_place"] != row["place"]
         assert mem.get("places", row["next_place"])["state"] == "candidate"
         assert len(mem.get("places", row["place"])["edges"]) == 1
-        back = [r for r in mem.rows("relations") if r["p"] == "leads_to" and r["src"] == "inferred"]
-        assert [(mem.get("entities", r["s"])["name"], r["o"]) for r in back] == [("door", row["place"])]
+        assert not [r for r in mem.rows("relations") if r["p"] == "leads_to" and r["src"] == "inferred"]
     loop, mem, row = run_case(tmp_path/"interact", "interact")
     assert row["scene_cut"] is False and row["next_place"] == row["place"]
 
@@ -530,3 +609,53 @@ def test_probe_stage_ledger_persists_thirty_request_cap(tmp_path, monkeypatch):
     assert (data["total"], data["m1"], data["stage_p"]) == (30, 30, 30)
     with pytest.raises(run_agent.CallCap): run_agent._ledger(Path("runs/m1"), "p", 30)
     assert json.loads(Path("runs/e3_budget.json").read_text()) == data
+
+def test_route_blocked_mid_way_replans_instead_of_ruling_out_target(tmp_path, monkeypatch):
+    from agent import loop as loop_module
+    env = GridEnv(); env.door = (8, 12); env.npc = (-5, -5); env.walls.add((8, 10))
+    def perceive(_model, _image, _context):
+        at = [.5 + (env.door[0] - env.player[0]) * 16 / 160, .5 + (env.door[1] - env.player[1]) * 16 / 144]
+        data = {"screen": "other room" if env.scene else "world", "text": [], "affordances": [],
+                "entities": [{"kind": "player", "name": "player", "at": [.5, .5]},
+                             {"kind": "object", "name": "floor patch", "at": at, "placement": "bottom wall"}]}
+        return data, reply(data)
+    monkeypatch.setattr(loop_module, "perceive", perceive)
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid"); loop.tile_px = 16
+    first = loop.step()
+    assert first["skill"]["reason"] == "route blocked"
+    assert not [r for r in loop.mem.rows("relations") if r["p"] == "leads_to"]
+    second = loop.step()
+    assert second["choice"]["target"] == "floor patch" and second["scene_cut"] and env.scene == 1
+
+
+def test_route_blocked_mid_way_commits_to_target_instead_of_taking_nearer_decoy(tmp_path, monkeypatch):
+    from agent import loop as loop_module
+    env = GridEnv(); env.door = (8, 12); env.npc = (-5, -5); env.walls.add((8, 10))
+    def perceive(_model, _image, _context):
+        at = [.5 + (env.door[0] - env.player[0]) * 16 / 160, .5 + (env.door[1] - env.player[1]) * 16 / 144]
+        data = {"screen": "other room" if env.scene else "world", "text": [], "affordances": [],
+                "entities": [{"kind": "player", "name": "player", "at": [.5, .5]},
+                             {"kind": "object", "name": "floor patch", "at": at, "placement": "bottom wall"},
+                             {"kind": "object", "name": "decoy", "at": [0 if env.player == (8, 8) else .45, .5], "placement": "left wall"}]}
+        return data, reply(data)
+    monkeypatch.setattr(loop_module, "perceive", perceive)
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid"); loop.tile_px = 16
+    assert loop.step()["skill"]["reason"] == "route blocked" and loop.commit
+    assert loop.restore(loop.state()) is None and loop.commit
+    second = loop.step()
+    assert second["choice"]["target"] == "floor patch" and second["scene_cut"] and env.scene == 1 and loop.commit is None
+
+def test_idless_target_routes_to_its_own_tile_not_another_idless_entitys(tmp_path, monkeypatch):
+    from agent import loop as loop_module
+    env = GridEnv(); env.door = (8, 12); env.npc = (-5, -5)
+    def perceive(_model, _image, _context):
+        at = lambda x, y: [.5 + (x - env.player[0]) * 16 / 160, .5 + (y - env.player[1]) * 16 / 144]
+        data = {"screen": "other room" if env.scene else "world", "text": [], "affordances": [],
+                "entities": [{"kind": "player", "name": "player", "at": [.5, .5]},
+                             {"kind": "object", "name": "", "at": at(5, 8)},
+                             {"kind": "object", "name": "", "at": at(*env.door), "placement": "bottom wall"}]}
+        return data, reply(data)
+    monkeypatch.setattr(loop_module, "perceive", perceive)
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid"); loop.tile_px = 16
+    row = loop.step()
+    assert env.scene == 1 and row["scene_cut"]

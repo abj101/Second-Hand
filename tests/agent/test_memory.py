@@ -50,6 +50,31 @@ def test_identity_kind_drift_edit_distance_tie_recurring_and_resolve(tmp_path):
     assert mem.resolve("mom", "p") == one
 
 
+def test_tile_identity_survives_scrolling_and_separates_same_name(tmp_path):
+    mem = Memory(tmp_path)
+    per = {"entities": [{"name": "sign", "kind": "object", "at": [.2, .3]}]}
+    first = mem.observe(per, "room", 1, tiles={0: (4, 2)})[0]
+    assert mem.observe(per, "room", 2, tiles={0: (5, 3)})[0] == first
+    other = mem.observe(per, "room", 3, tiles={0: (8, 2)})[0]
+    assert other != first
+    assert len(mem.rows("entities")) == 2
+    assert mem.observe(per, "room", 4, tiles={0: (8, 2)})[0] == other
+    assert len(mem.rows("entities")) == 2
+
+
+def test_known_exit_precedes_via_edge_and_no_cut_keeps_previous_place(tmp_path):
+    mem = Memory(tmp_path)
+    a = mem.match_place({"screen": "start", "entities": []}, 1, prev=None, cut=True)
+    b = mem.match_place({"screen": "exit", "entities": []}, 2, prev=a, cut=True)
+    c = mem.match_place({"screen": "other", "entities": []}, 3, prev=b, cut=True)
+    mem.add_edge(a, "approach", "door", c, True)
+    mem.upsert("tiles", {"id": f"{a}@4,2", "place": a, "x": 4, "y": 2,
+                          "exit": {"dir": "RIGHT", "to": b, "arrive": [0, 0], "src": "observed"}})
+    drifted = {"screen": "new screen", "entities": [{"name": "different landmark", "kind": "npc"}]}
+    assert mem.match_place(drifted, 4, prev=a, cut=True, via="door", exit=(4, 2, "RIGHT")) == b
+    assert mem.match_place(drifted, 5, prev=a, cut=False, via="door", exit=(4, 2, "RIGHT")) == a
+
+
 def test_relations_confidence_provenance_and_expiry(tmp_path):
     mem = Memory(tmp_path)
     rel = mem.relate("e_door", "leads_to", "p_lab", src="pixel", step=1, hit=True)
@@ -130,3 +155,22 @@ def test_refuted_view_cap_and_chooser_history_survives_crowded_memory(tmp_path):
     assert "Surprise at step 9" in text
     assert len(text) / 4 <= 1200
 
+
+def test_resolve_ambiguous_name_by_nearest_tile(tmp_path):
+    from agent.decide import resolve_target
+    mem = Memory(tmp_path)
+    for i, tile in enumerate(([0, 0], [5, 5])):
+        mem.upsert("entities", {"id": f"e_{i}", "kind": "object", "name": f"shelf#{i + 2}", "place": "p", "tile": tile})
+    assert mem.resolve("shelf", "p") is None and mem.resolve("shelf", "p", (3, 3)) is None
+    assert mem.resolve("shelf", "p", (5, 6)) == "e_1" and resolve_target(mem, "exit: shelf", "p", (1, 0)) == "e_0"
+
+
+def test_match_place_ignores_exit_prefix_and_follows_leads_to(tmp_path):
+    mem = Memory(tmp_path)
+    mem.upsert("places", {"id": "p_1f", "name": "1f", "edges": [{"verb": "approach", "via": "stairs", "to": "p_2f", "n": 1, "ok": 1}]})
+    mem.upsert("places", {"id": "p_2f", "name": "2f", "edges": []})
+    mem.upsert("places", {"id": "p_out", "name": "out", "edges": []})
+    cut = {"prev": "p_1f", "cut": True}
+    assert mem.match_place({"screen": "world"}, 5, via=" Exit: Stairs", **cut) == "p_2f"
+    mem.relate("e_door", "leads_to", "p_2f", src="inferred", step=1)
+    assert mem.match_place({"screen": "world"}, 5, prev="p_out", cut=True, via="exit: door", via_id="e_door") == "p_2f"

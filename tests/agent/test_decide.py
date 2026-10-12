@@ -1,7 +1,7 @@
 import pytest
 
 from agent.brief import GENERAL
-from agent.decide import (arrival_entrance, known_routes, _conditions, choose, code_choice, escalate, navigation_candidates,
+from agent.decide import (known_routes, _conditions, choose, code_choice, escalate, navigation_candidates,
                           next_test, plan, related_target_ids, resolve_target)
 from agent.memory import Memory
 from agent.model import ModelUnavailable
@@ -160,6 +160,13 @@ def test_plan_caps_tasks_and_adds_step_limit():
     assert model.calls == 1
 
 
+def test_plan_prompt_spells_out_the_answer_shape():
+    seen = []
+    class M:
+        def ask(self, system, user, **kw): seen.append(user); return type("Reply", (), {"data": {}})()
+    plan(M(), "view", "r"); assert '{"tasks":[{"goal"' in seen[0] and '"new_place":true' in seen[0]
+
+
 def test_default_curiosity_overrides_repeat_with_first_untried_action():
     affs = [{"verb": "interact", "target": "console"}, {"verb": "approach", "target": "exit up"}]
     model = StubModel([type("Reply", (), {"data": {"i": 0, "effect": "place_changes", "used": ["e_console"]}})()])
@@ -258,6 +265,14 @@ def test_next_test_uses_edge_placement_then_distance_when_judge_is_unavailable()
     ]
     assert next_test(None, "go somewhere", [], candidates, set())["id"] == "wall"
 
+def test_next_test_offers_only_wall_candidates_when_any_exist():
+    class Ranker:
+        def rank(self, state, questions):
+            assert set(state["things"]) == {"edge"}
+            return {"answers": {"target": {"choice": "edge"}}}
+    candidates = [{"id":"middle", "name":"middle", "placement":"middle"}, {"id":"edge", "name":"edge", "placement":"room edge"}]
+    assert next_test(Ranker(), "go", [], candidates, set()) == candidates[1]
+
 def test_next_test_keeps_missing_placement_unknown():
     class Ranker:
         def rank(self, state, questions):
@@ -314,12 +329,3 @@ def test_known_routes_names_visited_places_and_failed_tests(tmp_path):
     mem.relate(tv, "leads_to", "", src="observed", step=2, hit=False)
     mem.relate(tv, "leads_to", "the player leaves", src="model", step=2)
     assert known_routes(mem) == ["stairs leads to upstairs (already visited)", "television: tested, no new place"]
-
-
-def test_arrival_entrance_prefers_matching_name_then_nearest_exit():
-    per = {"entities": [{"kind": "player", "name": "player", "at": [.5, .5]},
-                        {"kind": "exit", "name": "exit: door mat", "at": [.5, .6]},
-                        {"kind": "exit", "name": "exit: stairs", "at": [.9, .1]}]}
-    assert arrival_entrance(per, "exit: stairs") == "exit: stairs"
-    assert arrival_entrance(per, "door") == "exit: door mat"
-    assert arrival_entrance(per, "door", reach=0.05) is None

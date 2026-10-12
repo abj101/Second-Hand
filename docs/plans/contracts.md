@@ -253,7 +253,7 @@ A trace row, one per step. Every key is always present; use `null` when a value 
  "verdict": "hit", "calls": 2, "ms": 7400, "shortcut": null}
 ```
 
-E3R4 adds `"tile": [x, y]` (the player's place-frame tile after the step, or null) and `"drift_fix": [dx, dy]` or null.
+E3R4 adds `"tile": [x, y]` (the player's place-frame tile after the step, or null) and `"drift_fix": [dx, dy]` or null. E3R5 (approved 2026-10-11) adds `"ranker": {"state": ..., "answer": ...}` (what the local ranker was asked and replied) on steps where it was asked, else null.
 
 - `effects` and `pred.effect` come from `EFFECTS = ("place_changes", "text_appears", "screen_changes", "entity_appears", "entity_disappears", "view_scrolled", "no_change")`.
 - `verdict` is one of `hit`, `partial`, `surprise`, `miss` or `unobservable`.
@@ -271,7 +271,7 @@ tiles      {"id":"<place>@x,y","place","x","y","floor":true|false|null,"blocked"
 places     {"id","name","screen","state":"candidate|place","visits","landmarks":[[name, kind]],"edges":[{"verb","via","to","n","ok"}],"blocked":[...]}
 relations  {"id","s","p","o","src","sup","con","ev":[steps],"state":"live|refuted|expired","why","step"}
 knowledge  {"id","text","src":"game_text|observed|model","step"}
-patterns   {"id","s","p","o","verb","sup","con","inst":[relation ids],"state":"candidate|promoted|demoted","name"}   # E4
+patterns   {"id","s","p","o","verb","sup","con","inst":[relation ids],"state":"candidate|promoted|demoted","name"}   # E4; s/o are normalized kinds (casefold, text before ":", singular, game-neutral aliases; a place id -> "place"); only observed pixel hits count, never model or inferred rows
 shortcuts  {"id","place","seq":[{"verb","target"}],"runs","state":"live|broken"}                                # deferred (was E4)
 ```
 
@@ -284,7 +284,9 @@ class Memory:
     def rows(self, store: str) -> list[dict]
     def upsert(self, store: str, row: dict) -> dict
     def match_place(self, perception: Perception, step: int, *, prev: str | None, cut: bool,
-                    via: str | None = None, exit: tuple[int, int, str] | None = None) -> str
+                    via: str | None = None, exit: tuple[int, int, str] | None = None, via_id: str | None = None) -> str
+        # E3R5, approved 2026-10-11: `via` names compare without an `exit:` prefix (casefolded). On a cut, before the landmark
+        # fallback: if `via_id` (the entity id the loop resolved for the via) has a live `leads_to` relation to a known place, that place wins.
         # E3R4: on a cut, a known exit tile (prev, x, y, dir) in the tiles store wins first, before the via-name edge.
         # no cut -> prev (continuity). On a cut: the known edge (prev, via) -> its destination; else
         # landmark (name, kind) overlap >= 0.6 with a known place of the same screen type; else a new
@@ -293,7 +295,8 @@ class Memory:
     def observe(self, perception: Perception, place: str, step: int, tiles: dict[int, tuple[int, int]] | None = None) -> dict[int, str]
         # perception entity index -> entity id. E3R4: with tiles, a same-name record whose stored tile is > 1 tile away
         # is a different thing; the matched record's tile is updated. Records without a tile match by name as before.
-    def resolve(self, name: str, place: str) -> str | None                                 # affordance target string -> entity id
+    def resolve(self, name: str, place: str, tile: tuple[int, int] | None = None) -> str | None   # affordance target string -> entity id
+        # E3R5, approved 2026-10-11: when several records match and `tile` is given, the one whose stored tile is nearest and within 1 tile; else None as before.
     def add_edge(self, src_place: str, verb: str, via: str, dst_place: str, ok: bool) -> None
     def relate(self, s: str, p: str, o: str, *, src: str, step: int, hit: bool | None = None) -> dict
     def know(self, text: str, *, src: str, step: int) -> str                               # dedup by normalized text
@@ -386,8 +389,10 @@ class Tasks:
         # is "Reach a place not visited yet", done_when [{"new_place": true}], budget 40, re-armed when done or failed.
         # An active model goal sets the default to "blocked". Every model goal carries fail_when steps_over (default 40).
     def check(self, step: int) -> list[dict]       # status changes; done needs the condition true on 2 consecutive settled steps
-    def wake(self, row: dict, step: int) -> str | None
-        # E4. "task_end" | "new_place" | "surprise" | "stuck" | "periodic" (every 50 steps), or None
+    # wake: REVISED 2026-10-11 (user-approved E4 re-sequencing). Tasks.wake is not created. The wake reasons live in
+    # the loop's existing plan trigger (pending_plan_reason): goal ended | Stuck reason | new game text (E3R3), plus
+    # "surprise" | "new_place" (verified edge to a new place) | "periodic" (every 50 steps) in E4; 15-step throttle kept.
+    # The trace row gets "wake": reason | null.
 class Stuck:
     def update(self, row: dict) -> str | None      # "no_change" (8 steps), "same_action" (3 times on the same frame), "budget",
         # "no_progress": 25 steps with no new place and no new verified edge (user-approved 2026-10-11, E3 repair)
@@ -414,13 +419,16 @@ def code_choice(perception: Perception, view_ids: list[str], recent: list[dict])
     # E3: 0-call baseline (untried first, then least tried); used by compare_chooser
 def escalate(model: Ollama, view: str, reason: str) -> list[dict]
     # E3: new subtasks as Tasks.add kwargs
-def reflect(model: Ollama, view: str) -> dict
-    # E4: {"tasks": [...], "pattern_names": {pattern_id: name}, "notes": str}
+def plan(model: Ollama, view: str, reason: str, last_goal: str = "", last_end: str = "", screen_text="") -> list[dict]
+    # E3R3: model-set goals (<= 2 tasks). E4 (REVISED 2026-10-11): reflection is this same call. Its schema also accepts
+    # "pattern_names": {pattern_id: name} and "notes": str, returned alongside the tasks; there is no separate reflect().
+    # The prompt states the JSON answer shape (the cloud model ignores the format schema).
 ```
 
 - `choose` skips the model call when there is exactly one non-`press` affordance (most dialogue boxes).
 - For a curiosity task, untried affordances rank first in the view. That is a ranking rule, not extra task records.
-- `reflect` never promotes a pattern; it only names them.
+- Reflection (`plan`'s `pattern_names`) never promotes a pattern; it only names existing pattern ids.
+- `escalate` has no callers since E3R3's `plan`; it is a deletion candidate (E4 reports it).
 
 ## run directory and truth
 

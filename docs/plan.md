@@ -14,8 +14,8 @@ Each phase is one packet in `docs/plans/`, and each packet runs in its own orche
 | E1 | (this file, below) | done | Perceiver chosen: Gemma; recall 0.71, precision 0.73 | — | — |
 | E1b | [E1b.md](plans/E1b.md) | **deferred**: STS2 small icons; run before any mouse game | recall ≥ 0.80 at precision ≥ 0.75 | 2 | ~450 |
 | E2 | [E2.md](plans/E2.md) | **done** | 4/4 truth goals; verdict 3/3; registration 17/17; 18 uncached calls, 0 retries | 6 | **60** |
-| E3 (M1) | [E3.md](plans/E3.md) | **E3R4 (spatial memory) approved, not started; paste E3.md §R4.5** | E3R3 offline check passed 2026-10-11 after judge fixes; 156 tests; agent/ 1,603 lines (+~110 approved for E3R4); 499 requests; resume from checkpoint 54; M1 false | 7 | **1,100** |
-| E4 | [E4.md](plans/E4.md) | not started | 3 doors plus a promoted pattern; a battle and a move; repeat accuracy ≥ first + 0.15; offline memory check | 5 | **600** |
+| E3 (M1) | [E3.md](plans/E3.md) | **M1 open; gate deferred into E4.5 stage M (user decision 2026-10-11)** | E3R4 spatial memory + E3R5 fixes + option A built; two live probes failed at the house exit (perceiver inventions, ranker noise, an id-less route bug); 542 requests (M1 524, 526 left); resume from checkpoint 54 | 7 | **1,100** |
+| E4 | [E4.md](plans/E4.md) | **revised 2026-10-11, not started; paste E4.md kickoff** | stage M: the deferred M1 gate; stage E: 3 doors plus a promoted pattern, a battle and a move, repeat accuracy ≥ first + 0.15, offline memory check | 5 | **600** (own ledger) |
 | E5 | [E5.md](plans/E5.md) | **deferred**: Pokémon only for now (game 2 = STS2) | second game with no core changes | 4 | ~1,300 |
 
 **Call policy until the architecture settles:**

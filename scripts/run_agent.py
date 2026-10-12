@@ -17,7 +17,7 @@ def _ledger(run, stage, cap):
         try:
             data = json.loads(path.read_text()) if path.exists() else {"total": 0, "smoke": 0, "m1": 0}
             bucket = "m1" if "m1" in str(run).lower() else "smoke"
-            base = {"a":180,"b":300,"p":30,"q":40,"c":546}.get(stage)
+            base = {"a":180,"b":300,"p":30,"q":60,"c":546}.get(stage)
             key, limit = (f"stage_{stage}", min(cap, base)) if stage and base else (None, None)
             if data["total"] >= 1100 or data[bucket] >= (1050 if bucket == "m1" else 50) or (key and data.get(key,0) >= limit): raise CallCap("persistent call budget exhausted")
             data["total"] += 1; data[bucket] += 1
@@ -71,7 +71,7 @@ def main(argv=None):
         with (run / "calls.jsonl").open("a", encoding="utf8") as f: f.write(json.dumps({**row, "step": active_step[0], "requests":n})+"\n")
     model = Ollama("gemma4:31b-cloud", cache_dir=Path(".cache/model"), log=log); post = model._post
     def guarded(payload):
-        stage_cap={"a":180,"b":a.stage_b_cap,"p":30,"q":40,"c":546}.get(a.stage,a.max_calls)
+        stage_cap={"a":180,"b":a.stage_b_cap,"p":30,"q":60,"c":546}.get(a.stage,a.max_calls)
         cap=min(a.max_calls,stage_cap)
         if invocation[0] >= cap: raise CallCap("invocation call cap")
         _ledger(run, a.stage, stage_cap); invocation[0] += 1; return post(payload)
