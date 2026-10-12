@@ -2,6 +2,9 @@
 
 Last written by: Codex E4 orchestrator, 2026-10-11, after the first stage-M evaluator failure. M1 remains open; E4 build is complete, stage E unstarted.
 
+## Next: program R1 + World Memory (approved 2026-10-12)
+- Entry point docs/plans/program-r1-wm.md (order P2 → W0 → W1 → W2 → W3 → P3 → P4 → W4, STOPs after P2, W3, P3, W4). Orchestrator GPT-6.1 Sol; subagents gpt-6-luna high only. Contracts for `notebook and act` and `world` are already in contracts.md.
+
 ## Update 2026-10-12 (Claude orchestrator; Sonnet fixes, Haiku verify; 0 cloud calls)
 - Evaluator CLI fixed (repo-root sys.path in scripts/eval_run.py) + standalone subprocess test; `eval_run.py runs/m1` exits 0, output identical to the diagnostic; runs/m1/summary.json refreshed.
 - A: directional world→world exit into a new place now scores place_changes (loop.py `world_exit`, reused for mark_exit); dialogue/menu cuts unchanged.

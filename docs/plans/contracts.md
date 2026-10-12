@@ -25,6 +25,8 @@ Orchestrators **never edit this file**. If a contract needs to change, they stop
 | [tasks](#tasks) | `agent/tasks.py` | E3 |
 | [chooser and orchestrator](#chooser-and-orchestrator) | `agent/decide.py` | E3 (reflection in E4) |
 | [run directory and truth](#run-directory-and-truth) | `agent/loop.py`, `scripts/` | E2 (truth) and E3 (loop) |
+| [notebook and act](#notebook-and-act) | `agent/notebook.py`, `agent/act.py` | R1 P1 (W1 changes) |
+| [world](#world) | `agent/world.py` | W0–W4 ([program-r1-wm.md](program-r1-wm.md)) |
 
 ## model
 
@@ -253,7 +255,7 @@ A trace row, one per step. Every key is always present; use `null` when a value 
  "verdict": "hit", "calls": 2, "ms": 7400, "shortcut": null}
 ```
 
-E3R4 adds `"tile": [x, y]` (the player's place-frame tile after the step, or null) and `"drift_fix": [dx, dy]` or null. E3R5 (approved 2026-10-11) adds `"ranker": {"state": ..., "answer": ...}` (what the local ranker was asked and replied) on steps where it was asked, else null.
+E3R4 adds `"tile": [x, y]` (the player's place-frame tile after the step, or null) and `"drift_fix": [dx, dy]` or null. W0 (approved 2026-10-12) adds `"entities": [{"id", "name", "kind", "at"}]` (the before-perception entities) and `"scroll": [dx, dy]` (the skill's total content scroll) or null; W4 replays anchors from them. E3R5 (approved 2026-10-11) adds `"ranker": {"state": ..., "answer": ...}` (what the local ranker was asked and replied) on steps where it was asked, else null.
 
 - `effects` and `pred.effect` come from `EFFECTS = ("place_changes", "text_appears", "screen_changes", "entity_appears", "entity_disappears", "view_scrolled", "no_change")`.
 - `verdict` is one of `hit`, `partial`, `surprise`, `miss` or `unobservable`.
@@ -316,6 +318,7 @@ def conf(rel: dict) -> float     # (sup + 1) / (sup + con + 2)
   - `route()` and `compact()` are deferred until something calls them.
 - **Relations from effects:** `PRED = {"place_changes": "leads_to", "text_appears": "says", "screen_changes": "opens", "entity_appears": "reveals", "entity_disappears": "removes", "view_scrolled": "moves_view", "no_change": "does_nothing"}`. The relation is `(target id, PRED[effect], to or detail)`, and `predict` reads `PRED` in reverse. It lives in `agent/predict.py`.
 - **Refuted** means `con ≥ 2` and `con > sup`. An observed fact with `sup ≥ 3` is not overturned by one contradiction.
+- **2026-10-12 (approved, W1/W3/W4):** entities gain `status` (`seen|remembered|stale|gone`), `misses`, `tier` (`interest|landmark|transient`) in W3, and `anchor` (`screen|world|actor|self|unknown`), `region`, `transient` in W4. Places gain `offset` on merged rows (W1). New store `seen` `{"id": place, "cells": ["x,y"], "step"}` (W3). `match_place` stops importing `agent.space` (W0). Merging established places lives in `World.merge` (W1).
 - **`view`:**
   - It returns the rendered text and the list of ids it showed.
   - Budgets: perceiver ≈ 400 tokens, chooser ≈ 1.2k, orchestrator ≈ 3k. Estimate tokens as `len(text) / 4`.
@@ -349,6 +352,7 @@ def describe(mem, place: str, pos: tuple[int, int]) -> str
 - **Player position** `pos` is a place-frame tile held by the loop and checkpointed in `harness.json`. The first arrival in a place sets `pos = (0, 0)`; a known exit sets `pos` to its `arrive` tile.
 - **Drift re-anchor:** after `observe`, the median (stored tile - projected tile) over matched non-player records; if it is non-zero on two consecutive perceptions, shift `pos` by it and set the trace `drift_fix`.
 - **Exit filter:** a navigation candidate whose tile is within 1 of a known exit tile in this place leading to an already visited place is excluded, alongside the relation filter.
+- **2026-10-12 (approved, W0–P4):** `agent/world.py` becomes the only caller of these functions on the act path (W0). W2 adds `fold(..., actors: frozenset[tuple[int, int]] = frozenset())`: a confident `(0, 0)` press into an actor tile records nothing. P4 removes `describe` and the exit filter below together with the gated path.
 - **Not in E3R4:** landmark matching by tile; perception skipping on known views; fixed-camera games (pos changes only from scroll).
 
 ## predict
@@ -449,4 +453,65 @@ runs/<run_id>/
 - **`--steps N` always means N more steps.** `--resume [--from-step K]` loads the newest checkpoint, or the newest at or before K, then **truncates** `trace`, `chooser`, `calls` and `truth` rows with `step >` the checkpoint step before continuing.
 - **Checkpointing belongs to the runner** (`scripts/run_agent.py`), not to `agent/loop.py`. The loop exposes its harness state through `state()` and `restore()`.
 - **RAM addresses** live only in `scripts/truth_pokered.py`. They are taken from the pokered disassembly symbol file, and E2 verifies them.
+- **2026-10-12 (approved):** `harness.json` gains World state (`World.state()`: the existing `pos`, `drift`, `drift_ref`, `entity_tiles`, `entity_ids`, `anchors` keys, plus `cam_px` and anchor evidence from W4). Truth rows gain `map_h`, `map_w` (P3, evaluation only).
 - **Resuming** is allowed only when the PyBoy state and the memory are loaded together from one checkpoint. That continues the same run. Loading a state without its memory is debugging, not a run.
+
+
+## notebook and act
+
+R1 P1 (built 2026-10-12, behind `--act`; P4 makes it the only path). W1 changes approved 2026-10-12.
+
+```python
+# agent/notebook.py — model-owned notes, code-stored at <memory root>/notebook.json (+ notebook.history op log)
+SECTIONS = ("goals", "hints", "lessons")        # W1: "places" removed; code owns places (see world)
+CAPS = {"lessons": 10, "hints": 20}             # most recent kept; done/dropped goals capped at 10
+class Notebook:
+    def __init__(self, root: Path) -> None
+    def apply(self, ops: list[dict], step: int) -> int     # {"op": "set"|"remove", "section", "key" (<= 40 chars), "value"}; returns ops applied
+    def render(self, limit: int = 6000) -> str             # drops oldest lessons, hints, finished goals first
+
+# agent/act.py — one structured model call per step
+@dataclass
+class Act: place: str; ops: list; action: dict | None; text: str | None; expect: str; why: str
+def act(model, image, perception: dict, notebook: str, facts: str, flags: list[str], controls: str,
+        prefs: dict, buttons: list[str], places: list[str] = ()) -> Act     # W1 adds `places` (known place names)
+    # action: {"i": option index} | {"go_to": name} | {"buttons": [<= 8 input names]}; anything else -> None
+    # W2: go_to may name an on-screen thing, a remembered thing, or a known place (resolved by World)
+```
+
+- The reply's `place` becomes an alias on a code-owned place via `World.name` (W1).
+- `flags` carries code observations as text, never commands: loop/stall detectors, `merge_pending: <name>`, `go_to "<name>": not in memory`, `travel: <reason>`.
+
+## world
+
+World Memory, approved 2026-10-12. Design: [world-memory.md](world-memory.md); packets W0–W4. `agent/world.py`. No model calls; never reads RAM; never picks goals or filters options.
+
+```python
+class World:
+    def __init__(self, mem: Memory, tile_px: int | None) -> None
+    # W0
+    def before(self, per: dict, place: str, prior: str | None, size: tuple[int, int], step: int) -> tuple[Callable, dict[int, tuple[int, int]], dict[int, str]]
+        # projection fn, entity index -> tile, entity index -> id (calls mem.observe); resets pos on a place change
+    def after(self, skill: SkillResult, place: str, next_place: str, scene_cut: bool, step: int) -> dict
+        # folds moves, marks exits on a cut; returns {"exit_key", "cut_dir", "known_exit"}
+    def state(self) -> dict
+    def restore(self, state: dict) -> None
+    # W1
+    def name(self, place: str, name: str, step: int) -> str          # model-asserted name -> alias, new-arrival merge, or merge()
+    def merge(self, src: str, dst: str, step: int) -> bool           # needs >= 2 agreeing same-name entity pairs for the tile offset
+    # W2
+    def resolve(self, name: str, per: dict, place: str) -> dict | None
+        # {"kind": "screen"|"memory"|"place", "place", "tile", "id", "stale": bool}; order: on screen, remembered, place
+    def plan(self, target: dict) -> list[dict] | None                # legs {"place", "dirs", "push", "expect": place id | None}
+    def travel(self, ctx: Ctx, legs: list[dict], step: int) -> SkillResult   # all legs in one loop step; stops on the first surprise
+    # W3
+    def view(self, goal_text: str, place: str) -> str                # <= VIEW_TOKENS; deterministic
+    # W4
+    def classify(history: list[tuple]) -> str                        # module-level pure function: "screen"|"world"|"actor"|"self"|"unknown"
+```
+
+- **Constants (calibration knobs, module level):** `POS_TOL = 1`, `ANCHOR_EVIDENCE = 2`, `MISS_TO_STALE = 2`, `MISS_TO_GONE = 4`, `ACTOR_STALE_STEPS = 20`, `LANDMARKS_PER_PLACE = 8`, `MAP_W, MAP_H = 21, 15`, `VIEW_TOKENS = 500`, `TRAVEL_MAX_INPUTS = 120`; `ACTOR_KINDS` (W2 stand-in, used only while an anchor is `unknown` after W4).
+- **Ownership:** World is the only writer of `tiles`, `seen` and the status/tier/anchor fields; `Memory` keeps identity (`match_place`, `name_place`, `observe`, `resolve`).
+- **Misses** count only on distinct frames, on `screen == "world"`, with no modal open, inside the view rectangle shrunk by 1 tile.
+- **View order:** Here line + cropped map, things here, screen/HUD, other places (hops, goal-word overlap, recency), flags. Gone things never render.
+- **Removed in P4 (after the user's STOP 3 decision):** the `tasks` and `chooser and orchestrator` sections, `space.describe`, the space exit filter, `--act`.
