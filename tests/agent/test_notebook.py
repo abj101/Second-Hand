@@ -9,13 +9,21 @@ def test_apply_counts_history_and_reload(tmp_path):
            {"op": "set", "section": "bogus", "key": "x", "value": {}},
            {"op": "set", "section": "hints", "key": "  ", "value": {}},
            "junk"]
-    assert nb.apply(ops, 1) == 2
+    assert nb.apply(ops, 1) == 1
     assert nb.apply({"op": "set"}, 2) == 0
     assert nb.apply([{"op": "remove", "section": "goals", "key": "find oak"}], 3) == 1
-    assert nb.places() == ["Town"]
-    assert len((tmp_path / "notebook.history").read_text(encoding="utf-8").splitlines()) == 3
+    assert "places" not in nb.data
+    assert len((tmp_path / "notebook.history").read_text(encoding="utf-8").splitlines()) == 2
     (tmp_path / "notebook.json").write_text("{not json", encoding="utf-8")
     assert Notebook(tmp_path).render() == "(empty)"
+
+
+def test_legacy_places_are_dropped(tmp_path):
+    (tmp_path / "notebook.json").write_text('{"places":{"Town":{"text":"old"}}}', encoding="utf-8")
+    nb = Notebook(tmp_path)
+    assert nb.data == {"goals": {}, "hints": {}, "lessons": {}}
+    nb.apply([], 1)
+    assert "places" not in (tmp_path / "notebook.json").read_text(encoding="utf-8")
 
 
 def test_lessons_cap_render_order_and_limit(tmp_path):
@@ -29,5 +37,5 @@ def test_lessons_cap_render_order_and_limit(tmp_path):
     assert "- l1:" not in text and "- l11:" in text
     assert text.index("- active_one") < text.index("- done_one")
     assert Notebook(tmp_path).render() == text
-    short = nb.render(limit=120)
-    assert len(short) <= 120 and "- active_one" in short and "- Town" in short and "- done_one" not in short
+    short = nb.render(limit=80)
+    assert len(short) <= 80 and "- active_one" in short and "- done_one" not in short

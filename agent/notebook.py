@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-SECTIONS = ("goals", "places", "hints", "lessons")
+SECTIONS = ("goals", "hints", "lessons")
 CAPS = {"lessons": 10, "hints": 20}  # most recent kept by step
 def _trim(d: dict, keys: list, keep: int) -> None:  # drop oldest-by-step until `keep` of `keys` remain
     for k in sorted(keys, key=lambda k: d[k].get("step", 0))[:max(0, len(keys) - keep)]: del d[k]
@@ -42,4 +42,3 @@ class Notebook:
             text = "\n".join(lines)
             if len(text) <= limit or not drop: return text[:limit]
             shown.discard(drop.pop(0))
-    def places(self) -> list[str]: return list(self.data["places"])

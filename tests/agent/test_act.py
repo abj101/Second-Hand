@@ -15,7 +15,7 @@ class Capture:
 
 def run(data, **kwargs):
     model = Capture(data)
-    return act(model, None, PERCEPTION, kwargs.get("notebook", ""), "none", kwargs.get("flags", []), "A: press", {}, BUTTONS), model
+    return act(model, None, PERCEPTION, kwargs.get("notebook", ""), "none", kwargs.get("flags", []), "A: press", {}, BUTTONS, kwargs.get("places", [])), model
 
 
 def test_option_reply_parsed():
@@ -41,3 +41,11 @@ def test_prompt_has_notebook_flags_options_and_no_game_words():
     user = model.args[0][1]
     assert "Goals: reach the hall" in user and "stuck twice" in user and "0: approach door" in user
     assert not re.search(r"pok[eé]mon|\bred\b|\bblue\b|\brival\b", (SYSTEM + REPLY + user).casefold())
+    assert "Known places: none" in user
+    assert '"section":"goals"|"hints"|"lessons"' in REPLY
+    assert "Place values" not in REPLY and '"places"' not in REPLY
+
+
+def test_prompt_includes_at_most_twelve_known_places():
+    _, model = run({}, places=[f"P{i}" for i in range(13)])
+    assert "Known places: " + ", ".join(f"P{i}" for i in range(12)) in model.args[0][1]

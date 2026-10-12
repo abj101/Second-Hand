@@ -61,12 +61,12 @@ class Loop:
         choice, exit_test, player = None, False, next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         candidate = act_route = None
         if self.act_mode:
-            a = act(self.model, before, per, self.notebook.render(), view, self.flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()))
+            a = act(self.model, before, per, self.notebook.render(), view, self.flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=list(dict.fromkeys(n for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True) for n in [p.get("name"), *p.get("aliases", [])] if n))[:12])
             applied = self.notebook.apply(a.ops, self.step_no + 1)
-            named = self.mem.name_place(place, a.place, self.step_no + 1)
+            named = self.world.name(place, a.place, self.step_no + 1)
             if named != place:  # model says this new arrival is a known place
                 place = self.place = named; ctx["place"] = place
-                self.world.pos = next(((r["x"], r["y"]) for r in self.mem.rows("tiles") if r.get("place") == place and (r.get("exit") or {}).get("to") == prior), self.world.pos)
+                if self.world.new_arrival: self.world.pos = next(((r["x"], r["y"]) for r in self.mem.rows("tiles") if r.get("place") == place and (r.get("exit") or {}).get("to") == prior), self.world.pos)
                 proj, tiles, ids = self.world.before(per, place, place, size, self.step_no + 1)
                 pa = self.world.pa
                 targets = [resolve_target(self.mem, x.get("target", ""), place, proj(x.get("at"))) for x in affs]; preds = [predict(self.mem, x, targets[j], place) for j, x in enumerate(affs)]
@@ -169,7 +169,7 @@ class Loop:
             "ranker": None, "perception_reused": reused, "frame_hash": frame_hash,
             "scene_cut": scene_cut, "next_place": next_place, "verified_edge": verified_edge, "view_ids": view_ids, "tile": self.world.pos if self.tile_px else None, "drift_fix": list(drift_fix) if drift_fix else None, "entities": self.world.entities, "scroll": spatial["scroll"], **({"exit": list(exit_key)} if scene_cut and not modal and next_place != place and exit_key else {}),
             "task_budget_exhausted": any(t.get("last_failure") == "budget exhausted" for t in changed_tasks), "wake": None,
-            **({"act": {"place": a.place, "ops": applied, "why": a.why, "action": a.action}} if self.act_mode else {})}
+            **({"act": {"place": a.place, "ops": applied, "why": a.why, "action": a.action}, **({"flags": [f"merge_pending: {self.world.merge_pending}"]} if self.world.merge_pending else {})} if self.act_mode else {})}
         self.step_no += 1
         (self.mem.root.parent / row["frame"]).parent.mkdir(parents=True, exist_ok=True); before.save(self.mem.root.parent / row["frame"])
         drift_fix = self.world.observe_after(after_per, after, after_reused, next_place, after.size, self.step_no)
@@ -179,7 +179,7 @@ class Loop:
         self.place, self.prev, self.prev_frame, self.cached, self.cached_hash = next_place, after_per, after, after_per, after_hash
         self.pending_cut, self.pending_via = False, None; reason = self.stuck.update(row); self.repair_pending = self.parse_failed and self.empty_streak >= 8 and not self.repair_used; self.repair_used |= self.repair_pending
         if unknown: reason = "player position unknown"
-        if self.act_mode: self.flags = [x for x in (reason, f"last action {skill.status}: {skill.reason}" if skill.status != "done" else None, f"verdict {v}" if v in ("miss", "surprise") else None) if x]
+        if self.act_mode: self.flags = [x for x in (reason, f"last action {skill.status}: {skill.reason}" if skill.status != "done" else None, f"verdict {v}" if v in ("miss", "surprise") else None, f"merge_pending: {self.world.merge_pending}" if self.world.merge_pending else None) if x]; self.world.merge_pending = None; self.world.new_arrival = False
         ended = changed_tasks[-1] if changed_tasks else {}; game_text_count = sum(r.get("src") == "game_text" for r in self.mem.rows("knowledge"))
         self.pending_plan_reason = (f"goal {ended.get('status')}: {ended.get('goal', '')}" if changed_tasks else reason or self.pending_plan_reason or ("new game text" if game_text_count > self.last_plan_text_count else None))
         if not self.pending_plan_reason: self.pending_plan_reason = "surprise" if v == "surprise" else "new_place" if verified_edge and next_place not in known_places else "periodic" if self.step_no % 50 == 0 else None

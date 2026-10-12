@@ -516,6 +516,7 @@ class World:
 ```
 
 - **Constants (calibration knobs, module level):** `POS_TOL = 1`, `ANCHOR_EVIDENCE = 2`, `MISS_TO_STALE = 2`, `MISS_TO_GONE = 4`, `ACTOR_STALE_STEPS = 20`, `LANDMARKS_PER_PLACE = 8`, `MAP_W, MAP_H = 21, 15`, `VIEW_TOKENS = 500`, `TRAVEL_MAX_INPUTS = 120`; `ACTOR_KINDS` (W2 stand-in, used only while an anchor is `unknown` after W4).
+- **Merges (W1, 2026-10-12):** `merge(src, dst)` writes shifted/unioned tiles and entities under `dst`, redirects edges, tile exits (`to`, shifted `arrive`) and relations, and marks `src` `{"state": "merged", "into": dst, "offset": [dx, dy]}`. `src` tile and entity rows are left as history (no tombstone field). Readers that scan across places skip rows whose `place` is a merged place; readers filtered by a live place need nothing.
 - **Ownership:** World is the only writer of `tiles`, `seen` and the status/tier/anchor fields; `Memory` keeps identity (`match_place`, `name_place`, `observe`, `resolve`).
 - **Misses** count only on distinct frames, on `screen == "world"`, with no modal open, inside the view rectangle shrunk by 1 tile.
 - **View order:** Here line + cropped map, things here, screen/HUD, other places (hops, goal-word overlap, recency), flags. Gone things never render.
