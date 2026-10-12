@@ -59,7 +59,7 @@ class Loop:
         affs = list(per.get("affordances", [])); targets = [resolve_target(self.mem, a.get("target", ""), place, proj(a.get("at"))) for a in affs]
         preds = [predict(self.mem, a, targets[i], place) for i, a in enumerate(affs)]
         choice, exit_test, player = None, False, next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
-        candidate = act_route = None
+        candidate = act_route = travel_legs = None
         if self.act_mode:
             a = act(self.model, before, per, self.notebook.render(), view, self.flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=list(dict.fromkeys(n for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True) for n in [p.get("name"), *p.get("aliases", [])] if n))[:12])
             applied = self.notebook.apply(a.ops, self.step_no + 1)
@@ -72,11 +72,10 @@ class Loop:
                 targets = [resolve_target(self.mem, x.get("target", ""), place, proj(x.get("at"))) for x in affs]; preds = [predict(self.mem, x, targets[j], place) for j, x in enumerate(affs)]
             action, i = a.action, None
             if action and "go_to" in action:
-                norm = lambda s: str(s or "").casefold().removeprefix("exit:").strip()
-                e = next((e for e in per.get("entities", []) if norm(e.get("name")) == norm(action["go_to"])), None)
-                if e:
-                    affs.append({"verb": "approach", "target": e["name"], "at": e.get("at")}); targets.append(resolve_target(self.mem, e["name"], place, proj(e.get("at")))); preds.append(None); i = len(affs) - 1
-                    if self.tile_px and player and (t := proj(e.get("at"))) and (dirs := route(self.mem, place, self.pos, t)) is not None: act_route = {"dirs": dirs, "push": outward(self.mem, place, t, None)}
+                resolved = self.world.resolve(action["go_to"], per, place); e = next((e for n, e in enumerate(per.get("entities", [])) if self.world.entity_ids.get(n) == resolved.get("id")), None) if resolved and resolved["kind"] == "screen" else None
+                if resolved and (e or resolved["kind"] != "screen"):
+                    affs.append({"verb": "approach", "target": (e or {}).get("name", action["go_to"]), "at": (e or {}).get("at")}); targets.append(resolved.get("id")); preds.append(None); i = len(affs) - 1
+                    act_route = {"dirs": dirs, "push": outward(self.mem, place, t, None)} if e and self.tile_px and player and (t := proj(e.get("at"))) and (dirs := route(self.mem, place, self.pos, t)) is not None else None; travel_legs = self.world.plan(resolved) if not e else None; action = None if travel_legs is None and not e else action
                 else: action = None
             if action and "buttons" in action:
                 affs.append({"verb": "buttons", "target": " ".join(action["buttons"])}); targets.append(None); preds.append(None); i = len(affs) - 1
@@ -115,18 +114,18 @@ class Loop:
         skillctx = Ctx(self.env, self.model, self.tile_px, self.move_frames)
         planned_route = act_route or (candidate.get("route") if exit_test and candidate else None)
         try:
-            if self.act_mode: skill = wait_until(skillctx) if not affs or choice is None else press_seq(skillctx, affs[choice.i]["target"].split()) if affs[choice.i].get("verb") == "buttons" else run_affordance(skillctx, affs[choice.i], per, text=choice.text, exit=False, **({"route": planned_route} if planned_route else {}))
+            if self.act_mode: skill = self.world.travel(skillctx, travel_legs, self.step_no + 1, self.trace) if travel_legs is not None and choice else wait_until(skillctx) if not affs or choice is None else press_seq(skillctx, affs[choice.i]["target"].split()) if affs[choice.i].get("verb") == "buttons" else run_affordance(skillctx, affs[choice.i], per, text=choice.text, exit=False, **({"route": planned_route} if planned_route else {}))
             else: skill = wait_until(skillctx) if not affs else run_affordance(skillctx, affs[choice.i], per, text=choice.text, exit=exit_test or bool(planned_route), **({"route": planned_route} if planned_route else {}))
         except BaseException: self.pending_cut, self.pending_via = cut(before, self.env.screenshot()), affs[choice.i].get("target") if choice else None; self.cached = self.cached_hash = None; raise
         self.tile_px = skillctx.tile_px; self.world.tile_px = self.tile_px
-        scene_cut = skill.blank_seen or skill.reason == "scene cut" or (cut(skill.before, skill.after) and (self.env.pointer or not choice or affs[choice.i].get("verb") not in ("approach", "interact") or skill.scroll == (0, 0)))
+        scene_cut = self.world._travel_cut if travel_legs is not None else skill.blank_seen or skill.reason == "scene cut" or (cut(skill.before, skill.after) and (self.env.pointer or not choice or affs[choice.i].get("verb") not in ("approach", "interact") or skill.scroll == (0, 0)))
         moves = getattr(skill, "moves", []); spatial = self.world.prepare(skill, place, scene_cut, self.step_no + 1); exit_key, cut_dir = spatial["exit_key"], spatial["cut_dir"]
         self.pending_cut, self.pending_via = scene_cut, affs[choice.i].get("target") if choice else None
         try: after_set = wait_settled(self.env); after = after_set.frame; after_per, after_hash, after_reused, _ = self._see(after, place)
         except BaseException: self.cached = self.cached_hash = None; raise
         modal = {per.get("screen"), after_per.get("screen")} <= {"world", "dialogue", "menu"} and per.get("screen") != after_per.get("screen") and "world" in (per.get("screen"), after_per.get("screen")) and not (skill.blank_seen or skill.reason == "scene cut")
         scene_cut &= not modal
-        next_place = place if modal else self.mem.match_place(after_per, self.step_no + 1, prev=place, cut=scene_cut, via=(affs[choice.i].get("target") if choice else None), exit=exit_key, via_id=targets[choice.i] if choice else None)
+        next_place = self.world.current_place if travel_legs is not None else place if modal else self.mem.match_place(after_per, self.step_no + 1, prev=place, cut=scene_cut, via=(affs[choice.i].get("target") if choice else None), exit=exit_key, via_id=targets[choice.i] if choice else None)
         spatial = self.world.after(skill, place, next_place, scene_cut, self.step_no + 1); known_exit = spatial["known_exit"]
         if skill.scroll != (0, 0) and next_place == place and self.mem.get("places", place).get("state") == "candidate":
             source = self.mem.get("places", place); source["state"] = "place"; self.mem.upsert("places", source)
@@ -179,6 +178,7 @@ class Loop:
         self.place, self.prev, self.prev_frame, self.cached, self.cached_hash = next_place, after_per, after, after_per, after_hash
         self.pending_cut, self.pending_via = False, None; reason = self.stuck.update(row); self.repair_pending = self.parse_failed and self.empty_streak >= 8 and not self.repair_used; self.repair_used |= self.repair_pending
         if unknown: reason = "player position unknown"
+        if self.act_mode and a.action and "go_to" in a.action and choice is None: reason = f'go_to "{a.action["go_to"]}": not in memory'
         if self.act_mode: self.flags = [x for x in (reason, f"last action {skill.status}: {skill.reason}" if skill.status != "done" else None, f"verdict {v}" if v in ("miss", "surprise") else None, f"merge_pending: {self.world.merge_pending}" if self.world.merge_pending else None) if x]; self.world.merge_pending = None; self.world.new_arrival = False
         ended = changed_tasks[-1] if changed_tasks else {}; game_text_count = sum(r.get("src") == "game_text" for r in self.mem.rows("knowledge"))
         self.pending_plan_reason = (f"goal {ended.get('status')}: {ended.get('goal', '')}" if changed_tasks else reason or self.pending_plan_reason or ("new game text" if game_text_count > self.last_plan_text_count else None))

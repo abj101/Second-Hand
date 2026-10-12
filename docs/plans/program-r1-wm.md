@@ -25,7 +25,7 @@ This file is the single entry point. The orchestrator pastes nothing else; it re
 ## 2. Rules for every phase (paste these into every subagent prompt)
 
 1. **Tools (CLAUDE.md, mandatory):** Ponytail full (reuse > stdlib > minimal code; no unrequested abstractions; mark deliberate shortcuts with a `ponytail:` comment); CodeGraph first (`codegraph_explore` MCP or `codegraph explore "<query>"`) before grep/Read, and check blast radius before editing; Headroom (`headroom_compress`/`headroom_retrieve`) for large outputs and logs.
-2. **Scope:** only the files the WP card lists, within its line budget. Never touch `loop/`. Never edit `docs/plans/contracts.md`; if a contract must change, stop and report the proposed text.
+2. **Scope:** only the files the WP card lists. **Line budgets are suspended (user, 2026-10-12):** record line counts in the Result, never stop or trim for them; a compression pass follows once the program works. Never touch `loop/`. Never edit `docs/plans/contracts.md`; if a contract must change, stop and report the proposed text.
 3. **Game-neutral:** nothing game-specific in `agent/`: no game, place, character, item, route or RAM address. RAM truth (`scripts/truth_pokered.py`, `truth.jsonl`) is for evaluation only and is never read by `agent/`.
 4. **No new gates:** World Memory stores facts, answers queries and executes the model's own `go_to`; it never picks goals, filters options or overrides the model (user decision 2026-10-12).
 5. **Tests:** unit tests use `StubModel`/`GridEnv` from `tests/agent/fakes.py` and make 0 cloud calls. Each non-trivial branch leaves one runnable check. Use `.venv-agent/Scripts/python.exe`, forward-slash paths.
@@ -41,7 +41,7 @@ This file is the single entry point. The orchestrator pastes nothing else; it re
 ## 4. Budgets across the program
 
 - **Cloud requests:** P2 ≤ 40 + P3 ≤ 80 = **≤ 120** from the M1 bucket (483 left on 2026-10-12; phase total cap 1,100, 585 used).
-- **Lines (`agent/`, 1,988 on 2026-10-12):** W0 +54 (actual), W1 ≈ +35, W2 ≈ +65, W3 ≈ +105, P4 ≈ −400 or more, W4 ≈ +60. Each packet states its own budget; overruns are reported, never hidden by compacting unrelated code.
+- **Lines:** budgets suspended 2026-10-12 (report only; compress after the program). Original estimates, for reference (`agent/`, 1,988 on 2026-10-12): W0 +54 (actual), W1 ≈ +35, W2 ≈ +65, W3 ≈ +105, P4 ≈ −400 or more, W4 ≈ +60. Each packet states its own budget; overruns are reported, never hidden by compacting unrelated code.
 
 ## 5. Commits
 

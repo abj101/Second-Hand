@@ -1,5 +1,6 @@
 from agent.memory import Memory
 from agent.space import describe, exit_to, fold, frontier, mark_exit, outward, route, tile_of
+from agent.world import World
 
 
 def tile(mem, place, pos, **values):
@@ -25,6 +26,24 @@ def test_fold_walk_blocked_and_none(tmp_path):
     lines = (tmp_path / "blank" / "tiles.jsonl").read_text().splitlines()
     fold(blank, "hall", (0, 0), [("RIGHT", (0, 0))], 16, 3)
     assert len((tmp_path / "blank" / "tiles.jsonl").read_text().splitlines()) == len(lines)
+
+
+def test_actor_zero_motion_does_not_record_a_wall(tmp_path):
+    from types import SimpleNamespace
+
+    mem = Memory(tmp_path)
+    world = World(mem, 16)
+    per = {"screen": "world", "entities": [
+        {"kind": "player", "at": [.45, .5]}, {"kind": "NPC: shopkeeper", "at": [.55, .5]},
+    ]}
+    world.before(per, "hall", None, (160, 144), 1)
+    world.prepare(SimpleNamespace(moves=[("RIGHT", (0, 0))]), "hall", False, 1)
+    assert world.actor_tiles == frozenset({(1, 0)})
+    assert mem.rows("tiles") == []
+
+    blank = Memory(tmp_path / "blank")
+    fold(blank, "hall", (0, 0), [("RIGHT", (0, 0))], 16, 1)
+    assert blank.get("tiles", "hall@0,0")["blocked"] == ["RIGHT"]
 
 
 def test_route_detours_around_wall_and_allows_unknown_goal(tmp_path):

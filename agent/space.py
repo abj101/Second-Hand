@@ -6,12 +6,13 @@ def _get(mem, place, pos): return mem.get("tiles", _id(place, pos))
 def _new(place, pos, step): return {"id": _id(place, pos), "place": place, "x": pos[0], "y": pos[1], "floor": None, "blocked": [], "pushed": [], "exit": None, "step": step}
 def _save(mem, row, before): return mem.upsert("tiles", row) if {k: v for k, v in row.items() if k != "step"} != {k: v for k, v in before.items() if k != "step"} else None
 def tile_of(at, player_at, pos, size, tile_px): a, p = snap(at, size, tile_px), snap(player_at, size, tile_px); return tuple(pos[i] + round((a[i] - p[i]) * size[i] / tile_px) for i in (0, 1))
-def fold(mem, place, pos, moves, tile_px, step):
+def fold(mem, place, pos, moves, tile_px, step, actors: frozenset[tuple[int, int]] = frozenset()):
     here = pos
     for move in moves:
         if move is None: continue
         direction, shift = (move.get("dir"), move.get("shift")) if isinstance(move, dict) else move
         if direction not in DIRS or shift is None: continue
+        if (shift == (0, 0) or shift == 0) and (here[0] + DIRS[direction][0], here[1] + DIRS[direction][1]) in actors: continue
         row = _get(mem, place, here) or _new(place, here, step); before = dict(row, blocked=list(row["blocked"]), pushed=list(row["pushed"]))
         if row["floor"] is not True: row["floor"] = True; row["step"] = step
         if shift == (0, 0) or shift == 0:
