@@ -3,7 +3,7 @@
 Last written by: E3R3 orchestrator, 2026-10-11; R3.6 offline check failed; validation stopped.
 
 ## State of the code
-- Branch is feat/lean-agent; prior WIP is 31246ad and the approved packet is 273e5ec; E3R3 is uncommitted.
+- Branch is feat/lean-agent; E3R3 plus the 2026-10-11 fixes and the E3R4 packet are committed as WIP d96a7f1 (pre-gate, user-approved).
 - Every WP ran on explicitly selected gpt-6-luna at high effort, in G-a/G-b/G-c/J before G-d order.
 - Orchestrator acceptance passed 154 tests in tests/agent, including boundaries, with one existing SDL warning.
 - E3R3 net agent growth is +115: G-a14, G-b19, G-c4, J15 and G-d63.
