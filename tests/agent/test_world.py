@@ -64,6 +64,27 @@ def test_resolve_and_plan_skip_merged_history_and_plan_entity_facing(tmp_path):
     assert world.plan({**target, "place": "c"}) is None
 
 
+def test_plan_routes_to_unknown_entity_neighbor_around_blocked_edges(tmp_path):
+    from agent.space import DIRS
+    from tests.agent.fakes import GridEnv, StubModel
+
+    mem = Memory(tmp_path); place(mem, "room", "room"); entity(mem, "fern", "Fern", "room", [-1, 1])
+    mem.upsert("tiles", {"id": "room@-1,0", "place": "room", "x": -1, "y": 0, "floor": False, "blocked": [], "pushed": [], "exit": None, "step": 1})
+    mem.upsert("tiles", {"id": "room@0,0", "place": "room", "x": 0, "y": 0, "floor": True, "blocked": ["DOWN", "RIGHT"], "pushed": [], "exit": None, "step": 1})
+    env, model = GridEnv(), StubModel([]); world = World(mem, 16); world.current_place = "room"
+    target = world.resolve("Fern", {"entities": []}, "room")
+
+    legs = world.plan(target)
+
+    dirs = legs[-1]["dirs"]; at = (0, 0)
+    for direction in dirs[:-1]:
+        dx, dy = DIRS[direction]; at = (at[0] + dx, at[1] + dy)
+        assert at != (-1, 0)
+    assert at == (0, 1) and dirs[-1] == "LEFT" and dirs[0] not in ("DOWN", "RIGHT")
+    assert mem.get("tiles", "room@0,0")["blocked"] == ["DOWN", "RIGHT"]
+    assert len(mem.rows("tiles")) == 2 and model.calls == 0 and env.player == (8, 8)
+
+
 def test_travel_leg_cap_and_blocked_leg_reason(tmp_path, monkeypatch):
     from agent.skills import Ctx, SkillResult; from tests.agent.fakes import GridEnv, StubModel; from agent import world as world_module
 

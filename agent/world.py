@@ -123,10 +123,14 @@ class World:
             legs.append({"place": p, "dirs": dirs, "push": edge["dir"], "expect": edge["to"], "exit_tile": tile, "arrive": tuple(edge["arrive"])}); pos, p = tuple(edge["arrive"]), edge["to"]
         tile = tuple(target["tile"]); facing = None
         if target["kind"] == "memory":
-            floors = {(r["x"], r["y"]) for r in self.mem.rows("tiles") if r.get("place") == p and r.get("floor") is True}; near = [(t, d) for d, (dx, dy) in DIRS.items() if (t := (tile[0]-dx, tile[1]-dy)) in floors]
+            rows = {(r["x"], r["y"]): r for r in self.mem.rows("tiles") if r.get("place") == p}; near = []
+            for d, (dx, dy) in DIRS.items():
+                t = tile[0]-dx, tile[1]-dy
+                if rows.get(t, {}).get("floor") is False: continue
+                if (dirs := route(self.mem, p, pos, t)) is not None: near.append((t, d, dirs))
             if not near: return None
-            tile, facing = min(near, key=lambda q: (abs(q[0][0]-pos[0])+abs(q[0][1]-pos[1]), q[1]))
-        dirs = route(self.mem, p, pos, tile)
+            tile, facing, dirs = min(near, key=lambda q: (abs(q[0][0]-pos[0])+abs(q[0][1]-pos[1]), q[1]))
+        else: dirs = route(self.mem, p, pos, tile)
         if dirs is None: return None
         legs.append({"place": p, "dirs": dirs + ([facing] if facing else []), "push": None, "expect": None, "target": target}); return legs
     def travel(self, ctx, legs, step, trace=None):
