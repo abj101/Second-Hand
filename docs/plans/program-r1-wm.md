@@ -41,7 +41,7 @@ This file is the single entry point. The orchestrator pastes nothing else; it re
 ## 4. Budgets across the program
 
 - **Cloud requests:** P2 ≤ 40 + P3 ≤ 80 = **≤ 120** from the M1 bucket (483 left on 2026-10-12; phase total cap 1,100, 585 used).
-- **Lines (`agent/`, 1,988 on 2026-10-12):** W0 ≈ −10, W1 ≈ +35, W2 ≈ +65, W3 ≈ +105, P4 ≈ −400 or more, W4 ≈ +60. Each packet states its own budget; overruns are reported, never hidden by compacting unrelated code.
+- **Lines (`agent/`, 1,988 on 2026-10-12):** W0 +54 (actual), W1 ≈ +35, W2 ≈ +65, W3 ≈ +105, P4 ≈ −400 or more, W4 ≈ +60. Each packet states its own budget; overruns are reported, never hidden by compacting unrelated code.
 
 ## 5. Commits
 

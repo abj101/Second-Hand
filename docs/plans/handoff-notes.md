@@ -1,54 +1,58 @@
 # Handoff notes
 
-Last written by: GPT-6.1 Sol P2 orchestrator, 2026-10-12; amended by Claude after the user waived P2 place-name purity. Next phase: W0.
+Last written by: GPT-6.1 Sol W0 orchestrator, 2026-10-12; amended by Claude after repairing W0.2 (user-approved). Next phase: W1.
 
 ## State of the code
-- Branch feat/lean-agent; HEAD 2ab17f4. P0/P1 committed at 4af5ce2; E4 build at 53a1e03.
-- P2.1 implemented by gpt-6-luna HIGH: scripts/eval_act.py (89/90 lines), tests/agent/test_eval_act.py (40/40).
-- P2 files (scripts/eval_act.py, tests/agent/test_eval_act.py) and docs committed after the waiver; no push. Pre-existing untracked .claude/ untouched.
-- P2 Status is gate passed (purity waived by user, 2026-10-12). W0 is the first unfinished program row.
+- Branch feat/lean-agent; W0 committed (gate passed). P2 committed with the user's purity waiver.
+- agent/world.py (72 lines) owns act-path spatial state: before, prepare, after, mark_exit, observe_after, state, restore; Loop.pos is a property over world.pos; tests read loop.world.drift / loop.world.anchors.
+- tests/agent/test_world_golden.py + tests/agent/data/w0_golden/ freeze spatial behaviour; regenerate only where a later packet intends a change (W0_REGEN=1), and review the diff.
+- tests/agent: 226 passed. agent/ 2,042 lines (W0 +54; budget revised to <= +60 by the user).
+- W0 lesson for packet budgets: loop.py is dense one-liners, so extracting into named methods costs lines; judge W budgets on agent/ net, not loop shrinkage.
 
 ## Decisions in force
-- Entry point docs/plans/program-r1-wm.md; order P2 -> W0 -> W1 -> W2 -> W3 -> P3 -> P4 -> W4.
-- Orchestrator GPT-6.1 Sol; one WP per subagent, gpt-6-luna HIGH only, explicitly set.
-- Failed gates stop the program. P2 purity was waived by the user (W1 makes place identity code-owned); P3 carries the real concern: repeated NPC interaction and re-entering visited maps (new P3 rows).
-- Cloud only in P2/P3 through persistent M1 ledger; P2 cap 40, P3 cap 80; never reset/refund/raise a cap.
-- No game-specific agent code, RAM for decisions, new behaviour gates, contracts.md edits or loop/ edits.
-- Never modify runs/m1/; preserve checkpoints and .cache/model/; no git add -A or push.
+- User continued past STOP 1 after waiving P2 purity; never rerun P2.
+- Program order remains W0 -> W1 -> W2 -> W3 -> STOP 2 -> P3 -> P4 -> W4.
+- Orchestrator GPT-6.1 Sol; each WP uses a fresh gpt-6-luna HIGH subagent with model/effort explicitly set.
+- Blocked or failed phase stops execution. W1 not started; P3 live spend needs the user at STOP 2.
+- World Memory must store facts and execute model choices without new gates or game-specific agent code.
+- Frozen contracts unchanged; no contract change is proposed. Never edit loop/ or runs/m1/; preserve cache/checkpoints.
+- Commit listed paths plus docs only at a passed gate; never git add -A or push.
 
 ## Measured numbers
-- P2 command: .venv-agent/Scripts/python.exe scripts/eval_act.py --max-calls 40; exit 0, completed 15/15 frames.
-- Parsed actions 15/15 (>=14); distinct text-supported goal keys 2 (>=2), including Mom frame 53 goal 1 (>=1).
-- World frames 11: map 0x26 room 3/4 (75%, FAIL); map 0x25 room 6/6; map 0x00 world 1/1.
-- Name room spans 0x25 and 0x26 (FAIL); evaluation exit 0 means completion, not a passed gate.
-- Requests 29/40, matching total and M1 ledger deltas: total 585 -> 614, M1 567 -> 596, smoke 18 unchanged.
-- Remaining: M1 454/1,050; phase 486/1,100. Stage a142/b297/p25/q60/c43 unchanged.
-- WP acceptance: .venv-agent/Scripts/python.exe -m pytest tests/agent/test_eval_act.py -q; 2 passed, exit 0.
-- Full suite: .venv-agent/Scripts/python.exe -m pytest tests/agent -q; 224 passed, exit 0 in 305.79 s (.tmp/p2/full-suite.txt).
-- Immutability check: 267/267 runs/m1 files unchanged; contracts.md unchanged (.tmp/p2/immutability-check.json).
+- HEAD entry suite: .venv-agent/Scripts/python.exe -m pytest tests/agent -q; 224 passed, exit 0 in 299.32 s (.tmp/w0/head-suite.txt).
+- Single W0_REGEN=1 golden capture: pytest tests/agent/test_world_golden.py -q; 2 passed in 25.87 s at unchanged HEAD.
+- HEAD golden comparison: same command without W0_REGEN; 2 passed in 25.49 s (.tmp/w0/golden-head-compare.txt).
+- Golden inventory: 112 memory upsert rows and 12 trace rows across 13 files; all capture hashes unchanged.
+- Parent W0.2 acceptance: pytest tests/agent/test_world_golden.py tests/agent/test_loop.py tests/agent/test_space.py tests/agent/test_memory.py tests/agent/test_act.py -q; 69 passed, 6 failed, exit 1 in 202.49 s.
+- Four failures: undefined moves; two failures: missing Loop.drift and Loop.anchors (.tmp/w0/extraction-acceptance.txt).
+- Both golden tests passed in the targeted run; no differing golden store row. Post-extraction full suite not run because W0.2 was not accepted.
+- Agent lines 1988 -> 2048 (+60 vs <=0); loop 232 -> 213 (-19 vs <=-50); memory 383 -> 384 (+1); world 78/80.
+- Dependency check removes memory's space import, but loop still has act-specific route/outward and arrival bookkeeping.
+- Requests spent 0; ledger unchanged: total614/M1596/smoke18, M1 remaining454; all 267 runs/m1 files and contracts unchanged.
 
 ## Environment and gotchas
-- Use .venv-agent/Scripts/python.exe and CodeGraph-only code reads from the active packet's list; Ponytail full required.
-- Ollama gemma4:31b-cloud was reachable; all 163 saved frames and default eval steps present.
-- Review artifacts: .tmp/p2/table.md, rows.jsonl, summary.json, notebook/notebook.json, notebook/notebook.history.
-- Ledger evidence: .tmp/p2/ledger-before.json and ledger-after.json. Original frames/truth never written.
-- Eval resumes completed rows and notebook; summary requests counts the phase spend in the output directory across invocations.
-- Evaluator adds repo-root sys.path for direct CLI execution; cached replies do not reserve a request, retries do.
-- Headroom invoked; configured proxy unreachable, no measured savings. Existing SDL2 warning during tests.
+- Use .venv-agent/Scripts/python.exe and forward-slash paths; unit tests use StubModel/GridEnv, no cloud calls.
+- Read code only through codegraph_explore, within the active packet's list; range query agent/loop.py:185-219 exposed the original drift tail.
+- Ponytail full and Headroom mandatory; Headroom proxy unreachable, no measured compression savings.
+- Golden files under tests/agent/data/w0_golden/ are ignored by existing data/ Git rule; explicit force-add is needed only at a future pass.
+- Goldens compare parsed memory histories sorted stably by id, plus trace rows excluding t/ms/entities/scroll only.
+- W0 evidence lives in .tmp/w0/: line counts, hashes, draft-budget.json, final-immutability.json, test outputs.
+- The subagent lost one started test session handle and claimed no result; the parent's independently verified acceptance is authoritative.
 
 ## Deviations from plan and contracts
-- Contracts and agent/ unchanged; no line overrun, new gates, live play, model comparison or prompt repair.
-- Static input, wrapper and StubModel symbols explicitly referenced by the WP were read via CodeGraph.
-- Table Goals added also lists removal keys at 44/53; exact notebook_ops/history distinguish edits; summary counts set ops only.
-- Text-supported goal metric counts distinct keys over the episode; intro was later removed, final notebook holds one active goal.
+- W0.2 exceeds net and loop budgets; no unrelated code was compacted to hide growth.
+- World.after requires prepare() for the same step; mark_exit uses the prepared exit tile (contracts.md#world as built).
+- Spatial arrival/go_to code remains in the act branch; extraction is incomplete despite golden episode parity.
+- No contracts, old loop/, golden baseline, P2 prompt, ledger, runs/m1 or cache removal changes.
 
 ## Do not retry
-- Do not rerun P2; its result stands with the waiver.
-- Do not resume the stopped M1/E4 live check or delete old paths; their gates remain unpassed.
-- Runner code 3/4 requires checkpoint/report/stop; no ledger reset, refund, cap increase or polling a free-tier window.
+- Do not redo W0; it is committed and gate passed.
+- Do not regenerate W0 goldens unless a packet intends the behaviour change; review the diff when you do.
+- Do not resume M1/E4 live checks or start P3; STOP 2 live-spend approval is still required.
+- Do not reset/refund/raise ledgers, delete old paths before P4, or push.
 
 ## Open issues for W0
-- W0 next (0 requests). P3 must report repeat_actions and reentries per its packet.
-- Upstairs frame 44 is mislabeled Professor's Lab; upstairs/downstairs share `room`. Waived: W1 makes place identity code-owned.
-- After the Oak goal, the eval often chooses another NPC interaction or house entry; live progress remains unmeasured.
-- The table goal column should distinguish additions from removals in any later authorized evaluator update.
+- Repair the six acceptance failures and complete spatial ownership/World.after behavior under unchanged contracts.
+- Meet world<=80, loop<=-50, memory+/-6 and phase net<=0 without compacting unrelated code, or obtain a revised packet from the user.
+- Preserve captured golden files and evaluate the next authorized attempt against them.
+- P3's evaluator WP must build repeat_actions and reentries report rows; P2 waiver carries those concerns forward.

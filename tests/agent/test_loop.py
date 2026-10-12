@@ -175,7 +175,7 @@ def test_stationary_two_fresh_frames_confirm_drift(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "run_affordance", still)
     loop = Loop(env, StubModel([]), Memory(tmp_path/"memory"), "grid")
     loop.step(); offset[0] = .75; first = loop.step()
-    assert loop.pos == (0, 0) and first["drift_fix"] is None and loop.drift == (-1, 0)
+    assert loop.pos == (0, 0) and first["drift_fix"] is None and loop.world.drift == (-1, 0)
     second = loop.step()
     assert loop.pos == (-1, 0) and second["drift_fix"] == [-1, 0]
 
@@ -390,8 +390,8 @@ def test_mislabelled_player_does_not_shift_tiles_or_duplicate_entities(tmp_path,
     monkeypatch.setattr(module, "run_affordance", still)
     loop = Loop(env, StubModel([]), Memory(tmp_path/"memory"), "grid"); loop.step()
     lamps = [e for e in loop.mem.rows("entities") if e["name"].startswith("lamp")]
-    assert len(seen) == 2 and len(lamps) == 1 and lamps[0]["tile"] == [2, 0] and loop.anchors == [[.5, .5]]
-    resumed = Loop(env, StubModel([]), loop.mem, "grid"); resumed.restore(loop.state()); assert resumed.anchors == [[.5, .5]]
+    assert len(seen) == 2 and len(lamps) == 1 and lamps[0]["tile"] == [2, 0] and loop.world.anchors == [[.5, .5]]
+    resumed = Loop(env, StubModel([]), loop.mem, "grid"); resumed.restore(loop.state()); assert resumed.world.anchors == [[.5, .5]]
 
 def test_malformed_parse_gets_one_repair_and_resumes(tmp_path):
     class Captures(StubModel):

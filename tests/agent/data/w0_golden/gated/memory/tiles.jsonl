@@ -1,0 +1,10 @@
+{"blocked":[],"exit":null,"floor":true,"id":"p_world@0,0","place":"p_world","pushed":[],"step":1,"x":0,"y":0}
+{"blocked":[],"exit":null,"floor":true,"id":"p_world@0,1","place":"p_world","pushed":[],"step":1,"x":0,"y":1}
+{"blocked":[],"exit":{"arrive":[0,0],"dir":"DOWN","src":"observed","to":"p_world_2"},"floor":true,"id":"p_world@0,1","place":"p_world","pushed":[],"step":1,"x":0,"y":1}
+{"blocked":[],"exit":{"arrive":[0,0],"dir":"DOWN","src":"inferred","to":"p_world_2"},"floor":true,"id":"p_world@0,1","place":"p_world","pushed":[],"step":2,"x":0,"y":1}
+{"blocked":[],"exit":{"arrive":[0,0],"dir":"DOWN","src":"observed","to":"p_world_2"},"floor":true,"id":"p_world@0,1","place":"p_world","pushed":[],"step":3,"x":0,"y":1}
+{"blocked":[],"exit":{"arrive":[0,0],"dir":"DOWN","src":"inferred","to":"p_world_2"},"floor":true,"id":"p_world@0,1","place":"p_world","pushed":[],"step":4,"x":0,"y":1}
+{"blocked":[],"exit":{"arrive":[0,1],"dir":"UP","src":"inferred","to":"p_world"},"floor":true,"id":"p_world_2@0,0","place":"p_world_2","pushed":[],"step":1,"x":0,"y":0}
+{"blocked":[],"exit":{"arrive":[0,1],"dir":"UP","src":"observed","to":"p_world"},"floor":true,"id":"p_world_2@0,0","place":"p_world_2","pushed":[],"step":2,"x":0,"y":0}
+{"blocked":[],"exit":{"arrive":[0,1],"dir":"UP","src":"inferred","to":"p_world"},"floor":true,"id":"p_world_2@0,0","place":"p_world_2","pushed":[],"step":3,"x":0,"y":0}
+{"blocked":[],"exit":{"arrive":[0,1],"dir":"UP","src":"observed","to":"p_world"},"floor":true,"id":"p_world_2@0,0","place":"p_world_2","pushed":[],"step":4,"x":0,"y":0}

@@ -89,8 +89,9 @@ class Memory:
         if not cut and prev is not None:
             return prev
         if cut and prev and exit:
-            from agent.space import exit_to
-            edge = exit_to(self, prev, exit[:2], exit[2])
+            row = self.get("tiles", f"{prev}@{exit[0]},{exit[1]}")
+            edge = row.get("exit") if row else None
+            edge = edge if edge and edge.get("dir") == exit[2] else None
             if edge and edge.get("to"):
                 return edge["to"]
         if cut and prev:
