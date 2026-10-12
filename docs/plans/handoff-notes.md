@@ -31,6 +31,7 @@ Last written by: GPT-6.1 Sol W0 orchestrator, 2026-10-12; amended by Claude afte
 - Requests spent 0; ledger unchanged: total614/M1596/smoke18, M1 remaining454; all 267 runs/m1 files and contracts unchanged.
 
 ## Environment and gotchas
+- tests/agent/data/ is gitignored (.gitignore `data/`): commit golden/test data with `git add -f <path>`.
 - Use .venv-agent/Scripts/python.exe and forward-slash paths; unit tests use StubModel/GridEnv, no cloud calls.
 - Read code only through codegraph_explore, within the active packet's list; range query agent/loop.py:185-219 exposed the original drift tail.
 - Ponytail full and Headroom mandatory; Headroom proxy unreachable, no measured compression savings.
