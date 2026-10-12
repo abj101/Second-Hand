@@ -1,7 +1,8 @@
 """One game-neutral perception, choice, action, and learning cycle."""
 import hashlib, json, time
-from agent.brief import GENERAL, defaults, load_brief
-from agent.decide import choose, escalate
+from agent.brief import GENERAL, _load, defaults, load_brief
+from agent.decide import Choice, arrival_entrance, choose, known_routes, next_test, navigation_candidates, plan, related_target_ids, resolve_target
+from agent.judge import Judge
 from agent.observer import cut, for_model, wait_settled
 from agent.perceive import perceive
 from agent.predict import PRED, effects, predict, verdict
@@ -14,8 +15,10 @@ class Loop:
         self.trace = Trace(mem.root.parent / "trace.jsonl"); self.step_no = 0
         self.place = None; self.prev = None; self.tile_px = getattr(env, "tile_px", None)
         self.move_frames = 16; self.stuck = Stuck(); self.tasks = Tasks(mem)
-        self.recent = self.trace.tail(5); self.cached = None; self.cached_hash = None; self.prev_frame = None; self.prompt_version = "e3-perceiver-6"; self.cached_version = self.prompt_version
+        self.recent = self.trace.tail(5); self.cached = None; self.cached_hash = None; self.prev_frame = None; self.prompt_version = "e3-perceiver-7"; self.cached_version = self.prompt_version
         self.pending_cut, self.pending_via, self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = False, None, False, 0, False, False
+        self.judge, self.last_plan_step, self.pending_plan_reason = Judge(log=mem.root.parent / "decider.log"), None, None
+        self.last_plan_text_count = sum(r.get("src") == "game_text" for r in mem.rows("knowledge"))
     def _see(self, frame, previous):
         key = hashlib.sha256(frame.tobytes()).hexdigest()
         if key == self.cached_hash and self.cached is not None and self.cached_version == self.prompt_version and not self.repair_pending: return self.cached, key, True, []
@@ -42,9 +45,16 @@ class Loop:
         on_screen = [ids[i] for i in ids if i < len(per.get("entities", []))]
         ctx = {"place": place, "task": task["id"], "on_screen": on_screen, "recent": self.recent, "step": self.step_no + 1}
         view, view_ids = self.mem.view("chooser", ctx)
-        affs = per.get("affordances", []); targets = [self.mem.resolve(a.get("target", ""), place) for a in affs]
+        affs = list(per.get("affordances", [])); targets = [resolve_target(self.mem, a.get("target", ""), place) for a in affs]
         preds = [predict(self.mem, a, targets[i], place) for i, a in enumerate(affs)]
-        choice = choose(self.model, view, per, task, preds, defaults(self.game)) if affs else None
+        choice, exit_test, player = None, False, next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
+        if any(c == {"new_place": True} for c in task.get("done_when", [])) and per.get("screen") == "world" and player:
+            entity_ids = {i: resolve_target(self.mem, e.get("name", ""), place) if str(e.get("name", "")).casefold().startswith("exit:") else ids.get(i) for i, e in enumerate(per.get("entities", []))}
+            candidate = next_test(self.judge, task.get("goal", ""), known_routes(self.mem), navigation_candidates(per, targets, entity_ids, player_at=player.get("at"), tile_frac=(self.tile_px / before.width, self.tile_px / before.height) if self.tile_px else None), related_target_ids(self.mem, place))
+            if candidate:
+                affs.append(candidate["affordance"]); targets.append(candidate.get("id")); preds.append(None); choice = Choice(len(affs) - 1, "place_changes", "", [], "goal-directed target test", False); exit_test = True
+        if choice is None:
+            choice = choose(self.model, view, per, task, preds, defaults(self.game), controls="\n".join(_load(self.game).get("controls", []))) if affs else None
         if choice and choice.called:
             row = {"step": self.step_no + 1, "view": view, "affordances": affs, "task": task, "preds": preds,
                    "choice": choice.__dict__, "view_ids": view_ids, "recent": [r for r in self.recent if r.get("place")==place and r.get("frame_hash")==frame_hash], "place": place,
@@ -53,7 +63,7 @@ class Loop:
         unknown = bool(choice and affs[choice.i].get("verb") in ("approach", "interact") and not self.env.pointer and
                        not any(e.get("kind", "").casefold() == "player" for e in per.get("entities", [])))
         skillctx = Ctx(self.env, self.model, self.tile_px, self.move_frames)
-        try: skill = wait_until(skillctx) if not affs else run_affordance(skillctx, affs[choice.i], per, text=choice.text)
+        try: skill = wait_until(skillctx) if not affs else run_affordance(skillctx, affs[choice.i], per, text=choice.text, exit=exit_test)
         except BaseException: self.pending_cut, self.pending_via = cut(before, self.env.screenshot()), affs[choice.i].get("target") if choice else None; self.cached = self.cached_hash = None; raise
         self.tile_px = skillctx.tile_px
         scene_cut = skill.blank_seen or skill.reason == "scene cut" or (cut(skill.before, skill.after) and (self.env.pointer or not choice or affs[choice.i].get("verb") not in ("approach", "interact") or skill.scroll == (0, 0)))
@@ -67,7 +77,9 @@ class Loop:
             source = self.mem.get("places", place); source["state"] = "place"; self.mem.upsert("places", source)
         outcome = effects(per, after_per, skill, place, next_place, place_after_candidate=bool(self.mem.get("places", next_place).get("state") == "candidate"), scene_cut=scene_cut)
         pred = (preds[choice.i] or {"effect": choice.effect, "detail": choice.detail, "basis": "guess"}) if choice else None
-        if choice and str(affs[choice.i].get("target", "")).startswith("exit"):
+        if choice and exit_test:
+            pred = {**pred, "effect": "place_changes", "detail": None}
+        elif choice and str(affs[choice.i].get("target", "")).startswith("exit"):
             pred = {**pred, "effect": "place_changes", "detail": pred.get("detail") if pred.get("effect") == "place_changes" else None}
         v = "unobservable" if not affs else verdict(pred, outcome, blocked=skill.status == "blocked", inputs=skill.inputs)
         if choice and targets[choice.i]:
@@ -84,6 +96,9 @@ class Loop:
             not any((e.get("verb"), e.get("via"), e.get("to")) == (affs[choice.i]["verb"], affs[choice.i].get("target", ""), next_place) and e.get("ok") for e in edge_rows))
         if choice and scene_cut:
             self.mem.add_edge(place, affs[choice.i]["verb"], affs[choice.i].get("target", ""), next_place, True)
+            # The way in is presumed to be the way back, so new_place goals do not retest it.
+            if next_place != place and (entrance := arrival_entrance(after_per, affs[choice.i].get("target", ""), 2 * self.tile_px / after.width if self.tile_px else 0.2)):
+                self.mem.relate(resolve_target(self.mem, entrance, next_place), "leads_to", place, src="inferred", step=self.step_no + 1)
         row = {"step": self.step_no + 1, "t": time.time(), "place": place, "screen": per.get("screen"),
             "task": task["id"], "frame": f"frames/{self.step_no+1:06d}.png", "options": len(affs),
             "choice": ({"i": choice.i, **affs[choice.i], "id": targets[choice.i], "called": choice.called, "text": choice.text, "why": choice.why} if choice else None),
@@ -100,15 +115,23 @@ class Loop:
         self.place, self.prev, self.prev_frame, self.cached, self.cached_hash = next_place, after_per, after, after_per, after_hash
         self.pending_cut, self.pending_via = False, None; reason = self.stuck.update(row); self.repair_pending = self.parse_failed and self.empty_streak >= 8 and not self.repair_used; self.repair_used |= self.repair_pending
         if unknown: reason = "player position unknown"
-        if reason:
-            self.stuck.n = self.stuck.same_action = 0
-            for sub in escalate(self.model, view, reason): self.tasks.add(**sub, parent=task["id"])
+        ended = changed_tasks[-1] if changed_tasks else {}; game_text_count = sum(r.get("src") == "game_text" for r in self.mem.rows("knowledge"))
+        self.pending_plan_reason = (f"goal {ended.get('status')}: {ended.get('goal', '')}" if changed_tasks else reason or self.pending_plan_reason or ("new game text" if game_text_count > self.last_plan_text_count else None))
+        if self.pending_plan_reason and (self.last_plan_step is None or self.step_no - self.last_plan_step >= 15):
+            ended = changed_tasks[-1] if changed_tasks else next((t for t in reversed(self.mem.rows("tasks")) if self.pending_plan_reason == f"goal {t.get('status')}: {t.get('goal', '')}"), {})
+            plan_view, _ = self.mem.view("orchestrator", {**ctx, "task": task.get("id")}); planned = plan(self.model, plan_view, self.pending_plan_reason, ended.get("goal", task.get("goal", "")), ended.get("status", ""), per.get("text", []))
+            parent = task.get("id")
+            for sub in planned:
+                try: parent = self.tasks.add(**sub, parent=parent)["id"]
+                except ValueError: continue
+            self.last_plan_step, self.last_plan_text_count, self.pending_plan_reason = self.step_no, game_text_count, None
         return row
     def state(self):
         task = next((r.get("id") for r in reversed(self.mem.rows("tasks")) if r.get("status")=="active"),None)
-        return {"step": self.step_no, "place": self.place, "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "perception": self.cached, "frame_hash": self.cached_hash, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "pending_via": self.pending_via, "task": task}
+        return {"step": self.step_no, "place": self.place, "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "perception": self.cached, "frame_hash": self.cached_hash, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "pending_via": self.pending_via, "task": task, "last_plan_step": self.last_plan_step, "last_plan_text_count": self.last_plan_text_count, "pending_plan_reason": self.pending_plan_reason}
     def restore(self, state):
-        self.step_no, self.place = int(state.get("step", 0)), state.get("place")
+        self.step_no, self.place, self.last_plan_step = int(state.get("step", 0)), state.get("place"), state.get("last_plan_step")
+        self.last_plan_text_count, self.pending_plan_reason = int(state.get("last_plan_text_count", sum(r.get("src") == "game_text" for r in self.mem.rows("knowledge")))), state.get("pending_plan_reason")
         self.tile_px, self.move_frames = state.get("tile_px"), int(state.get("move_frames", 16))
         self.stuck.restore(state.get("stuck", {})); self.prev = state.get("perception"); self.prev_frame = self.env.screenshot()
         digest = hashlib.sha256(self.prev_frame.tobytes()).hexdigest()

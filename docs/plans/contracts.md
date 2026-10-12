@@ -183,6 +183,9 @@ class SkillResult:
     after: Image                   # settled frame after
     scroll: tuple[int, int]        # total view shift during the skill, in pixels (summed frame by frame)
     blank_seen: bool               # a fade or blank frame occurred (feeds cut())
+    moves: list[tuple[str, tuple[int, int] | None]] = field(default_factory=list)
+        # E3R4: one entry per direction press, (direction, measured content shift in px or None if unsure);
+        # when the skill ends in a scene cut, the last entry is the press that caused it
 
 @dataclass
 class Ctx:
@@ -201,8 +204,11 @@ def press(ctx, key: str) -> SkillResult
 def type_text(ctx, text: str) -> SkillResult         # E3
 def wait_until(ctx, max_frames: int = 240) -> SkillResult
 
-def run_affordance(ctx, aff: Affordance, perception: Perception, text: str | None = None, *, exit: bool = False) -> SkillResult
-    # exit=True (E3R3): approach in exit mode (refine, step onto, push outward) whatever the target is called
+def run_affordance(ctx, aff: Affordance, perception: Perception, text: str | None = None, *, exit: bool = False, route: dict | None = None) -> SkillResult
+    # route=None (E3R4): {"dirs": [direction, ...], "push": direction | None}. Press dirs in order (no greedy walk);
+    #   a confident (0, 0) on a route press returns blocked "route blocked". In exit mode, push the given direction
+    #   first, then the existing side-step sequence around it. route=None keeps the E3R3 greedy walk.
+    # exit=True (E3R3): approach in exit mode (step onto, push outward) whatever the target is called; no refine call (user-approved 2026-10-11: walk the tile-snapped point, a miss shows as no scene cut)
     # verb -> skill dispatch; `text` is used by verb "type"
 ```
 
@@ -247,6 +253,8 @@ A trace row, one per step. Every key is always present; use `null` when a value 
  "verdict": "hit", "calls": 2, "ms": 7400, "shortcut": null}
 ```
 
+E3R4 adds `"tile": [x, y]` (the player's place-frame tile after the step, or null) and `"drift_fix": [dx, dy]` or null.
+
 - `effects` and `pred.effect` come from `EFFECTS = ("place_changes", "text_appears", "screen_changes", "entity_appears", "entity_disappears", "view_scrolled", "no_change")`.
 - `verdict` is one of `hit`, `partial`, `surprise`, `miss` or `unobservable`.
 - `basis` per effect: `pixel` (from scroll, cut, a blank frame or a changed region) or `model` (only from a difference between the VLM's lists). Only `pixel` effects may produce `src = "observed"` facts.
@@ -257,7 +265,9 @@ A trace row, one per step. Every key is always present; use `null` when a value 
 `agent/memory.py`. Stores are JSONL upsert files under `<run>/memory/`. The last row for an `id` wins. Files are replayed on start. **Any store name is accepted**, so E4 adds stores without changing the code. Record shapes follow spec §8, with the changes below:
 
 ```
-entities   {"id","kind","name","place","at","attrs":{k:{"v","src","step"}},"first","last","seen","src"}
+entities   {"id","kind","name","place","at","tile":[x, y] | absent,"attrs":{k:{"v","src","step"}},"first","last","seen","src"}   # tile: E3R4, place frame
+tiles      {"id":"<place>@x,y","place","x","y","floor":true|false|null,"blocked":[dirs],"pushed":[dirs],
+            "exit":{"dir","to","arrive":[x, y],"src":"observed|inferred"} | null,"step"}                           # E3R4, see space
 places     {"id","name","screen","state":"candidate|place","visits","landmarks":[[name, kind]],"edges":[{"verb","via","to","n","ok"}],"blocked":[...]}
 relations  {"id","s","p","o","src","sup","con","ev":[steps],"state":"live|refuted|expired","why","step"}
 knowledge  {"id","text","src":"game_text|observed|model","step"}
@@ -274,12 +284,15 @@ class Memory:
     def rows(self, store: str) -> list[dict]
     def upsert(self, store: str, row: dict) -> dict
     def match_place(self, perception: Perception, step: int, *, prev: str | None, cut: bool,
-                    via: str | None = None) -> str
+                    via: str | None = None, exit: tuple[int, int, str] | None = None) -> str
+        # E3R4: on a cut, a known exit tile (prev, x, y, dir) in the tiles store wins first, before the via-name edge.
         # no cut -> prev (continuity). On a cut: the known edge (prev, via) -> its destination; else
         # landmark (name, kind) overlap >= 0.6 with a known place of the same screen type; else a new
         # *candidate* place. A candidate becomes a place on its first view_scrolled; until then it is a
         # screen (battle, menu, naming) and a move into it records screen_changes, not place_changes.
-    def observe(self, perception: Perception, place: str, step: int) -> dict[int, str]  # perception entity index -> entity id
+    def observe(self, perception: Perception, place: str, step: int, tiles: dict[int, tuple[int, int]] | None = None) -> dict[int, str]
+        # perception entity index -> entity id. E3R4: with tiles, a same-name record whose stored tile is > 1 tile away
+        # is a different thing; the matched record's tile is updated. Records without a tile match by name as before.
     def resolve(self, name: str, place: str) -> str | None                                 # affordance target string -> entity id
     def add_edge(self, src_place: str, verb: str, via: str, dst_place: str, ok: bool) -> None
     def relate(self, s: str, p: str, o: str, *, src: str, step: int, hit: bool | None = None) -> dict
@@ -305,6 +318,35 @@ def conf(rel: dict) -> float     # (sup + 1) / (sup + con + 2)
   - Budgets: perceiver ≈ 400 tokens, chooser ≈ 1.2k, orchestrator ≈ 3k. Estimate tokens as `len(text) / 4`.
   - Model claims render with "(unverified)". At most two refuted items render, under "don't believe".
   - Selection order: on screen or in this place, then tied to the task, then recent, then important.
+
+## space
+
+E3R4 (approved 2026-10-11). `agent/space.py`, pure functions over `Memory`'s `tiles` store. No model calls. Design and rationale: [spatial-memory.md](spatial-memory.md).
+
+```python
+DIRS = {"UP": (0, -1), "DOWN": (0, 1), "LEFT": (-1, 0), "RIGHT": (1, 0)}
+def tile_of(at: list[float], player_at: list[float], pos: tuple[int, int], size: tuple[int, int], tile_px: int) -> tuple[int, int]
+    # place-frame tile of a perceived point: pos + (screen tile of at - screen tile of player_at), screen tiles via observer.snap
+def fold(mem, place: str, pos: tuple[int, int], moves: list, tile_px: int, step: int) -> tuple[int, int]
+    # walks the moves from pos: a shift of k tiles in dir -> k floor tiles; a confident (0, 0) -> dir added to "blocked"
+    # on the current tile; None -> nothing recorded. Returns the end tile. The player moves opposite to the content shift.
+def mark_exit(mem, place: str, tile: tuple[int, int], dir: str, to: str, arrive: tuple[int, int], step: int) -> None
+    # observed exit on place@tile, plus an inferred reverse exit on to@arrive with the opposite dir
+def exit_to(mem, place: str, tile: tuple[int, int], dir: str) -> dict | None
+def route(mem, place: str, start: tuple[int, int], goal: tuple[int, int]) -> list[str] | None
+    # BFS over tiles; unknown tiles are passable, blocked dirs are not; the goal tile is always enterable
+def outward(mem, place: str, tile: tuple[int, int], placement: str | None = None) -> str
+    # top/bottom/left/right wall placement -> UP/DOWN/LEFT/RIGHT; otherwise away from the centroid of known floor
+def frontier(mem, place: str) -> list[tuple[tuple[int, int], str]]
+    # known floor tiles on the map boundary whose outward dir is neither blocked nor pushed
+def describe(mem, place: str, pos: tuple[int, int]) -> str
+    # one line for views: "Here: <place> (x,y). Exits: (x,y) DIR -> <place name>. Untried edges: n."
+```
+
+- **Player position** `pos` is a place-frame tile held by the loop and checkpointed in `harness.json`. The first arrival in a place sets `pos = (0, 0)`; a known exit sets `pos` to its `arrive` tile.
+- **Drift re-anchor:** after `observe`, the median (stored tile - projected tile) over matched non-player records; if it is non-zero on two consecutive perceptions, shift `pos` by it and set the trace `drift_fix`.
+- **Exit filter:** a navigation candidate whose tile is within 1 of a known exit tile in this place leading to an already visited place is excluded, alongside the relation filter.
+- **Not in E3R4:** landmark matching by tile; perception skipping on known views; fixed-camera games (pos changes only from scroll).
 
 ## predict
 
@@ -390,7 +432,7 @@ runs/<run_id>/
   chooser.jsonl          E3: {step, view, affordances, task, preds, choice} for each step where choose() called the model; used for the offline Chooser comparison
   memory/*.jsonl         the stores
   truth.jsonl            EVALUATOR ONLY: written by the runner from env.ram(); never read by agent/
-  checkpoint/<step:06d>/ pyboy.state + memory/ copy + harness.json (step, tile_px, move_frames, prev place, Stuck counters, active task); every 25 steps
+  checkpoint/<step:06d>/ pyboy.state + memory/ copy + harness.json (step, tile_px, move_frames, prev place, Stuck counters, active task, E3R4 pos); every 25 steps
   summary.json           written by scripts/eval_run.py
 ```
 

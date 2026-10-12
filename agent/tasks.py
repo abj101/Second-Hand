@@ -1,6 +1,6 @@
 """Task conditions and the small no-progress monitor."""
 
-DEFAULT_GOAL = "Explore and test the world model"
+DEFAULT_GOAL = "Reach a place not visited yet"
 
 
 class Tasks:
@@ -10,19 +10,31 @@ class Tasks:
         self.current_place: str | None = None
         self.perception: dict = {}
         self.settled = True
+        self.step = 0
+
+    def _new_place_count(self) -> int:
+        return len({e.get("to") for p in self.mem.rows("places") for e in p.get("edges", []) if e.get("to") and e.get("ok", 0) > 0})
 
     def add(self, goal: str, done_when: list, fail_when=(), *, parent: str | None = None,
             budget: int = 100, src: str = "orchestrator") -> dict:
-        return self.mem.upsert("tasks", {"id": self.mem._id("tasks", goal), "goal": str(goal),
-            "done_when": list(done_when), "fail_when": list(fail_when), "parent": parent,
-            "status": "active", "budget": int(budget), "used": 0, "attempts": 0,
-            "last_failure": None, "src": src, "last_check": None, "done_streak": 0})
+        done_when, fail_when = list(done_when), list(fail_when)
+        if src == "orchestrator" and not any(isinstance(c, dict) and "steps_over" in c for c in fail_when): fail_when.append({"steps_over": 40})
+        task = {"id": self.mem._id("tasks", goal), "goal": str(goal), "done_when": done_when,
+            "fail_when": fail_when, "parent": parent, "status": "active", "budget": int(budget),
+            "used": 0, "attempts": 0, "last_failure": None, "src": src, "last_check": None, "done_streak": 0, "new_place_baseline": self._new_place_count()}
+        if any(self._condition(c, self.step, task) for c in done_when): raise ValueError("task done condition is already true")
+        return self.mem.upsert("tasks", task)
 
     def active(self) -> dict:
         rows = self.mem.rows("tasks")
         live = [r for r in rows if r.get("status") == "active"]
+        model_active = any(r.get("src") == "orchestrator" for r in live)
+        blocked = [r for r in live if r.get("src") == "default" and (model_active or not r.get("done_when"))]
+        for row in blocked:
+            row.update(status="blocked"); self.mem.upsert("tasks", row)
+        live = [r for r in live if r not in blocked]
         if not live:
-            return self.add(DEFAULT_GOAL, [], budget=150, src="default")
+            return self.add(DEFAULT_GOAL, [{"new_place": True}], budget=40, src="default")
         by_id = {r["id"]: r for r in rows}
 
         def depth(row):
@@ -33,7 +45,7 @@ class Tasks:
 
         return max(enumerate(live), key=lambda pair: (depth(pair[1]), pair[0]))[1]
 
-    def _condition(self, cond: dict, step: int) -> bool:
+    def _condition(self, cond: dict, step: int, task: dict | None = None) -> bool:
         if not isinstance(cond, dict) or len(cond) != 1:
             return False
         kind, value = next(iter(cond.items()))
@@ -55,9 +67,11 @@ class Tasks:
             return any(tuple(r.get(k) for k in ("s", "p", "o")) == tuple(value)
                        and r.get("src") == "observed" and r.get("state") == "live"
                        for r in self.mem.rows("relations"))
+        if kind == "new_place" and value is True and task is not None: return self._new_place_count() > task.get("new_place_baseline", 0)
         return kind == "steps_over" and type(value) in (int, float) and step > value
 
     def check(self, step: int) -> list[dict]:
+        self.step = step; self.active()
         changed = []
         for task in self.mem.rows("tasks"):
             if task.get("status") != "active":
@@ -68,11 +82,11 @@ class Tasks:
                 task["used"] = int(task.get("used", 0)) + 1
                 consecutive = last == step - 1
                 done = bool(task.get("done_when")) and all(
-                    self._condition(c, step) for c in task["done_when"])
+                    self._condition(c, step, task) for c in task["done_when"])
                 task["done_streak"] = (task.get("done_streak", 0) + 1 if consecutive else 1) \
                     if self.settled and done else 0
                 task["last_check"] = step
-            failed = any(self._condition(c, step) for c in task.get("fail_when", []))
+            failed = any(self._condition(c, task["used"] if task.get("src") == "orchestrator" else step, task) for c in task.get("fail_when", []))
             if failed or task["used"] >= task["budget"]:
                 task.update(status="failed", last_failure="fail_when condition met" if failed else "budget exhausted")
             elif self.settled and task.get("done_streak", 0) >= 2:

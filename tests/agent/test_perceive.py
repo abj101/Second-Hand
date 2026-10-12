@@ -49,6 +49,31 @@ def test_normalize_splits_string_text_into_lines():
     assert normalize({"text": "MOM: Right.\nAll boys leave"})["text"] == ["MOM: Right.", "All boys leave"]
 
 
+def test_placement_is_optional_and_normalize_keeps_only_valid_values():
+    from agent.perceive import PLACEMENTS, SCHEMA
+
+    data = {"entities": [
+        {"kind": "door", "name": "rug", "at": [200, 930], "placement": "bottom wall"},
+        {"kind": "person", "name": "MOM", "at": [500, 500], "placement": "near player"},
+    ], "affordances": [
+        {"verb": "approach", "target": "rug", "at": [200, 930], "placement": "room edge"},
+        {"verb": "approach", "target": "MOM", "at": [500, 500], "placement": "center"},
+    ]}
+    out = normalize(data)
+
+    assert out["entities"] == [
+        {"kind": "door", "name": "rug", "at": [.2, .93], "placement": "bottom wall"},
+        {"kind": "person", "name": "MOM", "at": [.5, .5]},
+    ]
+    assert out["affordances"] == [
+        {"verb": "approach", "target": "rug", "at": [.2, .93], "why": "", "placement": "room edge"},
+        {"verb": "approach", "target": "MOM", "at": [.5, .5], "why": ""},
+    ]
+    assert SCHEMA["properties"]["entities"]["items"]["required"] == ["kind", "name", "at"]
+    assert SCHEMA["properties"]["affordances"]["items"]["required"] == ["verb", "target", "at"]
+    assert SCHEMA["properties"]["entities"]["items"]["properties"]["placement"]["enum"] == list(PLACEMENTS)
+
+
 def test_score_frame_recall_and_precision():
     label = {"size": [1000, 1000], "objects": [
         {"category": "button", "bbox": [100, 100, 200, 200]},

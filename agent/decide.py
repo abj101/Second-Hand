@@ -3,11 +3,13 @@
 from dataclasses import dataclass
 from collections import Counter
 
+from agent.brief import GENERAL
+from agent.memory import RECURRING
 from agent.predict import EFFECTS
 
 SYSTEM = "Choose a useful next action from the visible options. Return only JSON."
-COND_KINDS = {"place_is", "entity_known", "text_seen", "relation", "steps_over"}
-_COND = {"type": "object", "anyOf": [{"type": "object", "properties": {k: {"type": "string"}}, "required": [k], "additionalProperties": False} for k in ("place_is", "entity_known", "text_seen")] + [{"type": "object", "properties": {"relation": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 3}}, "required": ["relation"], "additionalProperties": False}, {"type": "object", "properties": {"steps_over": {"type": "integer"}}, "required": ["steps_over"], "additionalProperties": False}]}
+COND_KINDS = {"place_is", "entity_known", "text_seen", "relation", "steps_over", "new_place"}
+_COND = {"type": "object", "anyOf": [{"type": "object", "properties": {k: {"type": "string"}}, "required": [k], "additionalProperties": False} for k in ("place_is", "entity_known", "text_seen")] + [{"type": "object", "properties": {"relation": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 3}}, "required": ["relation"], "additionalProperties": False}, {"type": "object", "properties": {"new_place": {"type": "boolean", "enum": [True]}}, "required": ["new_place"], "additionalProperties": False}, {"type": "object", "properties": {"steps_over": {"type": "integer"}}, "required": ["steps_over"], "additionalProperties": False}]}
 _TASKS = {"type": "object", "properties": {"tasks": {"type": "array", "items": {"type": "object", "properties": {"goal": {"type": "string"}, "done_when": {"type": "array", "items": _COND}, "fail_when": {"type": "array", "items": _COND}, "budget": {"type": "integer"}}, "required": ["goal", "done_when"]}}}, "required": ["tasks"]}
 
 
@@ -54,7 +56,7 @@ def _view_recent(view: str) -> list[dict]:
         if line.startswith(("Recent: ", "Failed here: ")) and verb in verbs:
             rows.append({"choice": {"verb": verb, "target": target}})
     return rows
-def choose(model, view: str, perception: dict, task: dict, preds: list[dict | None], defaults: dict) -> Choice:
+def choose(model, view: str, perception: dict, task: dict, preds: list[dict | None], defaults: dict, controls: str = "") -> Choice:
     affs = perception.get("affordances") or []
     eligible = [i for i, a in enumerate(affs) if a.get("verb") != "press"]
     if len(eligible) == 1:
@@ -63,9 +65,10 @@ def choose(model, view: str, perception: dict, task: dict, preds: list[dict | No
         effect = pred.get("effect") if pred.get("effect") in EFFECTS else "screen_changes"
         return Choice(i, _effect(affs[i], effect), str(pred.get("detail") or ""), [], "only available action", False,
                       _text(affs[i], defaults, perception))
-    lines = ["View:", view, f"Task: {task}", "Affordances:"]
+    lines = ["General:", GENERAL, "Controls:", controls, "View:", view, f"Goal: {task.get('goal', '')}; progress: {task.get('used', 0)}/{task.get('budget', '')}; budget: {task.get('budget', '')}", "Affordances:"]
     lines.extend(f"{i}: {a}" for i, a in enumerate(affs))
-    lines.append(f"Code predictions: {preds}")
+    if any(p is not None for p in preds):
+        lines.append(f"Code predictions: { {i: p for i, p in enumerate(preds) if p is not None} }")
     lines.append(f"Defaults: {defaults}")
     lines.append(f"Prefer untried affordances, using recent/failed view lines to avoid repeats. For default curiosity, favor visible traversal toward unfamiliar areas over repeatedly studying furniture or menus. Effect must be one of {EFFECTS}.")
     lines.append("For a requested name, use a matching preset; if none matches the required default, choose the custom name entry.")
@@ -104,26 +107,97 @@ def _conditions(rows) -> list[dict]:
             kind, value = c[:-1].split("(", 1); c = {kind: int(value) if kind == "steps_over" and value.lstrip("-").isdigit() else value}
         if isinstance(c, dict) and len(c) == 1:
             kind, value = next(iter(c.items()))
-            if kind in COND_KINDS and ((kind == "relation" and isinstance(value, (list, tuple)) and len(value) == 3) or (kind == "steps_over" and type(value) is int) or (kind not in {"relation", "steps_over"} and isinstance(value, str))): out.append({kind: value})
+            if kind in COND_KINDS and ((kind == "relation" and isinstance(value, (list, tuple)) and len(value) == 3) or (kind == "steps_over" and type(value) is int) or (kind == "new_place" and value is True) or (kind not in {"relation", "steps_over", "new_place"} and isinstance(value, str))): out.append({kind: value})
     return out
+
+def _task_results(data: dict, limit: int = 3, kinds: set[str] | None = None, timeout: int = 0) -> list[dict]:
+    out = []
+    for task in data.get("tasks", []) if isinstance(data, dict) and isinstance(data.get("tasks", []), list) else []:
+        if not isinstance(task, dict) or not str(task.get("goal") or "").strip(): continue
+        done, fail = _conditions(task.get("done_when")), _conditions(task.get("fail_when"))
+        if kinds: done, fail = [c for c in done if next(iter(c)) in kinds], [c for c in fail if next(iter(c)) in kinds]
+        if not done: continue
+        if timeout and not any("steps_over" in c for c in fail): fail.append({"steps_over": timeout})
+        item = {"goal": str(task["goal"]).strip(), "done_when": done, "fail_when": fail,
+                **({"budget": task["budget"]} if type(task.get("budget")) is int and task["budget"] > 0 else {})}
+        out.append(item)
+        if len(out) == limit: break
+    return out
+
+
+def navigation_candidates(perception: dict, affordance_ids: list[str | None], entity_ids: dict[int, str], *, tile_frac: tuple[float, float] | None = None, player_at: list[float] | None = None) -> list[dict]:
+    entities, affs = perception.get("entities") or [], perception.get("affordances") or []
+    by_id, aff_ids = {entity_ids.get(i): e for i, e in enumerate(entities)}, {x for x in affordance_ids if x}
+    rows = [(affordance_ids[i] if i < len(affordance_ids) else None, by_id.get(affordance_ids[i] if i < len(affordance_ids) else None, {}), a) for i, a in enumerate(affs) if a.get("verb") == "approach" and str(a.get("target", "")).strip().casefold() not in {"player", "the player", "player character"}]
+    rows += [(entity_ids.get(i), e, {"verb": "approach", "target": e.get("name", ""), "at": e.get("at"), "why": "visible entity", **({"placement": e["placement"]} if e.get("placement") else {})}) for i, e in enumerate(entities) if e.get("kind", "").casefold() != "player" and entity_ids.get(i) not in aff_ids]
+    candidates, seen = [], set()
+    for ident, entity, aff in rows:
+        at = aff.get("at") or entity.get("at")
+        if not isinstance(at, list) or len(at) != 2 or entity.get("kind", "").casefold() == "player": continue
+        key = ident or (str(entity.get("name", aff.get("target", "thing"))).casefold(), tuple(at))
+        if key in seen: continue
+        seen.add(key); dx = dy = 0.0
+        if isinstance(player_at, list) and len(player_at) == 2:
+            dx, dy = at[0] - player_at[0], at[1] - player_at[1]
+            if tile_frac and tile_frac[0] and tile_frac[1]: dx, dy = dx / tile_frac[0], dy / tile_frac[1]
+        pos = [f"{n} tiles {d}" for v, d in ((dx, "left" if dx < 0 else "right"), (dy, "up" if dy < 0 else "down")) if (n := round(abs(v)))]
+        name, kind, placement = entity.get("name") or aff.get("target"), entity.get("kind"), aff.get("placement") or entity.get("placement")
+        candidates.append({"id": ident, "name": str(name or kind or "thing"), "kind": str(kind or "object"), "at": at, **({"placement": placement} if placement else {}), "affordance": aff, "position": ", ".join(pos) or "at the player's position", "distance": abs(dx) + abs(dy)})
+    return candidates
+
+
+def resolve_target(mem, target: str, place: str) -> str | None:
+    name = str(target or "").strip()
+    return mem.resolve(name.split(":", 1)[1].strip() if name.casefold().startswith("exit:") else name, place) if name else None
+
+
+def related_target_ids(mem, place: str) -> set[str]:
+    return {(resolve_target(mem, e.get("name", ""), place) if e.get("place") == place or e.get("kind") in RECURRING else None) or r["s"]
+            for r in mem.rows("relations") if r.get("p") == "leads_to" and r.get("s") for e in [mem.get("entities", r["s"]) or {}]}
+
+
+def known_routes(mem) -> list[str]:
+    out = []
+    for r in mem.rows("relations"):
+        if r.get("p") != "leads_to" or not r.get("s"): continue
+        name, place = (mem.get("entities", r["s"]) or {}).get("name", r["s"]), mem.get("places", r.get("o") or "")
+        if place and r.get("state") == "live": out.append(f"{name} leads to {place.get('name', r['o'])} (already visited)")
+        elif r.get("con", 0) > r.get("sup", 0): out.append(f"{name}: tested, no new place")
+    return out
+
+
+def arrival_entrance(perception: dict, via: str, reach: float = 0.2) -> str | None:
+    """The passage the player most likely came through: an exit named like `via`, else the exit nearest the player."""
+    ents, bare = perception.get("entities") or [], lambda n: str(n).split(":", 1)[-1].strip().casefold()
+    exits = [e for e in ents if e.get("kind", "").casefold() == "exit" or str(e.get("name", "")).casefold().startswith("exit:")]
+    if named := [e for e in exits if bare(e.get("name", "")) == bare(via)]: return named[0]["name"]
+    player = next((e.get("at") for e in ents if e.get("kind", "").casefold() == "player"), None)
+    near = [(abs(e["at"][0] - player[0]) + abs(e["at"][1] - player[1]), e["name"]) for e in exits if player and isinstance(e.get("at"), list) and len(e["at"]) == 2]
+    return min(near)[1] if near and min(near)[0] <= reach else None
+
+
+def next_test(judge, goal: str, known: list[str], candidates: list[dict], tested: set[str]) -> dict | None:
+    pending = [c for c in candidates if not c.get("id") or c["id"] not in tested]
+    if not pending: return None
+    edge = {"top wall", "bottom wall", "left wall", "right wall", "room edge", "screen edge"}; pending.sort(key=lambda c: (c.get("placement") not in edge, c.get("distance", 0))); options = pending[:10]
+    names = [c["name"] for c in options]; labels = {c["name"] if names.count(c["name"]) == 1 else f"{c['name']} ({i + 1})": c for i, c in enumerate(options)}
+    things = {n: {"kind": c.get("kind", "object"), "position": c.get("position", "unknown position"), "placement": c.get("placement") or "unknown placement"} for n, c in labels.items()}
+    question = {"target": {"type": "choice", "instructions": f"Which thing should the player walk to next to {goal}?", "criteria": {n: f"walk to the {n} ({c['position']}; {c['placement']})" for n, c in things.items()}}}
+    try: return labels.get(judge.rank({"goal": goal, "known": known, "things": things}, question).get("answers", {}).get("target", {}).get("choice"), options[0]) if judge else options[0]
+    except (AttributeError, TypeError): return options[0]
+
+def plan(model, view: str, reason: str, last_goal: str = "", last_end: str = "", screen_text: str | list[str] = "") -> list[dict]:
+    text = "\n".join(screen_text) if isinstance(screen_text, list) else str(screen_text or "")
+    data = model.ask("Set a useful, verifiable next goal from the memory and current screen. Return only JSON.",
+                     f"Memory:\n{view}\nTrigger: {reason}\nLast goal: {last_goal}\nEnded: {last_end}\n"
+                     f"Screen text: {text}\nReturn one main goal and an optional child first step toward it; "
+                     "use new_place, text_seen, entity_known, relation, steps_over; prefer new_place for travel.",
+                     schema=_TASKS, role="plan").data
+    return _task_results(data, 2, {"new_place", "text_seen", "entity_known", "relation", "steps_over"}, 40)
+
 def escalate(model, view: str, reason: str) -> list[dict]:
     prompt = (f"View:\n{view}\nReason: {reason}\n" 
               'Suggest up to 3 useful subtasks as JSON {"tasks":[{"goal":str,"done_when":[conditions],"fail_when":[conditions]}]}. '
               "Conditions may use only place_is, entity_known, text_seen, relation, or steps_over.")
     data = model.ask(SYSTEM, prompt, schema=_TASKS, role="escalate").data
-    tasks = data.get("tasks", []) if isinstance(data, dict) else []
-    out = []
-    for task in tasks if isinstance(tasks, list) else []:
-        if not isinstance(task, dict) or not str(task.get("goal") or "").strip():
-            continue
-        done = _conditions(task.get("done_when"))
-        if not done:
-            continue
-        item = {"goal": str(task["goal"]).strip(), "done_when": done,
-                "fail_when": _conditions(task.get("fail_when"))}
-        if type(task.get("budget")) is int and task["budget"] > 0:
-            item["budget"] = task["budget"]
-        out.append(item)
-        if len(out) == 3:
-            break
-    return out
+    return _task_results(data)

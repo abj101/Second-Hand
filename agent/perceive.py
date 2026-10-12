@@ -12,6 +12,7 @@ from agent.locate import rulers
 from agent.model import Ollama, Reply
 
 VERBS = ("approach", "interact", "select", "click", "drag", "advance", "cancel", "type", "press")
+PLACEMENTS = ("top wall", "bottom wall", "left wall", "right wall", "room edge", "screen edge", "middle")
 
 SYSTEM = (
     "You look at a single screenshot of a video game you may have never seen. "
@@ -22,9 +23,11 @@ PROMPT = """Return JSON with:
 - "screen": one of world, dialogue, menu, keyboard, battle, title, other.
 - "text": every piece of readable text on screen, verbatim.
 - "entities": each distinct thing on screen (characters, objects, buttons, icons, cards, menu items), as
-  {"kind": short category, "name": its name or visible label, "at": [x, y]}.
+  {"kind": short category, "name": its name or visible label, "at": [x, y], "placement": optional position in the room}.
 - "affordances": every action the player could take right now, as
-  {"verb": one of %s, "target": entity name or input, "at": [x, y], "to": [x, y] only for drag, "why": expected result}.
+  {"verb": one of %s, "target": entity name or input, "at": [x, y], "to": [x, y] only for drag, "why": expected result, "placement": optional position in the room}.
+
+For placement, use only top wall, bottom wall, left wall, right wall, room edge, screen edge, or middle, based on what is visible.
 
 Coordinates are the centre of the thing on a 0-1000 grid: [0, 0] is top-left, [1000, 1000] is bottom-right.
 List each clickable thing separately (each card, each button, each menu item, each map node), including small icons.
@@ -39,11 +42,11 @@ SCHEMA = {
         "screen": {"type": "string", "enum": ["world", "dialogue", "menu", "keyboard", "battle", "title", "other"]},
         "text": {"type": "array", "items": {"type": "string"}},
         "entities": {"type": "array", "items": {"type": "object", "properties": {
-            "kind": {"type": "string"}, "name": {"type": "string"}, "at": _POINT},
+            "kind": {"type": "string"}, "name": {"type": "string"}, "at": _POINT, "placement": {"type": "string", "enum": list(PLACEMENTS)}},
             "required": ["kind", "name", "at"]}},
         "affordances": {"type": "array", "items": {"type": "object", "properties": {
             "verb": {"type": "string"}, "target": {"type": "string"}, "at": _POINT, "to": _POINT,
-            "why": {"type": "string"}}, "required": ["verb", "target", "at"]}},
+            "why": {"type": "string"}, "placement": {"type": "string", "enum": list(PLACEMENTS)}}, "required": ["verb", "target", "at"]}},
     },
     "required": ["screen", "text", "entities", "affordances"],
 }
@@ -79,12 +82,13 @@ def normalize(data: dict | None) -> dict:
            "entities": [], "affordances": []}
     for e in data.get("entities") or []:
         if isinstance(e, dict) and (at := _point(e.get("at"))):
-            out["entities"].append({"kind": str(e.get("kind") or ""), "name": str(e.get("name") or ""), "at": at})
+            out["entities"].append({"kind": str(e.get("kind") or ""), "name": str(e.get("name") or ""), "at": at,
+                                    **({"placement": e["placement"]} if e.get("placement") in PLACEMENTS else {})})
     for a in data.get("affordances") or []:
         if isinstance(a, dict) and (to := _point(a.get("to"))) and str(a.get("verb") or "").lower() != "drag": a = {**a, "at": a["to"]}
         if isinstance(a, dict) and (at := _point(a.get("at"))):
             row = {"verb": str(a.get("verb") or "").lower(), "target": str(a.get("target") or ""), "at": at,
-                   "why": str(a.get("why") or "")}
+                   "why": str(a.get("why") or ""), **({"placement": a["placement"]} if a.get("placement") in PLACEMENTS else {})}
             if to := _point(a.get("to")):
                 if row["verb"] == "drag": row["to"] = to
                 else: row["at"] = to

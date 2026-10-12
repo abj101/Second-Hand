@@ -220,6 +220,9 @@ class Memory:
         current = self.get("places", place) if place else None
         if current:
             add(f"Place: {current.get('name', place)} [{place}]", place)
+            for edge in current.get("edges", []) if caller == "chooser" else []:
+                for label, yes in (("Known exit", edge.get("ok")), ("Failed test", edge.get("n", 0) > edge.get("ok", 0))):
+                    if yes: add(f"{label}: {edge.get('via')} → {edge.get('to')}")
         if caller == "perceiver":
             for row in sorted((r for r in self.rows("entities") if r.get("place") == place), key=lambda r: r["name"].casefold()):
                 if not add(f"Known here: {row['name']} ({row['kind']})", row["id"]):
@@ -236,7 +239,8 @@ class Memory:
                         for r in recent if r.get("place") == place and r.get("verdict") in ("miss", "surprise")]
             history += [f"Surprise at step {r.get('step')}: {str(r.get('outcome', {}))[:100]}"
                         for r in recent if r.get("verdict") == "surprise"]
-        reserve = sum(len(line) + 1 for line in history)
+        text_reserve = sum(len(r.get("text", "")) + 12 for r in self.rows("knowledge") if r.get("src") == "game_text") if caller == "orchestrator" else 0
+        reserve = sum(len(line) + 1 for line in history) + text_reserve
         entities = self.rows("entities")
         for row in sorted(entities, key=lambda r: (r["id"] not in on_screen, r.get("place") != place,
                                                     -r.get("seen", 0), r["id"])):
@@ -260,9 +264,13 @@ class Memory:
                 claim = "Don't believe: " + claim
             if add(claim, row["id"], reserve):
                 refuted += row.get("state") == "refuted"
-        for row in self.rows("knowledge"):
+        knowledge = self.rows("knowledge")
+        if caller == "orchestrator": knowledge.sort(key=lambda r: r.get("src") != "game_text")
+        if caller == "chooser":
+            knowledge = [r for i, r in enumerate(knowledge) if r.get("text") and not any(o.get("src") == r.get("src") and str(o.get("text", "")).casefold().startswith(str(r["text"]).casefold()) and (len(str(o.get("text", ""))) > len(str(r["text"])) or j > i) for j, o in enumerate(knowledge))][-8:]
+        for row in knowledge:
             claim = f"Knowledge: {row['text']}" + (" (unverified)" if row.get("src") == "model" else "")
-            if not add(claim, row["id"], reserve):
+            if not add(claim, row.get("id"), reserve - text_reserve):
                 break
         return "\n".join(lines), ids
 

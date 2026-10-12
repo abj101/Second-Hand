@@ -85,29 +85,28 @@ def test_approach_pushes_once_from_door_mat():
     assert result.inputs == 2 and env.scene == 1
 
 
-def test_exit_refines_rough_point_before_walking(monkeypatch):
+def test_exit_walks_rough_point_and_pushes_without_model_call():
     env = GridEnv(); env.door = (10, 8); env.npc = (-5, -5)
-    result = run_affordance(ctx(env, replies=[Reply("", {"at": [900, 500]}, 0, None, None)]),
+    result = run_affordance(ctx(env),
                             {"verb": "approach", "target": "exit down", "at": point(env, (9, 8))},
                             {"entities": [{"kind": "player", "at": [.5, .5]}]})
     assert result.status == "done" and result.reason == "scene cut"
-    assert result.calls == 1 and env.scene == 1
+    assert result.calls == 0 and env.scene == 1
 
 
-def test_exit_refine_none_fails_without_input():
-    env = GridEnv(); env.door = (11, 7); env.npc = (-5, -5)
-    replies = [Reply("", {"at": None}, 0, None, None)]
-    model = StubModel(replies)
+def test_exit_mode_pushes_non_exit_named_target():
+    env = GridEnv(); env.door = (10, 8); env.npc = (-5, -5)
+    model = StubModel([])
     result = run_affordance(Ctx(env, model),
-                            {"verb": "approach", "target": "exit down", "at": point(env, (9, 8))},
-                            {"entities": [{"kind": "player", "at": [.5, .5]}]})
-    assert result.status == "failed" and result.reason == "exit not visible"
-    assert result.inputs == 0 and result.calls == model.calls == 1 and env.scene == 0
+        {"verb": "approach", "target": "floor patch", "at": point(env, (9, 8))},
+        {"entities": [{"kind": "player", "at": [.5, .5]}]}, exit=True)
+    assert result.status == "done" and result.reason == "scene cut"
+    assert result.inputs == 2 and result.calls == model.calls == 0 and env.scene == 1
 
 
 def test_exit_without_scene_cut_is_blocked():
     env = GridEnv(); env.door = (-5, -5); env.npc = (-6, -6)
-    result = run_affordance(ctx(env, replies=[Reply("", {"at": [700, 500]}, 0, None, None)]),
+    result = run_affordance(ctx(env),
                             {"verb": "approach", "target": "exit down", "at": point(env, (10, 8))},
                             {"entities": [{"kind": "player", "at": [.5, .5]}]})
     assert result.status == "blocked" and result.reason == "exit not crossed"
@@ -115,7 +114,7 @@ def test_exit_without_scene_cut_is_blocked():
 
 def test_exit_blocked_by_walls_reports_not_crossed():
     env = GridEnv(); env.walls.update({(8, 7), (8, 9), (7, 8), (9, 8)})
-    result = run_affordance(ctx(env, replies=[Reply("", {"at": [800, 833]}, 0, None, None)]),
+    result = run_affordance(ctx(env),
                             {"verb": "approach", "target": "exit down", "at": point(env, (11, 11))},
                             {"entities": [{"kind": "player", "at": [.5, .5]}]})
     assert result.status == "blocked" and result.reason == "exit not crossed"
