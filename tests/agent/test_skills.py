@@ -94,20 +94,20 @@ def test_exit_refines_rough_point_before_walking(monkeypatch):
     assert result.calls == 1 and env.scene == 1
 
 
-def test_exit_refine_none_probes_beside_target():
+def test_exit_refine_none_fails_without_input():
     env = GridEnv(); env.door = (11, 7); env.npc = (-5, -5)
     replies = [Reply("", {"at": None}, 0, None, None)]
     model = StubModel(replies)
     result = run_affordance(Ctx(env, model),
                             {"verb": "approach", "target": "exit down", "at": point(env, (9, 8))},
                             {"entities": [{"kind": "player", "at": [.5, .5]}]})
-    assert result.status == "done" and result.reason == "scene cut"
-    assert result.calls == model.calls == 1 and env.scene == 1
+    assert result.status == "failed" and result.reason == "exit not visible"
+    assert result.inputs == 0 and result.calls == model.calls == 1 and env.scene == 0
 
 
 def test_exit_without_scene_cut_is_blocked():
     env = GridEnv(); env.door = (-5, -5); env.npc = (-6, -6)
-    result = run_affordance(ctx(env, replies=[Reply("", {"at": None}, 0, None, None)]),
+    result = run_affordance(ctx(env, replies=[Reply("", {"at": [700, 500]}, 0, None, None)]),
                             {"verb": "approach", "target": "exit down", "at": point(env, (10, 8))},
                             {"entities": [{"kind": "player", "at": [.5, .5]}]})
     assert result.status == "blocked" and result.reason == "exit not crossed"
@@ -115,10 +115,17 @@ def test_exit_without_scene_cut_is_blocked():
 
 def test_exit_blocked_by_walls_reports_not_crossed():
     env = GridEnv(); env.walls.update({(8, 7), (8, 9), (7, 8), (9, 8)})
-    result = run_affordance(ctx(env, replies=[Reply("", {"at": None}, 0, None, None)]),
+    result = run_affordance(ctx(env, replies=[Reply("", {"at": [800, 833]}, 0, None, None)]),
                             {"verb": "approach", "target": "exit down", "at": point(env, (11, 11))},
                             {"entities": [{"kind": "player", "at": [.5, .5]}]})
     assert result.status == "blocked" and result.reason == "exit not crossed"
+
+
+def test_approach_at_target_fails_without_pressing():
+    for tile_px in (16, None):
+        env = GridEnv()
+        result = approach(ctx(env, tile_px=tile_px), point(env, env.player), [.5, .5])
+        assert result.status == "failed" and result.reason == "already there" and result.inputs == 0
 
 
 def test_interact_opens_text_box():

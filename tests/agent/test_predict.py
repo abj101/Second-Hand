@@ -35,6 +35,13 @@ def test_verdict_hit_partial_surprise_miss_and_unobservable():
     assert verdict(pred, {}) == "unobservable"
 
 
+def test_zero_input_skill_cannot_hit_unless_no_change_was_predicted():
+    outcome = {"effects": ["place_changes"], "to": "house"}
+    assert verdict({"effect": "place_changes"}, outcome, inputs=0) == "miss"
+    assert verdict({"effect": "place_changes"}, outcome, inputs=1) == "hit"
+    assert verdict({"effect": "no_change"}, {"effects": ["no_change"]}, inputs=0) == "hit"
+
+
 def test_blocked_exit_walk_misses_even_with_incidental_movement_effects():
     pred = {"effect": "place_changes"}
     assert verdict(pred, {"effects": ["screen_changes", "view_scrolled"]}, blocked=True) == "miss"

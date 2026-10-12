@@ -44,7 +44,7 @@ def test_perceiver_guides_whole_name_entry(tmp_path):
     assert "A visible modal dialogue or selection menu blocks world movement" in model.prompt
     assert "Previous-place memory is reference only" in model.prompt
     assert 'Name every visible passage "exit: <what it is>"' in model.prompt
-    assert loop.prompt_version == "e3-perceiver-5"
+    assert loop.prompt_version == "e3-perceiver-6"
 
 def test_dialogue_opening_over_world_keeps_place(tmp_path, monkeypatch):
     from agent import loop as loop_module

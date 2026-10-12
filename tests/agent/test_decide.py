@@ -119,12 +119,25 @@ def test_code_choice_handles_empty_affordances():
 
 def test_escalate_drops_unknown_condition_kinds():
     data = {"tasks": [
-        {"goal": "Find a path", "done_when": [{"steps_over": 3}, {"unknown": "x"}],
+        {"goal": "Find a path", "done_when": ["steps_over(3)", "place_is(outdoor area)", "teleport(x)"],
          "fail_when": [{"entity_known": "wall"}, {"route": "x"}]},
         {"goal": "Invalid", "done_when": [{"route": "x"}]},
     ]}
     model = StubModel([type("Reply", (), {"data": data})()])
     tasks = escalate(model, "", "stuck")
     assert len(tasks) == 1
-    assert tasks[0]["done_when"] == [{"steps_over": 3}]
+    assert tasks[0]["done_when"] == [{"steps_over": 3}, {"place_is": "outdoor area"}]
     assert tasks[0]["fail_when"] == [{"entity_known": "wall"}]
+
+
+def test_escalate_sends_typed_condition_schema():
+    class SchemaModel(StubModel):
+        def ask(self, *args, **kwargs):
+            self.schema = kwargs.get("schema")
+            return super().ask(*args, **kwargs)
+
+    model = SchemaModel([type("Reply", (), {"data": {"tasks": []}})()])
+    escalate(model, "", "stuck")
+    schema = model.schema["properties"]["tasks"]["items"]["properties"]["done_when"]["items"]
+    assert schema["anyOf"][0]["properties"]["place_is"]["type"] == "string"
+    assert schema["anyOf"][-1]["properties"]["steps_over"]["type"] == "integer"

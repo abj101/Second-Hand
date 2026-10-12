@@ -14,7 +14,7 @@ class Loop:
         self.trace = Trace(mem.root.parent / "trace.jsonl"); self.step_no = 0
         self.place = None; self.prev = None; self.tile_px = getattr(env, "tile_px", None)
         self.move_frames = 16; self.stuck = Stuck(); self.tasks = Tasks(mem)
-        self.recent = self.trace.tail(5); self.cached = None; self.cached_hash = None; self.prev_frame = None; self.prompt_version = "e3-perceiver-5"; self.cached_version = self.prompt_version
+        self.recent = self.trace.tail(5); self.cached = None; self.cached_hash = None; self.prev_frame = None; self.prompt_version = "e3-perceiver-6"; self.cached_version = self.prompt_version
         self.pending_cut, self.pending_via, self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = False, None, False, 0, False, False
     def _see(self, frame, previous):
         key = hashlib.sha256(frame.tobytes()).hexdigest()
@@ -69,7 +69,7 @@ class Loop:
         pred = (preds[choice.i] or {"effect": choice.effect, "detail": choice.detail, "basis": "guess"}) if choice else None
         if choice and str(affs[choice.i].get("target", "")).startswith("exit"):
             pred = {**pred, "effect": "place_changes", "detail": pred.get("detail") if pred.get("effect") == "place_changes" else None}
-        v = "unobservable" if not affs else verdict(pred, outcome, blocked=skill.status == "blocked")
+        v = "unobservable" if not affs else verdict(pred, outcome, blocked=skill.status == "blocked", inputs=skill.inputs)
         if choice and targets[choice.i]:
             for effect in outcome["effects"]:
                 detail = outcome.get("to") if effect == "place_changes" else choice.detail or effect

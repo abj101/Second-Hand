@@ -81,10 +81,12 @@ def normalize(data: dict | None) -> dict:
         if isinstance(e, dict) and (at := _point(e.get("at"))):
             out["entities"].append({"kind": str(e.get("kind") or ""), "name": str(e.get("name") or ""), "at": at})
     for a in data.get("affordances") or []:
+        if isinstance(a, dict) and (to := _point(a.get("to"))) and str(a.get("verb") or "").lower() != "drag": a = {**a, "at": a["to"]}
         if isinstance(a, dict) and (at := _point(a.get("at"))):
             row = {"verb": str(a.get("verb") or "").lower(), "target": str(a.get("target") or ""), "at": at,
                    "why": str(a.get("why") or "")}
             if to := _point(a.get("to")):
-                row["to"] = to
+                if row["verb"] == "drag": row["to"] = to
+                else: row["at"] = to
             out["affordances"].append(row)
     return out

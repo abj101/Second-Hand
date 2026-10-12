@@ -27,6 +27,16 @@ def test_normalize_scales_clamps_and_drops_bad_points():
     assert len(out["affordances"]) == 2 and out["affordances"][1]["to"] == [0.7, 0.3]
     assert normalize(None)["affordances"] == []
 
+
+def test_approach_uses_to_as_target_but_drag_keeps_destination():
+    approach = {"verb": "approach", "target": "MOM", "at": [452, 462], "to": [354, 143]}
+    target_only = {"verb": "approach", "target": "door", "to": [354, 143]}
+    drag = {"verb": "drag", "target": "card", "at": [100, 200], "to": [700, 300]}
+    out = normalize({"affordances": [approach, target_only, drag]})["affordances"]
+    assert out[0]["at"] == [.354, .143] and "to" not in out[0]
+    assert out[1]["at"] == [.354, .143] and "to" not in out[1]
+    assert out[2]["at"] == [.1, .2] and out[2]["to"] == [.7, .3]
+
 def test_screen_labels_follow_the_enum():
     from agent.perceive import SCHEMA
     labels = ("world", "dialogue", "menu", "keyboard", "battle", "title", "other")

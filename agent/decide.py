@@ -7,6 +7,8 @@ from agent.predict import EFFECTS
 
 SYSTEM = "Choose a useful next action from the visible options. Return only JSON."
 COND_KINDS = {"place_is", "entity_known", "text_seen", "relation", "steps_over"}
+_COND = {"type": "object", "anyOf": [{"type": "object", "properties": {k: {"type": "string"}}, "required": [k], "additionalProperties": False} for k in ("place_is", "entity_known", "text_seen")] + [{"type": "object", "properties": {"relation": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 3}}, "required": ["relation"], "additionalProperties": False}, {"type": "object", "properties": {"steps_over": {"type": "integer"}}, "required": ["steps_over"], "additionalProperties": False}]}
+_TASKS = {"type": "object", "properties": {"tasks": {"type": "array", "items": {"type": "object", "properties": {"goal": {"type": "string"}, "done_when": {"type": "array", "items": _COND}, "fail_when": {"type": "array", "items": _COND}, "budget": {"type": "integer"}}, "required": ["goal", "done_when"]}}}, "required": ["tasks"]}
 
 
 @dataclass
@@ -96,14 +98,19 @@ def code_choice(perception: dict, view_ids: list[str], recent: list[dict]) -> Ch
 def _conditions(rows) -> list[dict]:
     if not isinstance(rows, list):
         return []
-    return [{kind: value} for c in rows if isinstance(c, dict) and len(c) == 1
-            for kind, value in c.items() if kind in COND_KINDS and
-            ((kind == "relation" and isinstance(value, (list, tuple)) and len(value) == 3) or (kind == "steps_over" and type(value) in (int, float)) or (kind not in {"relation", "steps_over"} and isinstance(value, str)))]
+    out = []
+    for c in rows:
+        if isinstance(c, str) and "(" in c and c.endswith(")"):
+            kind, value = c[:-1].split("(", 1); c = {kind: int(value) if kind == "steps_over" and value.lstrip("-").isdigit() else value}
+        if isinstance(c, dict) and len(c) == 1:
+            kind, value = next(iter(c.items()))
+            if kind in COND_KINDS and ((kind == "relation" and isinstance(value, (list, tuple)) and len(value) == 3) or (kind == "steps_over" and type(value) is int) or (kind not in {"relation", "steps_over"} and isinstance(value, str))): out.append({kind: value})
+    return out
 def escalate(model, view: str, reason: str) -> list[dict]:
     prompt = (f"View:\n{view}\nReason: {reason}\n" 
               'Suggest up to 3 useful subtasks as JSON {"tasks":[{"goal":str,"done_when":[conditions],"fail_when":[conditions]}]}. '
               "Conditions may use only place_is, entity_known, text_seen, relation, or steps_over.")
-    data = model.ask(SYSTEM, prompt, role="escalate").data
+    data = model.ask(SYSTEM, prompt, schema=_TASKS, role="escalate").data
     tasks = data.get("tasks", []) if isinstance(data, dict) else []
     out = []
     for task in tasks if isinstance(tasks, list) else []:
