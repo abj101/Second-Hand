@@ -17,7 +17,7 @@ def test_repair_stage_caps_preserve_prior_spend(tmp_path, monkeypatch, stage, sp
     assert json.loads(path.read_text()) == expected
 
 
-@pytest.mark.parametrize("key,limit,initial", [("total",1100,1099), ("m1",1050,1049)])
+@pytest.mark.parametrize("key,limit,initial", [("total",1300,1299), ("m1",1250,1249)])
 def test_phase_and_m1_caps_preserve_spend(tmp_path, monkeypatch, key, limit, initial):
     monkeypatch.chdir(tmp_path)
     path = tmp_path / "runs/e3_budget.json"; path.parent.mkdir()
@@ -32,7 +32,7 @@ def test_phase_and_m1_caps_preserve_spend(tmp_path, monkeypatch, key, limit, ini
 def test_e4_uses_separate_600_request_ledger(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     e3 = tmp_path / "runs/e3_budget.json"; e3.parent.mkdir()
-    e3.write_text('{"total":1100,"smoke":50,"m1":1050}')
+    e3.write_text('{"total":1300,"smoke":50,"m1":1250}')
     e3_before = e3.read_bytes()
     e4 = tmp_path / "runs/e4_budget.json"
     e4.write_text('{"total":598}')
