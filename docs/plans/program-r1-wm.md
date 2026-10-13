@@ -38,8 +38,8 @@ This file is the single entry point. The orchestrator pastes nothing else; it re
 
 ## 3. Model tiers
 
-- **Orchestrator:** GPT-6.1 Sol. Writes exact WP specs from the packet, delegates, reviews diffs against the card, runs every acceptance command itself.
-- **Subagents:** `gpt-6-luna` at **high** reasoning effort, for every WP, no exceptions. Set model and effort explicitly on every spawn. No other subagent models.
+- **From 2026-10-12 (after P3b):** orchestrator **Claude Sonnet** (Claude Code session); subagents **Claude Haiku** for every WP, set explicitly (`model: "haiku"`) on every spawn. This overrides the "Tier" column in packets (which says gpt-6-luna high). Never Opus. P2–P3b ran on GPT-6.1 Sol + gpt-6-luna high.
+- The orchestrator writes exact WP specs from the packet, delegates, reviews diffs against the card, and runs every acceptance command itself.
 - One WP per subagent. Paste: §2 rules, the WP card, and the contracts.md text the card cites. A subagent that fails a WP twice → the orchestrator stops and reports; it does not take over the implementation itself.
 
 ## 4. Budgets across the program
@@ -51,43 +51,6 @@ This file is the single entry point. The orchestrator pastes nothing else; it re
 
 At each gate pass: `git add` the paths the packet lists plus `docs/`, message `<PHASE>: <one-line gate result>`, with the trailer the repo uses. No push.
 
-## 6. Kickstart prompt (paste this into GPT-6.1 Sol)
+## 6. Kickstart prompt
 
-```text
-You are the orchestrator for the R1 + World Memory program of the lean game-playing agent,
-in repo C:\Users\Abj1\Documents\GitHub\Avatar on branch feat/lean-agent.
-
-Model tiers are fixed by the user: you are GPT-6.1 Sol. Every subagent you spawn is
-gpt-6-luna with reasoning effort HIGH. Set model and effort explicitly on every spawn.
-Never use any other subagent model. One work package (WP) per subagent.
-
-1. Read, in order: CLAUDE.md; docs/plans/program-r1-wm.md (all of it);
-   docs/plans/handoff-notes.md; docs/plans/contracts.md (sections: memory, space, trace,
-   run directory and truth, notebook and act, world); docs/plans/world-memory.md and
-   docs/plans/autonomy-redesign.md for design context. Read code only via codegraph_explore,
-   and only what the current packet lists.
-2. Find the next phase: the first row of program-r1-wm.md §1 whose packet Status is not
-   "gate passed". If a packet says "gate failed" or "blocked", report it and stop.
-   Open that packet and execute it exactly: entry criteria, WPs in run order, acceptance
-   commands, gate.
-3. For each WP: write the subagent prompt from the WP card, paste program §2 rules and the
-   cited contracts.md text into it, spawn gpt-6-luna (high), review its diff against the
-   card (files, line budget, no game-specific code, no new gates), then run the acceptance
-   commands yourself. A WP is done only when they exit 0 and the budget holds. After the
-   last WP of a phase, run the full suite:
-   .venv-agent/Scripts/python.exe -m pytest tests/agent -q
-   (~5 min; run it in the background if your shell times out).
-4. Cloud calls only in phases with a request cap in §1, only through the ledger, never above the packet cap.
-   Exit code 3 or 4 from a runner: checkpoint, report, stop. Never modify runs/m1/.
-5. Gate: run it exactly as the packet says. Fill in the packet's Result section and Status
-   line, update the phase table row in docs/plan.md, and rewrite
-   docs/plans/handoff-notes.md (rewrite, don't append; under 80 lines; fixed headings).
-   On a pass, commit the listed paths plus docs/ ("<PHASE>: <one-line gate result>");
-   never git add -A, never push.
-6. Then continue with the next phase, unless program §1 marks a STOP after this phase or
-   a gate failed. At a STOP or failure, end with a short report to the user: phase,
-   gate numbers with the commands that produced them, deviations, open questions,
-   and requests spent.
-7. Never edit contracts.md or anything under loop/. If a contract has to change, stop and
-   report the exact proposed text.
-```
+The current prompt (Sonnet orchestrator, Haiku subagents) is in [kickstart.md](kickstart.md).
