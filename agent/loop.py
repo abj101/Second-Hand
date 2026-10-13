@@ -29,6 +29,7 @@ class Loop:
         self.reperception_used = False
         self.world = World(mem, self.tile_px)
         self.last_plan, self.text_pending, self.focus_closed, self._plan_row = None, False, None, None
+        self.fails, self.moves, self.urgent = {}, [], None  # per-place failed actions, recent place moves, a replan reason that skips the throttle
     @property
     def pos(self): return self.world.pos
     @pos.setter
@@ -87,7 +88,7 @@ class Loop:
             p = plan(self.model, trigger, self.notebook, view, per.get("text", []), [f"{(r.get('choice') or {}).get('verb')} {(r.get('choice') or {}).get('target') or ''} -> {r.get('verdict')}" for r in self.recent])
             ops = self.notebook.apply(p.ops, self.step_no + 1); self.notebook.set_focus(p.focus or self.notebook.focus, self.step_no + 1)
             if p.lesson: self.notebook.note(self.step_no + 1, f"lesson: {p.lesson}")
-            self.last_plan, self.text_pending, self.focus_closed = self.step_no + 1, False, None
+            self.last_plan, self.text_pending, self.focus_closed, self.urgent = self.step_no + 1, False, None, None
             self._plan_row = {"trigger": trigger, "focus": self.notebook.focus, "ops": ops, "why": p.why}
             view = self.world.view(self._goal_text(), place)
         affs, targets, preds = [], [], []
@@ -121,11 +122,13 @@ class Loop:
                 summaries.pop(1 if self.stuck.n else 0); recent_flag = "recent: " + "; ".join(summaries)
             act_flags.append(recent_flag[:197] + "..." if len(recent_flag) > 200 else recent_flag)
         act_flags.append(self.world.here_flag())
+        failed_here = sorted(((k.split("|", 1)[1], f) for k, f in self.fails.items() if k.split("|", 1)[0] == place), key=lambda kv: -kv[1]["n"])[:4]
+        if failed_here: act_flags.append("failed here before: " + "; ".join(f"{a} x{f['n']} ({f['why']})" for a, f in failed_here))
         a = act(self.model, None if self.act_text else model_frame, per, self.notebook.render_focus(), view, act_flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]])
         applied = self.notebook.apply(a.ops, self.step_no + 1, structure=False)
         closed = self.notebook.data["goals"].get(self.notebook.focus or "", {})
         if closed.get("status") in FINISHED: self.focus_closed = f"focus {self.notebook.focus} {closed['status']}: {closed.get('evidence', '')}"
-        named = self.world.name(place, a.place, self.step_no + 1)
+        named = self.world.name(place, a.place, self.step_no + 1, frame=before)
         if named != place:  # model says this new arrival is a known place
             place = self.place = named
             if self.world.new_arrival: self.world.pos = next(((r["x"], r["y"]) for r in self.mem.rows("tiles") if r.get("place") == place and (r.get("exit") or {}).get("to") == prior), self.world.pos)
@@ -222,6 +225,12 @@ class Loop:
         self.prev_frame_mark_eligible = after_mark_eligible
         self.pending_cut, self.pending_via = False, None; reason = self.stuck.update(row); self.repair_pending = self.parse_failed and self.empty_streak >= 8 and not self.repair_used; self.repair_used |= self.repair_pending
         if unknown: reason = "player position unknown"
+        if choice is not None:
+            key = f"{place}|{affs[choice.i].get('verb')} {affs[choice.i].get('target') or ''}".strip()
+            failed = skill.status in ("blocked", "failed") or v == "miss" or "no_change" in outcome.get("effects", [])
+            if failed:
+                f = self.fails.setdefault(key, {"n": 0}); f.update(n=f["n"] + 1, why=(skill.reason or f"verdict {v}")[:40], step=self.step_no)
+                if f["n"] == 2: self.urgent = self.urgent or f"the same action failed twice here: {key.split('|', 1)[1]} ({f['why']})"
         if a.action and "go_to" in a.action and choice is None: reason = f'go_to "{a.action["go_to"]}": not in memory'
         self.flags = [x for x in (reason, f"last action {skill.status}: {skill.reason}" if skill.status != "done" else None, f"verdict {v}" if v in ("miss", "surprise") else None, f"merge_pending: {self.world.merge_pending}" if self.world.merge_pending else None) if x]; self.world.merge_pending = None; self.world.new_arrival = False
         self.trace.write(row); self.recent = [*self.recent, row][-5:]
@@ -247,6 +256,12 @@ class Loop:
     def _moved(self, src, dst, via, step):
         label = self.world.place_label
         self.notebook.note(step, f"went from {label(src)} to {label(dst)}" + (f" via {via}" if via else ""))
+        self.moves = [*self.moves, [step, src, dst]][-6:]
+        last = [m for m in self.moves if step - m[0] <= 15][-4:]
+        if len(last) == 4 and len({(m[1], m[2]) for m in last}) == 2 and all(a[2] == b[1] for a, b in zip(last, last[1:])):
+            self.urgent = f"cycle: went back and forth between {label(src)} and {label(dst)} {len(last)} times in {step - last[0][0]} steps without progress"
+        elif (self.mem.get("places", dst) or {}).get("visits", 0) <= 1 and not any(m[1] == dst for m in self.moves):
+            self.urgent = self.urgent or f"arrived somewhere new: {label(dst)}"
     def _goal_text(self):
         goals = self.notebook.data["goals"]; path = self.notebook.path()
         keys = path or [k for k, v in goals.items() if v.get("status", "active") == "active"]
@@ -254,6 +269,7 @@ class Loop:
     def _plan_trigger(self, per):
         """Events that warrant replanning; the model decides what they mean. Closing the focus always replans, the rest at most every 3 steps."""
         if self.focus_closed: return self.focus_closed
+        if self.urgent: return self.urgent
         if self.last_plan is not None and self.step_no + 1 - self.last_plan < 3: return None
         goal = self.notebook.data["goals"].get(self.notebook.focus or "")
         if not goal or goal.get("status") in FINISHED: return "no focus goal yet" if not goal else f"focus {self.notebook.focus} is {goal['status']}"
@@ -262,7 +278,7 @@ class Loop:
         # ponytail: 8-step floor on stuck replans; m1_gp replanned every ~3 steps into button-level goals
         return f"stuck: {stuck}" if stuck and (self.last_plan is None or self.step_no + 1 - self.last_plan >= 8) else None
     def state(self):
-        return {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "reperception_used": self.reperception_used, "perception": self.cached, "frame_hash": self.cached_hash, "perception_marked": self.cached_marked, "frame_mark_eligible": self.prev_frame_mark_eligible, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "pending_via": self.pending_via, "flags": self.flags, "planner": {"last": self.last_plan, "text_pending": self.text_pending, "focus_closed": self.focus_closed}}
+        return {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "reperception_used": self.reperception_used, "perception": self.cached, "frame_hash": self.cached_hash, "perception_marked": self.cached_marked, "frame_mark_eligible": self.prev_frame_mark_eligible, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "pending_via": self.pending_via, "flags": self.flags, "planner": {"last": self.last_plan, "text_pending": self.text_pending, "focus_closed": self.focus_closed, "fails": self.fails, "moves": self.moves, "urgent": self.urgent}}
     def restore(self, state):
         self.step_no, self.place = int(state.get("step", 0)), state.get("place")
         self.tile_px, self.move_frames = state.get("tile_px"), int(state.get("move_frames", 16))
@@ -274,4 +290,5 @@ class Loop:
         self.cached, self.cached_hash, self.cached_marked, self.cached_version = state.get("perception"), state.get("frame_hash"), bool(state.get("perception_marked", False)), state.get("perception_version")
         self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = bool(state.get("parse_failed")), int(state.get("empty_streak", 0)), bool(state.get("repair_used")), bool(state.get("repair_pending")); self.pending_cut, self.pending_via = bool(state.get("pending_cut")), state.get("pending_via"); self.flags = state.get("flags", [])
         planner = state.get("planner") or {}; self.last_plan, self.text_pending, self.focus_closed = planner.get("last"), bool(planner.get("text_pending")), planner.get("focus_closed")
+        self.fails, self.moves, self.urgent = planner.get("fails") or {}, planner.get("moves") or [], planner.get("urgent")
         if self.cached_version != self.prompt_version or digest != self.cached_hash: self.cached = self.cached_hash = None; self.cached_marked = False

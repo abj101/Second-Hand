@@ -882,3 +882,36 @@ def test_go_to_unexplored_walks_to_nearest_frontier(tmp_path):
     assert loop._unexplored("r") is None  # the only open edge is the way back out: not "unexplored"
     loop.tile_px = None
     assert loop._unexplored("p") is None
+
+
+def test_new_place_and_back_and_forth_cycle_trigger_replans_without_throttle(tmp_path):
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    for pid in ("house", "town"): loop.mem.upsert("places", {"id": pid, "name": pid, "screen": "world", "state": "place", "visits": 1})
+    loop.last_plan = loop.step_no = 10  # a plan just ran: ordinary triggers are throttled
+    loop._moved("house", "town", "door", 11)
+    assert loop.urgent == "arrived somewhere new: town" and loop._plan_trigger({}) == loop.urgent
+    loop.urgent = None
+    for step, (a, b) in enumerate((("town", "house"), ("house", "town"), ("town", "house")), 12): loop._moved(a, b, "door", step)
+    assert loop.urgent.startswith("cycle: went back and forth between town and house 4 times")
+    assert loop._plan_trigger({}) == loop.urgent
+
+
+def test_second_failure_of_same_action_flags_act_and_replans(tmp_path, monkeypatch):
+    from agent import loop as module
+    env = GridEnv()
+    def perceive(*_):
+        return {"screen": "world", "text": [], "entities": [{"name": "player", "kind": "player", "at": [.5, .5]}, {"name": "door", "kind": "exit", "at": [.6, .5]}]}, reply({})
+    monkeypatch.setattr(module, "perceive", perceive)
+    seen_flags = []
+    def act(*a, **k): seen_flags.append(a[5]); return SimpleNamespace(place="", ops=[], action={"thing": 1, "verb": "approach"}, expect="place_changes", why="t", text=None)
+    monkeypatch.setattr(module, "act", act)
+    def blocked(ctx, aff, per, **k):
+        frame = env.screenshot(); return SimpleNamespace(status="blocked", reason="wall", inputs=1, calls=0, before=frame, after=frame, scroll=(0, 0), blank_seen=False, moves=[])
+    monkeypatch.setattr(module, "run_affordance", blocked)
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    loop.step(); assert loop.urgent is None
+    loop.step(); assert loop.urgent == "the same action failed twice here: approach door (wall)"
+    row = loop.step()
+    assert any(f.startswith("failed here before: approach door x2 (wall)") for f in seen_flags[-1])
+    assert row["plan"]["trigger"] == "the same action failed twice here: approach door (wall)"

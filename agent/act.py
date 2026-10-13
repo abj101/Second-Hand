@@ -10,8 +10,9 @@ SYSTEM = ("You are playing a video game you have never seen, from screenshots on
   "The log lists what already happened, including what people said: do not repeat finished conversations or actions unless the focus needs it. "
   "When the focus's done_when sign is visible, mark it done with the evidence; when you have tried it several ways and it cannot work from here, mark it blocked and say why. "
   "Treat your notes as hypotheses: prefer what you see now over what you wrote earlier. "
+  "Flags list actions that already failed here: after one failure try something different, and never repeat an action that failed twice here. "
   "If you are stuck or an action keeps failing, try something different and write down what you learned. Return only JSON.")
-REPLY = ('Reply JSON: {"place": short name for where you are (reuse a known place name if it is the same place), '
+REPLY = ('Reply JSON: {"place": short descriptive name for where you are, from what you see (e.g. "bedroom", "kitchen", "town"; never a screen type like world, dialogue or menu; reuse a known place name only if it is the same place), '
   '"notebook": list of edits: {"op":"focus","status":"done"|"blocked","evidence":"what you saw"}, {"op":"tried","text":"what you just tried for the focus"}, or {"op":"set"|"remove","section":"hints"|"lessons","key":short id,"value":{...}}, '
   '"action": {"thing": n, "verb": "approach"|"interact"|"select"|"click"}, {"verb": "advance"|"cancel"|"type"}, {"go_to": name of a thing on screen, remembered thing or known place, or "unexplored" to walk to the nearest part of this place you have not explored}, or {"buttons": up to 8 of %s}; '
   '"text": text to type when the verb is type, else null, "expect": one of %s, "why": one sentence}. '

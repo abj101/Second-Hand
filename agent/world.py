@@ -596,7 +596,7 @@ class World:
     def _travel_result(self, results, status, reason, ctx):
         moves = [m for r in results for m in r.moves]
         self._travelled = SkillResult(status, f"travel: {reason}" if reason else "", sum(r.inputs for r in results), sum(r.calls for r in results), results[0].before if results else ctx.env.screenshot(), results[-1].after if results else ctx.env.screenshot(), tuple(map(sum, zip(*(r.scroll for r in results)))) if results else (0, 0), any(r.blank_seen for r in results), moves, next((m.get("self_at") for m in reversed(moves) if isinstance(m, dict) and m.get("self_at") is not None), None)); return self._travelled
-    def name(self, place, name, step):
+    def name(self, place, name, step, frame=None):
         self.new_arrival, self.merge_pending = False, None
         cut_arrival, self._cut_arrival = self._cut_arrival, None
         if cut_arrival and (cut_arrival[1] != place or cut_arrival[0] + 1 != step): cut_arrival = None
@@ -611,6 +611,9 @@ class World:
                               and key in [str(v).casefold() for v in [r.get("name"), *r.get("aliases", [])]]), None)
         if not target: return self.mem.name_place(place, name, step)
         if not cut_arrival or target["id"] != cut_arrival[2]:
+            looks = [v for v in self.mem.rows("views") if self.mem._home(v["place"])[0] == target["id"]]
+            if frame is not None and looks and self.mem.seen_view(frame, None, None, self.tile_px, only=target["id"]) is None:
+                self.merge_pending = f"{name} (but this does not look like the known {self.place_label(target['id'])}; give it its own name)"; return place
             if row.get("first") == step: self.new_arrival = True; return self.mem.name_place(place, name, step)
             if self.merge(place, target["id"], step): return target["id"]
         aliases = row.get("aliases", [])

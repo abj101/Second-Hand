@@ -10,7 +10,9 @@ SYSTEM = ("You plan for a player of a video game they have never seen. The top g
   "When nothing tells you where to go, the goal is to explore: reach parts of the map you have not seen (the map counts untried edges into unseen cells), find exits, and go through exits you have not used. "
   "Use only what the screen, the map, the log or the known facts show; if a goal is a guess, mark its source assumed. Never invent places, items or routes. "
   "Do not re-create a goal the log says is done. Keep goals that still hold and change only what the trigger calls for. "
-  "When a focus is blocked, choose a different way to reach its parent (another exit, another person, another object) and say why. Return only JSON.")
+  "When a focus is blocked, choose a different way to reach its parent (another exit, another person, another object) and say why. "
+  "When the trigger is a cycle or an action that failed twice, the current focus is not working: mark it blocked and pick a different approach, not a rewording of the same one. "
+  "When the trigger is arriving somewhere new, re-check which goals this place serves before keeping the old focus. Return only JSON.")
 REPLY = ('Reply JSON: {"goals": list of edits {"op":"set"|"remove","section":"goals","key":short id,'
   '"value":{"text","parent":key of the goal this serves or null,"done_when":"one observable sign it is done","source":"saw|heard|assumed","evidence","status":"todo|active|done|blocked|dropped"}}, '
   '"focus": key of the one leaf goal to work on now, "lesson": one short lesson learned or null, "why": one sentence}.')
