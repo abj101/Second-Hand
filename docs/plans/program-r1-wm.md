@@ -15,6 +15,7 @@ This file is the single entry point. The orchestrator pastes nothing else; it re
 | 4 | W2: `go_to` through memory, routing across places | [W2.md](W2.md) | 0 | continue |
 | 5 | W3: evidence states, seen tiles, known-things view | [W3.md](W3.md) | 0 | **STOP 2**: user approves the live spend |
 | 6 | P3: live comparison, 40 steps with `--act` + World Memory | [P3.md](P3.md) | ≤ 80 | **STOP 3**: user decides "better?" |
+| 6b | P3b: fix player identity, cut identity, recent actions; rerun the P3 comparison (added 2026-10-12 at STOP 3) | [P3b.md](P3b.md) | ≤ 80 | **STOP 3b**: user decides "better?" |
 | 7 | P4: delete the gated path | [P4.md](P4.md) | 0 | continue |
 | 8 | W4: anchors from motion, HUD regions | [W4.md](W4.md) | 0 | **STOP 4**: program done |
 
@@ -40,7 +41,7 @@ This file is the single entry point. The orchestrator pastes nothing else; it re
 
 ## 4. Budgets across the program
 
-- **Cloud requests:** P2 ≤ 40 + P3 ≤ 80 = **≤ 120** from the M1 bucket (483 left on 2026-10-12; phase total cap 1,100, 585 used).
+- **Cloud requests:** P2 ≤ 40 + P3 ≤ 80 + P3b ≤ 80 = **≤ 200** from the M1 bucket (411 left after P3 on 2026-10-12; P3 used 43).
 - **Lines:** budgets suspended 2026-10-12 (report only; compress after the program). Original estimates, for reference (`agent/`, 1,988 on 2026-10-12): W0 +54 (actual), W1 ≈ +35, W2 ≈ +65, W3 ≈ +105, P4 ≈ −400 or more, W4 ≈ +60. Each packet states its own budget; overruns are reported, never hidden by compacting unrelated code.
 
 ## 5. Commits
