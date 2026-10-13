@@ -430,5 +430,19 @@ Text arm ran 30 steps (71-100): 47 requests; steps 85-100 were 14 of 16 `buttons
 
 **Spend.** Ledger 971 → 991 (ab_image) → 1011 (ab_text) → 1058 (text live, 47) → 1084 (image live, 26): +113. Now total 1084/1100 (16 left), M1 1036/1050 (14 left). PS total ≈153/160 (40 + 113). **L3's ≤108 live requests cannot be funded without raising the ledger caps** (hard-coded in `scripts/run_agent.py` `_ledger`: total 1100, M1 1050). The "127 M1 remaining" in the Result above is stale.
 
+### 9b. Addendum: place identity by view fingerprint (2026-10-13)
+
+- **Diagnosis.** After a cut, `match_place` recognised a place only by how much the perceiver's landmark names overlapped (Jaccard ≥ .6). Those names change on every visit ("furniture, rival" / "cabinet, table with bowl"), so each stairs round trip minted a new id. In `m1_long`, Red's house became 7 ids for 2 floors. The 1F-exit stall followed from this: `E -> world [p_world_4]` pointed at a stranger, and the 2F ids never merged.
+- **Fix** (`1eb6a83`). Memory stores one half-res greyscale view per (place, tile) in `views.jsonl`. On a cut, the new frame is matched against stored views of the same screen type, allowing whole-tile scroll of up to ±4 tiles and requiring ≥ .9 equal lit pixels. The match gives the place and the arrival tile. It runs before the edge and name fallbacks. Exit lines now read `E at (x,y) push DIR -> place`.
+- **Calibration** on recorded frames: same floor ≥ .958 within 4 tiles; other floor ≤ .789.
+- **Known ceiling:** pixel-identical interiors in different towns, such as Poké Centers, will match each other.
+- **Offline replay** of `m1_long` cuts, 0 requests: names only gives 7 ids for 2 maps; with views it gives 2 ids for 2 maps, with no mixed ids.
+- **Live** `runs/m1_ps_fp`, steps 71–80 from `m1_long` checkpoint 70. I backfilled the 1F view from frame 70.
+  - The probe went upstairs and minted `p_world_2` (2F, first visit, correct).
+  - At step 72, the return to 1F was recognised as `p_world`.
+  - Tiles then tracked RAM exactly, for example RAM (5,3) = tile (−2,2) relative to (7,1).
+  - Steps 76–80 were Mom's dialogue. The run ended before the door. Party 0.
+- **Spend:** 13 requests. Ledger is now total 1097/1100 and M1 1049/1050. Further live play needs the caps raised.
+
 ## 10. Handoff notes
 Rewrite `docs/plans/handoff-notes.md` per the template §10 (under 80 lines, fixed headings).
