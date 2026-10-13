@@ -25,7 +25,7 @@ def _ledger(run, stage, cap):
             bucket = "m1" if "m1" in str(run).lower() else "smoke"
             base = {"a":180,"b":300,"p":30,"q":60,"c":546}.get(stage)
             key, limit = (f"stage_{stage}", min(cap, base)) if stage and base else (None, None)
-            if data["total"] >= 1975 or data[bucket] >= (1925 if bucket == "m1" else 50) or (key and data.get(key,0) >= limit): raise CallCap("persistent call budget exhausted")
+            if data["total"] >= 2175 or data[bucket] >= (2125 if bucket == "m1" else 50) or (key and data.get(key,0) >= limit): raise CallCap("persistent call budget exhausted")
             data["total"] += 1; data[bucket] += 1
             if key: data[key] = data.get(key,0)+1
             tmp = path.with_suffix(".tmp"); tmp.write_text(json.dumps(data)); tmp.replace(path)
