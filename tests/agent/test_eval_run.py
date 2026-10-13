@@ -250,6 +250,34 @@ def test_legacy_trace_without_spatial_values_is_unmeasured(tmp_path):
     assert metric["visits"] == []
 
 
+def test_p3b_evaluator_counts_player_role_cut_loop_and_recent_line(tmp_path):
+    run = tmp_path / "p3b"
+    write(run / "trace.jsonl", [
+        world(1, "p", [0, 0]) | {"entities": [{"kind": "player", "at": [0.45, 68 / 144]}]},
+        world(2, "p", [1, 0]) | {"scene_cut": True, "next_place": "p",
+                                  "entities": [{"kind": "player", "at": [0.25, 0.8]}],
+                                  "act": {"flags": ["recent: line seen"]}},
+    ])
+    write(run / "truth.jsonl", [
+        {"step": 1, "map": 0x26, "sprites": [{"slot": 0, "x": 64, "y": 60}]},
+        {"step": 2, "map": 0x26, "sprites": [{"slot": 0, "x": 64, "y": 60}]},
+    ])
+
+    result = evaluate(run)
+
+    assert result["player_role_errors"] == 1
+    assert result["cut_self_loops"] == 1
+    assert result["recent_line_steps"] == 1
+
+
+def test_player_role_errors_is_null_when_truth_has_no_sprites(tmp_path):
+    run = tmp_path / "no-sprites"
+    write(run / "trace.jsonl", [world(1, "p", [0, 0])])
+    write(run / "truth.jsonl", [{"step": 1, "map": 0x26, "sprites": []}])
+
+    assert evaluate(run)["player_role_errors"] is None
+
+
 def test_e4_metrics_and_offline_repredict_preserve_chooser_guess(tmp_path):
     run = tmp_path / "e4"
     trace = [

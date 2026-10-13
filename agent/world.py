@@ -23,6 +23,7 @@ class World:
         self.entities, self.pa, self._prepared = [], None, None
         self.current_place, self.merge_pending, self.new_arrival = None, None, False
         self._travelled = None
+        self._cut_arrival = None
         self._last_miss_hash = {}
     def _anchor(self, per, size):
         h = self.anchors
@@ -30,6 +31,25 @@ class World:
         mid = lambda: h[0] if len(h) < 3 else [sorted(x[i] for x in h)[len(h) // 2] for i in (0, 1)]
         if p and self.tile_px and per.get("screen") == "world" and (not h or max(abs(p[i] - mid()[i]) * size[i] for i in (0, 1)) <= 1.5 * self.tile_px): h.append(list(p)); del h[:-9]
         return mid() if h else p
+    def fix_player(self, per, size):
+        if per.get("screen") != "world" or len(self.anchors) < 3 or not self.tile_px: return None
+        entities = per.get("entities", [])
+        player = next((e for e in entities if e.get("kind", "").casefold() == "player"), None)
+        if not player or not isinstance(player.get("at"), list) or len(player["at"]) != 2: return None
+        median = [sorted(a[i] for a in self.anchors)[len(self.anchors) // 2] for i in (0, 1)]
+        dist = lambda at: max(abs(at[i] - median[i]) * size[i] for i in (0, 1))
+        if dist(player["at"]) <= 1.5 * self.tile_px: return None
+        # ponytail: assumes a camera that follows the player (fixed screen spot); W4 motion anchors replace it for fixed-screen games.
+        candidates = [(dist(e["at"]), e) for e in entities if e is not player and isinstance(e.get("at"), list) and len(e["at"]) == 2]
+        near = min(candidates, key=lambda item: item[0]) if candidates else None
+        old = list(player["at"])
+        if near and near[0] <= self.tile_px:
+            replacement = near[1]
+            player["kind"], replacement["kind"] = "character", "player"
+            fixed = list(replacement["at"])
+        else:
+            player["at"] = fixed = median
+        return {"from": old, "to": fixed}
     def before(self, per, place, prior, size, step):
         self.current_place = place
         if prior and place != prior: self.pos, self.drift, self.drift_ref = (0, 0), None, None
@@ -155,9 +175,12 @@ class World:
         self._prepared = (skill, place, step, cut_dir, self.pos)
         return {"cut_dir": cut_dir, "exit_key": (*self.pos, cut_dir) if cut_dir and self.tile_px else None}
     def after(self, skill, place, next_place, scene_cut, step):  # call after prepare() for the same step
-        if skill is self._travelled: self.current_place = next_place; return {"known_exit": None, "scroll": list(skill.scroll) if skill.scroll is not None else None}
+        if skill is self._travelled:
+            self._cut_arrival = None; self.current_place = next_place
+            return {"known_exit": None, "scroll": list(skill.scroll) if skill.scroll is not None else None}
         cut_dir = self._prepared[3]
         known_exit = exit_to(self.mem, place, self.pos, cut_dir) if scene_cut and cut_dir else None
+        self._cut_arrival = (step, next_place, place) if scene_cut and next_place != place else None
         if scene_cut and next_place != place:
             self.pos = tuple(known_exit["arrive"]) if known_exit else (0, 0)
             self.drift = self.drift_ref = None
@@ -459,14 +482,17 @@ class World:
         self._travelled = SkillResult(status, f"travel: {reason}" if reason else "", sum(r.inputs for r in results), sum(r.calls for r in results), results[0].before if results else ctx.env.screenshot(), results[-1].after if results else ctx.env.screenshot(), tuple(map(sum, zip(*(r.scroll for r in results)))) if results else (0, 0), any(r.blank_seen for r in results), [m for r in results for m in r.moves]); return self._travelled
     def name(self, place, name, step):
         self.new_arrival, self.merge_pending = False, None
+        cut_arrival, self._cut_arrival = self._cut_arrival, None
+        if cut_arrival and (cut_arrival[1] != place or cut_arrival[0] + 1 != step): cut_arrival = None
         name = str(name or "").strip()
         if not name or not (row := self.mem.get("places", place)): return place
         key = name.casefold()
         target = next((r for r in self.mem.rows("places") if r.get("state") != "merged" and r["id"] != place
                        and key in [str(v).casefold() for v in [r.get("name"), *r.get("aliases", [])]]), None)
         if not target: return self.mem.name_place(place, name, step)
-        if row.get("first") == step: self.new_arrival = True; return self.mem.name_place(place, name, step)
-        if self.merge(place, target["id"], step): return target["id"]
+        if not cut_arrival or target["id"] != cut_arrival[2]:
+            if row.get("first") == step: self.new_arrival = True; return self.mem.name_place(place, name, step)
+            if self.merge(place, target["id"], step): return target["id"]
         aliases = row.get("aliases", [])
         if key not in {a.casefold() for a in aliases}: self.mem.upsert("places", {**row, "aliases": [*aliases, name]})
         self.merge_pending = name

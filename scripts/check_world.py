@@ -345,10 +345,51 @@ def merge_check() -> int:
     return 0
 
 
+def roles_check(run: Path) -> int:
+    """Replays recorded world entities through World.fix_player with the run's learned anchors; scores vs truth sprite 0."""
+    import copy
+    from scripts.eval_run import _p3b_metrics
+    harness = json.loads((run / "checkpoint/000074/harness.json").read_text(encoding="utf-8"))
+    world = World(None, harness["tile_px"]); world.anchors = harness["anchors"]
+    trace = [r for r in rows(run / "trace.jsonl") if r.get("step", 0) >= 75 and r.get("screen") == "world"]
+    fixed, bad = [], 0
+    for row in trace:
+        per = {"screen": "world", "entities": copy.deepcopy(row.get("entities") or [])}
+        fix = world.fix_player(per, (160, 144))
+        players = [e for e in per["entities"] if str(e.get("kind", "")).casefold() == "player"]
+        ok = len(players) == 1 and world.fix_player(per, (160, 144)) is None  # second pass: player already on the anchor
+        bad += not ok
+        print(f"step {row['step']}: {'fixed ' + str(fix) if fix else 'unchanged'} {'ok' if ok else 'FAIL'}")
+        fixed.append({**row, "entities": per["entities"]})
+    errors = {"before": _p3b_metrics(trace, rows(run / "truth.jsonl"))["player_role_errors"],
+              "after": _p3b_metrics(fixed, rows(run / "truth.jsonl"))["player_role_errors"]}
+    print(f"steps={len(trace)} anchor_fail={bad} truth_role_errors before={errors['before']} after={errors['after']}")
+    return 0 if trace and not bad and errors["after"] == 0 else 1
+
+
+def cut_check(run: Path, step: int) -> int:
+    """Replays match_place for a recorded cut on a copy of the previous checkpoint's memory."""
+    before = json.loads((run / f"checkpoint/{step - 1:06d}/harness.json").read_text(encoding="utf-8"))
+    after = json.loads((run / f"checkpoint/{step:06d}/harness.json").read_text(encoding="utf-8"))
+    row = next(r for r in rows(run / "trace.jsonl") if r.get("step") == step)
+    VIEW_SCRATCH.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="cut-", dir=VIEW_SCRATCH))
+    shutil.copytree(run / f"checkpoint/{step - 1:06d}/memory", root / "memory")
+    prev = row["place"]
+    got = Memory(root / "memory").match_place(after["perception"], step, prev=prev, cut=True,
+                                              via=(row.get("choice") or {}).get("target"), via_id=(row.get("choice") or {}).get("id"))
+    print(f"step {step}: prev={prev} (checkpoint place {before.get('place')}) recorded next={row.get('next_place')} replay next={got} scratch={root}")
+    return 0 if got != prev else 1
+
+
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv == ["merge"]:
         return merge_check()
+    if argv[:1] == ["roles"] and len(argv) == 2:
+        return roles_check(ROOT / argv[1])
+    if argv[:1] == ["cut"] and len(argv) == 3:
+        return cut_check(ROOT / argv[1], int(argv[2]))
     parser = argparse.ArgumentParser()
     parser.add_argument("check", choices=("graph", "travel", "fetch", "view"))
     parser.add_argument("memory", nargs="?", help="optional memory directory for the view check")

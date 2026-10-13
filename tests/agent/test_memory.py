@@ -75,6 +75,32 @@ def test_known_exit_precedes_via_edge_and_no_cut_keeps_previous_place(tmp_path):
     assert mem.match_place(drifted, 5, prev=a, cut=False, via="door", exit=(4, 2, "RIGHT")) == a
 
 
+def test_cut_with_identical_landmarks_does_not_return_previous_place(tmp_path):
+    mem = Memory(tmp_path)
+    per = {"screen": "world", "entities": [{"name": "Oak", "kind": "npc"}]}
+    prev = mem.match_place(per, 1, prev=None, cut=True)
+
+    assert mem.match_place(per, 2, prev=prev, cut=True) != prev
+
+
+def test_cut_ignores_self_loop_exit_edges_and_relations(tmp_path):
+    mem = Memory(tmp_path)
+    for suffix, path in (("tile", "exit"), ("via", "edge"), ("relation", "relation")):
+        prev = f"p_{suffix}"
+        mem.upsert("places", {"id": prev, "name": suffix, "screen": suffix, "state": "place", "edges": []})
+        if path == "exit":
+            mem.upsert("tiles", {"id": f"{prev}@1,2", "place": prev, "x": 1, "y": 2,
+                                  "exit": {"dir": "RIGHT", "to": prev, "arrive": [0, 0]}})
+        elif path == "edge":
+            mem.upsert("places", {**mem.get("places", prev),
+                                  "edges": [{"verb": "approach", "via": "door", "to": prev}]})
+        else:
+            mem.upsert("relations", {"id": "r_self", "s": "e_door", "p": "leads_to", "o": prev, "state": "live"})
+        matched = mem.match_place({"screen": suffix}, 2, prev=prev, cut=True, via="door",
+                                  exit=(1, 2, "RIGHT"), via_id="e_door")
+        assert matched != prev
+
+
 def test_relations_confidence_provenance_and_expiry(tmp_path):
     mem = Memory(tmp_path)
     rel = mem.relate("e_door", "leads_to", "p_lab", src="pixel", step=1, hit=True)

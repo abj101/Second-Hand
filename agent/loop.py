@@ -41,7 +41,7 @@ class Loop:
     def step(self):
         start, calls = time.perf_counter(), self.model.calls
         before_set = wait_settled(self.env); before = before_set.frame; prior = self.place; known_places = {p.get("id") for p in self.mem.rows("places")}
-        per, frame_hash, reused, _ = self._see(before, prior); self.empty_streak = self.empty_streak + 1 if self.parse_failed else 0; self.repair_used = self.repair_used if self.parse_failed else False
+        per, frame_hash, reused, _ = self._see(before, prior); player_fix = self.world.fix_player(per, before.size); self.empty_streak = self.empty_streak + 1 if self.parse_failed else 0; self.repair_used = self.repair_used if self.parse_failed else False
         via = next((a.get("target") for a in per.get("affordances", []) if a.get("verb") == "approach"), None)
         modal = self.prev and {self.prev.get("screen"), per.get("screen")} <= {"world", "dialogue", "menu"} and self.prev.get("screen") != per.get("screen") and "world" in (self.prev.get("screen"), per.get("screen")) and not (self.pending_cut or before_set.blank_seen)
         place = self.mem.match_place(per, self.step_no + 1, prev=prior, cut=bool((self.pending_cut or prior and cut(self.prev_frame, before, before_set.blank_seen)) and not modal), via=self.pending_via or via)
@@ -69,7 +69,33 @@ class Loop:
         choice, exit_test, player = None, False, next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         candidate = act_route = travel_legs = None
         if self.act_mode:
-            a = act(self.model, before, per, self.notebook.render(), view, self.flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]])
+            act_flags = list(self.flags)
+            if self.recent:
+                runs = []
+                for recent in self.recent:
+                    action = recent.get("choice") or {}; skill = recent.get("skill") or {}; outcome = recent.get("outcome") or {}
+                    verb, target = str(action.get("verb") or "action"), str(action.get("target") or "")
+                    status = str(skill.get("status") or recent.get("verdict") or "tried")[:12]
+                    reason = str(skill.get("reason") or "")[:40]
+                    unchanged = "no_change" in outcome.get("effects", [])
+                    key, result = (verb, target), (status, reason)
+                    if runs and runs[-1][0] == key:
+                        runs[-1][2] += 1; runs[-1][3] |= runs[-1][4] != result; runs[-1][4] = result; runs[-1][5] += unchanged
+                    else:
+                        runs.append([key, recent.get("step", self.step_no), 1, False, result, int(unchanged)])
+                summaries = []
+                for (verb, target), step, count, mixed, (status, reason), unchanged in runs:
+                    label = f"{verb[:16]} {target[:24]}".strip()
+                    summary = (f"{label} x{count} since step {step}; last {status}" if mixed else
+                               f"{label} -> {status}" + (f" ({reason})" if reason else "") + f" x{count} since step {step}")
+                    if mixed and reason: summary += f" ({reason})"
+                    if unchanged: summary += f"; screen unchanged x{unchanged}"
+                    summaries.append(summary)
+                recent_flag = "recent: " + "; ".join(summaries)
+                while len(recent_flag) > 200 and len(summaries) > 1:
+                    summaries.pop(0); recent_flag = "recent: " + "; ".join(summaries)
+                act_flags.append(recent_flag[:197] + "..." if len(recent_flag) > 200 else recent_flag)
+            a = act(self.model, before, per, self.notebook.render(), view, act_flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]])
             applied = self.notebook.apply(a.ops, self.step_no + 1)
             named = self.world.name(place, a.place, self.step_no + 1)
             if named != place:  # model says this new arrival is a known place
@@ -131,7 +157,7 @@ class Loop:
         scene_cut = self.world._travel_cut if travel_legs is not None else skill.blank_seen or skill.reason == "scene cut" or (cut(skill.before, skill.after) and (self.env.pointer or not choice or affs[choice.i].get("verb") not in ("approach", "interact") or skill.scroll == (0, 0)))
         moves = getattr(skill, "moves", []); spatial = self.world.prepare(skill, place, scene_cut, self.step_no + 1); exit_key, cut_dir = spatial["exit_key"], spatial["cut_dir"]
         self.pending_cut, self.pending_via = scene_cut, affs[choice.i].get("target") if choice else None
-        try: after_set = wait_settled(self.env); after = after_set.frame; after_per, after_hash, after_reused, _ = self._see(after, place)
+        try: after_set = wait_settled(self.env); after = after_set.frame; after_per, after_hash, after_reused, _ = self._see(after, place); after_fix = self.world.fix_player(after_per, after.size); player_fix = player_fix or after_fix
         except BaseException: self.cached = self.cached_hash = None; raise
         modal = {per.get("screen"), after_per.get("screen")} <= {"world", "dialogue", "menu"} and per.get("screen") != after_per.get("screen") and "world" in (per.get("screen"), after_per.get("screen")) and not (skill.blank_seen or skill.reason == "scene cut")
         scene_cut &= not modal
@@ -176,9 +202,9 @@ class Loop:
             "pred": pred, "used": choice.used if choice else [], "skill": {"status": skill.status, "reason": skill.reason, "inputs": skill.inputs, "calls": skill.calls},
             "outcome": outcome, "verdict": v, "calls": self.model.calls-calls, "ms": int((time.perf_counter()-start)*1000), "shortcut": None,
             "ranker": None, "perception_reused": reused, "frame_hash": frame_hash,
-            "scene_cut": scene_cut, "next_place": next_place, "verified_edge": verified_edge, "view_ids": view_ids, "tile": self.world.pos if self.tile_px else None, "drift_fix": list(drift_fix) if drift_fix else None, "entities": self.world.entities, "scroll": spatial["scroll"], **({"exit": list(exit_key)} if scene_cut and not modal and next_place != place and exit_key else {}),
+            "scene_cut": scene_cut, "next_place": next_place, "verified_edge": verified_edge, "view_ids": view_ids, "tile": self.world.pos if self.tile_px else None, "drift_fix": list(drift_fix) if drift_fix else None, "player_fix": player_fix, "entities": self.world.entities, "scroll": spatial["scroll"], **({"exit": list(exit_key)} if scene_cut and not modal and next_place != place and exit_key else {}),
             "task_budget_exhausted": any(t.get("last_failure") == "budget exhausted" for t in changed_tasks), "wake": None,
-            **({"act": {"place": a.place, "ops": applied, "why": a.why, "action": a.action}, **({"flags": [f"merge_pending: {self.world.merge_pending}"]} if self.world.merge_pending else {})} if self.act_mode else {})}
+            **({"act": {"place": a.place, "ops": applied, "why": a.why, "action": a.action, "flags": act_flags}, **({"flags": [f"merge_pending: {self.world.merge_pending}"]} if self.world.merge_pending else {})} if self.act_mode else {})}
         self.step_no += 1
         (self.mem.root.parent / row["frame"]).parent.mkdir(parents=True, exist_ok=True); before.save(self.mem.root.parent / row["frame"])
         drift_fix = self.world.observe_after(after_per, after, after_reused, next_place, after.size, self.step_no)

@@ -105,6 +105,39 @@ def _tile_metrics(trace, truth):
             "post_resume": totals("post_resume")}
 
 
+def _p3b_metrics(trace, truth_rows):
+    has_sprites = any(isinstance(r.get("sprites"), list) and r["sprites"] for r in truth_rows)
+    errors = 0
+    truth = {r.get("step"): r for r in truth_rows}
+    for row in trace:
+        if row.get("screen") != "world":
+            continue
+        actual = truth.get(row.get("step")) or {}
+        sprite = next((s for s in actual.get("sprites", [])
+                       if isinstance(s, dict) and s.get("slot") == 0), None)
+        entities = row.get("entities") or []
+        player = next((e for e in entities if isinstance(e, dict) and
+                       str(e.get("kind", "")).casefold() == "player"), None)
+        at = (player or {}).get("at")
+        if not sprite or not isinstance(at, (list, tuple)) or len(at) != 2:
+            continue
+        try:
+            # Sprite RAM records its top-left; perception records the avatar center.
+            dx = float(at[0]) * 160 - (float(sprite["x"]) + 8)
+            dy = float(at[1]) * 144 - (float(sprite["y"]) + 8)
+        except (KeyError, TypeError, ValueError):
+            continue
+        errors += (dx * dx + dy * dy) ** .5 > 16
+    recent = 0
+    for row in trace:
+        flags = (row.get("act") or {}).get("flags") or []
+        recent += "recent:" in flags if isinstance(flags, str) else any("recent:" in str(flag) for flag in flags)
+    return {"player_role_errors": errors if has_sprites else None,
+            "cut_self_loops": sum(r.get("scene_cut") is True and r.get("place") is not None and
+                                  r.get("next_place") == r.get("place") for r in trace),
+            "recent_line_steps": recent}
+
+
 def _p3_metrics(run, trace, truth_rows):
     paths = {name: run / "memory" / f"{name}.jsonl"
              for name in ("places", "seen", "knowledge", "entities")}
@@ -591,7 +624,7 @@ def evaluate(run, *, repredict=False, hide_memory=False):
                                               "legacy": legacy_duplicates,
                                               "new_after_resume": new_duplicates},
                         "known_exit_id_reuse": exit_reuse},
-            **_e4_metrics(run, trace, truth_rows), **p3}
+            **_e4_metrics(run, trace, truth_rows), **_p3b_metrics(trace, truth_rows), **p3}
     if repredict:
         result.update(_repredict(run, trace, hide_memory))
     return result

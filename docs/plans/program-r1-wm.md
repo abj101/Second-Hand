@@ -15,9 +15,12 @@ This file is the single entry point. The orchestrator pastes nothing else; it re
 | 4 | W2: `go_to` through memory, routing across places | [W2.md](W2.md) | 0 | continue |
 | 5 | W3: evidence states, seen tiles, known-things view | [W3.md](W3.md) | 0 | **STOP 2**: user approves the live spend |
 | 6 | P3: live comparison, 40 steps with `--act` + World Memory | [P3.md](P3.md) | ≤ 80 | **STOP 3**: user decides "better?" |
-| 6b | P3b: fix player identity, cut identity, recent actions; rerun the P3 comparison (added 2026-10-12 at STOP 3) | [P3b.md](P3b.md) | ≤ 80 | **STOP 3b**: user decides "better?" |
-| 7 | P4: delete the gated path | [P4.md](P4.md) | 0 | continue |
-| 8 | W4: anchors from motion, HUD regions | [W4.md](W4.md) | 0 | **STOP 4**: program done |
+| 6b | P3b: fix player identity, cut identity, recent actions (offline only; added 2026-10-12 at STOP 3) | [P3b.md](P3b.md) | 0 | continue |
+| 7 | P4: delete the gated path (user decided 2026-10-12; no performance gate) | [P4.md](P4.md) | 0 | continue |
+| 8 | W4: anchors from motion, HUD regions | [W4.md](W4.md) | 0 | continue |
+| 9 | L1: health report against truth, then one long act run | [L1.md](L1.md) | ≤ 220 | **STOP 4**: program done; user reads health first, progress second |
+
+**Build-first decision (user, 2026-10-12, after STOP 3):** finish the system before judging intelligence. Live 40-step "better than the gated path?" comparisons are retired: both paths were stuck in the same house for reasons unrelated to decision-making, and every live failure so far was a correctness bug. Phases gate on unit tests and on **correctness checks against RAM truth** (player identity, one place per map, cuts change place, seen cells in bounds, actions reach their target), computed offline at 0 requests. Progress (maps, party, text) is reported, never gated, until L1 shows green health.
 
 - **Next phase** = the first row whose packet Status is not `gate passed`. A phase marked `gate failed` or `blocked` means stop and report; do not skip it.
 - **At a STOP:** fill in the packet's Result, update `docs/plan.md` and `handoff-notes.md`, commit, then end the session with a short report to the user. The user restarts the same kickstart prompt to continue.
@@ -30,7 +33,7 @@ This file is the single entry point. The orchestrator pastes nothing else; it re
 3. **Game-neutral:** nothing game-specific in `agent/`: no game, place, character, item, route or RAM address. RAM truth (`scripts/truth_pokered.py`, `truth.jsonl`) is for evaluation only and is never read by `agent/`.
 4. **No new gates:** World Memory stores facts, answers queries and executes the model's own `go_to`; it never picks goals, filters options or overrides the model (user decision 2026-10-12).
 5. **Tests:** unit tests use `StubModel`/`GridEnv` from `tests/agent/fakes.py` and make 0 cloud calls. Each non-trivial branch leaves one runnable check. Use `.venv-agent/Scripts/python.exe`, forward-slash paths.
-6. **Cloud calls:** only P2 and P3 spend requests, only through the persistent ledger in `scripts/run_agent.py` (`_ledger`, M1 bucket), never above the packet cap. Never reset a ledger, refund or raise a cap. Preserve `.cache/model/`. Runner exit code 3 (cap) or 4 (model unavailable) → checkpoint, report, stop.
+6. **Cloud calls:** only phases with a request cap in §1 (P2, P3, L1) spend requests, only through the persistent ledger in `scripts/run_agent.py` (`_ledger`, M1 bucket), never above the packet cap. Never reset a ledger, refund or raise a cap. Preserve `.cache/model/`. Runner exit code 3 (cap) or 4 (model unavailable) → checkpoint, report, stop.
 7. **Data safety:** never modify `runs/m1/` or its checkpoints; copy to a new directory first, as the packets say. Never `git add -A`, never push.
 
 ## 3. Model tiers
@@ -41,7 +44,7 @@ This file is the single entry point. The orchestrator pastes nothing else; it re
 
 ## 4. Budgets across the program
 
-- **Cloud requests:** P2 ≤ 40 + P3 ≤ 80 + P3b ≤ 80 = **≤ 200** from the M1 bucket (411 left after P3 on 2026-10-12; P3 used 43).
+- **Cloud requests:** P2 ≤ 40 (29 used) + P3 ≤ 80 (43 used) + L1 ≤ 220 from the M1 bucket (411 left after P3 on 2026-10-12; P3b used 0).
 - **Lines:** budgets suspended 2026-10-12 (report only; compress after the program). Original estimates, for reference (`agent/`, 1,988 on 2026-10-12): W0 +54 (actual), W1 ≈ +35, W2 ≈ +65, W3 ≈ +105, P4 ≈ −400 or more, W4 ≈ +60. Each packet states its own budget; overruns are reported, never hidden by compacting unrelated code.
 
 ## 5. Commits
@@ -74,7 +77,7 @@ Never use any other subagent model. One work package (WP) per subagent.
    last WP of a phase, run the full suite:
    .venv-agent/Scripts/python.exe -m pytest tests/agent -q
    (~5 min; run it in the background if your shell times out).
-4. Cloud calls only in P2 and P3, only through the ledger, never above the packet cap.
+4. Cloud calls only in phases with a request cap in §1, only through the ledger, never above the packet cap.
    Exit code 3 or 4 from a runner: checkpoint, report, stop. Never modify runs/m1/.
 5. Gate: run it exactly as the packet says. Fill in the packet's Result section and Status
    line, update the phase table row in docs/plan.md, and rewrite

@@ -48,7 +48,7 @@ def approach(ctx: Ctx, target_at: list[float], player_at: list[float] | None, *,
     initial, before, blank = first.frame, first.frame, first.blank_seen
     calls = 0  # exit tests walk to the tile-snapped perceived point; a miss shows as no scene cut, so no refine call
     w, h = before.size; delta = [(target_at[0] - player_at[0]) * w, (target_at[1] - player_at[1]) * h]
-    if route is None and max(map(abs, delta)) <= (ctx.tile_px or 1) / 2: return _result("failed", "already there", 0, calls, initial, before, blank=blank)
+    if route is None and max(map(abs, delta)) <= (ctx.tile_px or 1) / 2: return _result("blocked", "target is the player", 0, calls, initial, before, blank=blank)
     if ctx.tile_px: delta[:] = [round(v / ctx.tile_px) * ctx.tile_px for v in delta]
     total, blocked, inputs, last_dir, pushed, axis_dirs, moves = [0, 0], set(), 0, None, False, {}, []
     result = lambda *args: _result(*args, moves=moves)

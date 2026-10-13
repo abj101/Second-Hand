@@ -92,21 +92,21 @@ class Memory:
             row = self.get("tiles", f"{prev}@{exit[0]},{exit[1]}")
             edge = row.get("exit") if row else None
             edge = edge if edge and edge.get("dir") == exit[2] else None
-            if edge and edge.get("to"):
+            if edge and edge.get("to") and edge["to"] != prev:
                 return edge["to"]
         if cut and prev:
             for edge in self.get("places", prev).get("edges", []) if self.get("places", prev) else ():
-                if via and _via(edge.get("via")) == _via(via) and edge.get("to"):
+                if via and _via(edge.get("via")) == _via(via) and edge.get("to") and edge["to"] != prev:
                     return edge["to"]
         if cut and via_id:
-            known = next((r["o"] for r in self.rows("relations") if r.get("s") == via_id and r.get("p") == "leads_to" and r.get("state") == "live" and self.get("places", r.get("o"))), None)
+            known = next((r["o"] for r in self.rows("relations") if r.get("s") == via_id and r.get("p") == "leads_to" and r.get("state") == "live" and r.get("o") != prev and self.get("places", r.get("o"))), None)
             if known: return known
         screen = str(perception.get("screen", "unknown"))
         landmarks = sorted({(str(e.get("name", "")).casefold(), str(e.get("kind", "")).casefold())
                             for e in perception.get("entities", []) if e.get("name") and normalize_kind(e.get("kind")) not in TRANSIENT})
         best, score = None, 0.0
         current = set(landmarks)
-        for place in (p for p in self.rows("places") if p.get("state") != "merged"):
+        for place in (p for p in self.rows("places") if p.get("state") != "merged" and (not cut or p.get("id") != prev)):
             known = {tuple(l) for l in place.get("landmarks", []) if normalize_kind(l[1]) not in TRANSIENT}  # rows saved before TRANSIENT
             union = current | known
             overlap = len(current & known) / len(union) if union else 1  # both empty (only transients seen): same screen

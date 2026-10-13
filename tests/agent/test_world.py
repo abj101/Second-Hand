@@ -10,6 +10,30 @@ def entity(mem, id, name, place, tile, seen=2):
     mem.upsert("entities", {"id": id, "name": name, "kind": "object", "place": place, "tile": tile, "seen": seen})
 
 
+def test_fix_player_swaps_entity_at_anchor_median(tmp_path):
+    world = World(Memory(tmp_path), 16); world.anchors = [[.5, .5]] * 3
+    player = {"name": "Guide", "kind": "player", "at": [.75, .5]}
+    npc = {"name": "Hero", "kind": "npc", "at": [.5, .5]}
+    per = {"screen": "world", "entities": [player, npc]}
+
+    assert world.fix_player(per, (160, 144)) == {"from": [.75, .5], "to": [.5, .5]}
+    assert player["kind"] == "character" and npc["kind"] == "player"
+
+
+def test_fix_player_moves_to_median_or_leaves_perception_alone(tmp_path):
+    world = World(Memory(tmp_path), 16); player = {"kind": "player", "at": [.75, .5]}
+    per = {"screen": "world", "entities": [player, {"kind": "object", "at": [.75, .8]}]}
+    world.anchors = [[.5, .5]] * 3
+    assert world.fix_player(per, (160, 144)) == {"from": [.75, .5], "to": [.5, .5]}
+    assert player["at"] == [.5, .5]
+
+    unchanged = {"kind": "player", "at": [.5, .5]}
+    assert world.fix_player({"screen": "world", "entities": [unchanged]}, (160, 144)) is None
+    assert world.fix_player({"screen": "menu", "entities": [{"kind": "player", "at": [.75, .5]}]}, (160, 144)) is None
+    world.anchors = []
+    assert world.fix_player({"screen": "world", "entities": [{"kind": "player", "at": [.75, .5]}]}, (160, 144)) is None
+
+
 def test_merge_shifts_unions_redirects_and_collapses(tmp_path):
     mem = Memory(tmp_path); place(mem, "src", "room"); place(mem, "dst", "Hall"); place(mem, "from", "Start")
     entity(mem, "s1", "Oak", "src", [1, 1]); entity(mem, "s2", "Oak", "src", [1, 2], 3)
@@ -43,6 +67,21 @@ def test_name_refusal_alias_flag_and_new_arrival(tmp_path):
     assert mem.get("places", "a")["aliases"] == ["room b"] and world.merge_pending == "room b"
     place(mem, "new", "screen", 5); place(mem, "old", "Known", 1)
     assert world.name("new", "known", 5) == "old" and mem.get("places", "new")["into"] == "old"
+
+
+def test_cut_arrival_name_cannot_merge_back_to_departed_place(tmp_path):
+    mem = Memory(tmp_path); place(mem, "left", "Left"); place(mem, "arrival", "world", 5)
+    entity(mem, "left_oak", "Oak", "left", [0, 0]); entity(mem, "left_key", "Key", "left", [1, 0])
+    entity(mem, "arrival_oak", "Oak", "arrival", [4, 4]); entity(mem, "arrival_key", "Key", "arrival", [5, 4])
+    world = World(mem, 16); skill = type("Skill", (), {"scroll": None})()
+    world._prepared = (skill, "left", 10, None, (0, 0))
+    world.after(skill, "left", "arrival", True, 10)
+    world.before({"screen": "world", "entities": [], "text": [], "affordances": []},
+                 "arrival", "left", (160, 144), 11)
+
+    assert world.name("arrival", "Left", 11) == "arrival"
+    assert mem.get("places", "arrival")["aliases"] == ["Left"] and world.merge_pending == "Left"
+    assert world.name("arrival", "Left", 12) == "left"
 
 
 def test_resolve_and_plan_skip_merged_history_and_plan_entity_facing(tmp_path):

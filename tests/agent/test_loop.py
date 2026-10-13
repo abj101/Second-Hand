@@ -179,6 +179,40 @@ def test_stationary_two_fresh_frames_confirm_drift(tmp_path, monkeypatch):
     second = loop.step()
     assert loop.pos == (-1, 0) and second["drift_fix"] == [-1, 0]
 
+
+def test_loop_fixes_swapped_player_before_approaching_target(tmp_path, monkeypatch):
+    from agent import loop as module
+    env = GridEnv()
+    env.door, env.npc = (-5, -5), (-6, -6)
+    perceptions = []
+    def perceive(*_):
+        data = {"screen": "world", "text": [],
+                "affordances": [{"verb": "approach", "target": "Chest", "at": [.6, .5]}],
+                "entities": [{"name": "Guide", "kind": "player", "at": [.6875, .5]},
+                             {"name": "Hero", "kind": "npc", "at": [.5, .5]},
+                             {"name": "Chest", "kind": "object", "at": [.6, .5]}]}
+        perceptions.append(data)
+        return data, reply({})
+    monkeypatch.setattr(module, "perceive", perceive)
+    monkeypatch.setattr(module, "choose", lambda *a, **k: module.Choice(0, "screen_changes", "", [], "test", False))
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.world.anchors = [[.5, .5]] * 3
+    loop.tasks.add("Approach Chest", [], src="orchestrator")
+
+    row = loop.step()
+
+    assert row["choice"]["target"] == "Chest" and row["player_fix"] == {"from": [.6875, .5], "to": [.5, .5]}
+    assert row["skill"]["status"] == "done" and env.player[0] > 8 and env.scene == 0
+    assert len(perceptions) == 2 and all(per["entities"][0]["kind"] == "character" and per["entities"][1]["kind"] == "player" for per in perceptions)
+
+
+def test_approaching_player_is_blocked_without_input():
+    from agent.skills import Ctx, approach
+    env = GridEnv(); result = approach(Ctx(env, StubModel([]), tile_px=16), [.5, .5], [.5, .5])
+    assert result.status == "blocked" and result.reason == "target is the player" and result.inputs == 0
+    assert env.player == (8, 8)
+
+
 def test_grid_loop_reuses_two_spatial_exits_between_floors(tmp_path, monkeypatch):
     from agent import loop as module
     class TwoFloor(GridEnv):
@@ -282,7 +316,7 @@ def test_modal_overlay_at_step_start_keeps_place(tmp_path, monkeypatch):
     env = GridEnv()
     world = perception(); world["screen"] = "world"
     dialogue = perception(); dialogue["screen"] = "dialogue"
-    model = StubModel([reply(world), reply(world), reply(dialogue)])
+    model = StubModel([reply(world), reply(world), reply({"tasks": []}), reply(dialogue)])
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
     monkeypatch.setattr(loop_module, "cut", lambda *args: True)
     moves = [0]
@@ -296,7 +330,7 @@ def test_modal_overlay_at_step_start_keeps_place(tmp_path, monkeypatch):
     first = loop.step()
     env.scene = 0
     second = loop.step()
-    assert second["place"] == first["place"]
+    assert second["place"] == first["next_place"]  # modal overlay keeps the post-cut place
 
 def test_explicit_transition_into_dialogue_creates_place(tmp_path, monkeypatch):
     from agent import loop as loop_module
@@ -745,6 +779,78 @@ def test_act_mode_names_place_edits_notebook_and_skips_planner(tmp_path):
     assert json.loads((tmp_path / "memory" / "notebook.json").read_text())["goals"]["g1"]["text"] == "leave"
     assert loop.mem.get("places", row["place"])["name"] == "Hall"
     assert model.roles[:2] == ["perceiver", "act"] and "plan" not in model.roles and "chooser" not in model.roles
+
+
+def test_act_prompt_summarizes_recent_repeated_blocked_action(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from agent import loop as module
+
+    class Captures(StubModel):
+        def __init__(self, replies): super().__init__(replies); self.prompts = []
+        def ask(self, *args, **kwargs):
+            if kwargs.get("role") == "act": self.prompts.append(args[1])
+            return super().ask(*args, **kwargs)
+
+    data = {"screen": "world", "text": [], "entities": [{"kind": "player", "name": "player", "at": [.5, .5]}],
+            "affordances": [{"verb": "approach", "target": "npc", "at": [.6, .5]}]}
+    monkeypatch.setattr(module, "perceive", lambda *args: (data, reply(data)))
+    def blocked(ctx, *args, **kwargs):
+        frame = ctx.env.screenshot()
+        return SimpleNamespace(status="blocked", reason="both axes blocked", inputs=1, calls=0,
+                               before=frame, after=frame, scroll=(0, 0), blank_seen=False, moves=[])
+    monkeypatch.setattr(module, "run_affordance", blocked)
+    response = {"place": "Room", "notebook": [], "action": {"i": 0}, "text": None,
+                "expect": "screen_changes", "why": "try"}
+    model = Captures([reply(response) for _ in range(4)])
+    loop = Loop(GridEnv(), model, Memory(tmp_path / "memory"), "grid", act_mode=True)
+
+    rows = [loop.step() for _ in range(4)]
+
+    assert "x3" in model.prompts[3] and "both axes blocked" in model.prompts[3]
+    assert "screen unchanged x3" in model.prompts[3]
+    flags = rows[3]["act"]["flags"]
+    assert len([flag for flag in flags if flag.startswith("recent:")]) == 1
+    assert flags[-1] in model.prompts[3]
+    assert all(row["skill"]["reason"] == "both axes blocked" for row in rows[:3])
+    model._replies.append(reply(response))
+    resumed = Loop(loop.env, model, loop.mem, "grid", act_mode=True)
+    resumed_row = resumed.step()
+    assert "x4" in model.prompts[4] and resumed_row["act"]["flags"][-1] in model.prompts[4]
+
+
+def test_act_recent_groups_by_action_and_caps_mixed_outcomes(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from agent import loop as module
+
+    class Captures(StubModel):
+        def __init__(self, replies): super().__init__(replies); self.prompts = []
+        def ask(self, *args, **kwargs):
+            if kwargs.get("role") == "act": self.prompts.append(args[1])
+            return super().ask(*args, **kwargs)
+
+    data = {"screen": "world", "text": [], "entities": [{"kind": "player", "name": "player", "at": [.5, .5]}],
+            "affordances": [{"verb": "approach", "target": "npc", "at": [.6, .5]}]}
+    monkeypatch.setattr(module, "perceive", lambda *args: (data, reply(data)))
+    def blocked(ctx, *args, **kwargs):
+        frame = ctx.env.screenshot()
+        return SimpleNamespace(status="blocked", reason="both axes blocked", inputs=1, calls=0,
+                               before=frame, after=frame, scroll=(0, 0), blank_seen=False, moves=[])
+    monkeypatch.setattr(module, "run_affordance", blocked)
+    response = {"place": "Room", "notebook": [], "action": {"i": 0}, "text": None,
+                "expect": "screen_changes", "why": "try"}
+    model = Captures([reply(response)])
+    loop = Loop(GridEnv(), model, Memory(tmp_path / "memory"), "grid", act_mode=True)
+    loop.recent = [{"step": 77 + i, "choice": {"verb": "approach", "target": "npc", "id": "detector-id-123"},
+                    "skill": {"status": "blocked" if i != 1 else "done", "reason": "both axes blocked" if i != 1 else "adjacent"},
+                    "outcome": {"effects": ["no_change"] if i in (0, 4) else ["screen_changes"]}}
+                   for i in range(5)]
+
+    row = loop.step()
+
+    flag = row["act"]["flags"][-1]
+    assert "approach npc x5 since step 77; last blocked (both axes blocked)" in flag
+    assert "screen unchanged x2" in flag and "detector-id-123" not in flag
+    assert len(flag) <= 200 and flag in model.prompts[0]
 
 
 def test_act_buttons_are_pressed_in_order(tmp_path):

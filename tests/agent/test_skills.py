@@ -176,11 +176,11 @@ def test_exit_blocked_by_walls_reports_not_crossed():
     assert result.status == "blocked" and result.reason == "exit not crossed"
 
 
-def test_approach_at_target_fails_without_pressing():
+def test_approach_at_player_is_blocked_without_pressing():
     for tile_px in (16, None):
         env = GridEnv()
         result = approach(ctx(env, tile_px=tile_px), point(env, env.player), [.5, .5])
-        assert result.status == "failed" and result.reason == "already there" and result.inputs == 0
+        assert result.status == "blocked" and result.reason == "target is the player" and result.inputs == 0
 
 
 def test_interact_opens_text_box():
