@@ -601,14 +601,18 @@ class World:
         name = str(name or "").strip()
         if not name or not (row := self.mem.get("places", place)): return place
         key = name.casefold()
-        target = next((r for r in self.mem.rows("places") if r.get("state") != "merged" and r["id"] != place
-                       and key in [str(v).casefold() for v in [r.get("name"), *r.get("aliases", [])]]), None)
+        live = [r for r in self.mem.rows("places") if r.get("state") != "merged"]
+        # "world [p_x]" is our own disambiguated label: it points at that place and is never a name or alias
+        ref = next((r for r in live if self.place_label(r["id"]).casefold() == key and str(r.get("name", "")).casefold() != key), None)
+        if ref and ref["id"] == place: return place
+        target = ref or next((r for r in live if r["id"] != place
+                              and key in [str(v).casefold() for v in [r.get("name"), *r.get("aliases", [])]]), None)
         if not target: return self.mem.name_place(place, name, step)
         if not cut_arrival or target["id"] != cut_arrival[2]:
             if row.get("first") == step: self.new_arrival = True; return self.mem.name_place(place, name, step)
             if self.merge(place, target["id"], step): return target["id"]
         aliases = row.get("aliases", [])
-        if key not in {a.casefold() for a in aliases}: self.mem.upsert("places", {**row, "aliases": [*aliases, name]})
+        if not ref and key not in {a.casefold() for a in aliases}: self.mem.upsert("places", {**row, "aliases": [*aliases, name]})
         self.merge_pending = name
         return place
 
@@ -631,6 +635,7 @@ class World:
         if len(pairs) < 2: return False
         dx, dy = (round(median(p[i] for p in pairs)) for i in (0, 1))
         if sum(max(abs(p[0] - dx), abs(p[1] - dy)) <= 1 for p in pairs) < 2: return False
+        if self.mem.views_agree(src, dst, (dx, dy), self.tile_px) is False: return False  # pixels outrank names
         for t in self.mem.rows("tiles"):
             if t.get("place") == src:
                 x, y = t["x"] + dx, t["y"] + dy; tid = f"{dst}@{x},{y}"; other = self.mem.get("tiles", tid)

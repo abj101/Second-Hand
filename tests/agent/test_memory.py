@@ -257,3 +257,19 @@ def test_revisit_recognised_by_stored_view_with_tile_scroll(tmp_path):
     back = mem.match_place({"screen": "world", "entities": [{"name": "machine", "kind": "object"}]}, 3, prev=down, cut=True,
                            frame=view(1, 0), tile_px=16)
     assert back == up and mem.arrival == (up, (1, 0))
+
+
+def test_views_agree_vetoes_merging_different_rooms(tmp_path):
+    import numpy as np
+    from PIL import Image
+    rng = np.random.default_rng(1)
+    room = lambda: rng.integers(1, 4, (144 + 64, 160 + 64), dtype=np.uint8) * 80
+    up, down = room(), room()
+    view = lambda r, x, y: Image.fromarray(r[32 + 16 * y:176 + 16 * y, 32 + 16 * x:192 + 16 * x])
+    mem = Memory(tmp_path)
+    mem.remember_view("a", (0, 0), view(up, 0, 0))
+    mem.remember_view("b", (1, 0), view(up, 1, 0))   # same room, other id
+    mem.remember_view("c", (1, 0), view(down, 1, 0))  # different room
+    assert mem.views_agree("a", "b", (0, 0), 16) is True
+    assert mem.views_agree("a", "c", (0, 0), 16) is False
+    assert mem.views_agree("a", "c", (20, 0), 16) is None  # out of reach: no pixel evidence either way

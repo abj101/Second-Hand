@@ -167,9 +167,7 @@ class Memory:
         q, best, step = _thumb(frame), None, (tile_px or 0) // 2
         reach = range(-VIEW_REACH, VIEW_REACH + 1) if step else (0,)
         for v in self.rows("views"):
-            place, (ox, oy) = v["place"], (0, 0)
-            while (row := self.get("places", place)) and row.get("state") == "merged":
-                ox, oy, place = ox + row["offset"][0], oy + row["offset"][1], row["into"]
+            place, (ox, oy), row = self._home(v["place"])
             if not row or place == exclude or row.get("screen") != screen or list(q.shape) != v["shape"]: continue
             stored = np.frombuffer(base64.b64decode(v["q"]), np.uint8).reshape(v["shape"])
             for dy in reach:
@@ -178,6 +176,28 @@ class Memory:
                     if score >= VIEW_MATCH and (best is None or score > best[0]):
                         best = (score, place, (v["pos"][0] + ox + dx, v["pos"][1] + oy + dy))
         return best[1:] if best else None
+
+    def _home(self, place: str):
+        """Live place a (possibly merged) place now lives in, its tile offset there, and that place's row."""
+        ox, oy = 0, 0
+        while (row := self.get("places", place)) and row.get("state") == "merged":
+            ox, oy, place = ox + row["offset"][0], oy + row["offset"][1], row["into"]
+        return place, (ox, oy), row
+
+    def views_agree(self, src: str, dst: str, offset, tile_px: int | None):
+        """None: no stored views of src and dst within scroll reach of each other at this offset; else whether any pair matches."""
+        step, scores = (tile_px or 0) // 2, []
+        if not step: return None
+        load = lambda v: np.frombuffer(base64.b64decode(v["q"]), np.uint8).reshape(v["shape"])
+        home = lambda v: self._home(v["place"])
+        theirs = [(v, h[1]) for v in self.rows("views") if (h := home(v))[0] == dst]
+        for mine, (sx, sy) in ((v, h[1]) for v in self.rows("views") if (h := home(v))[0] == src):
+            at = (mine["pos"][0] + sx + offset[0], mine["pos"][1] + sy + offset[1])
+            for v, (tx, ty) in theirs:
+                dx, dy = at[0] - v["pos"][0] - tx, at[1] - v["pos"][1] - ty
+                if max(abs(dx), abs(dy)) <= VIEW_REACH and v["shape"] == mine["shape"]:
+                    scores.append(_view_score(load(v), load(mine), dx * step, dy * step))
+        return max(scores) >= VIEW_MATCH if scores else None
 
     def name_place(self, place: str, name: str, step: int) -> str:
         name, row = str(name or "").strip(), self.get("places", place)
