@@ -916,3 +916,21 @@ def test_second_failure_of_same_action_flags_act_and_replans(tmp_path, monkeypat
     row = loop.step()
     assert any(f.startswith("failed here before: approach door x2 (wall)") for f in seen_flags[-1])
     assert row["plan"]["trigger"] == "the same action failed twice here: approach door (wall)"
+
+
+def test_fail_key_merges_rewordings_and_cycle_marks(tmp_path):
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    key = loop._fail_key
+    assert len({key("p", "buttons", t) for t in ("UP A", "UP", "up UP up A")}) == 1 and key("p", "buttons", "A") != key("p", "buttons", "B")
+    assert key("p", "go_to", "Stairs") == key("p", "approach", "stairs") != key("q", "approach", "stairs") and key("p", "advance", "") == "p|advance"
+    for mem_id in ("a", "b"): loop.mem.upsert("places", {"id": mem_id, "name": mem_id, "screen": "world", "state": "place", "visits": 2})
+    for step, (s, d) in enumerate((("a", "b"), ("b", "a"), ("a", "b"), ("b", "a")), 1): loop._moved(s, d, "UP UP A", step)
+    assert loop.fails[key("a", "buttons", "UP")]["why"] == "leads back to b: cycle"
+
+
+def test_slow_cycle_fires_and_progress_resets_history(tmp_path):
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    for pid in ("a", "b"): loop.mem.upsert("places", {"id": pid, "name": pid, "screen": "world", "state": "place", "visits": 2})
+    for step, (s, d) in zip((1, 3, 21, 33), (("a", "b"), ("b", "a"), ("a", "b"), ("b", "a"))): loop._moved(s, d, "door", step)
+    assert loop.urgent.startswith("cycle: went back and forth between b and a 4 times in 32 steps") and loop.moves == []
+    loop.urgent = None; loop._moved("a", "b", "door", 40); loop._moved("b", "a", "door", 41); assert loop.urgent is None  # a full alternation is needed again

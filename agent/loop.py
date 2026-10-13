@@ -122,12 +122,12 @@ class Loop:
                 summaries.pop(1 if self.stuck.n else 0); recent_flag = "recent: " + "; ".join(summaries)
             act_flags.append(recent_flag[:197] + "..." if len(recent_flag) > 200 else recent_flag)
         act_flags.append(self.world.here_flag())
-        failed_here = sorted(((k.split("|", 1)[1], f) for k, f in self.fails.items() if k.split("|", 1)[0] == place), key=lambda kv: -kv[1]["n"])[:4]
+        failed_here = sorted(((f.get("act") or k.split("|", 1)[1], f) for k, f in self.fails.items() if k.split("|", 1)[0] == place), key=lambda kv: -kv[1]["n"])[:4]
         if failed_here: act_flags.append("failed here before: " + "; ".join(f"{a} x{f['n']} ({f['why']})" for a, f in failed_here))
         a = act(self.model, None if self.act_text else model_frame, per, self.notebook.render_focus(), view, act_flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]])
         applied = self.notebook.apply(a.ops, self.step_no + 1, structure=False)
         closed = self.notebook.data["goals"].get(self.notebook.focus or "", {})
-        if closed.get("status") in FINISHED: self.focus_closed = f"focus {self.notebook.focus} {closed['status']}: {closed.get('evidence', '')}"
+        if closed.get("status") in FINISHED: self.focus_closed, self.moves = f"focus {self.notebook.focus} {closed['status']}: {closed.get('evidence', '')}", []  # progress: the place-move history starts over
         named = self.world.name(place, a.place, self.step_no + 1, frame=before)
         if named != place:  # model says this new arrival is a known place
             place = self.place = named
@@ -227,11 +227,11 @@ class Loop:
         self.pending_cut, self.pending_via = False, None; reason = self.stuck.update(row); self.repair_pending = self.parse_failed and self.empty_streak >= 8 and not self.repair_used; self.repair_used |= self.repair_pending
         if unknown: reason = "player position unknown"
         if choice is not None:
-            key = f"{place}|{affs[choice.i].get('verb')} {affs[choice.i].get('target') or ''}".strip()
+            verb, target = affs[choice.i].get("verb"), affs[choice.i].get("target") or ""; key = self._fail_key(place, verb, target)
             failed = skill.status in ("blocked", "failed") or v == "miss" or "no_change" in outcome.get("effects", [])
             if failed:
-                f = self.fails.setdefault(key, {"n": 0}); f.update(n=f["n"] + 1, why=(skill.reason or f"verdict {v}")[:40], step=self.step_no)
-                if f["n"] == 2: self.urgent = self.urgent or f"the same action failed twice here: {key.split('|', 1)[1]} ({f['why']})"
+                f = self.fails.setdefault(key, {"n": 0}); f.update(n=f["n"] + 1, why=(skill.reason or f"verdict {v}")[:40], step=self.step_no, act=f"{verb} {target}".strip())
+                if f["n"] == 2: self.urgent = self.urgent or f"the same action failed twice here: {f['act']} ({f['why']})"
         if a.action and "go_to" in a.action and choice is None: reason = f'go_to "{a.action["go_to"]}": not in memory'
         if not a.action and not reason: reason = "your last reply had no valid action, so nothing happened: use one of the action shapes"
         self.flags = [x for x in (reason, f"last action {skill.status}: {skill.reason}" if skill.status != "done" else None, f"verdict {v}" if v in ("miss", "surprise") else None, f"merge_pending: {self.world.merge_pending}" if self.world.merge_pending else None) if x]; self.world.merge_pending = None; self.world.new_arrival = False
@@ -263,15 +263,20 @@ class Loop:
                 "choice": choice or None, "act": {"place": a.place, "why": a.why, "action": a.action}, "plan": self._plan_row, "self_spot": self.world.self_spot}
         try: (root / "live.tmp").write_text(json.dumps(live, default=str), encoding="utf-8"); os.replace(root / "live.tmp", root / "live.json")
         except OSError: pass  # a reader holding live.json on Windows; the trace row still lands
+    def _fail_key(self, place, verb, target):
+        """One key per place and intent: button presses collapse to their direction keys (else the first button), targets ignore the verb."""
+        t, keys = str(target).split(), set(self.env.inputs())
+        if t and all(x.upper() in keys for x in t): u = list(dict.fromkeys(x.upper() for x in t)); t = [x for x in u if x in DIRS] or u[:1]
+        return f"{place}|{' '.join(t).casefold() or verb}"
     def _moved(self, src, dst, via, step):
         label = self.world.place_label
         self.notebook.note(step, f"went from {label(src)} to {label(dst)}" + (f" via {via}" if via else ""))
         self.moves = [*self.moves, [step, src, dst, via or ""]][-6:]
-        last = [m for m in self.moves if step - m[0] <= 15][-4:]
+        last = self.moves[-4:]  # A<->B four times running, however slowly; progress (a focus closing) clears self.moves
         if len(last) == 4 and len({(m[1], m[2]) for m in last}) == 2 and all(a[2] == b[1] for a, b in zip(last, last[1:])):
-            self.urgent = f"cycle: went back and forth between {label(src)} and {label(dst)} {len(last)} times in {step - last[0][0]} steps without progress"
+            self.urgent = f"cycle: went back and forth between {label(src)} and {label(dst)} {len(last)} times in {step - last[0][0]} steps without progress"; self.moves = []
             for m in last:  # act sees, in each of the two places, that the way it keeps taking only leads back
-                if m[3]: f = self.fails.setdefault(f"{m[1]}|{m[3]}", {"n": 0}); f.update(n=f["n"] + 1, why=f"leads back to {label(m[2])}: cycle", step=step)
+                if m[3]: f = self.fails.setdefault(self._fail_key(m[1], "", m[3]), {"n": 0}); f.update(n=f["n"] + 1, why=f"leads back to {label(m[2])}: cycle", step=step)
         elif (self.mem.get("places", dst) or {}).get("visits", 0) <= 1 and not any(m[1] == dst for m in self.moves):
             self.urgent = self.urgent or f"arrived somewhere new: {label(dst)}"
     def _goal_text(self):
