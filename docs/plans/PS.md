@@ -1,6 +1,6 @@
 # PS: Mark the player for the model, and split describing from deciding
 
-Status: not started (approved by the user 2026-10-13; audited by an Opus 5.5 high subagent, 16 findings folded in) · Branch: feat/lean-agent · Program: [program-r1-wm.md](program-r1-wm.md) row 11 · Follows: [TL.md](TL.md) §7 STOP 5
+Status: gate failed (S1 failed its one repair round; orchestrator confirmed, 2026-10-13; no cloud requests spent) · Branch: feat/lean-agent · Program: [program-r1-wm.md](program-r1-wm.md) row 11 · Follows: [TL.md](TL.md) §7 STOP 5
 
 ## 0. Why this phase exists (evidence, 2026-10-13, 54 diagnostic requests)
 - **The L2 stall started with perception.** The model cannot pick out the player when the sprite faces away. In L2 it labelled the TV, then Mom, as `player`, and the real player as `monster`/`rival`/`NPC`. From step 37 onward the notebook's only goal was "go talk to the character in the centre", i.e. the player. 87 identical choices followed.
@@ -229,6 +229,48 @@ Status: not started (approved by the user 2026-10-13; audited by an Opus 5.5 hig
 - **Cost:** two calls per moving step as before (the L2 trace shows no shortcut fired). The before/after mark decisions must agree (S1), or a frame is perceived twice.
 
 ## 9. Result (filled in by the orchestrator)
+
+- **Decision:** stop at S1. The slice failed its first check and its single repair round; the orchestrator did not take over implementation or authorize another repair. This is a broken test suite, the stopping condition in §1. S0, S2, E and L3 are unstarted. No STOP 6a comparison table exists yet.
+- **Progress:** no PS live play or frame-eval requests; no new maps, party or gameplay progress measured. Historical L2 progress remains house only / party 0 (TL §7).
+- **Health:** build/check health red. The unresolved test expects the second same-raw step to be marked and reuse the after perception; it observes `marked == False`. Test: `tests/agent/test_loop.py:112`, assertion at `:138`. Its fixture is a uniform black frame; whether blank-frame settling or eligibility causes the expectation mismatch remains an open question, not a verified diagnosis.
+- **Acceptance command:** `.venv-agent/Scripts/python.exe -m pytest tests/agent/test_world.py tests/agent/test_loop.py -q -p no:cacheprovider`.
+  - First subagent: `3 failed, 78 passed, 1 warning in 208.16s`.
+  - First orchestrator: `3 failed, 78 passed, 1 warning in 161.58s`; exact output `.tmp/ps/s1_orchestrator.log`.
+  - One repair fixed the interior half-tile assertion, the perception reply fixture and the old four-value `_see` unpack; added the required near-player keep/rename/idempotence and actual-step cut/cache checks.
+  - Repair subagent: `1 failed, 81 passed, 1 warning in 207.21s`.
+  - Repair orchestrator: `1 failed, 81 passed, 1 warning in 276.95s`; exact output `.tmp/ps/s1_repair_orchestrator.log`.
+- **Closing full suite (background):** `.venv-agent/Scripts/python.exe -m pytest tests/agent -q -p no:cacheprovider` → pytest's own summary: `2 failed, 236 passed, 1 warning in 394.76s`. Exact output `.tmp/ps/closing_suite.log`. Failures: the same cut/cache test, plus `tests/agent/test_world_golden.py::test_act_eight_steps` (`trace.jsonl` comparison; five memory items identical). Only warning: pysdl2-dll 2.32.10.
+- **Scope review:** edits only `agent/world.py`, `agent/loop.py`, `tests/agent/test_world.py`, `tests/agent/test_loop.py`. No game-specific agent code, new decision gates or cloud calls. Previous motion/probe/HUD, recent/here, routing, merge and memory fixes retained by diff review. Protected evidence runs, `.cache/model/`, `loop/` and unrelated untracked `.claude/` were not edited. `git diff --check` passed.
+- **Goldens:** not regenerated, changed or staged; S2's prescribed regeneration has not been reached. The closing suite records the existing golden trace mismatch instead of accepting it. No data diff to explain.
+- **Line counts (report only):** `agent/` 2369→2400 (+31), `scripts/` 3122→3122 (+0), `tests/agent/` 3775→3872 (+97). Files: world 668, loop 218, test_world 681, test_loop 821 lines. Diff: 158 insertions, 30 deletions.
+- **Models/tools:** one gpt-6-luna HIGH subagent for S1, same subagent for its one repair; no Opus. Self-contained prompt `.tmp/ps/s1_prompt.txt` contained the card, program §2, cited contracts, exact scope and checks. CodeGraph first; Ponytail full. Headroom local compression/retrieval worked, but its configured proxy was unreachable.
+- **Requests:** PS 0/160; S0 0/26, E 0/26, L3a 0/60, L3b 0/48. Ledger before and after identical: `total=931, smoke=48, m1=883, stage_a=142, stage_b=297, stage_p=25, stage_q=60, stage_c=306`; total 169 remaining, M1 167 remaining. No cap reset, refund or increase. No runner exit 3/4 occurred.
+- **Deviations:** stopped before S0 because S1 failed twice, as the kickstart requires. Added private `seen_image`/`seen_marked` fields so `_see` retains its existing four-value return shape. Added `frame_mark_eligible` checkpoint state to preserve the after-frame eligibility decision on the next identical before frame. No cap or phase scope changed. Packet §2's stale-budget correction is already present in program §4 (M1 883/1050, 167 left); docs/plan.md now uses that ledger.
+- **Open questions:** resolve the cut/cache fixture versus blank-frame behavior under a revised S1 packet or explicit new repair authorization. Do not run S0 or spend live requests from this failed packet. The golden regeneration remains deferred to S2 after S1 is resolved. Place fragmentation and stale player/rival notebook evidence remain out of scope (§7).
+
+**Exact proposed contract text for S1 only (not applied; contracts.md is unchanged):**
+
+Add to `world`:
+
+```python
+def fix_player(self, per: dict, size: tuple[int, int]) -> dict | None
+    # On a world screen with a motion-locked self_spot and known tile_px:
+    # keep a player-kind entity within 1.5 tiles (Chebyshev pixel distance), renaming it player;
+    # otherwise promote the nearest entity within tile_px/2 to kind/name player;
+    # otherwise insert {"kind":"player","name":"player","at":self_spot}.
+    # Demote every other player-kind entity to character; rename player to character on those rows.
+    # Return {"from": old_at or None, "to": chosen_at} for any change, otherwise None.
+    # Idempotent. Without the lock or on another screen, leave the model's labels unchanged.
+def mark(self, frame: Image, screen_was_world: bool) -> tuple[Image, bool]
+    # Only when motion-locked and screen_was_world, draw a 1px red rectangle on a copy:
+    # [x-9,y-10,x+9,y+9], x,y = self_spot * native frame size. Otherwise return (frame,False).
+```
+
+Only perception/act model inputs receive marked images. Saved PNGs, `before`, `after`, `prev_frame`, cut/scroll observations, HUD crops, miss hashes and trace `frame_hash` use raw images. Before eligibility uses the previous world perception and no cut; after eligibility uses the current world perception and no skill cut. Persist the after eligibility for the next identical raw before frame. The perception cache requires the same raw hash, prompt version and `marked`; checkpoint state gains `perception_marked` (bool, default false) and `frame_mark_eligible` (bool or null).
+
+Add to `trace`: `marked: bool`, whether this step's before/act model input was marked. S2's perception/action/options contract changes are not implemented or proposed as completed here.
+
+Contracts SHA-256 before/after: `cced97713bc8dc71036a052611ba9d6bc05d5b9b678fbb6dca546a743e1ace70`.
 
 ## 10. Handoff notes
 Rewrite `docs/plans/handoff-notes.md` per the template §10 (under 80 lines, fixed headings).

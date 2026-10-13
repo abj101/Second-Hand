@@ -21,21 +21,62 @@ def test_fix_player_swaps_entity_near_locked_self_spot(tmp_path):
     per = {"screen": "world", "entities": [player, npc]}
 
     assert world.fix_player(per, (160, 144)) == {"from": [.75, .5], "to": [.5, .5]}
-    assert player["kind"] == "character" and npc["kind"] == "player"
+    assert player["kind"] == "character" and player["name"] == "Guide"
+    assert npc["kind"] == "player" and npc["name"] == "player"
+    assert world.fix_player(per, (160, 144)) is None
 
 
-def test_fix_player_moves_to_locked_spot_or_leaves_perception_alone(tmp_path):
+def test_fix_player_inserts_at_locked_spot_or_leaves_perception_alone(tmp_path):
     world = World(Memory(tmp_path), 16); player = {"kind": "player", "at": [.75, .5]}
     per = {"screen": "world", "entities": [player, {"kind": "object", "at": [.75, .8]}]}
     world.self_spot, world._self_from_motion = [.5, .5], True
     assert world.fix_player(per, (160, 144)) == {"from": [.75, .5], "to": [.5, .5]}
-    assert player["at"] == [.5, .5]
+    assert player["kind"] == "character" and player["at"] == [.75, .5]
+    assert per["entities"][-1] == {"kind": "player", "name": "player", "at": [.5, .5]}
 
-    unchanged = {"kind": "player", "at": [.5, .5]}
+    unchanged = {"kind": "player", "name": "player", "at": [.5, .5]}
     assert world.fix_player({"screen": "world", "entities": [unchanged]}, (160, 144)) is None
     assert world.fix_player({"screen": "menu", "entities": [{"kind": "player", "at": [.75, .5]}]}, (160, 144)) is None
     world.self_spot, world._self_from_motion = None, False
     assert world.fix_player({"screen": "world", "entities": [{"kind": "player", "at": [.75, .5]}]}, (160, 144)) is None
+
+
+def test_fix_player_uses_half_tile_threshold_and_demotes_other_players(tmp_path):
+    world = World(Memory(tmp_path), 16); world.self_spot, world._self_from_motion = [.5, .5], True
+    npc = {"kind": "npc", "name": "NPC", "at": [.54, .5]}
+    old = {"kind": "player", "name": "player", "at": [.75, .5]}
+    per = {"screen": "world", "entities": [npc, old]}
+    assert world.fix_player(per, (160, 144)) == {"from": [.75, .5], "to": [.54, .5]}
+    assert npc == {"kind": "player", "name": "player", "at": [.54, .5]}
+    assert old["kind"] == "character" and old["name"] == "character"
+
+    side = {"kind": "npc", "name": "NPC", "at": [.6, .5]}
+    per = {"screen": "world", "entities": [side]}
+    assert world.fix_player(per, (160, 144)) == {"from": None, "to": [.5, .5]}
+    assert per["entities"][-1] == {"kind": "player", "name": "player", "at": [.5, .5]}
+
+
+def test_mark_draws_only_fixed_outline_on_copy(tmp_path):
+    from PIL import Image
+
+    world = World(Memory(tmp_path), 16); world.self_spot, world._self_from_motion = [.5, .5], True
+    raw = Image.new("RGB", (160, 144), "black")
+    image, marked = world.mark(raw, True)
+    assert marked and image is not raw and raw.getpixel((71, 62)) == (0, 0, 0)
+    changed = {(x, y) for y in range(144) for x in range(160) if image.getpixel((x, y)) != raw.getpixel((x, y))}
+    expected = {(x, y) for x in range(71, 90) for y in range(62, 82)
+                if x in (71, 89) or y in (62, 81)}
+    assert changed == expected and all(image.getpixel(p) == (255, 0, 0) for p in expected)
+    assert world.mark(raw, False) == (raw, False)
+
+
+def test_fix_player_keeps_own_player_within_tolerance(tmp_path):
+    world = World(Memory(tmp_path), 16); world.self_spot, world._self_from_motion = [.5, .5], True
+    player = {"kind": "player", "name": "Guide", "at": [.64, .5]}
+    per = {"screen": "world", "entities": [player]}
+    assert world.fix_player(per, (160, 144)) == {"from": [.64, .5], "to": [.64, .5]}
+    assert player == {"kind": "player", "name": "player", "at": [.64, .5]}
+    assert world.fix_player(per, (160, 144)) is None
 
 
 def test_motion_self_spot_locks_persists_and_unlocks_after_two_contradictions(tmp_path):
@@ -456,7 +497,7 @@ def test_loop_act_uses_world_facts_active_goals_and_labels(tmp_path, monkeypatch
     entity(mem, "oak", "Oak", "home", [2, 0]); mem.upsert("entities", {**mem.get("entities", "oak"), "tier": "landmark"})
     per = {"screen": "world", "text": [], "entities": [{"name": "Player", "kind": "player", "at": [.5, .5]},
                                                                   {"name": "Chest", "kind": "object", "at": [.6, .5]}], "affordances": []}
-    env = GridEnv(); model = StubModel([SimpleNamespace(data=per)]); loop = Loop(env, model, mem, "grid")
+    env = GridEnv(); model = StubModel([SimpleNamespace(data=per), SimpleNamespace(data=per)]); loop = Loop(env, model, mem, "grid")
     loop.place, loop.prev_frame = "home", env.screenshot()
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     loop.notebook.data["goals"] = {"active": {"text": "Find Chest", "status": "active"},

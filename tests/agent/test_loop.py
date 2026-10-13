@@ -84,6 +84,62 @@ def test_position_checkpoint_defaults_and_restores(tmp_path):
     assert resumed.pos == (4, -2)
     resumed.restore({}); assert resumed.pos == (0, 0)
 
+def test_marked_perception_uses_raw_hash_and_restores_mark_state(tmp_path, monkeypatch):
+    from PIL import Image
+    from agent import loop as module
+    raw = Image.new("RGB", (160, 144), "black")
+    model = StubModel([reply(perception())])
+    loop = Loop(GridEnv(), model, Memory(tmp_path/"memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    loop.env.screenshot = lambda: raw.copy()
+    observed = []
+    monkeypatch.setattr(module, "perceive", lambda _model, image, _ctx: (perception(), observed.append(image) or reply(perception())))
+
+    per, digest, reused, _ = loop._see(raw, None, screen_was_world=True)
+    image, marked = loop.seen_image, loop.seen_marked
+    assert marked and not reused and digest == __import__("hashlib").sha256(raw.tobytes()).hexdigest()
+    assert image.getpixel((71, 62)) == (255, 0, 0) and raw.getpixel((71, 62)) == (0, 0, 0)
+    assert loop._see(raw, None, screen_was_world=True)[2] and len(observed) == 1
+    saved = loop.state()
+    assert saved["perception_marked"] is True
+    resumed = Loop(loop.env, model, loop.mem, "grid"); resumed.restore(saved)
+    assert resumed.cached_marked is True
+    _, same_digest, reused, _ = loop._see(raw, None, screen_was_world=False)
+    marked = loop.seen_marked
+    assert same_digest == digest and not reused and not marked and len(observed) == 2
+
+def test_cut_before_frame_suppresses_marker_and_same_raw_after_frame_reuses(tmp_path, monkeypatch):
+    from PIL import Image
+    from agent import loop as module
+    env = GridEnv(); frame = Image.new("RGB", (160, 144), "black")
+    env.screenshot = lambda: frame.copy()
+    loop = Loop(env, StubModel([]), Memory(tmp_path/"memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    loop.prev, loop.prev_frame = {"screen": "world"}, Image.new("RGB", (160, 144), "white")
+    per = {"screen":"world", "text":[], "entities":[{"name":"player", "kind":"player", "at":[.5,.5]}], "affordances":[]}
+    calls, contexts, acts = [], [], []
+    def perceive(_model, image, ctx):
+        calls.append(image); contexts.append(ctx)
+        return per, reply(per)
+    def act(_model, image, _per, _notebook, _view, flags, *_args, **_kwargs):
+        acts.append((image, flags))
+        return SimpleNamespace(place="", ops=[], action=None, expect="screen_changes", why="test", text=None)
+    monkeypatch.setattr(module, "perceive", perceive)
+    monkeypatch.setattr(module, "act", act)
+    cut_calls = [0]
+    def cut_once(*_args, **_kwargs):
+        cut_calls[0] += 1
+        return cut_calls[0] == 1
+    monkeypatch.setattr(module, "cut", cut_once)
+
+    first = loop.step()
+    second = loop.step()
+
+    assert not first["marked"] and second["marked"]
+    assert second["perception_reused"] and len(calls) == 2
+    assert module.CAPTION in contexts[1] and "the sprite inside the red box is you" in acts[1][1]
+    assert acts[1][0].getpixel((71, 62)) == (255, 0, 0)
+
 def test_stationary_two_fresh_frames_confirm_drift(tmp_path, monkeypatch):
     from agent import loop as module
     env = GridEnv(); env.phase = 0; original = env.screenshot

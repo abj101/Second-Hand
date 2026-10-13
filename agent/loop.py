@@ -12,6 +12,7 @@ from agent.tasks import Stuck
 from agent.trace import Trace
 from agent.space import outward, route
 from agent.world import World
+CAPTION = 'The sprite inside the red box is the player\'s own character (you); list it with kind "player".'
 class Loop:
     def __init__(self, env, model, mem, game):
         self.env, self.model, self.mem, self.game = env, model, mem, game
@@ -19,7 +20,8 @@ class Loop:
         self.trace = Trace(mem.root.parent / "trace.jsonl"); self.step_no = 0
         self.place = None; self.prev = None; self.tile_px = getattr(env, "tile_px", None)
         self.move_frames = 16; self.stuck = Stuck()
-        self.recent = self.trace.tail(5); self.cached = None; self.cached_hash = None; self.prev_frame = None; self.prompt_version = "e5-perceiver-8"; self.cached_version = self.prompt_version
+        self.recent = self.trace.tail(5); self.cached = None; self.cached_hash = None; self.cached_marked = False; self.prev_frame = None; self.prev_frame_mark_eligible = None; self.prompt_version = "e5-perceiver-8"; self.cached_version = self.prompt_version
+        self.seen_image, self.seen_marked = None, False
         self.pending_cut, self.pending_via, self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = False, None, False, 0, False, False
         self.reperception_used = False
         self.world = World(mem, self.tile_px)
@@ -27,23 +29,29 @@ class Loop:
     def pos(self): return self.world.pos
     @pos.setter
     def pos(self, value): self.world.pos = tuple(value)
-    def _see(self, frame, previous, *, force=False, relook=False):
+    def _see(self, frame, previous, *, force=False, relook=False, screen_was_world=False):
         key = hashlib.sha256(frame.tobytes()).hexdigest()
-        if not force and key == self.cached_hash and self.cached is not None and self.cached_version == self.prompt_version and not self.repair_pending: return self.cached, key, True, []
+        image, marked = self.world.mark(frame, screen_was_world)
+        self.seen_image, self.seen_marked = image, marked
+        if not force and key == self.cached_hash and marked == self.cached_marked and self.cached is not None and self.cached_version == self.prompt_version and not self.repair_pending: return self.cached, key, True, []
         ctx = GENERAL + "\n" + load_brief(self.game) + "\nOn a visible editable text field with its on-screen keyboard, expose one type affordance for the whole field; dialogue questions alone are advance, preset name menus are select. Never list letter buttons separately. A visible modal dialogue or selection menu blocks world movement; offer only its applicable advance, select, or cancel actions until it closes. Previous-place memory is reference only; include details only if visible now." + ("\nThe previous JSON was empty or malformed. Retry with compact JSON containing string screen and list text, entities, affordances; no prose. Use empty lists only for genuinely absent content and report visible details only." if self.repair_pending else "")
+        if marked: ctx += "\n" + CAPTION
         if relook: ctx += "\nYour last labels may be wrong; look again at who the player is."
         view, ids = self.mem.view("perceiver", {"place": previous, "task": None, "on_screen": [], "recent": [], "step": self.step_no})
         if view: ctx += "\n" + view
-        per, reply = perceive(self.model, for_model(frame), ctx); data = reply.data
+        per, reply = perceive(self.model, for_model(image), ctx); data = reply.data
         valid = isinstance(data, dict) and isinstance(data.get("screen"), str) and isinstance(data.get("text"), (list, str)) and all(isinstance(data.get(k), list) for k in ("entities", "affordances"))
-        self.cached, self.cached_hash, self.cached_version = per, key, self.prompt_version; self.repair_pending = False; self.parse_failed = not valid or not any((per["screen"], per["text"], per["entities"], per["affordances"]))
+        self.cached, self.cached_hash, self.cached_marked, self.cached_version = per, key, marked, self.prompt_version; self.repair_pending = False; self.parse_failed = not valid or not any((per["screen"], per["text"], per["entities"], per["affordances"]))
         return per, key, False, ids
     def step(self):
         start, calls = time.perf_counter(), self.model.calls
         before_set = wait_settled(self.env); before = before_set.frame; prior = self.place;
         if self.stuck.n < 2: self.reperception_used = False
         relook = self.stuck.n >= 2 and not self.reperception_used
-        per, frame_hash, reused, _ = self._see(before, prior, force=relook, relook=relook)
+        before_mark = bool(self.prev and self.prev.get("screen") == "world" and self.prev_frame is not None and not cut(self.prev_frame, before, before_set.blank_seen))
+        if self.prev_frame is not None and hashlib.sha256(before.tobytes()).hexdigest() == hashlib.sha256(self.prev_frame.tobytes()).hexdigest() and self.prev_frame_mark_eligible is not None:
+            before_mark = self.prev_frame_mark_eligible
+        per, frame_hash, reused, _ = self._see(before, prior, force=relook, relook=relook, screen_was_world=before_mark); model_frame, marked = self.seen_image, self.seen_marked
         if relook: self.reperception_used = True
         player_fix = self.world.fix_player(per, before.size); self.empty_streak = self.empty_streak + 1 if self.parse_failed else 0; self.repair_used = self.repair_used if self.parse_failed else False
         via = next((a.get("target") for a in per.get("affordances", []) if a.get("verb") == "approach"), None)
@@ -59,7 +67,7 @@ class Loop:
             probe = self.world.probe(probe_ctx)
             if probe["presses"]:
                 probe_set = wait_settled(self.env); probe_frame = probe_set.frame
-                probe_per, probe_hash, probe_reused, _ = self._see(probe_frame, place, force=True)
+                probe_per, probe_hash, probe_reused, _ = self._see(probe_frame, place, force=True, screen_was_world=per.get("screen") == "world" and not probe["scene_cut"]); model_frame, marked = self.seen_image, self.seen_marked
                 probe_fix = self.world.fix_player(probe_per, probe_frame.size); player_fix = player_fix or probe_fix
                 if probe["scene_cut"]:
                     probe_place = self.mem.match_place(probe_per, self.step_no + 1, prev=place, cut=True)
@@ -79,6 +87,7 @@ class Loop:
         choice, player = None, next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         act_route = travel_legs = None
         act_flags = list(self.flags)
+        if marked: act_flags.append('the sprite inside the red box is you')
         if self.recent or self.stuck.n:
             runs = []
             for recent in self.recent:
@@ -105,7 +114,7 @@ class Loop:
                 summaries.pop(1 if self.stuck.n else 0); recent_flag = "recent: " + "; ".join(summaries)
             act_flags.append(recent_flag[:197] + "..." if len(recent_flag) > 200 else recent_flag)
         act_flags.append(self.world.here_flag())
-        a = act(self.model, before, per, self.notebook.render(), view, act_flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]])
+        a = act(self.model, model_frame, per, self.notebook.render(), view, act_flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]])
         applied = self.notebook.apply(a.ops, self.step_no + 1)
         named = self.world.name(place, a.place, self.step_no + 1)
         if named != place:  # model says this new arrival is a known place
@@ -136,7 +145,8 @@ class Loop:
         scene_cut = self.world._travel_cut if travel_legs is not None else skill.blank_seen or skill.reason == "scene cut" or (cut(skill.before, skill.after) and (self.env.pointer or not choice or affs[choice.i].get("verb") not in ("approach", "interact") or skill.scroll == (0, 0)))
         moves = getattr(skill, "moves", []); spatial = self.world.prepare(skill, place, scene_cut, self.step_no + 1); exit_key, cut_dir = spatial["exit_key"], spatial["cut_dir"]
         self.pending_cut, self.pending_via = scene_cut, affs[choice.i].get("target") if choice else None
-        try: after_set = wait_settled(self.env); after = after_set.frame; after_per, after_hash, after_reused, _ = self._see(after, place); after_fix = self.world.fix_player(after_per, after.size); player_fix = player_fix or after_fix
+        after_mark_eligible = per.get("screen") == "world" and not scene_cut
+        try: after_set = wait_settled(self.env); after = after_set.frame; after_per, after_hash, after_reused, _ = self._see(after, place, screen_was_world=after_mark_eligible); after_fix = self.world.fix_player(after_per, after.size); player_fix = player_fix or after_fix
         except BaseException: self.cached = self.cached_hash = None; raise
         modal = {per.get("screen"), after_per.get("screen")} <= {"world", "dialogue", "menu"} and per.get("screen") != after_per.get("screen") and "world" in (per.get("screen"), after_per.get("screen")) and not (skill.blank_seen or skill.reason == "scene cut")
         scene_cut &= not modal
@@ -174,7 +184,7 @@ class Loop:
             "choice": ({"i": choice.i, **affs[choice.i], "id": targets[choice.i], "called": choice.called, "text": choice.text, "why": choice.why} if choice else None),
             "pred": pred, "used": choice.used if choice else [], "skill": {"status": skill.status, "reason": skill.reason, "inputs": skill.inputs, "calls": skill.calls},
             "outcome": outcome, "verdict": v, "calls": self.model.calls-calls, "ms": int((time.perf_counter()-start)*1000), "shortcut": None,
-            "ranker": None, "perception_reused": reused, "frame_hash": frame_hash,
+            "ranker": None, "perception_reused": reused, "frame_hash": frame_hash, "marked": marked,
             "scene_cut": scene_cut, "next_place": next_place, "verified_edge": verified_edge, "view_ids": [], "tile": self.world.pos if self.tile_px else None, "drift_fix": list(drift_fix) if drift_fix else None, "player_fix": player_fix, "entities": self.world.entities, "scroll": spatial["scroll"], **({"exit": list(exit_key)} if scene_cut and not modal and next_place != place and exit_key else {}),
             "act": {"place": a.place, "ops": applied, "why": a.why, "action": a.action, "flags": act_flags}, **({"flags": [f"merge_pending: {self.world.merge_pending}"]} if self.world.merge_pending else {})}
         row["probe"] = {"presses": probe["presses"], "locked": probe["locked"]} if probe is not None else None
@@ -186,6 +196,7 @@ class Loop:
         for text in after_per.get("text", []):
             if text not in per.get("text", []): self.mem.know(text, src="game_text", step=self.step_no)
         self.place, self.prev, self.prev_frame, self.cached, self.cached_hash = next_place, after_per, after, after_per, after_hash
+        self.prev_frame_mark_eligible = after_mark_eligible
         self.pending_cut, self.pending_via = False, None; reason = self.stuck.update(row); self.repair_pending = self.parse_failed and self.empty_streak >= 8 and not self.repair_used; self.repair_used |= self.repair_pending
         if unknown: reason = "player position unknown"
         if a.action and "go_to" in a.action and choice is None: reason = f'go_to "{a.action["go_to"]}": not in memory'
@@ -193,14 +204,15 @@ class Loop:
         self.trace.write(row); self.recent = [*self.recent, row][-5:]
         return row
     def state(self):
-        return {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "reperception_used": self.reperception_used, "perception": self.cached, "frame_hash": self.cached_hash, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "pending_via": self.pending_via, "flags": self.flags}
+        return {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "reperception_used": self.reperception_used, "perception": self.cached, "frame_hash": self.cached_hash, "perception_marked": self.cached_marked, "frame_mark_eligible": self.prev_frame_mark_eligible, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "pending_via": self.pending_via, "flags": self.flags}
     def restore(self, state):
         self.step_no, self.place = int(state.get("step", 0)), state.get("place")
         self.tile_px, self.move_frames = state.get("tile_px"), int(state.get("move_frames", 16))
         self.world.tile_px = self.tile_px; self.world.restore(state)
         self.stuck.restore(state.get("stuck", {})); self.prev = state.get("perception"); self.prev_frame = self.env.screenshot()
+        self.prev_frame_mark_eligible = state.get("frame_mark_eligible")
         self.reperception_used = bool(state.get("reperception_used", False))
         digest = hashlib.sha256(self.prev_frame.tobytes()).hexdigest()
-        self.cached, self.cached_hash, self.cached_version = state.get("perception"), state.get("frame_hash"), state.get("perception_version")
+        self.cached, self.cached_hash, self.cached_marked, self.cached_version = state.get("perception"), state.get("frame_hash"), bool(state.get("perception_marked", False)), state.get("perception_version")
         self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = bool(state.get("parse_failed")), int(state.get("empty_streak", 0)), bool(state.get("repair_used")), bool(state.get("repair_pending")); self.pending_cut, self.pending_via = bool(state.get("pending_cut")), state.get("pending_via"); self.flags = state.get("flags", [])
-        if self.cached_version != self.prompt_version or digest != self.cached_hash: self.cached = self.cached_hash = None
+        if self.cached_version != self.prompt_version or digest != self.cached_hash: self.cached = self.cached_hash = None; self.cached_marked = False

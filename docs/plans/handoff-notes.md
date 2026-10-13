@@ -1,52 +1,50 @@
 # Handoff notes
 
-Last written by: Codex, 2026-10-12, after TL and L2. Next: the user's STOP 5 review; no further phase or live spend authorized.
+Last written by: Codex, 2026-10-13, after PS S1 failed its one repair. Next: user review; do not retry or spend from the failed packet.
 
 ## State of the code
-- Branch feat/lean-agent; TL B1–B4 built and L2 completed; see TL.md §7 for checks, data review and exact proposed contract text.
-- Tracking: observer.residual, dict moves with self_at, World motion lock/unlock, bounded probe, once-per-streak re-perception, true recent/here feedback.
-- W4 classify/_learn/evidence/cam_px and median identity rule removed; still-used HUD/regions and W3 statuses retained.
-- Cached perceptions are role-corrected; Memory observes once per perception; successful crossing clears blocked; inferred exits do not block route/frontier.
-- Resume state and memory: runs/m1_long/checkpoint/000170; L1 evidence preserved in runs/m1_long_l1 (112 source files SHA256 verified).
-- New checker: scripts/check_track.py dupes/self/probe; evaluator --from-step and self_spot/false_walls metrics.
+- Branch feat/lean-agent; PS Status gate failed; Result in PS.md §9 records checks and proposed S1 contract text.
+- S1 partial build: World.fix_player owns player kind/name when locked; World.mark copies a fixed red outline onto model inputs.
+- Loop tracks cached_marked and after-frame eligibility; raw images remain the observation/storage/hash inputs; trace gains marked.
+- S0, S2, E and L3 unstarted; perception still proposes options, act still picks option indexes.
+- Prior TL motion/probe/HUD, recent/here, routing/merge and memory fixes retained by diff review.
 
 ## Decisions in force
-- STOP 5: progress first, then health; checks report, not progress gates; no further implementation or spend before the user's next approved packet.
-- Every subagent gpt-6-luna HIGH, one slice each; never Opus; orchestrator reviews and runs acceptance.
-- No game-specific code in agent/, no new goals/filters/gates, no contracts.md or loop/ edits.
-- TL cap consumed: 110/110; M1 191 remaining is not authorization to resume TL.
-- Proposed contract delta is in TL.md §7; user applies it.
+- One gpt-6-luna HIGH subagent implemented S1 and its one repair; no Opus, no orchestrator implementation.
+- S1 failed twice; user kickstart requires stop; a revised packet or explicit new repair authorization is required.
+- PS §1 checks report, but a broken suite stops; no live approval or spend occurred.
+- No game-specific code in agent/, new decision gates, loop/ or contracts.md edits.
 
 ## Measured numbers
-- Full prelive: 233 passed,1 SDL2 warning,249.27s; closing: 233 passed,1 warning,248.98s.
-- L2 runner exit0; 100 steps71–170; 110 HTTP requests,0 retries,1 cache hit.
-- Truth maps: 1F0x25 at71/73/76/81; 2F0x26 at72/74/80; no Town/lab; party0; final1F(7,1).
-- Self spot accuracy99/99=1.0, coverage99/100=.99; lock at72; two probes/three presses.
-- Health red:2 live IDs per house map, no-effect max90, same-place/action repeats87; false walls0 is a lower bound.
-- Worst window81–170:90 blocked NPC actions,0 inputs,one frame hash; reason target is the player.
-- B2 checker: m1 locks firstLEFT5px; m1_long fifthLEFT2px after four compact-heat misses; probe checker stops2presses on real1F→2F cut.
-- Lines agent2263→2369(+106),scripts2892→3122(+230),tests3525→3775(+250); report only.
-- Ledger runs/e3_budget.json: total877/smoke18/M1859/a142/b297/p25/q60/c306; M1 remaining191.
+- Targeted command: .venv-agent/Scripts/python.exe -m pytest tests/agent/test_world.py tests/agent/test_loop.py -q -p no:cacheprovider.
+- First orchestrator: 3 failed,78 passed,1 warning,161.58s; repair orchestrator: 1 failed,81 passed,1 warning,276.95s.
+- Closing command: .venv-agent/Scripts/python.exe -m pytest tests/agent -q -p no:cacheprovider.
+- Closing pytest summary: 2 failed,236 passed,1 warning,394.76s; outputs in .tmp/ps/closing_suite.log.
+- Remaining failure: test_loop.py:138 expects marked second step, receives False; test_world_golden trace also differs (5 memory items identical).
+- Lines: agent2369→2400(+31),scripts3122 unchanged,tests3775→3872(+97); budgets report only.
+- PS requests0/160; ledger before/after total931/smoke48/M1883/a142/b297/p25/q60/c306; M1 remaining167.
+- Historical L2 progress: house only,party0; spot99/99,coverage99/100; no new PS gameplay measurement.
 
 ## Environment and gotchas
-- Use .venv-agent/Scripts/python.exe and forward-slash paths; only warning is pysdl2-dll2.32.10.
-- Use `scripts/eval_run.py runs/m1_long --no-write --health --from-step 71` for TL; the stored summary was not overwritten.
-- Truth is sampled before probe, act frame/place after probe: two probed rows excluded from before-place ID counts; spot scored against next truth.
-- False-wall reconstruction skips probes/cuts/drift/place changes and diagonal/multi-axis paths; it cannot prove absence of all false walls.
-- Goldens changed only entities upserts44→17(same4IDs) and trace tracking/feedback fields; regen only W0_REGEN=1, force-stage data.
+- Use .venv-agent/Scripts/python.exe and forward-slash paths; warning only pysdl2-dll2.32.10.
+- Failing cut/cache test uses a uniform black frame; blank-frame settling versus eligibility is an unverified cause.
+- _see keeps its four-value return; current model image/flag are loop.seen_image and loop.seen_marked.
+- Checkpoint state adds perception_marked and frame_mark_eligible; S2 prompt-version bump has not happened.
+- Headroom configured proxy unreachable; local compression/store usable.
+- Offline eval must exclude m1_long71/72 probe frames and m1 frames above94 (stale leftovers).
 
 ## Deviations from plan and contracts
-- Packet CLI spacing corrected: `110--stage c` became `--max-calls 110 --stage c`; no cap changed.
-- One B3 repair fixed stale probe frame and fixture call queues; one B2 repair fixed a legacy three-return _step mock in test_type_text.py.
-- Exact approved TL contract proposals await the user; contracts.md SHA256 unchanged.
+- Stopped at S1 before baseline, as user two-failure rule requires; no second design or further repair.
+- Exact proposed S1 world/trace/cache contract text in PS.md §9; no S2 delta implemented.
+- contracts.md SHA256 unchanged: cced97713bc8dc71036a052611ba9d6bc05d5b9b678fbb6dca546a743e1ace70.
+- No golden regeneration or data changes; S2 must review/regenerate only with W0_REGEN=1 after S1 is resolved.
 
 ## Do not retry
-- Never overwrite runs/m1_long_l1, runs/m1, runs/m1_act; copy TL evidence before any future live continuation.
-- No more TL requests, ledger reset/refund/cap increase, git add -A, runs/.tmp commits or push.
-- Do not tune residual thresholds to hide m1_long's initial misses, filter model choices or add progress gates.
+- No additional repair, S0/E cloud eval or live continuation under this failed PS packet.
+- Never overwrite runs/m1_long_l1,runs/m1_long,runs/m1,runs/m1_act; copy evidence before future continuation.
+- Never reset/refund/raise a ledger cap, commit runs/ or .tmp/, use git add -A or push.
 
-## Open issues for STOP 5 review
-- Player location is correct, but role-swapped NPC name/affordance still points to the player (trace78/84/170); model repeats despite explicit feedback.
-- Inspect cached entity IDs across place merge: at84 choice id e_npc_2 while perception NPC id e_npc_3.
-- Places fragment and act echoes readable labels such as world[p_world_6], leaving merge_pending; live IDs/map2.
-- Decide the next correctness packet for target/name consistency and place ownership before any new live spend.
+## Open issues for PS (stopped)
+- Resolve remaining cut/cache test expectation under revised authorization; distinguish fixture blank-frame effects from marker eligibility.
+- Golden trace mismatch recorded, not accepted; S0 baseline and S2 split remain undone.
+- Existing place fragmentation, stale rival/player goals and misleading memory remain PS §7 exclusions.

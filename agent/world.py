@@ -3,6 +3,7 @@ import hashlib, json
 from dataclasses import replace
 from itertools import pairwise
 from statistics import median
+from PIL import ImageDraw
 from agent.memory import TRANSIENT, _base, _distance, normalize_kind
 from agent.observer import changed, cut
 from agent.space import DIRS, exit_to, fold, frontier, mark_exit, route, tile_of
@@ -33,21 +34,39 @@ class World:
     def fix_player(self, per, size):
         if per.get("screen") != "world" or not self.tile_px or not self._self_from_motion or self.self_spot is None: return None
         entities = per.get("entities", [])
-        player = next((e for e in entities if e.get("kind", "").casefold() == "player"), None)
-        if not player or not isinstance(player.get("at"), list) or len(player["at"]) != 2: return None
+        players = [e for e in entities if e.get("kind", "").casefold() == "player"]
+        old = list(players[0]["at"]) if players and isinstance(players[0].get("at"), list) else None
+        original = [(e, e.get("kind"), e.get("name")) for e in entities]
         median = self.self_spot
         dist = lambda at: max(abs(at[i] - median[i]) * size[i] for i in (0, 1))
-        if dist(player["at"]) <= 1.5 * self.tile_px: return None
-        candidates = [(dist(e["at"]), e) for e in entities if e is not player and isinstance(e.get("at"), list) and len(e["at"]) == 2]
-        near = min(candidates, key=lambda item: item[0]) if candidates else None
-        old = list(player["at"])
-        if near and near[0] <= self.tile_px:
-            replacement = near[1]
-            player["kind"], replacement["kind"] = "character", "player"
-            fixed = list(replacement["at"])
+        valid_at = lambda e: isinstance(e.get("at"), list) and len(e["at"]) == 2
+        player = next((e for e in players if valid_at(e) and dist(e["at"]) <= 1.5 * self.tile_px), None)
+        if player:
+            fixed = list(player["at"])
         else:
-            player["at"] = fixed = median
-        return {"from": old, "to": fixed}
+            candidates = [(dist(e["at"]), e) for e in entities if valid_at(e)]
+            near = min(candidates, key=lambda item: item[0]) if candidates else None
+            if near and near[0] <= self.tile_px / 2:
+                player = near[1]
+                fixed = list(player["at"])
+            else:
+                player = {"kind": "player", "name": "player", "at": list(median)}
+                entities.append(player)
+                fixed = list(median)
+        for e in players:
+            if e is not player:
+                e["kind"] = "character"
+                if e.get("name") == "player": e["name"] = "character"
+        player["kind"], player["name"] = "player", "player"
+        changed = not players or any(e.get("kind") != kind or e.get("name") != name for e, kind, name in original)
+        return {"from": old, "to": fixed} if changed else None
+    def mark(self, frame, screen_was_world):
+        if not self._self_from_motion or self.self_spot is None or not screen_was_world: return frame, False
+        image = frame.copy()
+        x, y = self.self_spot[0] * frame.width, self.self_spot[1] * frame.height
+        # ponytail: fixed red outline and offsets from the 2026-10-13 test; pick a contrasting colour per frame if a colour game hides it.
+        ImageDraw.Draw(image).rectangle([x - 9, y - 10, x + 9, y + 9], outline="red", width=1)
+        return image, True
     def before(self, per, place, prior, size, step):
         self.current_place = place
         if prior and place != prior:
