@@ -16,8 +16,7 @@ from agent.brief import _load, defaults
 from agent.loop import Loop
 from agent.memory import Memory
 from agent.model import ModelUnavailable, Ollama
-from agent.observer import cut, for_model
-from agent.world import World
+from agent.observer import for_model
 from scripts.run_agent import CallCap, _ledger
 
 GAME = "pokemon_red"
@@ -98,7 +97,6 @@ def _point_for(action, per):
                 (not raw_verb or a.get("verb") == raw_verb)), None)
     entity = next((e for e in entities if str(e.get("name", "")).casefold() == folded), None)
     target = row or entity
-    resolved = raw_verb or (row or {}).get("verb") or "approach"
     return f"{physical_verb} {name}".strip(), target.get("at") if target else None, physical_verb
 
 
@@ -110,20 +108,18 @@ def _near(point, acceptable):
     return point is not None and any(max(abs(point[i] - p[i]) for i in (0, 1)) <= 0.1 for p in acceptable)
 
 
+STEP = {"UP": (0, -1), "DOWN": (0, 1), "LEFT": (-1, 0), "RIGHT": (1, 0)}
+
+
 def _buttons_toward(label, self_point, acceptable):
-    if self_point is None or not acceptable:
+    """True when the first direction moves toward an acceptable point and no direction points away from it."""
+    dirs = [STEP[w.upper()] for w in label.split()[1:] if w.upper() in STEP]
+    if self_point is None or not acceptable or not dirs:
         return False
-    words = {word.upper() for word in label.split()[1:]}
     for x, y in acceptable:
-        dx, dy = x - self_point[0], y - self_point[1]
-        need_x = "RIGHT" if dx > 0.02 else "LEFT" if dx < -0.02 else None
-        need_y = "DOWN" if dy > 0.02 else "UP" if dy < -0.02 else None
-        if ((need_x is None or need_x in words) and (need_y is None or need_y in words)
-                and (need_x or need_y)
-                and not (need_x == "RIGHT" and "LEFT" in words)
-                and not (need_x == "LEFT" and "RIGHT" in words)
-                and not (need_y == "UP" and "DOWN" in words)
-                and not (need_y == "DOWN" and "UP" in words)):
+        d = (x - self_point[0], y - self_point[1])
+        along = [sx * d[0] + sy * d[1] for sx, sy in dirs]
+        if along[0] > 0.02 and all(a > -0.02 for a in along):
             return True
     return False
 
@@ -179,24 +175,20 @@ def evaluate(entry, trace_by_step, truth_by_step, model, attempts):
     frame = Image.open(frame_path).convert("RGB")
     trace, truth = trace_by_step[step], truth_by_step[step]
     previous = trace_by_step.get(step - 1)
-    prev_path = run_root / "frames" / f"{step - 1:06d}.png"
-    prev_frame = Image.open(prev_path).convert("RGB") if previous and prev_path.is_file() else None
     with tempfile.TemporaryDirectory(prefix="s0_frame_", dir=ROOT / ".tmp/ps") as isolated:
         mem = Memory(Path(isolated) / "memory")
         loop = Loop(SimpleNamespace(tile_px=16), model, mem, GAME)
         loop.tile_px = loop.world.tile_px = 16
         loop.prev = {"screen": previous.get("screen")} if previous else None
-        loop.prev_frame = prev_frame
-        previous_world = bool(previous and previous.get("screen") == "world")
-        mark_eligible = previous_world and prev_frame is not None and not cut(prev_frame, frame, False)
+        # Every world frame is mark-eligible: the eval measures prompts with the marker; S1 unit tests own eligibility.
+        mark_eligible = trace.get("screen") == "world"
         loop.prev_frame_mark_eligible = mark_eligible
-        if entry["run"] == "m1_long":
-            loop.world.self_spot = previous.get("self_spot") if previous and previous.get("self_locked") else None
-            loop.world._self_from_motion = bool(previous and previous.get("self_locked") and loop.world.self_spot is not None)
+        if previous and previous.get("self_locked") and previous.get("self_spot"):
+            loop.world.self_spot, loop.world._self_from_motion = previous["self_spot"], True
             truth_self = entry["self"]
             truth_injected = False
         else:
-            # Harness-only screen projection for older traces without motion spots.
+            # Harness-only: frames recorded before a motion lock (runs/m1, early m1_long) use the labelled spot.
             loop.world.self_spot = list(entry["self"]) if entry["self"] else None
             loop.world._self_from_motion = entry["self"] is not None
             truth_self, truth_injected = entry["self"], entry["self"] is not None

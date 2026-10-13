@@ -1,6 +1,6 @@
 # PS: Mark the player for the model, and split describing from deciding
 
-Status: gate failed (S0 evaluator implementation failed review and its one repair, 2026-10-13; S1 remains resolved; 0 requests spent) · Branch: feat/lean-agent · Program: [program-r1-wm.md](program-r1-wm.md) row 11 · Follows: [TL.md](TL.md) §7 STOP 5
+Status: in progress (S0 evaluator fixed 2026-10-13 by the user session; next: run the S0 baseline, then S2; 0 requests spent) · Branch: feat/lean-agent · Program: [program-r1-wm.md](program-r1-wm.md) row 11 · Follows: [TL.md](TL.md) §7 STOP 5
 
 ## 0. Why this phase exists (evidence, 2026-10-13, 54 diagnostic requests)
 - **The L2 stall started with perception.** The model cannot pick out the player when the sprite faces away. In L2 it labelled the TV, then Mom, as `player`, and the real player as `monster`/`rival`/`NPC`. From step 37 onward the notebook's only goal was "go talk to the character in the centre", i.e. the player. 87 identical choices followed.
@@ -229,6 +229,23 @@ Status: gate failed (S0 evaluator implementation failed review and its one repai
 - **Cost:** two calls per moving step as before (the L2 trace shows no shortcut fired). The before/after mark decisions must agree (S1), or a frame is perceived twice.
 
 ## 9. Result (filled in by the orchestrator)
+
+**S0 evaluator fix (2026-10-13, user session after the S0 stop below; 0 requests). The evaluator is accepted; the orchestrator only runs it.**
+- **Scoring.** `_buttons_toward` now scores a button press as toward a target when its first direction has a positive component toward an acceptable point and no pressed direction points away from it. One step toward a diagonal target is correct, since one move is all a step can make.
+  - Checked with inline asserts: RIGHT, RIGHT DOWN and `press RIGHT` toward right-hand stairs pass; LEFT, RIGHT LEFT, UP and A fail; the 26-attempt guard raises.
+- **Labels, checked against the PNGs:**
+  - `m1_long` 37: target was the wall above the player; now stairs (.65, .49) and the PC desk (.10, .46).
+  - `m1_long` 74: dropped. Its target was in the black void, and the player stands on the arrival stairs tile, so the right action is ambiguous.
+  - `m1` 71: is 1F; Mom (.75, .82) added beside the stairs.
+  - Added `m1` 88 (2F, facing down, stairs one tile above) and `m1` 64 (1F mid-room; Mom, plus the door mat at the bottom).
+  - 10 frames = 20 requests, which is ≤ 26.
+- **Seeding.**
+  - Frames whose previous trace row has no motion lock (all `runs/m1`, and `m1_long` 37 from L1) use the labelled spot (harness-only, flagged `truth_injected`).
+  - Every world frame is mark-eligible. The eval measures the prompts with the marker; S1's unit tests own the loop's eligibility rules. The harness's own `cut()` check disagreed with the trace's `scene_cut` (e.g. `m1_long` 72→73).
+- **Cleanup.** Unused imports, a dead variable and the previous-frame load were removed; pyflakes is clean. `--dry` scores 10/10 rows as intended with 0 requests.
+- **Next:** `.venv-agent/Scripts/python.exe scripts/eval_frames.py` (baseline, today's prompts + marker, ≤ 26 attempts) → S2 → full suite → `eval_frames.py --out .tmp/ps/new.json` → STOP 6a.
+
+**S0 stop record (orchestrator, before the fix):**
 
 **S0 stop (Codex orchestrator, 2026-10-13; 0 requests):**
 - **Decision:** stopped after S0's initial implementation and its single authorized repair both failed review. S1 remains resolved. No cloud baseline was run; S2, E and L3 were not started. There is no STOP 6a comparison table. This is an evaluator implementation failure against the card, not a model-quality or gameplay-progress gate. The orchestrator did not implement a fix or start a third repair.
