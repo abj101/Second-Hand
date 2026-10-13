@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent.memory import Memory
 
-FRAME = re.compile(r"\d{6}\.png")
+FRAME = re.compile(r"\d{6}(_after)?\.png")
 
 
 class RunState:
@@ -38,20 +38,31 @@ class RunState:
         # ponytail: re-reads all memory jsonl per poll; switch to an offset tail if polls get slow on long runs.
         mem = Memory(self.run / "memory") if (self.run / "memory").exists() else None
         return {"run": self.run.name,
-                "live": trace.exists() and time.time() - trace.stat().st_mtime < 3,
+                "live": time.time() - max(_mtime(trace), _mtime(self.run / "live.json")) < 3,
+                "pending": self._pending(),
                 "rows": [r for r in self.rows if int(r.get("step", 0)) > since],
-                "presses": self._presses(),
+                "presses": self._by_step("presses.jsonl", lambda row: row["keys"]),
+                "call_rows": self._by_step("calls.jsonl", list),
                 "notebook": self.notebook,
                 "places": mem.rows("places") if mem else [], "tiles": mem.rows("tiles") if mem else [],
                 "calls": sum(1 for _ in calls.open(encoding="utf-8")) if calls.exists() else 0}
 
-    def _presses(self) -> dict:
-        path, out = self.run / "presses.jsonl", {}
+    def _by_step(self, name: str, pick) -> dict:
+        """{step: pick(row)} for presses.jsonl, or {step: [rows]} for calls.jsonl (pick=list)."""
+        path, out = self.run / name, {}
         if path.exists():
             for line in path.read_text(encoding="utf-8").splitlines():
-                try: row = json.loads(line); out[str(row["step"])] = row["keys"]
+                try:
+                    row = json.loads(line); step = str(row["step"])
+                    if pick is list: out.setdefault(step, []).append(row)
+                    else: out[step] = pick(row)
                 except (json.JSONDecodeError, KeyError, TypeError): continue
         return out
+
+    def _pending(self) -> dict | None:
+        """live.json: the step the agent has decided but not finished acting on (agent/loop.py Loop._live)."""
+        try: return json.loads((self.run / "live.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError): return None
 
     def frame(self, name: str) -> bytes | None:
         path = self.run / "frames" / name
@@ -97,50 +108,56 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><title>Avatar Run</t
 <style>
 /* palette and type copied from loop/adaptive/diagnostics_window.py */
 :root{--bg:#080808;--panel:#0d0d0d;--fg:#f2f2f2;--muted:#858585;--dim:#303030;--subtle:#171717}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:12px/1.45 Consolas,"Courier New",monospace}
+*{box-sizing:border-box}body{margin:0;height:100vh;display:flex;flex-direction:column;overflow:hidden;background:var(--bg);color:var(--fg);font:12px/1.45 Consolas,"Courier New",monospace}
 header{display:flex;gap:18px;align-items:center;padding:14px 18px;border-bottom:1px solid var(--fg)}
 header b{font-size:14px}.muted{color:var(--muted)}
 .badge{display:flex;align-items:center;gap:6px;padding:2px 9px;border:1px solid var(--dim);background:var(--panel);font-size:10px;color:var(--muted)}
 .badge i{width:6px;height:6px;background:var(--muted)}.badge.live{border-color:var(--fg);color:var(--fg)}.badge.live i{background:var(--fg)}
-main{display:grid;grid-template-columns:minmax(320px,1fr) minmax(320px,1fr) minmax(360px,1.2fr);gap:18px;padding:18px}
-.col{display:grid;grid-template-columns:minmax(0,1fr);gap:18px;align-content:start;min-width:0}section{min-width:0}
+main{flex:1;min-height:0;display:grid;grid-template-rows:minmax(0,1.5fr) minmax(0,1fr);grid-template-columns:minmax(420px,1.6fr) repeat(2,minmax(320px,1fr));gap:18px;padding:18px}
+.col{display:flex;flex-direction:column;gap:18px;min-width:0;min-height:0}section{min-width:0;flex:0 0 auto}
+/* fit the viewport: .grow sections share the leftover height and scroll (or scale) their body inside */
+.grow{flex:1 1 0;min-height:0;display:flex;flex-direction:column}.grow>:last-child{flex:1 1 0;min-height:0;overflow:auto}
 h3{display:flex;justify-content:space-between;margin:0 0 10px;padding-bottom:5px;border-bottom:1px solid var(--dim);font-size:11px;color:var(--muted);letter-spacing:.04em}
 h3 span{font-weight:normal;font-size:10px}
-#frame{width:100%;image-rendering:pixelated;background:#000;border:1px solid var(--dim)}
-.out{position:relative;background:var(--panel);border:1px solid var(--fg);padding:10px 12px 10px 18px}
+#frame{width:100%;object-fit:contain;image-rendering:pixelated;background:#000;border:1px solid var(--dim)}
+.out{position:relative;flex:none;background:var(--panel);border:1px solid var(--fg);padding:7px 12px 7px 18px}
 .out:before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--fg)}
-.out .k{font-size:10px;color:var(--muted);font-weight:bold}.out .big{font-size:18px;font-weight:bold;margin:4px 0;word-break:break-word}
-.kv{display:grid;grid-template-columns:80px minmax(0,1fr);overflow-wrap:anywhere;gap:4px 10px;margin-top:10px}.kv div:nth-child(odd){color:var(--muted);text-transform:uppercase;font-size:10px;padding-top:1px}
-.ctl{display:grid;grid-template-columns:62px 1fr 28px;gap:3px 10px;align-items:center;margin-bottom:6px}
+.out .k{font-size:10px;color:var(--muted);font-weight:bold}.out .big{font-size:16px;font-weight:bold;margin:2px 0;word-break:break-word}
+.kv{display:grid;grid-template-columns:84px minmax(0,1fr);overflow-wrap:anywhere;gap:3px 10px;align-content:start;margin-top:10px}.kv .k{color:var(--muted);text-transform:uppercase;font-size:10px;padding-top:1px}
+.kv .g{grid-column:1/-1;margin-top:8px;padding-bottom:2px;border-bottom:1px solid var(--subtle);color:var(--muted);font-size:10px;font-weight:bold;letter-spacing:.06em}.kv .g:first-child{margin-top:0}
+.stage{display:flex}.stage>*{flex:1;min-width:0;min-height:0;height:100%}.stage [hidden]{display:none}
+#controls{display:grid;grid-template-columns:1fr 1fr;gap:4px 18px}.ctl{display:grid;grid-template-columns:58px 1fr 18px;gap:8px;align-items:center}
 .ctl .bar{height:8px;background:var(--subtle);border:1px solid var(--dim)}.ctl .bar i{display:block;height:100%;background:var(--muted)}
 .ctl.on{color:var(--fg);font-weight:bold}.ctl.on .bar i{background:var(--fg)}.ctl:not(.on){color:var(--muted)}.ctl span:last-child{text-align:right;font-size:10px}
-#feed{max-height:340px;overflow:auto}#feed div{padding:3px 4px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid var(--subtle);color:var(--muted)}
+#feed div{padding:3px 4px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid var(--subtle);color:var(--muted)}
 #feed div:hover{background:var(--subtle)}#feed div.sel{color:var(--fg);background:var(--panel);outline:1px solid var(--dim)}
 .v-surprise{text-decoration:underline}.v-fail,.v-failed{color:var(--fg);font-weight:bold}
 #goals div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted);padding:1px 0}#goals .focus{color:var(--fg);font-weight:bold}#goals .done{text-decoration:line-through}
 button,select{background:var(--panel);color:var(--fg);border:1px solid var(--dim);padding:2px 8px;font:inherit;font-size:10px}
-canvas{display:block;background:var(--bg);max-width:100%;border:1px solid var(--dim)}
-#edges{max-height:160px;overflow:auto;margin-top:10px}#edges div{color:var(--muted);border-bottom:1px solid var(--subtle);padding:2px 0}
+canvas{display:block;width:100%;background:var(--bg);border:1px solid var(--dim)}
+#edges div{color:var(--muted);border-bottom:1px solid var(--subtle);padding:2px 0}
 footer{display:flex;justify-content:space-between;border-top:1px solid var(--fg);padding:10px 18px;color:var(--muted);font-size:10px}
-@media (max-width:1100px){main{grid-template-columns:1fr}}
+@media (max-width:1100px){body{height:auto;overflow:auto}main{grid-template-columns:1fr;grid-template-rows:none}.grow{flex:none}.grow>:last-child{max-height:420px}}
 </style></head><body>
 <header><b>AVATAR / RUN</b><span id="run" class="muted"></span><span style="flex:1"></span>
 <button id="follow">FOLLOW LIVE</button><span id="badge" class="badge"><i></i><span>IDLE</span></span></header>
 <main>
-<div class="col">
-<section><h3>FRAME <span id="fstep"></span></h3><img id="frame" alt=""></section>
-<section><h3>CONTROLS <span id="ckind"></span></h3><div id="controls"></div></section></div>
-<div class="col">
-<section><div id="decision"><div class="out"><div class="k">MODEL OUTPUT</div><div class="big">WAITING FOR TRACE</div><div class="muted">start scripts/run_agent.py on this run</div></div></div></section>
-<section><h3>FEED <span id="fcount"></span></h3><div id="feed"></div></section>
-<section><h3>GOALS <span id="gfocus"></span></h3><div id="goals"></div></section></div>
-<div class="col"><section><h3>MAP <select id="place"></select></h3><canvas id="map" width="560" height="440"></canvas><div id="edges"></div></section></div>
+<!-- row-major 3x2 grid: top-row panels share one bottom seam -->
+<section class="grow"><h3>FRAME <span><span id="lcount"></span> <button id="after">BEFORE</button> <button id="overlay">OVERLAY OFF</button> <span id="fstep"></span></span></h3><div class="stage"><img id="frame" alt=""><canvas id="lens" hidden></canvas></div></section>
+<section class="grow"><div id="card" class="out"><div class="k">MODEL OUTPUT</div><div class="big">WAITING FOR TRACE</div><div class="muted">start scripts/run_agent.py on this run</div></div><div id="detail" class="kv"></div></section>
+<section class="grow"><h3>MAP <select id="place"></select></h3><canvas id="map"></canvas></section>
+<div class="col"><section><h3>CONTROLS <span id="ckind"></span></h3><div id="controls"></div></section>
+<section class="grow"><h3>GOALS <span id="gfocus"></span></h3><div id="goals"></div></section></div>
+<section class="grow"><h3>FEED <span id="fcount"></span></h3><div id="feed"></div></section>
+<section class="grow"><h3>PLACE LINKS <span>learned moves between places</span></h3><div id="edges"></div></section>
 </main>
 <footer><span id="fstat">STEP —</span><span id="fcalls"></span></footer>
 <script>
 const $=id=>document.getElementById(id), rows=[], esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const PAD=["UP","DOWN","LEFT","RIGHT","A","B","START","SELECT"], DIR={UP:"↑",DOWN:"↓",LEFT:"←",RIGHT:"→"};
 let pinned=null, chosenPlace=null, last={};
+let after=false; $("after").onclick=()=>{after=!after; $("after").textContent=after?"AFTER":"BEFORE"; render()};
+let overlay=false; $("overlay").onclick=()=>{overlay=!overlay; $("overlay").textContent=overlay?"OVERLAY ON":"OVERLAY OFF"; $("frame").hidden=overlay; $("lens").hidden=!overlay; render()};
 $("follow").onclick=()=>{pinned=null;chosenPlace=null;render()};
 $("place").onchange=e=>{chosenPlace=e.target.value;render()};
 async function poll(){
@@ -148,7 +165,9 @@ async function poll(){
     if(s.run!==last.run){pinned=null;chosenPlace=null;rows.length=0} else if(s.rows.length&&rows.length&&s.rows[0].step<=since) rows.length=0; rows.push(...s.rows); last=s; render();}catch(e){}
   setTimeout(poll,500);
 }
-const sel=()=>pinned!=null?rows.find(r=>r.step===pinned):rows[rows.length-1];
+// the decided-but-unfinished step from live.json, shown until its trace row lands; stale files from an older run are ignored
+const pending=()=>{const p=last.pending, n=rows.length?rows[rows.length-1].step:0; return p&&p.step===n+1?{...p,pending:true,verdict:"acting"}:null};
+const sel=()=>pinned!=null?rows.find(r=>r.step===pinned):pending()||rows[rows.length-1];
 const label=id=>{const p=(last.places||[]).find(p=>p.id===id);return p?`${p.name||id} [${id}]`:id||"?"};
 function keysOf(r){ // real presses from presses.jsonl; older runs fall back to the chosen buttons
   const k=(last.presses||{})[r.step]; if(k) return [k,"PRESSED"];
@@ -158,21 +177,43 @@ function render(){
   const r=sel(), live=rows[rows.length-1];
   $("run").textContent=last.run||""; $("badge").className="badge"+(last.live?" live":""); $("badge").lastChild.textContent=last.live?"LIVE":"IDLE";
   $("fstat").textContent=live?`STEP ${String(live.step).padStart(5,"0")} / ${label(live.place).toUpperCase()}`:"STEP —"; $("fcalls").textContent=`${last.calls||0} MODEL CALLS`;
-  if(r){ const src="/"+r.frame; if(!$("frame").src.endsWith(src)) $("frame").src=src; $("fstep").textContent="STEP "+r.step+(pinned!=null?" / PINNED":"");
-    const c=r.choice||{}, sk=r.skill||{}, p=r.plan, o=r.outcome||{};
-    const kv=[["why",c.why||(r.act||{}).why],["predict",r.pred?`${r.pred.effect} (${r.pred.basis})`:""],["outcome",(o.effects||[]).join(", ")],
-      ["skill",`${sk.status||""} ${sk.reason||""}`],["place",label(r.place)+(r.tile?` @ ${r.tile}`:"")]];
-    if(p) kv.push(["replan",p.trigger],["focus",p.focus],["plan why",p.why]);
-    $("decision").innerHTML=`<div class="out"><div class="k">MODEL OUTPUT</div><div class="big">${esc(`${c.verb||"wait"} ${c.target||""}`.toUpperCase())}</div>
-      <div class="muted">${esc(String(r.verdict||"").toUpperCase())}  /  ${esc(r.screen)}  /  ${r.calls} CALLS  /  ${r.ms} MS</div></div>
-      <div class="kv">${kv.map(([k,v])=>`<div>${k}</div><div>${esc(v)}</div>`).join("")}</div>`;
+  if(r){ const src="/"+(after&&r.after?r.after:r.frame); if(!$("frame").src.endsWith(src)) $("frame").src=src; $("fstep").textContent="STEP "+r.step+(pinned!=null?" / PINNED":"");
+    const c=r.choice||{}, sk=r.skill||{}, p=r.plan, o=r.outcome||{}, a=r.act||{}, pr=r.pred||{}, j=v=>v==null?"":typeof v==="object"?JSON.stringify(v):String(v);
+    const ents=r.entities||[];
+    const groups=[  // only what the vision and act calls returned, plus the outcome and any replan
+      ["VISION",[["screen",r.screen+(r.perception_reused?" (cached look)":"")],["things",ents.map(e=>String(e.kind).toLowerCase()==="player"?"you":e.name||e.kind).join(", ")]]],
+      ["ACT",[["place",a.place],["action",j(a.action)],["typed",c.text],["expects",pr.effect],["notebook",a.ops?`${a.ops} edit${a.ops>1?"s":""}`:""],["why",c.why||a.why]]],
+      ["RESULT",[["saw",(o.effects||[]).join(", ")],["verdict",r.verdict],["moved to",r.next_place&&r.next_place!==r.place?label(r.next_place):""]]],
+      ["REPLAN",p?[["focus",p.focus],["why",p.why]]:[]]];
+    $("card").innerHTML=`<div class="k">MODEL OUTPUT</div><div class="big">${esc(`${c.verb||"wait"} ${c.target||""}`.toUpperCase())}</div>
+      <div class="muted">${r.pending?`ACTING...  /  ${esc(r.screen)}`:`${esc(String(r.verdict||"").toUpperCase())}  /  ${esc(r.screen)}  /  ${r.calls} CALLS  /  ${r.ms} MS`}</div>`;
+    $("detail").innerHTML=groups.map(([g,kv])=>{kv=kv.filter(([,v])=>v!==""&&v!=null);return kv.length?`<div class="g">${g}</div>`+kv.map(([k,v])=>`<div class="k">${esc(k)}</div><div>${esc(v)}</div>`).join(""):""}).join("");
+    lens(r);
     const [keys,kind]=keysOf(r), n=k=>keys.filter(x=>x===k).length, most=Math.max(1,...PAD.map(n)); $("ckind").textContent=`${keys.length} ${kind}`;
     $("controls").innerHTML=PAD.map(k=>`<div class="ctl ${n(k)?"on":""}"><span>${n(k)?"> ":"  "}${k}</span><div class="bar"><i style="width:${100*n(k)/most}%"></i></div><span>${n(k)}</span></div>`).join("");}
   $("fcount").textContent=rows.length+" STEPS";
-  $("feed").innerHTML=rows.slice(-300).reverse().map(x=>{const c=x.choice||{};return `<div data-s="${x.step}" class="${x.step===(r&&r.step)?"sel":""}">${x.step===(r&&r.step)?">":" "} ${String(x.step).padStart(4,"0")}  ${esc(label(x.place))}  ${esc(c.verb||"")} ${esc(c.target||"")} -> <span class="v-${esc(x.verdict)}">${esc(x.verdict)}</span>${x.plan?"  [REPLAN]":""}</div>`}).join("");
-  goals(); map(r);
+  const pend=pending(), pc=(pend&&pend.choice)||{};
+  $("feed").innerHTML=(pend?`<div class="${r===pend||r&&r.pending?"sel":""}">${r&&r.pending?">":" "} ${String(pend.step).padStart(4,"0")}  ${esc(label(pend.place))}  ${esc(pc.verb||"")} ${esc(pc.target||"")} -> acting...</div>`:"")+rows.slice(-300).reverse().map(x=>{const c=x.choice||{};return `<div data-s="${x.step}" class="${x.step===(r&&r.step)?"sel":""}">${x.step===(r&&r.step)?">":" "} ${String(x.step).padStart(4,"0")}  ${esc(label(x.place))}  ${esc(c.verb||"")} ${esc(c.target||"")} -> <span class="v-${esc(x.verdict)}">${esc(x.verdict)}</span>${x.plan?"  [REPLAN]":""}</div>`}).join("");
+  goals(); map(r&&r.pending?rows[rows.length-1]:r);  // the pending step has no tile until it lands
 }
 $("feed").onclick=e=>{const d=e.target.closest("[data-s]"); if(d){pinned=+d.dataset.s; chosenPlace=null; render();}};
+const img=new Image(); img.onload=()=>lens(sel());
+function lens(r){ // the perception layer over a small copy of the frame: detected entities, the self box, the player fix
+  const cv=$("lens"), ctx=cv.getContext("2d"); if(cv.width!==cv.clientWidth||cv.height!==cv.clientHeight){cv.width=cv.clientWidth;cv.height=cv.clientHeight}
+  ctx.clearRect(0,0,cv.width,cv.height); if(!r) return;
+  const src="/"+r.frame; if(!img.src.endsWith(src)){img.src=src; return}
+  if(!img.complete||!img.naturalWidth) return;
+  const k=Math.min(cv.width/img.naturalWidth,cv.height/img.naturalHeight), W=img.naturalWidth*k, H=img.naturalHeight*k, X=(cv.width-W)/2, Y=(cv.height-H)/2;
+  ctx.imageSmoothingEnabled=false; ctx.globalAlpha=.55; ctx.drawImage(img,X,Y,W,H); ctx.globalAlpha=1;
+  const at=p=>[X+p[0]*W,Y+p[1]*H], ents=(r.entities||[]).filter(e=>Array.isArray(e.at)), t=16*k;
+  ctx.font="10px Consolas"; ctx.textBaseline="bottom"; $("lcount").textContent=`${ents.length} ENTITIES${r.perception_reused?" / CACHED":""}`;
+  if(Array.isArray(r.self_spot)){const [x,y]=at(r.self_spot); ctx.strokeStyle="#f2f2f2"; ctx.lineWidth=2; ctx.strokeRect(x-t/2,y-t/2,t,t); ctx.lineWidth=1}
+  if(r.player_fix&&r.player_fix.from&&r.player_fix.to){const [a,b]=at(r.player_fix.from),[c,d]=at(r.player_fix.to); ctx.strokeStyle="#858585"; ctx.setLineDash([3,3]); ctx.beginPath(); ctx.moveTo(a,b); ctx.lineTo(c,d); ctx.stroke(); ctx.setLineDash([])}
+  for(const e of ents){ const [x,y]=at(e.at), me=String(e.kind).toLowerCase()==="player";
+    ctx.strokeStyle=me?"#f2f2f2":"#c8c8c8"; ctx.beginPath(); ctx.moveTo(x-5,y); ctx.lineTo(x+5,y); ctx.moveTo(x,y-5); ctx.lineTo(x,y+5); ctx.stroke();
+    const text=me?"YOU":(e.name||e.kind||"?"), w=ctx.measureText(text).width+6, lx=Math.min(Math.max(x-w/2,0),cv.width-w), ly=Math.max(y-7,13);
+    ctx.fillStyle="#080808"; ctx.fillRect(lx,ly-12,w,12); ctx.strokeStyle="#303030"; ctx.strokeRect(lx,ly-12,w,12); ctx.fillStyle=me?"#f2f2f2":"#c8c8c8"; ctx.fillText(text,lx+3,ly);}
+}
 function goals(){
   const g=(last.notebook||{}).goals||{}, focus=(last.notebook||{}).focus, out=[]; $("gfocus").textContent=focus?"FOCUS "+focus:"";
   const walk=(parent,depth)=>Object.entries(g).filter(([,v])=>(v.parent||null)===parent).forEach(([k,v])=>{
@@ -182,7 +223,9 @@ function goals(){
 function map(r){
   const places=(last.places||[]).filter(p=>p.state!=="merged"), cur=chosenPlace||(r&&r.place);
   $("place").innerHTML=places.map(p=>`<option value="${esc(p.id)}" ${p.id===cur?"selected":""}>${esc(label(p.id))}</option>`).join("");
-  const tiles=(last.tiles||[]).filter(t=>t.place===cur), cv=$("map"), ctx=cv.getContext("2d"); ctx.clearRect(0,0,cv.width,cv.height);
+  const tiles=(last.tiles||[]).filter(t=>t.place===cur), cv=$("map"), ctx=cv.getContext("2d");
+  if(cv.width!==cv.clientWidth||cv.height!==cv.clientHeight){cv.width=cv.clientWidth;cv.height=cv.clientHeight} // drawing buffer follows the fitted size
+  ctx.clearRect(0,0,cv.width,cv.height);
   const me=r&&r.place===cur&&r.tile?r.tile:null, xs=tiles.map(t=>t.x).concat(me?[me[0]]:[]), ys=tiles.map(t=>t.y).concat(me?[me[1]]:[]);
   ctx.font="11px Consolas"; ctx.textAlign="center"; ctx.textBaseline="middle";
   if(xs.length){

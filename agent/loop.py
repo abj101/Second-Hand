@@ -1,5 +1,5 @@
 """One game-neutral perception, choice, action, and learning cycle."""
-import hashlib, time
+import hashlib, json, os, time
 from agent.act import act
 from agent.brief import GENERAL, _load, defaults, load_brief
 from agent.decide import Choice
@@ -160,6 +160,7 @@ class Loop:
         if action: choice = Choice(i, a.expect, "", [], a.why, True, a.text)
         unknown = bool(choice and affs[choice.i].get("verb") in ("approach", "interact") and not self.env.pointer and
                        not any(e.get("kind", "").casefold() == "player" for e in per.get("entities", [])))
+        self._live(before, place, per, choice and {**affs[choice.i], "why": choice.why, "text": choice.text}, a)
         skillctx = Ctx(self.env, self.model, self.tile_px, self.move_frames)
         try:
             skill = self.world.travel(skillctx, travel_legs, self.step_no + 1, self.trace) if travel_legs is not None and choice else wait_until(skillctx) if not affs or choice is None else press_seq(skillctx, affs[choice.i]["target"].split()) if affs[choice.i].get("verb") == "buttons" else run_affordance(skillctx, affs[choice.i], per, text=choice.text, exit=False, **({"route": act_route} if act_route else {}))
@@ -206,7 +207,7 @@ class Loop:
             self.mem.add_edge(place, affs[choice.i]["verb"], affs[choice.i].get("target", ""), next_place, True)
             if world_exit: self.world.mark_exit(place, cut_dir, next_place, self.world.pos, self.step_no+1)
         row = {"step": self.step_no + 1, "t": time.time(), "place": place, "screen": per.get("screen"),
-            "task": None, "frame": f"frames/{self.step_no+1:06d}.png", "options": len(affs),
+            "task": None, "frame": f"frames/{self.step_no+1:06d}.png", "after": f"frames/{self.step_no+1:06d}_after.png", "options": len(affs),
             "choice": ({"i": choice.i, **affs[choice.i], "id": targets[choice.i], "called": choice.called, "text": choice.text, "why": choice.why} if choice else None),
             "pred": pred, "used": choice.used if choice else [], "skill": {"status": skill.status, "reason": skill.reason, "inputs": skill.inputs, "calls": skill.calls},
             "outcome": outcome, "verdict": v, "calls": self.model.calls-calls, "ms": int((time.perf_counter()-start)*1000), "shortcut": None,
@@ -216,7 +217,7 @@ class Loop:
         row["plan"] = self._plan_row
         row["probe"] = {"presses": probe["presses"], "locked": probe["locked"]} if probe is not None else None
         self.step_no += 1
-        (self.mem.root.parent / row["frame"]).parent.mkdir(parents=True, exist_ok=True); before.save(self.mem.root.parent / row["frame"])
+        after.save(self.mem.root.parent / row["after"])
         drift_fix = self.world.observe_after(after_per, after, after_reused, next_place, after.size, self.step_no, before=before, skill=skill)
         row["tile"], row["drift_fix"] = self.world.pos if self.tile_px else None, list(drift_fix) if drift_fix else None
         row["self_spot"], row["self_locked"] = self.world.self_spot, self.world._self_from_motion
@@ -254,6 +255,14 @@ class Loop:
             key = (f"{x + DIRS[d][0]},{y + DIRS[d][1]}" in seen, len(dirs))
             if best is None or key < best[0]: best = (key, [*dirs, d])
         return {"dirs": best[1]} if best else None
+    def _live(self, frame, place, per, choice, a):
+        """The decision before it is acted on, for scripts/watch_run.py; the trace row only lands after the skill and verification."""
+        root = self.mem.root.parent; name = f"frames/{self.step_no+1:06d}.png"
+        (root / "frames").mkdir(parents=True, exist_ok=True); frame.save(root / name)
+        live = {"step": self.step_no + 1, "t": time.time(), "frame": name, "place": place, "screen": per.get("screen"), "entities": self.world.entities,
+                "choice": choice or None, "act": {"place": a.place, "why": a.why, "action": a.action}, "plan": self._plan_row, "self_spot": self.world.self_spot}
+        try: (root / "live.tmp").write_text(json.dumps(live, default=str), encoding="utf-8"); os.replace(root / "live.tmp", root / "live.json")
+        except OSError: pass  # a reader holding live.json on Windows; the trace row still lands
     def _moved(self, src, dst, via, step):
         label = self.world.place_label
         self.notebook.note(step, f"went from {label(src)} to {label(dst)}" + (f" via {via}" if via else ""))
