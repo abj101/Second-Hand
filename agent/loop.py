@@ -58,6 +58,7 @@ class Loop:
         player_fix = self.world.fix_player(per, before.size); self.empty_streak = self.empty_streak + 1 if self.parse_failed else 0; self.repair_used = self.repair_used if self.parse_failed else False
         modal = self.prev and {self.prev.get("screen"), per.get("screen")} <= {"world", "dialogue", "menu"} and self.prev.get("screen") != per.get("screen") and "world" in (self.prev.get("screen"), per.get("screen")) and not (self.pending_cut or before_set.blank_seen)
         place = self.mem.match_place(per, self.step_no + 1, prev=prior, cut=bool((self.pending_cut or prior and cut(self.prev_frame, before, before_set.blank_seen)) and not modal), via=self.pending_via, frame=before, tile_px=self.tile_px)
+        if prior and place != prior: self._moved(prior, place, self.pending_via, self.step_no + 1)
         self.place, self.pending_cut, self.pending_via = place, False, None
         size = before.size
         proj = self.world.before(per, place, prior, size, self.step_no + 1)[0]
@@ -73,6 +74,7 @@ class Loop:
                 if probe["scene_cut"]:
                     probe_place = self.mem.match_place(probe_per, self.step_no + 1, prev=place, cut=True, frame=probe_frame, tile_px=self.tile_px)
                     self.world.after(probe["skill"], place, probe_place, True, self.step_no + 1)
+                    if probe_place != place: self._moved(place, probe_place, "a step taken to locate yourself", self.step_no + 1)
                     place = self.place = probe_place
                 per, frame_hash, reused = probe_per, probe_hash, probe_reused
                 before, size = probe_frame, probe_frame.size
@@ -168,6 +170,7 @@ class Loop:
         scene_cut &= not modal
         next_place = self.world.current_place if travel_legs is not None else place if modal else self.mem.match_place(after_per, self.step_no + 1, prev=place, cut=scene_cut, via=(affs[choice.i].get("target") if choice else None), exit=exit_key, via_id=targets[choice.i] if choice else None, frame=after, tile_px=self.tile_px)
         spatial = self.world.after(skill, place, next_place, scene_cut, self.step_no + 1); known_exit = spatial["known_exit"]
+        if next_place != place: self._moved(place, next_place, affs[choice.i].get("target") if choice else None, self.step_no + 1)
         if skill.scroll != (0, 0) and next_place == place and self.mem.get("places", place).get("state") == "candidate":
             source = self.mem.get("places", place); source["state"] = "place"; self.mem.upsert("places", source)
         world_exit = bool(scene_cut and next_place != place and cut_dir and per.get("screen") == after_per.get("screen") == "world")
@@ -225,6 +228,9 @@ class Loop:
         fresh = [t for t in texts if t not in seen and _key(t) not in known]
         for text in (t for t in texts if t not in seen): self.mem.know(text, src="game_text", step=step)
         if fresh: self.notebook.note(step, f"text at {self.world.place_label(place) if place else '?'}: " + " / ".join(f'"{t}"' for t in fresh)); self.text_pending = True
+    def _moved(self, src, dst, via, step):
+        label = self.world.place_label
+        self.notebook.note(step, f"went from {label(src)} to {label(dst)}" + (f" via {via}" if via else ""))
     def _goal_text(self):
         goals = self.notebook.data["goals"]; path = self.notebook.path()
         keys = path or [k for k, v in goals.items() if v.get("status", "active") == "active"]

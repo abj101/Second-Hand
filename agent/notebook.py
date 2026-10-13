@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 SECTIONS = ("goals", "hints", "lessons")
 CAPS = {"lessons": 10, "hints": 20}  # most recent kept by step
@@ -65,7 +66,12 @@ class Notebook:
     def _save(self, lines) -> None:
         self.log = self.log[-200:]
         with self.history.open("a", encoding="utf-8") as f: f.write("".join(line + "\n" for line in lines))
-        tmp = self.file.with_suffix(".tmp"); tmp.write_text(json.dumps({**self.data, "focus": self.focus, "log": self.log}, ensure_ascii=False, indent=1), encoding="utf-8"); tmp.replace(self.file)
+        tmp = self.file.with_suffix(".tmp"); tmp.write_text(json.dumps({**self.data, "focus": self.focus, "log": self.log}, ensure_ascii=False, indent=1), encoding="utf-8")
+        for wait in (0, .05, .1, .2, .4, .8):  # Windows: a scanner can hold the fresh temp file for a moment
+            time.sleep(wait)
+            try: tmp.replace(self.file); break
+            except PermissionError:
+                if wait == .8: raise
     def render_log(self, n: int = LOG_SHOWN) -> str:
         return "\n".join(f"- step {e.get('step')}: {e.get('text')}" for e in self.log[-n:]) or "(nothing yet)"
     def render_focus(self, limit: int = 4000) -> str:

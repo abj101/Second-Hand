@@ -1,6 +1,6 @@
 # GP: Goal planner — goals worked backwards to one focus, plus a done log
 
-Status: in progress (plan written 2026-10-13; build next, then offline eval) · Branch: feat/lean-agent · Follows: [PS.md](PS.md) §9c · User decision 2026-10-13: Option B (event-triggered planner)
+Status: STOP 7a (built `aa301bb` + follow-ups; offline eval done 2026-10-13; awaiting live approval) · Branch: feat/lean-agent · Follows: [PS.md](PS.md) §9c · User decision 2026-10-13: Option B (event-triggered planner)
 
 ## 0. Why (evidence)
 - **Run `runs/m1_ps_fp`, steps 81–180.** The agent never left the house and its party stayed at 0. Spend: 113 requests. Haiku extracted the evidence from `notebook.history` and the trace.
@@ -104,5 +104,24 @@ Status: in progress (plan written 2026-10-13; build next, then offline eval) · 
 - **STOP 7a.** After the offline eval, the user approves live spend.
 - **STOP 7b.** After a live run from checkpoint 80 (≤ 80 requests).
 
-## 9. Result
-(filled in after the eval)
+## 9. Result (2026-10-13)
+- **Built.**
+  - `agent/plan.py` is the planner call.
+  - The notebook now has a goal tree, a `focus`, and an append-only `log` (goal closures, game text, lessons, and **moves between places**).
+  - Act sees the root-to-focus path plus the log, and may only close or annotate the focus.
+  - Trigger wiring is in `Loop._plan_trigger`.
+  - `Notebook._save` retries `os.replace` on Windows `PermissionError`; Haiku found it failing intermittently.
+  - `pytest tests/agent`: 243 passed.
+- **Offline eval** (`scripts/eval_plan.py`; checkpoint-80 memory; frame 82; 16 requests over 2 rounds; M1 ledger now 1178/1250):
+
+  | Case | Round 1 (log = game text) | Round 2 (log + place moves) |
+  |---|---|---|
+  | P1: planner from scratch | 0/2 (focus: stairs) | 0/2 in substance (both plan to leave via the stairs; try 1's focus text "Go to the house exit" passed the regex, but its act heads for the stairs) |
+  | P2: stairs blocked, with history | 2/2 ("Find the exit door" → "Leave via the door") | 2/2 ("explore the ground floor for a door") |
+  | A1: act on the P2 focus | n/a (frame 81 is dialogue, so `advance` was correct) | 2/2 (moves LEFT/DOWN, toward the real door at bottom-left) |
+
+- **Reading.**
+  - Backward reasoning works once a failure is known. P2 decomposes "leave house" → "find the door" and act heads for it.
+  - From scratch the planner picks the only exit memory knows, the stairs. Memory at step 80 holds no door or rug on 1F, and both floors are named "world", so nothing says the stairs go back up to the starting bedroom.
+  - The expected live behaviour is therefore ADaPT-style: one stairs round trip, then act marks the focus `blocked` ("arrived back in the bedroom"), the planner replans, and the agent heads for the door. The pre-registered P1 gate fails.
+- **Not done.** P1 might pass with distinct place names (e.g. "bedroom" / "living room"), but that would be a perception or naming change outside this packet.
