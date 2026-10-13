@@ -3,9 +3,11 @@ import hashlib, time
 from agent.act import act
 from agent.brief import GENERAL, _load, defaults, load_brief
 from agent.decide import Choice
-from agent.notebook import Notebook
+from agent.memory import _key
+from agent.notebook import FINISHED, Notebook
 from agent.observer import cut, for_model, wait_settled
 from agent.perceive import perceive
+from agent.plan import plan
 from agent.predict import PRED, effects, predict, verdict
 from agent.skills import Ctx, press_seq, run_affordance, wait_until
 from agent.tasks import Stuck
@@ -26,6 +28,7 @@ class Loop:
         self.pending_cut, self.pending_via, self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = False, None, False, 0, False, False
         self.reperception_used = False
         self.world = World(mem, self.tile_px)
+        self.last_plan, self.text_pending, self.focus_closed, self._plan_row = None, False, None, None
     @property
     def pos(self): return self.world.pos
     @pos.setter
@@ -74,12 +77,17 @@ class Loop:
                 per, frame_hash, reused = probe_per, probe_hash, probe_reused
                 before, size = probe_frame, probe_frame.size
                 proj = self.world.before(per, place, place, size, self.step_no + 1)[0]
-        for text in per.get("text", []):
-            if text not in (self.prev or {}).get("text", []): self.mem.know(text, src="game_text", step=self.step_no + 1)
+        self._learn(per.get("text", []), (self.prev or {}).get("text", []), self.step_no + 1, place)
         self.world.view_flags = self.flags
-        goals = " ".join(f"{key} {value.get('text', '')}" for key, value in self.notebook.data["goals"].items()
-                          if value.get("status", "active") == "active")
-        view = self.world.view(goals, place)
+        view = self.world.view(self._goal_text(), place)
+        self._plan_row = None
+        if (trigger := self._plan_trigger(per)):
+            p = plan(self.model, trigger, self.notebook, view, per.get("text", []), [f"{(r.get('choice') or {}).get('verb')} {(r.get('choice') or {}).get('target') or ''} -> {r.get('verdict')}" for r in self.recent])
+            ops = self.notebook.apply(p.ops, self.step_no + 1); self.notebook.set_focus(p.focus or self.notebook.focus, self.step_no + 1)
+            if p.lesson: self.notebook.note(self.step_no + 1, f"lesson: {p.lesson}")
+            self.last_plan, self.text_pending, self.focus_closed = self.step_no + 1, False, None
+            self._plan_row = {"trigger": trigger, "focus": self.notebook.focus, "ops": ops, "why": p.why}
+            view = self.world.view(self._goal_text(), place)
         affs, targets, preds = [], [], []
         choice, player = None, next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         act_route = travel_legs = None
@@ -111,8 +119,10 @@ class Loop:
                 summaries.pop(1 if self.stuck.n else 0); recent_flag = "recent: " + "; ".join(summaries)
             act_flags.append(recent_flag[:197] + "..." if len(recent_flag) > 200 else recent_flag)
         act_flags.append(self.world.here_flag())
-        a = act(self.model, None if self.act_text else model_frame, per, self.notebook.render(), view, act_flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]])
-        applied = self.notebook.apply(a.ops, self.step_no + 1)
+        a = act(self.model, None if self.act_text else model_frame, per, self.notebook.render_focus(), view, act_flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]])
+        applied = self.notebook.apply(a.ops, self.step_no + 1, structure=False)
+        closed = self.notebook.data["goals"].get(self.notebook.focus or "", {})
+        if closed.get("status") in FINISHED: self.focus_closed = f"focus {self.notebook.focus} {closed['status']}: {closed.get('evidence', '')}"
         named = self.world.name(place, a.place, self.step_no + 1)
         if named != place:  # model says this new arrival is a known place
             place = self.place = named
@@ -193,14 +203,14 @@ class Loop:
             "ranker": None, "perception_reused": reused, "frame_hash": frame_hash, "marked": marked,
             "scene_cut": scene_cut, "next_place": next_place, "verified_edge": verified_edge, "view_ids": [], "tile": self.world.pos if self.tile_px else None, "drift_fix": list(drift_fix) if drift_fix else None, "player_fix": player_fix, "entities": self.world.entities, "scroll": spatial["scroll"], **({"exit": list(exit_key)} if scene_cut and not modal and next_place != place and exit_key else {}),
             "act": {"place": a.place, "ops": applied, "why": a.why, "action": a.action, "flags": act_flags}, **({"flags": [f"merge_pending: {self.world.merge_pending}"]} if self.world.merge_pending else {})}
+        row["plan"] = self._plan_row
         row["probe"] = {"presses": probe["presses"], "locked": probe["locked"]} if probe is not None else None
         self.step_no += 1
         (self.mem.root.parent / row["frame"]).parent.mkdir(parents=True, exist_ok=True); before.save(self.mem.root.parent / row["frame"])
         drift_fix = self.world.observe_after(after_per, after, after_reused, next_place, after.size, self.step_no, before=before, skill=skill)
         row["tile"], row["drift_fix"] = self.world.pos if self.tile_px else None, list(drift_fix) if drift_fix else None
         row["self_spot"], row["self_locked"] = self.world.self_spot, self.world._self_from_motion
-        for text in after_per.get("text", []):
-            if text not in per.get("text", []): self.mem.know(text, src="game_text", step=self.step_no)
+        self._learn(after_per.get("text", []), per.get("text", []), self.step_no, next_place)
         self.place, self.prev, self.prev_frame, self.cached, self.cached_hash = next_place, after_per, after, after_per, after_hash
         self.prev_frame_mark_eligible = after_mark_eligible
         self.pending_cut, self.pending_via = False, None; reason = self.stuck.update(row); self.repair_pending = self.parse_failed and self.empty_streak >= 8 and not self.repair_used; self.repair_used |= self.repair_pending
@@ -209,8 +219,27 @@ class Loop:
         self.flags = [x for x in (reason, f"last action {skill.status}: {skill.reason}" if skill.status != "done" else None, f"verdict {v}" if v in ("miss", "surprise") else None, f"merge_pending: {self.world.merge_pending}" if self.world.merge_pending else None) if x]; self.world.merge_pending = None; self.world.new_arrival = False
         self.trace.write(row); self.recent = [*self.recent, row][-5:]
         return row
+    def _learn(self, texts, seen, step, place):
+        """Store new game text and log it once, so dialogue is remembered after it scrolls away."""
+        known = {_key(r.get("text", "")) for r in self.mem.rows("knowledge")}
+        fresh = [t for t in texts if t not in seen and _key(t) not in known]
+        for text in (t for t in texts if t not in seen): self.mem.know(text, src="game_text", step=step)
+        if fresh: self.notebook.note(step, f"text at {self.world.place_label(place) if place else '?'}: " + " / ".join(f'"{t}"' for t in fresh)); self.text_pending = True
+    def _goal_text(self):
+        goals = self.notebook.data["goals"]; path = self.notebook.path()
+        keys = path or [k for k, v in goals.items() if v.get("status", "active") == "active"]
+        return " ".join(f"{k} {goals[k].get('text', '')}" for k in keys)
+    def _plan_trigger(self, per):
+        """Events that warrant replanning; the model decides what they mean. Closing the focus always replans, the rest at most every 3 steps."""
+        if self.focus_closed: return self.focus_closed
+        if self.last_plan is not None and self.step_no + 1 - self.last_plan < 3: return None
+        goal = self.notebook.data["goals"].get(self.notebook.focus or "")
+        if not goal or goal.get("status") in FINISHED: return "no focus goal yet" if not goal else f"focus {self.notebook.focus} is {goal['status']}"
+        if self.text_pending and per.get("screen") == "world": return "new game text was seen (see the log)"
+        stuck = next((f for f in self.flags if f in ("same_action", "no_progress")), None)
+        return f"stuck: {stuck}" if stuck else None
     def state(self):
-        return {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "reperception_used": self.reperception_used, "perception": self.cached, "frame_hash": self.cached_hash, "perception_marked": self.cached_marked, "frame_mark_eligible": self.prev_frame_mark_eligible, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "pending_via": self.pending_via, "flags": self.flags}
+        return {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "reperception_used": self.reperception_used, "perception": self.cached, "frame_hash": self.cached_hash, "perception_marked": self.cached_marked, "frame_mark_eligible": self.prev_frame_mark_eligible, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "pending_via": self.pending_via, "flags": self.flags, "planner": {"last": self.last_plan, "text_pending": self.text_pending, "focus_closed": self.focus_closed}}
     def restore(self, state):
         self.step_no, self.place = int(state.get("step", 0)), state.get("place")
         self.tile_px, self.move_frames = state.get("tile_px"), int(state.get("move_frames", 16))
@@ -221,4 +250,5 @@ class Loop:
         digest = hashlib.sha256(self.prev_frame.tobytes()).hexdigest()
         self.cached, self.cached_hash, self.cached_marked, self.cached_version = state.get("perception"), state.get("frame_hash"), bool(state.get("perception_marked", False)), state.get("perception_version")
         self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = bool(state.get("parse_failed")), int(state.get("empty_streak", 0)), bool(state.get("repair_used")), bool(state.get("repair_pending")); self.pending_cut, self.pending_via = bool(state.get("pending_cut")), state.get("pending_via"); self.flags = state.get("flags", [])
+        planner = state.get("planner") or {}; self.last_plan, self.text_pending, self.focus_closed = planner.get("last"), bool(planner.get("text_pending")), planner.get("focus_closed")
         if self.cached_version != self.prompt_version or digest != self.cached_hash: self.cached = self.cached_hash = None; self.cached_marked = False

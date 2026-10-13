@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from PIL import Image, ImageDraw
@@ -122,4 +123,9 @@ class GridEnv:
 class StubModel:
     def __init__(self, replies: list[Any]) -> None: self._replies, self.calls = deque(replies), 0
 
-    def ask(self, *args, **kwargs) -> Any: self.calls += 1; return self._replies.popleft()
+    def ask(self, *args, **kwargs) -> Any:
+        # planner calls get an empty plan unless the test queued one (a reply whose data has "focus")
+        nxt = self._replies[0] if self._replies else None
+        if kwargs.get("role") == "plan" and not (isinstance(getattr(nxt, "data", None), dict) and "focus" in nxt.data):
+            return SimpleNamespace(data={"goals": [], "focus": "", "why": "stub"}, text="")
+        self.calls += 1; return self._replies.popleft()

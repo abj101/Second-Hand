@@ -85,7 +85,9 @@ def test_twenty_steps_have_contract_keys_and_reuse(tmp_path):
         def __init__(self):
             super().__init__([]); self.replies = {"perceiver": deque([reply(perception()), reply(perception())]),
                                                    "act": deque(act_reply(None) for _ in range(20))}
-        def ask(self, *args, **kwargs): self.calls += 1; return self.replies[kwargs["role"]].popleft()
+        def ask(self, *args, **kwargs):
+            if kwargs["role"] == "plan": return SimpleNamespace(data={"goals": [], "focus": "", "why": "stub"}, text="")
+            self.calls += 1; return self.replies[kwargs["role"]].popleft()
     model=Roles(); loop=Loop(GridEnv(),model,Memory(tmp_path/"memory"),"grid")
     rows=[loop.step() for _ in range(20)]
     keys={"step","t","place","screen","task","frame","options","choice","pred","used","skill","outcome","verdict","calls","ms","shortcut","self_spot","self_locked"}
@@ -746,21 +748,28 @@ def test_probe_stage_ledger_persists_thirty_request_cap(tmp_path, monkeypatch):
     with pytest.raises(run_agent.CallCap): run_agent._ledger(Path("runs/m1"), "p", 30)
     assert json.loads(Path("runs/e3_budget.json").read_text()) == data
 
-def test_act_names_place_edits_notebook_and_skips_planner(tmp_path):
+def test_planner_owns_goals_and_act_closes_the_focus(tmp_path):
     class Roles(StubModel):
         def __init__(self, replies): super().__init__(replies); self.roles = []
         def ask(self, *args, **kwargs): self.roles.append(kwargs.get("role")); return super().ask(*args, **kwargs)
-    act_reply = reply({"place": "Hall", "notebook": [{"op": "set", "section": "goals", "key": "g1", "value": {"text": "leave", "source": "assumed"}}],
+    plan_reply = reply({"goals": [{"op": "set", "key": "top", "value": {"text": "finish", "parent": None, "status": "active"}},
+                                  {"op": "set", "key": "g1", "value": {"text": "leave", "parent": "top", "done_when": "new place", "source": "assumed"}}],
+                        "focus": "g1", "lesson": None, "why": "start"})
+    act_reply = reply({"place": "Hall", "notebook": [{"op": "set", "section": "goals", "key": "sneaky", "value": {"text": "x"}},
+                                                    {"op": "focus", "status": "done", "evidence": "door crossed"}],
                        "action": {"thing": 0, "verb": "approach"}, "text": None, "expect": "screen_changes", "why": "try"})
-    model = Roles([reply(perception()), act_reply, reply(perception()), reply(perception())])
+    model = Roles([reply(perception()), plan_reply, act_reply, reply(perception()), reply(perception())])
     loop = Loop(GridEnv(), model, Memory(tmp_path / "memory"), "grid")
 
     row = loop.step()
 
-    assert row["act"]["ops"] == 1 and row["act"]["why"] == "try"
-    assert json.loads((tmp_path / "memory" / "notebook.json").read_text())["goals"]["g1"]["text"] == "leave"
+    saved = json.loads((tmp_path / "memory" / "notebook.json").read_text())
+    assert row["plan"]["focus"] == "g1" and row["act"]["ops"] == 1 and row["act"]["why"] == "try"
+    assert "sneaky" not in saved["goals"] and saved["goals"]["g1"]["status"] == "done"  # act can't add goals, only close the focus
+    assert any("goal g1 done: door crossed" in e["text"] for e in saved["log"])
+    assert loop.focus_closed and loop._plan_trigger({}) == loop.focus_closed  # closing the focus replans next step
     assert loop.mem.get("places", row["place"])["name"] == "Hall"
-    assert model.roles[:2] == ["perceiver", "act"] and "plan" not in model.roles and "chooser" not in model.roles
+    assert model.roles[:3] == ["perceiver", "plan", "act"] and "chooser" not in model.roles
 
 
 def test_act_prompt_summarizes_recent_repeated_blocked_action(tmp_path, monkeypatch):

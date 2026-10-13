@@ -6,15 +6,16 @@ from agent.observer import for_model
 from agent.predict import EFFECTS
 
 SYSTEM = ("You are playing a video game you have never seen, from screenshots only. Your goal is to finish the game. "
-  "Work out what to do next the way a new player would: read every piece of on-screen text; when dialogue, signs, tutorials or menus tell you where to go or what to do, "
-  "turn that into a goal in your notebook with the quote as evidence. Treat your notes as hypotheses: prefer what you see now over what you wrote earlier, and fix notes that turn out wrong. "
+  "A planner keeps your goals; you work on the focus goal at the end of the goal path. Read every piece of on-screen text. "
+  "The log lists what already happened, including what people said: do not repeat finished conversations or actions unless the focus needs it. "
+  "When the focus's done_when sign is visible, mark it done with the evidence; when you have tried it several ways and it cannot work from here, mark it blocked and say why. "
+  "Treat your notes as hypotheses: prefer what you see now over what you wrote earlier. "
   "If you are stuck or an action keeps failing, try something different and write down what you learned. Return only JSON.")
 REPLY = ('Reply JSON: {"place": short name for where you are (reuse a known place name if it is the same place), '
-  '"notebook": list of edits {"op":"set"|"remove","section":"goals"|"hints"|"lessons","key":short id,"value":{...}}, '
+  '"notebook": list of edits: {"op":"focus","status":"done"|"blocked","evidence":"what you saw"}, {"op":"tried","text":"what you just tried for the focus"}, or {"op":"set"|"remove","section":"hints"|"lessons","key":short id,"value":{...}}, '
   '"action": {"thing": n, "verb": "approach"|"interact"|"select"|"click"}, {"verb": "advance"|"cancel"|"type"}, {"go_to": name of a thing on screen, remembered thing or known place}, or {"buttons": up to 8 of %s}; '
   '"text": text to type when the verb is type, else null, "expect": one of %s, "why": one sentence}. '
   'On a dialogue or menu screen, use advance, select or cancel. On a text field with an on-screen keyboard, use type with the text. Never pick letter buttons one by one. '
-  'Goal values: {"text","why","source":"saw|heard|assumed","evidence","status":"active|done|dropped"}. '
   'Hint values: {"text","source","checked"}. Lesson values: {"text"}. '
   'Only edit the notebook when something changed.')
 SCHEMA = {"type": "object", "properties": {"place": {"type": "string"}, "notebook": {"type": "array", "items": {"type": "object"}},

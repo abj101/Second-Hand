@@ -48,7 +48,7 @@ def test_prompt_has_numbered_things_screen_rules_and_no_game_words():
     assert "use type with the text" in REPLY and "Never pick letter buttons one by one" in REPLY
     assert not re.search(r"pok[eé]mon|\bred\b|\bblue\b|\brival\b", (SYSTEM + REPLY + user).casefold())
     assert "Known places: none" in user
-    assert '"section":"goals"|"hints"|"lessons"' in REPLY
+    assert '"op":"focus","status":"done"|"blocked"' in REPLY and '"section":"hints"|"lessons"' in REPLY and '"goals"' not in REPLY
     assert "Place values" not in REPLY and '"places"' not in REPLY
 
 
