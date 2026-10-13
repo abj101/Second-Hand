@@ -894,6 +894,7 @@ def test_new_place_and_back_and_forth_cycle_trigger_replans_without_throttle(tmp
     for step, (a, b) in enumerate((("town", "house"), ("house", "town"), ("town", "house")), 12): loop._moved(a, b, "door", step)
     assert loop.urgent.startswith("cycle: went back and forth between town and house 4 times")
     assert loop._plan_trigger({}) == loop.urgent
+    assert loop.fails["town|door"] == {"n": 2, "why": "leads back to house: cycle", "step": 14}
 
 
 def test_second_failure_of_same_action_flags_act_and_replans(tmp_path, monkeypatch):

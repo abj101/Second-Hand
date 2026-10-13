@@ -256,10 +256,12 @@ class Loop:
     def _moved(self, src, dst, via, step):
         label = self.world.place_label
         self.notebook.note(step, f"went from {label(src)} to {label(dst)}" + (f" via {via}" if via else ""))
-        self.moves = [*self.moves, [step, src, dst]][-6:]
+        self.moves = [*self.moves, [step, src, dst, via or ""]][-6:]
         last = [m for m in self.moves if step - m[0] <= 15][-4:]
         if len(last) == 4 and len({(m[1], m[2]) for m in last}) == 2 and all(a[2] == b[1] for a, b in zip(last, last[1:])):
             self.urgent = f"cycle: went back and forth between {label(src)} and {label(dst)} {len(last)} times in {step - last[0][0]} steps without progress"
+            for m in last:  # act sees, in each of the two places, that the way it keeps taking only leads back
+                if m[3]: f = self.fails.setdefault(f"{m[1]}|{m[3]}", {"n": 0}); f.update(n=f["n"] + 1, why=f"leads back to {label(m[2])}: cycle", step=step)
         elif (self.mem.get("places", dst) or {}).get("visits", 0) <= 1 and not any(m[1] == dst for m in self.moves):
             self.urgent = self.urgent or f"arrived somewhere new: {label(dst)}"
     def _goal_text(self):

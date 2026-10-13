@@ -25,7 +25,7 @@ from scripts.eval_frames import BUTTONS, GAME, _guarded_post
 from scripts.run_agent import CallCap, _ledger
 
 RUN_NAME = "m1_gp_eval"
-CASES = {"P1": ("runs/m1_ps_fp", 80, 82), "P2": ("runs/m1_ps_fp", 80, 82), "P3": ("runs/m1_gp", 75, 88)}  # run, checkpoint step, situation step
+CASES = {"P1": ("runs/m1_ps_fp", 80, 82), "P2": ("runs/m1_ps_fp", 80, 82), "P3": ("runs/m1_gp", 75, 88), "P4": ("runs/m1_gp2", 125, 127)}  # run, checkpoint step, situation step
 OUT = ROOT / ".tmp/gp/eval_plan.json"
 P_OK, P_BAD = re.compile(r"door|rug|mat|exit|outside|leave|way out|front"), re.compile(r"stair|upstairs|2f|bed")
 A_OK, A_BAD = re.compile(r"door|rug|mat|exit|outside|bottom|south"), re.compile(r"stair|mom|mother|woman|lady")
@@ -54,6 +54,10 @@ def _setup(tmp, case):
     shutil.copytree(checkpoint / "memory", tmp / "memory")
     mem = Memory(tmp / "memory")
     world = World(mem, 16); world.restore(state); world.current_place = state["place"]
+    if case == "P4":  # the live notebook at the bounce, copied as-is (goals, focus, log); trigger is Loop._moved's text
+        nb_dir = tmp / "nb"; nb_dir.mkdir()
+        for name in ("notebook.json", "notebook.history"): shutil.copy(checkpoint / "memory" / name, nb_dir / name)
+        return world, Notebook(nb_dir), f"cycle: went back and forth between {world.place_label('p_world_2')} and {world.place_label('p_world')} 4 times in 8 steps without progress"
     if case == "P3":  # the live log at the stall; goals/lessons written under the old planner prompt are cleared
         nb_dir = tmp / "nb"; nb_dir.mkdir()
         for name in ("notebook.json", "notebook.history"): shutil.copy(checkpoint / "memory" / name, nb_dir / name)
@@ -78,7 +82,7 @@ def _setup(tmp, case):
     return world, nb, TRIGGER_P2
 
 
-def _p_pass(focus, goal):
+def _p_pass(focus, goal, *_):
     text = f'{goal.get("text", "")} {goal.get("done_when", "")}'.casefold()
     return bool(focus) and bool(P_OK.search(text)) and not P_BAD.search(text)
 
@@ -86,7 +90,7 @@ def _p_pass(focus, goal):
 P3_OK, P3_BAD = re.compile(r"explor|exit|stair|door|unseen|new|leave|room|area", re.I), re.compile(r"\b(?i:press|button|up|down|left|right|start|select)\b|\bA\b|\bB\b")
 
 
-def _p3_pass(focus, goal):  # case-sensitive A/B so the article "a" is not read as a button
+def _p3_pass(focus, goal, *_):  # case-sensitive A/B so the article "a" is not read as a button
     text = f'{goal.get("text", "")} {goal.get("done_when", "")}'
     return bool(focus) and bool(P3_OK.search(text)) and not P3_BAD.search(text)
 
@@ -114,7 +118,23 @@ def _a3_pass(action, target, why):  # why is unused: P3 scores the action only
     return go == "unexplored" or bool(re.search(r"stair|exit|door", f"{go} {target}", re.I)) or any(b in ("UP", "RIGHT") for b in buttons)
 
 
-PASSES = {"P1": (_p_pass, _a_pass), "P2": (_p_pass, _a_pass), "P3": (_p3_pass, _a3_pass)}
+P4_BAD, A4_BAD = re.compile(r"\b(enter|go into|back into)\b.*\b(house|home|building|room)\b|door ?mat|room edge|reach_room_edge"), re.compile(r"door|mat|house|entrance|home", re.I)
+
+
+def _p4_pass(focus, goal, old, nb):  # after the bounce: a new focus, or the old one closed
+    text = f'{goal.get("text", "")} {goal.get("done_when", "")}'.casefold()
+    old_status = nb.data["goals"].get(old, {}).get("status")
+    return bool(focus) and not P4_BAD.search(text) and (focus != old or old_status in ("blocked", "dropped"))
+
+
+def _a4_pass(action, target, why):  # the house door is directly above the player: no walking back into it
+    action = action or {}
+    buttons = action.get("buttons") or []
+    if ("go_to" in action or action.get("verb") == "approach") and A4_BAD.search(target): return False
+    return not (buttons and buttons[0] == "UP")
+
+
+PASSES = {"P1": (_p_pass, _a_pass), "P2": (_p_pass, _a_pass), "P3": (_p3_pass, _a3_pass), "P4": (_p4_pass, _a4_pass)}
 
 
 def _frame_per(case):
@@ -134,11 +154,12 @@ def _run_try(case, n, model, frame, per, results):
         route = Loop._unexplored(world, world.current_place) if case == "P3" else None
         goal_text = " ".join(nb.data["goals"][k].get("text", "") for k in nb.path())
         view = world.view(goal_text, world.current_place)
+        old_focus = nb.focus
         p = plan(model, trigger, nb, view, [], [])
         nb.apply(p.ops, 81); nb.set_focus(p.focus, 81)
         goal = nb.data["goals"].get(nb.focus, {}) if nb.focus else {}
         row = {"case": case, "try": n, "cached": n == 1, "focus": nb.focus, "focus_text": goal.get("text", ""),
-               "done_when": goal.get("done_when", ""), "p_pass": p_pass_fn(nb.focus, goal),
+               "done_when": goal.get("done_when", ""), "p_pass": p_pass_fn(nb.focus, goal, old_focus, nb),
                "goal_tree": nb.render(), "plan_why": p.why, "plan_ops": p.ops}
         if case == "P3": row["unexplored_route"] = route
         results.append(row)
@@ -152,7 +173,7 @@ def main(argv=None):
     ap.add_argument("--tries", type=int, default=2)
     ap.add_argument("--cap", type=int, default=16, help="max real model requests, charged to the m1 ledger")
     ap.add_argument("--dry", action="store_true", help="stub model: no network, no ledger")
-    ap.add_argument("--cases", default="P1,P2,P3", help="comma-separated subset of P1,P2,P3")
+    ap.add_argument("--cases", default="P1,P2,P3,P4", help="comma-separated subset of P1,P2,P3,P4")
     a = ap.parse_args(argv)
     cases = [c.strip() for c in a.cases.split(",") if c.strip()]
     if not set(cases) <= set(CASES): ap.error(f"unknown case in --cases: {a.cases}")
