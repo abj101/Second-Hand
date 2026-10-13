@@ -169,7 +169,7 @@ def _screen_from_trace(trace, entry):
     return "other"
 
 
-def evaluate(entry, trace_by_step, truth_by_step, model, attempts):
+def evaluate(entry, trace_by_step, truth_by_step, model, attempts, arm="image"):
     run_root, step = ROOT / "runs" / entry["run"], entry["step"]
     frame_path = run_root / "frames" / f"{step:06d}.png"
     frame = Image.open(frame_path).convert("RGB")
@@ -206,7 +206,12 @@ def evaluate(entry, trace_by_step, truth_by_step, model, attempts):
         player_fix = loop.world.fix_player(per, frame.size)
         controls = "\n".join(_load(GAME).get("controls", []))
         flags = ["the sprite inside the red box is you"] if loop.seen_marked else []
-        choice = act(model, for_model(loop.seen_image), per, loop.notebook.render(), "none", flags,
+        facts, image = "none", for_model(loop.seen_image)
+        if arm == "text":  # act sees no pixels: only the description plus the spatial layer (tile map, here flag)
+            place = loop.mem.match_place(per, 1, prev=None, cut=False)
+            loop.world.before(per, place, None, frame.size, 1)
+            facts, flags, image = loop.world.view("", place), [loop.world.here_flag()], None
+        choice = act(model, image, per, loop.notebook.render(), facts, flags,
                      controls, defaults(GAME), BUTTONS)
         label, point, verb = _point_for(choice.action, per)
         self_target = bool(point is not None and truth_self is not None and
@@ -218,7 +223,7 @@ def evaluate(entry, trace_by_step, truth_by_step, model, attempts):
         result = {"run": entry["run"], "step": step, "screen": per.get("screen"),
                   "truth": {key: truth.get(key) for key in ("map", "x", "y")},
                   "player_labels": before_fix, "player_fix": player_fix, "marked": loop.seen_marked,
-                  "act_flags": flags, "raw_action": choice.action, "why": choice.why,
+                  "arm": arm, "act_facts": facts, "act_flags": flags, "raw_action": choice.action, "why": choice.why,
                   "action": label, "target": point, "self_target": self_target, "ok": ok,
                   "truth_self": truth_self, "self_seed": seeded_self,
                   "self_from_motion": seeded_from_motion, "truth_injected": truth_injected,
@@ -252,6 +257,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--frames", type=Path, default=ROOT / "scripts/frames.json")
     parser.add_argument("--out", type=Path, default=ROOT / ".tmp/ps/baseline.json")
+    parser.add_argument("--arm", choices=("image", "text"), default="image",
+                        help="image: act sees the frame (current); text: act sees description + spatial layer only")
     parser.add_argument("--dry", action="store_true", help="run with a zero-request stub model")
     args = parser.parse_args(argv)
     entries = json.loads(args.frames.read_text(encoding="utf-8"))
@@ -271,7 +278,7 @@ def main(argv=None):
     status, error = "ok", None
     for entry in entries:
         try:
-            results.append(evaluate(entry, traces[entry["run"]], truths[entry["run"]], model, attempts))
+            results.append(evaluate(entry, traces[entry["run"]], truths[entry["run"]], model, attempts, args.arm))
         except CallCap as exc:
             status, error = "cap", str(exc)
             break
@@ -279,7 +286,7 @@ def main(argv=None):
             status, error = "unavailable", str(exc)
             break
     after = _ledger_snapshot()
-    output = {"status": status, "error": error,
+    output = {"arm": args.arm, "status": status, "error": error,
               "truth_injection": "m1 label projection is harness-only; agent/ never reads RAM truth",
               "attempts": attempts[0], "ledger_before": before, "ledger_after": after, "results": results}
     args.out.write_text(json.dumps(output, indent=2), encoding="utf-8")

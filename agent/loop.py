@@ -14,7 +14,8 @@ from agent.space import outward, route
 from agent.world import World
 CAPTION = 'The sprite inside the red box is the player\'s own character (you); list it with kind "player".'
 class Loop:
-    def __init__(self, env, model, mem, game):
+    def __init__(self, env, model, mem, game, act_text=False):
+        self.act_text = act_text  # act sees description + spatial layer only, no pixels
         self.env, self.model, self.mem, self.game = env, model, mem, game
         self.notebook, self.flags = Notebook(mem.root), []
         self.trace = Trace(mem.root.parent / "trace.jsonl"); self.step_no = 0
@@ -83,7 +84,7 @@ class Loop:
         choice, player = None, next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         act_route = travel_legs = None
         act_flags = list(self.flags)
-        if marked: act_flags.append('the sprite inside the red box is you')
+        if marked and not self.act_text: act_flags.append('the sprite inside the red box is you')
         if self.recent or self.stuck.n:
             runs = []
             for recent in self.recent:
@@ -110,7 +111,7 @@ class Loop:
                 summaries.pop(1 if self.stuck.n else 0); recent_flag = "recent: " + "; ".join(summaries)
             act_flags.append(recent_flag[:197] + "..." if len(recent_flag) > 200 else recent_flag)
         act_flags.append(self.world.here_flag())
-        a = act(self.model, model_frame, per, self.notebook.render(), view, act_flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]])
+        a = act(self.model, None if self.act_text else model_frame, per, self.notebook.render(), view, act_flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]])
         applied = self.notebook.apply(a.ops, self.step_no + 1)
         named = self.world.name(place, a.place, self.step_no + 1)
         if named != place:  # model says this new arrival is a known place

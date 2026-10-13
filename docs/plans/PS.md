@@ -1,6 +1,6 @@
 # PS: Mark the player for the model, and split describing from deciding
 
-Status: in progress (S0 baseline, S2 and E complete; STOP 6a awaiting live-spend approval; PS 40/160 requests, 2026-10-13) · Branch: feat/lean-agent · Program: [program-r1-wm.md](program-r1-wm.md) row 11 · Follows: [TL.md](TL.md) §7 STOP 5
+Status: in progress (S0 baseline, S2 and E complete; act-text A/B and two 20-30 step live runs done outside L3; STOP 6a awaiting decision; PS ≈153/160 requests, M1 ledger 1036/1050, 2026-10-13) · Branch: feat/lean-agent · Program: [program-r1-wm.md](program-r1-wm.md) row 11 · Follows: [TL.md](TL.md) §7 STOP 5
 
 ## 0. Why this phase exists (evidence, 2026-10-13, 54 diagnostic requests)
 - **The L2 stall started with perception.** The model cannot pick out the player when the sprite faces away. In L2 it labelled the TV, then Mom, as `player`, and the real player as `monster`/`rival`/`NPC`. From step 37 onward the notebook's only goal was "go talk to the character in the centre", i.e. the player. 87 identical choices followed.
@@ -404,6 +404,31 @@ Only perception/act model inputs receive marked images. Saved PNGs, `before`, `a
 Add to `trace`: `marked: bool`, whether this step's before/act model input was marked. S2's perception/action/options contract changes are not implemented or proposed as completed here.
 
 Contracts SHA-256 before/after: `cced97713bc8dc71036a052611ba9d6bc05d5b9b678fbb6dca546a743e1ace70`.
+
+### 9a. Addendum: act-text arm (user-requested A/B, 2026-10-13; not part of L3)
+**What changed.** `eval_frames.py --arm image|text`; `Loop(act_text=...)` and `run_agent.py --act-text`. In the text arm the perceiver still sees the marked frame, but `act` gets no image: only the description (numbered entities, player tagged `← you`), `World.view` (tile map, things with tiles, exits) and `here_flag`. The red-box act flag is dropped.
+
+**Recorded frames (same ten, one try each, `.tmp/ps/ab_image.json`, `.tmp/ps/ab_text.json`, 20 requests each):** image 10/10 ok, world 5/5, self-target 0; text 10/10 ok, world 5/5, self-target 0. A tie. Text chose named targets on all five world frames; image used raw `buttons` on two (m1_long 73, m1 71).
+
+**Live, from `m1_long` checkpoint 70 (`runs/m1_ps_text`, `runs/m1_ps_image`):**
+
+| Steps 71-90 | Text arm | Image arm |
+|---|---|---|
+| Verdicts hit / miss / partial / surprise | 9 / 7 / 2 / 2 | 7 / 1 / 5 / 7 |
+| Verbs buttons / approach / advance / interact | 9 / 5 / 5 / 1 | 10 / 5 / 5 / 0 |
+| Requests (steps 71-90) | 35 | 26 |
+| Position at step 90 | 1F (0x25) tile 7,1, stuck on `buttons:RIGHT` from step 85 | 2F (0x26), bouncing 1F/2F via stairs and doorway |
+| Town / party | no / 0 | no / 0 |
+
+Text arm ran 30 steps (71-100): 47 requests; steps 85-100 were 14 of 16 `buttons:RIGHT`, mostly `miss`; ended on 1F (7,2), party 0. Image arm ran 20 steps.
+
+**Reading (one run per arm, one segment; not a result).**
+- Dropping the image from `act` did not break the loop: same Mom dialogue, same stairs and doorway through step 84.
+- The two arms fail differently. Text: a repeated raw-button choice the repeat guard did not break in 16 steps. Image: a stairs/doorway oscillation (`surprise`-heavy).
+- Request counts are not comparable: the model cache serves repeated identical prompts without charging, and the image run followed the text run on the same frames.
+- Neither arm left the house. The shared blocker is not the image.
+
+**Spend.** Ledger 971 → 991 (ab_image) → 1011 (ab_text) → 1058 (text live, 47) → 1084 (image live, 26): +113. Now total 1084/1100 (16 left), M1 1036/1050 (14 left). PS total ≈153/160 (40 + 113). **L3's ≤108 live requests cannot be funded without raising the ledger caps** (hard-coded in `scripts/run_agent.py` `_ledger`: total 1100, M1 1050). The "127 M1 remaining" in the Result above is stale.
 
 ## 10. Handoff notes
 Rewrite `docs/plans/handoff-notes.md` per the template §10 (under 80 lines, fixed headings).
