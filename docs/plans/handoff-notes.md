@@ -1,45 +1,56 @@
 # Handoff notes
 
-Last written by: Claude (user session), 2026-10-13, after resolving PS S1. Next: PS S0 (baseline frame eval), then S2, E, STOP 6a.
+Last written by: Codex orchestrator, 2026-10-13, after PS S0 failed review and its one repair. Stop; do not skip PS.
 
 ## State of the code
-- Branch feat/lean-agent; PS Status "in progress"; S1 done; S0, S2, E, L3 unstarted.
-- S1: World.fix_player owns player kind/name when locked (1.5-tile keep, tile/2 takeover, insert, idempotent); World.mark draws the red outline on a copy.
-- Only model inputs are marked; raw frames are kept for storage, cut/scroll, HUD crops, miss hash and trace frame_hash.
-- Loop: _see keeps its four-value return; the current model image and flag are loop.seen_image and loop.seen_marked; the cache hit also needs the same marked.
-- Checkpoint state adds perception_marked and frame_mark_eligible; trace adds marked.
-- Perception still proposes options and act still picks option indexes until S2; S2 also bumps prompt_version.
+- Branch feat/lean-agent; PS Status gate failed at S0; S1 remains resolved and committed.
+- New scripts/eval_frames.py and scripts/frames.json are an evaluator draft, not an accepted baseline.
+- S0 baseline not run; S2, E and L3 unstarted; no STOP 6a comparison exists.
+- S1 still owns locked player kind/name, marks model inputs on a copy and preserves raw frames/cache/cut behavior.
+- Perception still proposes options; act still selects option indexes until S2.
 
 ## Decisions in force
-- PS packet as written (audited, 16 findings folded in); order S1 → S0 → S2 → full suite → E → STOP 6a → L3a → L3b → STOP 6b.
-- Every subagent gpt-6-luna HIGH (or Haiku under Sonnet), one slice each; never Opus; orchestrator reviews and runs checks.
-- No game-specific code in agent/, no new gates/filters, no loop/ or contracts.md edits; proposed S1 contract text is in PS.md §9.
+- PS packet order S1 → S0 → S2 → full suite → E → STOP 6a → L3a → L3b → STOP 6b.
+- Every subagent explicitly gpt-6-luna HIGH; one slice each, no Opus; root reviews and runs checks.
+- One S0 subagent and one repair used. No third repair or root implementation allowed under this kickstart.
+- No game-specific agent code, new decision gates, loop/ or contracts.md edits.
 
 ## Measured numbers
-- Full suite after the S1 fix: 238 passed, 1 warning (pysdl2), 269.00s.
-- Golden act/trace.jsonl regenerated: only `marked` and the act flag "the sprite inside the red box is you" (steps 3–8) changed; memory unchanged.
-- Lines: agent 2369→2400 (+31); tests 3775→3873; report only.
-- Ledger total 931 / smoke 48 / M1 883 / a142 b297 p25 q60 c306; M1 left 167; PS spent 0 of 160.
-- 2026-10-13 diagnostics: player label 0/2 on facing-away frames as run; red box + caption 8/8; split arm B with box 3/3 by intent (1 try per cell).
+- Inherited full suite: 238 passed, 1 warning in 246.74s (0:04:06).
+- Closing full suite: 238 passed, 1 warning in 245.97s (0:04:05).
+- Repaired py_compile and --dry passed; all nine dry rows printed with requests 0 (synthetic, not model accuracy).
+- Root decode/wrong-way/cap checks passed; toward-stairs button assertion failed.
+- Lines: agent 2400 unchanged; scripts 3122→3421 (+299); tests 3873 unchanged; goldens unchanged.
+- Ledger total 931 / smoke 48 / M1 883 / a142 b297 p25 q60 c306; M1 left 167; PS spent 0/160.
+- Protected evidence: 934 file hashes verified, zero changes; contracts SHA256 unchanged.
 
 ## Environment and gotchas
 - Use .venv-agent/Scripts/python.exe and forward-slash paths.
-- observer._blank: any frame ≥ 95% one colour is a blank transition, which sets scene_cut and stops marking. Test fixtures need non-uniform frames.
-- Offline eval: exclude probe frames (m1_long 71/72) and runs/m1 frames above 94 (stale leftovers).
-- S0 prototype: .tmp/perc_ab/split.py (untracked; keep). S0/E seed self_spot/_self_from_motion/prev screen from the previous trace row.
-- Every HTTP attempt is charged (retries, schema fallback); S0/E wrappers raise at 26.
-- Headroom proxy unreachable; local compression works.
+- S0 final frames: m1_long 3/4/5/18 UI, 37 up, 74 down, 73 Mom; m1 23 keyboard and 71 sideways.
+- 37 previous row is unlocked, so unmarked; later three world examples marked; m1 self injection harness-only.
+- m1_long 71/72 are probes; 80 is black. m1 29 is dialogue, not keyboard; frames >94 stale.
+- _buttons_toward requires BOTH directions to a diagonal target; RIGHT alone toward stairs returns false.
+- Exact failure: .tmp/ps/s0_repair_orchestrator_check.log; dry output: s0_repair_orchestrator_dry.json/log.
+- Evaluator uses no cache, fresh per-frame temporary memory, marker flag, pre-fix labels and a 26-attempt guard.
+- CodeGraph used first; Ponytail full; Headroom proxy unreachable, local compression/retrieval works.
 
 ## Deviations from plan and contracts
-- S1 stopped once (fixture failure), then resolved outside the orchestrator by the user's session; see PS.md §9.
-- contracts.md SHA256 unchanged: cced97713bc8dc71036a052611ba9d6bc05d5b9b678fbb6dca546a743e1ace70.
+- Stopped before baseline spend on the second evaluator implementation failure, per user one-repair limit.
+- This is scoring correctness against the card; no model-quality or progress gate was added.
+- S0 draft 299 script lines (subagent final report incorrectly said 264); line counts report only.
+- S0 proposes no contract change. S1's unapplied exact contract text remains in PS.md §9.
+- Contracts SHA256: cced97713bc8dc71036a052611ba9d6bc05d5b9b678fbb6dca546a743e1ace70.
 
 ## Do not retry
+- Do not auto-repair or continue from a gate-failed PS packet; revised instructions are needed.
 - Never overwrite runs/m1_long_l1, runs/m1_long, runs/m1, runs/m1_act; L3 copies to runs/m1_ps.
-- Never reset/refund/raise a ledger cap, commit runs/ or .tmp/, git add -A or push.
-- Do not fix S1's test by changing marking eligibility; the blank-frame behaviour is correct.
+- Never reset/refund/raise ledger caps, commit runs/ or .tmp/, git add -A or push.
+- Preserve .cache/model/ and unrelated untracked .claude/.
+- Do not change S1 marking eligibility to accommodate blank fixtures; that resolved behavior is correct.
 
 ## Open issues for PS
-- S2 regenerates goldens again (option plumbing removed); explain each diff.
-- Checkpoint 70 still stores the player as e_rival_2 "rival" with notebook "Talk to the rival"; the L3a repeat check (≥ 10) covers it.
-- Place fragmentation and stale player-evidence goals remain §7 exclusions.
+- Fix evaluator scoring with explicit new authorization, re-review labels/harness, run S0 before S2.
+- UI button scoring is broad; review alongside toward-target scoring before spending requests.
+- S2 still requires fixture migration, unchanged normalize, prompt version bump and explained golden regen.
+- Checkpoint 70's stale rival/player memory and notebook goal remain for the L3a repeat check.
+- Place fragmentation and stale player-evidence goals remain PS §7 exclusions.

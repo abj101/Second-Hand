@@ -1,6 +1,6 @@
 # PS: Mark the player for the model, and split describing from deciding
 
-Status: in progress (S1 resolved 2026-10-13 after its failed repair: fixture fix + golden regen, full suite 238 passed; next S0; 0 requests spent) · Branch: feat/lean-agent · Program: [program-r1-wm.md](program-r1-wm.md) row 11 · Follows: [TL.md](TL.md) §7 STOP 5
+Status: gate failed (S0 evaluator implementation failed review and its one repair, 2026-10-13; S1 remains resolved; 0 requests spent) · Branch: feat/lean-agent · Program: [program-r1-wm.md](program-r1-wm.md) row 11 · Follows: [TL.md](TL.md) §7 STOP 5
 
 ## 0. Why this phase exists (evidence, 2026-10-13, 54 diagnostic requests)
 - **The L2 stall started with perception.** The model cannot pick out the player when the sprite faces away. In L2 it labelled the TV, then Mom, as `player`, and the real player as `monster`/`rival`/`NPC`. From step 37 onward the notebook's only goal was "go talk to the character in the centre", i.e. the player. 87 identical choices followed.
@@ -229,6 +229,27 @@ Status: in progress (S1 resolved 2026-10-13 after its failed repair: fixture fix
 - **Cost:** two calls per moving step as before (the L2 trace shows no shortcut fired). The before/after mark decisions must agree (S1), or a frame is perceived twice.
 
 ## 9. Result (filled in by the orchestrator)
+
+**S0 stop (Codex orchestrator, 2026-10-13; 0 requests):**
+- **Decision:** stopped after S0's initial implementation and its single authorized repair both failed review. S1 remains resolved. No cloud baseline was run; S2, E and L3 were not started. There is no STOP 6a comparison table. This is an evaluator implementation failure against the card, not a model-quality or gameplay-progress gate. The orchestrator did not implement a fix or start a third repair.
+- **Initial failure:** labels included a black transition frame (`m1_long` 80), dialogue incorrectly called keyboard (`m1` 29), and acceptable targets at the player. Numeric `thing` and bare-verb actions decoded as invalid; wrong-way buttons scored true; marker flag was omitted from act; temporary memory could be reused. Root output: `.tmp/ps/s0_orchestrator_dry.log`, `.tmp/ps/s0_review_failures.log`.
+- **Repair:** selected nine eligible frames: `m1_long` 3 title, 4 start menu, 5 dialogue, 18 preset-name menu, 37 upstairs facing up, 74 upstairs facing down, 73 downstairs with Mom; `m1` 23 keyboard and 71 sideways. Targets are computer `[.45,.35]`, stairs `[.69,.42]`, Mom `[.25,.82]`, right-edge stairs `[.95,.5]`. Excluded probe rows 71/72 of `m1_long`, black frame 80, and stale `m1` frames above 94. Root visually reviewed the PNGs. Frame 37 is correctly unmarked because its previous trace row is unlocked; three later world frames are marked. `m1` 71's injected self spot is harness-only, based on the visible fixed camera/player projection and paired truth coordinates.
+- **Remaining failure:** `_buttons_toward` requires both nonzero coordinate directions in the same action. A single `RIGHT` press from `[.45,.4444444444444444]` toward the labelled stairs `[.69,.42]` reduces distance but returns false. Exact root output: `AssertionError: RIGHT toward labelled stairs rejected: requires both RIGHT and UP`. This contradicts the card's requirement that buttons moving toward an acceptable point count as `ok`; it can bias S0/E. UI button scoring is also broad (e.g. a title action containing B can be accepted); no cloud numbers are claimed.
+- **Commands and results:**
+  - `.venv-agent/Scripts/python.exe -m py_compile scripts/eval_frames.py` passed, before and after repair.
+  - `.venv-agent/Scripts/python.exe scripts/eval_frames.py --dry --out .tmp/ps/s0_repair_orchestrator_dry.json` printed all nine rows, `status=ok requests=0`; synthetic `ok=True` rows only exercise the harness and are not model results.
+  - Root offline assertions through `.venv-agent/Scripts/python.exe -`: numeric entity/bare verb decoding, wrong-way rejection and the 26-attempt mocked ledger guard passed (27th refused, no real ledger writes); the toward-stairs assertion above failed. Exact output: `.tmp/ps/s0_repair_orchestrator_check.log`.
+  - `git diff --check` passed. The final shell command's exit is not used as evidence for the preceding Python assertion; its own traceback is the failure evidence.
+  - Inherited full suite in background: `.venv-agent/Scripts/python.exe -m pytest tests/agent -q -p no:cacheprovider` → `238 passed, 1 warning in 246.74s (0:04:06)`; `.tmp/ps/pre_s0_suite.log`.
+  - Closing full suite: 238 passed, 1 warning in 245.97s (0:04:05).
+- **Progress:** no PS live play or new maps/party measured. Historical L2 remains house only / party 0. **Health:** inherited agent suite green; S0 evaluator correctness red; model/player accuracy remains unmeasured in this session.
+- **Scope and safety:** only new `scripts/eval_frames.py` and `scripts/frames.json`, plus this packet, `docs/plan.md` and rewritten handoff. No `agent/` edits, game-specific agent code, new decision gates, earlier-fix removal, contracts or `loop/` edits. Protected-run hashes verified: 934 files, zero changes. Unrelated untracked `.claude/` untouched. `.cache/model/` preserved.
+- **Goldens:** unchanged; no regeneration or new data changes. S1's existing golden explanation below remains valid. S2's prescribed regeneration was not reached.
+- **Lines (report only):** agent 2400→2400, scripts 3122→3421 (+299), tests/agent 3873→3873; eval_frames 299, frames.json 11 lines. The subagent's final report said 264 script lines; the orchestrator counted the on-disk artifact as 299.
+- **Models/tools:** one S0 subagent, explicitly gpt-6-luna HIGH, fork without context; same agent for one repair. No Opus. Self-contained full prompt `.tmp/ps/s0_prompt_current.txt` includes the card, program §2, cited contracts, exact scope and checks. CodeGraph first; Ponytail full; Headroom local compression/retrieval worked, proxy unreachable.
+- **Requests:** PS 0/160; S0 0/26, E 0/26, L3a 0/60, L3b 0/48. Before/after ledger identical: `total=931, smoke=48, m1=883, stage_a=142, stage_b=297, stage_p=25, stage_q=60, stage_c=306`; M1 167 remaining, total 169 remaining. No reset/refund/cap increase. No runner exit 3/4.
+- **Deviations:** stopped before the baseline after the second implementation failure, per the user's one-repair limit. PS's measured-quality checks still report without blocking; this stop concerns the evaluator's adherence to its scoring card. S0 uses nine frames (within 13), so a successful eval would ordinarily cost 18 attempts per arm before retries. No live spend or phase cap changed.
+- **Open question:** resolve evaluator scoring under revised instructions or explicit further-repair authorization, then establish the S0 baseline before S2. Place fragmentation and stale player/rival goal evidence remain §7 exclusions. No additional contract change is proposed by S0; S1's exact proposed text and unchanged SHA-256 remain below.
 
 **S1 resolution (2026-10-13, user session after the stop below; 0 requests):**
 - **Cause, verified.**

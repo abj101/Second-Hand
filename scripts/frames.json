@@ -1,0 +1,11 @@
+[
+  {"run":"m1_long","step":3,"self":null,"ok_verbs":["press"],"ok_near":[],"why":"Title screen; press START to begin."},
+  {"run":"m1_long","step":4,"self":null,"ok_verbs":["select"],"ok_near":[],"why":"Start menu; NEW GAME is the visible selection."},
+  {"run":"m1_long","step":5,"self":null,"ok_verbs":["advance"],"ok_near":[],"why":"Opening dialogue; advance the visible dialogue box."},
+  {"run":"m1_long","step":18,"self":null,"ok_verbs":["select"],"ok_near":[],"why":"Preset-name menu; NEW NAME, RED, ASH and JACK are visible."},
+  {"run":"m1","step":23,"self":null,"ok_verbs":["type"],"ok_near":[],"why":"The naming keyboard is visible with its letter grid."},
+  {"run":"m1_long","step":37,"self":[0.45,0.4444444444444444],"ok_verbs":["approach","interact"],"ok_near":[[0.45,0.35]],"why":"2F bedroom; player faces up toward the visible computer."},
+  {"run":"m1_long","step":74,"self":[0.45,0.4444444444444444],"ok_verbs":["approach","interact"],"ok_near":[[0.69,0.42]],"why":"2F bedroom; player faces down toward the visible stairs."},
+  {"run":"m1_long","step":73,"self":[0.45,0.4444444444444444],"ok_verbs":["approach","interact"],"ok_near":[[0.25,0.82]],"why":"1F living room; Mom is visible left of the table."},
+  {"run":"m1","step":71,"self":[0.45,0.4444444444444444],"ok_verbs":["approach","interact"],"ok_near":[[0.95,0.5]],"why":"Player faces sideways in the open middle of the room; the visible staircase is at the right edge."}
+]
