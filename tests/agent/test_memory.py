@@ -273,3 +273,15 @@ def test_views_agree_vetoes_merging_different_rooms(tmp_path):
     assert mem.views_agree("a", "b", (0, 0), 16) is True
     assert mem.views_agree("a", "c", (0, 0), 16) is False
     assert mem.views_agree("a", "c", (20, 0), 16) is None  # out of reach: no pixel evidence either way
+
+
+def test_seen_view_only_locates_within_one_place(tmp_path):
+    import numpy as np
+    from PIL import Image
+    room = np.random.default_rng(2).integers(1, 4, (144 + 64, 160 + 64), dtype=np.uint8) * 80
+    view = lambda x, y: Image.fromarray(room[32 + 16 * y:176 + 16 * y, 32 + 16 * x:192 + 16 * x])
+    mem = Memory(tmp_path)
+    mem.upsert("places", {"id": "bed", "screen": "dialogue", "state": "place"})  # first seen under a dialogue box
+    mem.remember_view("bed", (0, 0), view(0, 0))
+    assert mem.seen_view(view(1, 0), "world", None, 16) is None  # screen type differs
+    assert mem.seen_view(view(1, 0), None, None, 16, only="bed") == ("bed", (1, 0))

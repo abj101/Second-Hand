@@ -307,7 +307,9 @@ class World:
             delta = [(tuple(anchor[i][j] - tiles[n][j] for j in (0, 1)), i) for i, n in pairs.items() if i in anchor]
             if delta:
                 dx, dy = (sorted(v[0][j] for v in delta)[len(delta) // 2] for j in (0, 1)); drift = (dx, dy) if (dx, dy) != (0, 0) else None
-                if drift and drift == self.drift: self.pos = (self.pos[0] + dx, self.pos[1] + dy); drift_fix = (dx, dy); tiles = {i: (p[0] + dx, p[1] + dy) for i, p in tiles.items()}; self.drift = self.drift_ref = None
+                at = self.mem.seen_view(frame, None, None, self.tile_px, only=place) if drift and drift == self.drift and frame is not None else None
+                if at and tuple(at[1]) != (self.pos[0] + dx, self.pos[1] + dy): self.drift = self.drift_ref = None  # stored views say where we are: entity drift was noise
+                elif drift and drift == self.drift: self.pos = (self.pos[0] + dx, self.pos[1] + dy); drift_fix = (dx, dy); tiles = {i: (p[0] + dx, p[1] + dy) for i, p in tiles.items()}; self.drift = self.drift_ref = None
                 else: self.drift, self.drift_ref = drift, anchor if drift else None
         if not reused:
             self.entity_ids = self.mem.observe(per, place, step, tiles)

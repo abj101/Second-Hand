@@ -13,7 +13,7 @@ SYSTEM = ("You are playing a video game you have never seen, from screenshots on
   "If you are stuck or an action keeps failing, try something different and write down what you learned. Return only JSON.")
 REPLY = ('Reply JSON: {"place": short name for where you are (reuse a known place name if it is the same place), '
   '"notebook": list of edits: {"op":"focus","status":"done"|"blocked","evidence":"what you saw"}, {"op":"tried","text":"what you just tried for the focus"}, or {"op":"set"|"remove","section":"hints"|"lessons","key":short id,"value":{...}}, '
-  '"action": {"thing": n, "verb": "approach"|"interact"|"select"|"click"}, {"verb": "advance"|"cancel"|"type"}, {"go_to": name of a thing on screen, remembered thing or known place}, or {"buttons": up to 8 of %s}; '
+  '"action": {"thing": n, "verb": "approach"|"interact"|"select"|"click"}, {"verb": "advance"|"cancel"|"type"}, {"go_to": name of a thing on screen, remembered thing or known place, or "unexplored" to walk to the nearest part of this place you have not explored}, or {"buttons": up to 8 of %s}; '
   '"text": text to type when the verb is type, else null, "expect": one of %s, "why": one sentence}. '
   'On a dialogue or menu screen, use advance, select or cancel. On a text field with an on-screen keyboard, use type with the text. Never pick letter buttons one by one. '
   'Hint values: {"text","source","checked"}. Lesson values: {"text"}. '

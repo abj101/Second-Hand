@@ -1,4 +1,4 @@
-"""Offline eval of the goal planner, notebook and act on one recorded Pokemon Red situation (runs/m1_ps_fp, step 81)."""
+"""Offline eval of the goal planner, notebook and act on recorded Pokemon Red situations (P1/P2 in runs/m1_ps_fp, P3 in runs/m1_gp)."""
 import argparse
 import json
 import re
@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 from PIL import Image
 
 from agent.act import act
+from agent.loop import Loop
 from agent.brief import _load, defaults
 from agent.memory import Memory
 from agent.model import ModelUnavailable, Ollama
@@ -24,13 +25,13 @@ from scripts.eval_frames import BUTTONS, GAME, _guarded_post
 from scripts.run_agent import CallCap, _ledger
 
 RUN_NAME = "m1_gp_eval"
-RUN = ROOT / "runs/m1_ps_fp"
-CHECKPOINT = RUN / "checkpoint/000080"
+CASES = {"P1": ("runs/m1_ps_fp", 80, 82), "P2": ("runs/m1_ps_fp", 80, 82), "P3": ("runs/m1_gp", 75, 88)}  # run, checkpoint step, situation step
 OUT = ROOT / ".tmp/gp/eval_plan.json"
 P_OK, P_BAD = re.compile(r"door|rug|mat|exit|outside|leave|way out|front"), re.compile(r"stair|upstairs|2f|bed")
 A_OK, A_BAD = re.compile(r"door|rug|mat|exit|outside|bottom|south"), re.compile(r"stair|mom|mother|woman|lady")
 TRIGGER_P1 = "new game text was seen (see the log)"
 TRIGGER_P2 = "focus use_stairs blocked: the stairs lead up to the bedroom on 2F where I started, not outside"
+TRIGGER_P3 = "no focus goal yet"
 GOALS = [("top", {"text": "Finish the game", "status": "active", "parent": None}),
          ("find_oak", {"text": "Find Prof. Oak", "parent": "top", "source": "heard",
                        "evidence": "PROF. OAK, next door, is looking for you.", "status": "active"}),
@@ -47,17 +48,24 @@ class DryModel:
 
 
 def _setup(tmp, case):
-    state = json.loads((CHECKPOINT / "harness.json").read_text(encoding="utf-8"))
-    shutil.copytree(CHECKPOINT / "memory", tmp / "memory")
+    run, ck, _ = CASES[case]
+    checkpoint = ROOT / run / "checkpoint" / f"{ck:06d}"; trace_path = ROOT / run / "trace.jsonl"
+    state = json.loads((checkpoint / "harness.json").read_text(encoding="utf-8"))
+    shutil.copytree(checkpoint / "memory", tmp / "memory")
     mem = Memory(tmp / "memory")
     world = World(mem, 16); world.restore(state); world.current_place = state["place"]
+    if case == "P3":  # the live log at the stall; goals/lessons written under the old planner prompt are cleared
+        nb_dir = tmp / "nb"; nb_dir.mkdir()
+        for name in ("notebook.json", "notebook.history"): shutil.copy(checkpoint / "memory" / name, nb_dir / name)
+        nb = Notebook(nb_dir); nb.data = {s: {} for s in nb.data}; nb.focus = None
+        return world, nb, TRIGGER_P3
     nb = Notebook(tmp / "nb")
     # the log the live loop would have written by step 80: game text and moves between places (Loop._learn / Loop._moved)
-    events = [(r["step"], f'text: "{r["text"]}"') for r in mem.rows("knowledge") if r.get("src") == "game_text" and r["step"] <= 80]
-    rows = [json.loads(line) for line in (RUN / "trace.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    events = [(r["step"], f'text: "{r["text"]}"') for r in mem.rows("knowledge") if r.get("src") == "game_text" and r["step"] <= ck]
+    rows = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     moved = lambda a, b, via: f"went from {world.place_label(a)} to {world.place_label(b)}" + (f" via {via}" if via else "")
     for prev, row in zip(rows, rows[1:]):
-        if row["step"] > 80: break
+        if row["step"] > ck: break
         if prev.get("next_place") and row["place"] != prev["next_place"]: events.append((row["step"], moved(prev["next_place"], row["place"], "a step taken to locate yourself")))
         if row.get("next_place") and row["next_place"] != row["place"]: events.append((row["step"], moved(row["place"], row["next_place"], (row.get("choice") or {}).get("target"))))
     for step, text in sorted(events, key=lambda e: e[0]): nb.note(step, text)
@@ -73,6 +81,14 @@ def _setup(tmp, case):
 def _p_pass(focus, goal):
     text = f'{goal.get("text", "")} {goal.get("done_when", "")}'.casefold()
     return bool(focus) and bool(P_OK.search(text)) and not P_BAD.search(text)
+
+
+P3_OK, P3_BAD = re.compile(r"explor|exit|stair|door|unseen|new|leave|room|area", re.I), re.compile(r"\b(?i:press|button|up|down|left|right|start|select)\b|\bA\b|\bB\b")
+
+
+def _p3_pass(focus, goal):  # case-sensitive A/B so the article "a" is not read as a button
+    text = f'{goal.get("text", "")} {goal.get("done_when", "")}'
+    return bool(focus) and bool(P3_OK.search(text)) and not P3_BAD.search(text)
 
 
 def _target(action, entities):
@@ -92,22 +108,43 @@ def _a_pass(action, target, why):
     return down or text_ok
 
 
+def _a3_pass(action, target, why):  # why is unused: P3 scores the action only
+    action = action or {}
+    go, buttons = action.get("go_to", ""), action.get("buttons") or []
+    return go == "unexplored" or bool(re.search(r"stair|exit|door", f"{go} {target}", re.I)) or any(b in ("UP", "RIGHT") for b in buttons)
+
+
+PASSES = {"P1": (_p_pass, _a_pass), "P2": (_p_pass, _a_pass), "P3": (_p3_pass, _a3_pass)}
+
+
+def _frame_per(case):
+    run, _, step = CASES[case]
+    frame = Image.open(ROOT / run / f"frames/{step:06d}.png").convert("RGB")
+    trace = next(r for r in (json.loads(line) for line in (ROOT / run / "trace.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()) if r["step"] == step)
+    per = {"screen": trace["screen"], "text": [], "entities": [{"name": e["name"], "kind": e["kind"], "at": e["at"]} for e in trace["entities"] if e.get("name")]}
+    return frame, per
+
+
 def _run_try(case, n, model, frame, per, results):
     controls = "\n".join(_load(GAME).get("controls", []))
+    p_pass_fn, a_pass_fn = PASSES[case]
     with tempfile.TemporaryDirectory(prefix=f"{case}_", dir=ROOT / ".tmp/gp") as tmp:
         world, nb, trigger = _setup(Path(tmp), case)
+        # mechanical frontier pick, no model call: Loop._unexplored only reads self.mem, self.pos and self.tile_px, all of which World carries
+        route = Loop._unexplored(world, world.current_place) if case == "P3" else None
         goal_text = " ".join(nb.data["goals"][k].get("text", "") for k in nb.path())
         view = world.view(goal_text, world.current_place)
         p = plan(model, trigger, nb, view, [], [])
         nb.apply(p.ops, 81); nb.set_focus(p.focus, 81)
         goal = nb.data["goals"].get(nb.focus, {}) if nb.focus else {}
         row = {"case": case, "try": n, "cached": n == 1, "focus": nb.focus, "focus_text": goal.get("text", ""),
-               "done_when": goal.get("done_when", ""), "p_pass": _p_pass(nb.focus, goal),
+               "done_when": goal.get("done_when", ""), "p_pass": p_pass_fn(nb.focus, goal),
                "goal_tree": nb.render(), "plan_why": p.why, "plan_ops": p.ops}
+        if case == "P3": row["unexplored_route"] = route
         results.append(row)
         a = act(model, frame, per, nb.render_focus(), view, [], controls, defaults(GAME), BUTTONS, places=[])
         target = _target(a.action, per["entities"])
-        row.update(act_action=a.action, act_target=target, act_why=a.why, act_ops=a.ops, a_pass=_a_pass(a.action, target, a.why))
+        row.update(act_action=a.action, act_target=target, act_why=a.why, act_ops=a.ops, a_pass=a_pass_fn(a.action, target, a.why))
 
 
 def main(argv=None):
@@ -115,14 +152,15 @@ def main(argv=None):
     ap.add_argument("--tries", type=int, default=2)
     ap.add_argument("--cap", type=int, default=16, help="max real model requests, charged to the m1 ledger")
     ap.add_argument("--dry", action="store_true", help="stub model: no network, no ledger")
+    ap.add_argument("--cases", default="P1,P2,P3", help="comma-separated subset of P1,P2,P3")
     a = ap.parse_args(argv)
+    cases = [c.strip() for c in a.cases.split(",") if c.strip()]
+    if not set(cases) <= set(CASES): ap.error(f"unknown case in --cases: {a.cases}")
     OUT.parent.mkdir(parents=True, exist_ok=True); (ROOT / ".tmp/gp").mkdir(parents=True, exist_ok=True)
-    frame = Image.open(RUN / "frames/000082.png").convert("RGB")
-    trace = next(r for r in (json.loads(line) for line in (RUN / "trace.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()) if r["step"] == 82)
-    per = {"screen": trace["screen"], "text": [], "entities": [{"name": e["name"], "kind": e["kind"], "at": e["at"]} for e in trace["entities"] if e.get("name")]}
     attempts, results, status, error = [0], [], "ok", None
     try:
-        for case in ("P1", "P2"):
+        for case in cases:
+            frame, per = _frame_per(case)
             for n in range(1, a.tries + 1):
                 if a.dry:
                     model = DryModel()

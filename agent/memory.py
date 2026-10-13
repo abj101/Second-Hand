@@ -162,13 +162,13 @@ class Memory:
         self.upsert("views", {"id": vid, "place": place, "pos": list(pos), "shape": list(q.shape),
                               "q": base64.b64encode(q.tobytes()).decode()})
 
-    def seen_view(self, frame, screen: str, exclude: str | None, tile_px: int | None):
-        """(place, tile) of the known view this frame matches, allowing whole-tile camera scroll."""
+    def seen_view(self, frame, screen: str, exclude: str | None, tile_px: int | None, only: str | None = None):
+        """(place, tile) of the known view this frame matches, allowing whole-tile camera scroll; `only` = look up where you are in that place."""
         q, best, step = _thumb(frame), None, (tile_px or 0) // 2
         reach = range(-VIEW_REACH, VIEW_REACH + 1) if step else (0,)
         for v in self.rows("views"):
             place, (ox, oy), row = self._home(v["place"])
-            if not row or place == exclude or row.get("screen") != screen or list(q.shape) != v["shape"]: continue
+            if not row or list(q.shape) != v["shape"] or (place != only if only else place == exclude or row.get("screen") != screen): continue
             stored = np.frombuffer(base64.b64decode(v["q"]), np.uint8).reshape(v["shape"])
             for dy in reach:
                 for dx in reach:

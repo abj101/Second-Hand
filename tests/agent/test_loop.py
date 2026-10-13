@@ -178,7 +178,8 @@ def test_cut_before_frame_suppresses_marker_and_same_raw_after_frame_reuses(tmp_
     assert module.CAPTION in contexts[1] and "the sprite inside the red box is you" in acts[1][1]
     assert acts[1][0].getpixel((71, 62)) == (255, 0, 0)
 
-def test_stationary_two_fresh_frames_confirm_drift(tmp_path, monkeypatch):
+@pytest.mark.parametrize("views", [False, True])
+def test_stationary_two_fresh_frames_confirm_drift(tmp_path, monkeypatch, views):
     from agent import loop as module
     env = GridEnv(); env.phase = 0; original = env.screenshot
     def screenshot():
@@ -193,11 +194,13 @@ def test_stationary_two_fresh_frames_confirm_drift(tmp_path, monkeypatch):
         return SimpleNamespace(status="done",reason="",inputs=0,calls=0,before=before,after=after,scroll=(0,0),blank_seen=False,moves=[])
     monkeypatch.setattr(module, "run_affordance", still)
     loop = Loop(env, StubModel([]), Memory(tmp_path/"memory"), "grid")
+    if not views: monkeypatch.setattr(loop.mem, "seen_view", lambda *a, **k: None)  # no stored view matches: entity drift decides
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     loop.step(); offset[0] = .75; first = loop.step()
     assert loop.pos == (0, 0) and first["drift_fix"] is None and loop.world.drift == (-1, 0)
     second = loop.step()
-    assert loop.pos == (-1, 0) and second["drift_fix"] == [-1, 0]
+    if views: assert loop.pos == (0, 0) and second["drift_fix"] is None  # screen never moved: stored view vetoes the entity drift
+    else: assert loop.pos == (-1, 0) and second["drift_fix"] == [-1, 0]
 
 
 def test_loop_fixes_swapped_player_before_approaching_target(tmp_path, monkeypatch):
@@ -866,3 +869,12 @@ def test_act_invalid_action_waits_and_is_unobservable(tmp_path):
     row = loop.step()
 
     assert row["choice"] is None and row["act"]["action"] is None and row["verdict"] == "unobservable"
+
+def test_go_to_unexplored_walks_to_nearest_frontier(tmp_path):
+    from agent.space import fold
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    fold(loop.mem, "p", (0, 0), [{"dir": d, "shift": 0} for d in ("UP", "DOWN", "LEFT")], 16, 1)  # walls on three sides, RIGHT untried
+    loop.pos = (0, 0)
+    assert loop._unexplored("p") == {"dirs": ["RIGHT"]}
+    loop.tile_px = None
+    assert loop._unexplored("p") is None

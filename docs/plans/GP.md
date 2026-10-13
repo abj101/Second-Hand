@@ -1,6 +1,6 @@
 # GP: Goal planner — goals worked backwards to one focus, plus a done log
 
-Status: STOP 7b (clean-boot live run done 2026-10-13: never left 2F; next-step decision pending) · Branch: feat/lean-agent · Follows: [PS.md](PS.md) §9c · User decision 2026-10-13: Option B (event-triggered planner)
+Status: STOP 7c (outcome goals + `go_to unexplored` + pixel drift veto built; offline only; live run needs caps) · Branch: feat/lean-agent · Follows: [PS.md](PS.md) §9c · User decision 2026-10-13: Option B (event-triggered planner)
 
 ## 0. Why (evidence)
 - **Run `runs/m1_ps_fp`, steps 81–180.** The agent never left the house and its party stayed at 0. Spend: 113 requests. Haiku extracted the evidence from `notebook.history` and the trace.
@@ -147,3 +147,18 @@ Status: STOP 7b (clean-boot live run done 2026-10-13: never left 2F; next-step d
      - It concluded that "UP and DOWN fail" from the one blocked tile at (3,6). The view's frontier ("untried edges") was never used, so it never walked right and then up to where the stairs are.
   3. **About 35 steps (50–85) were lost** to the Start menu and Options after the SNES text: dismissing a dialogue box with START opened the menu.
 - **Reading.** Goal bookkeeping is fixed. The bottleneck is now (a) goals that are moves instead of outcomes, and (b) having no cheap way for the model to say "go somewhere I haven't seen". In `m1_long` the agent left 2F at step 37 via a `go_to`/approach that routed it to the stairs.
+
+### 9c. Option C: outcome goals, `go_to unexplored`, pixel drift veto (2026-10-13)
+- **A. Planner prompt.**
+  - Goals must be outcomes: reach, find, talk to, get, use, win. Never buttons, directions or retries.
+  - With no instruction, the default goal is to explore: unseen parts of the map, unused exits.
+  - `stuck` replans wait at least 8 steps after the last plan (was 3).
+- **B. `go_to "unexplored"`** is a tool the model may choose (`Loop._unexplored`). It routes to the nearest untried edge, preferring edges into unseen cells, then steps across it. It uses the existing `route` and the approach skill, and it is never forced. There is a unit test.
+- **New finding: false drift corrections corrupted the map.**
+  - At m1_gp step 92 the entity-median drift fix moved `pos` by (+3, −2) with no movement. Step 113 undid it. For 21 steps tiles were written about 3 off, which made a fake upper area, and that is where `unexplored` pointed on the step-100 memory.
+  - The stored views put the agent exactly at the true tile on both steps (score .979 / .992).
+  - **Fix:** `World.observe_after` applies an entity drift only when no stored view of this place matches, or when the matching view agrees with the corrected tile.
+  - `Memory.seen_view(..., only=place)` locates within one place regardless of screen type. This place was first recorded under a dialogue box, so its type is `dialogue`.
+  - The stationary-drift test is now parametrised: with views it vetoes, without views it still corrects.
+- **Offline P3** (m1_gp 2F stall, 8 requests): not a clean test. The checkpoint-75 log ends inside the Options menu, so the planner rightly plans "exit the menu → select CANCEL". With the inherited goals cleared, its top goal became the outcome "explore the world (done when all map edges are tried)".
+- `pytest tests/agent` is green. **Ledger:** total 1482/1500, M1 1434/1450.

@@ -12,7 +12,7 @@ from agent.predict import PRED, effects, predict, verdict
 from agent.skills import Ctx, press_seq, run_affordance, wait_until
 from agent.tasks import Stuck
 from agent.trace import Trace
-from agent.space import outward, route
+from agent.space import DIRS, frontier, outward, route
 from agent.world import World
 CAPTION = 'The sprite inside the red box is the player\'s own character (you); list it with kind "player".'
 class Loop:
@@ -132,7 +132,11 @@ class Loop:
             proj = self.world.before(per, place, place, size, self.step_no + 1)[0]
         if per.get("screen") == "world" and not modal and self.tile_px: self.mem.remember_view(place, self.world.pos, before)
         action, i = a.action, None
-        if action and "go_to" in action:
+        if action and "go_to" in action and action["go_to"].casefold().startswith("unexplored"):
+            act_route = self._unexplored(place)
+            if act_route and player: affs.append({"verb": "approach", "target": "unexplored", "at": player.get("at")}); targets.append(None); preds.append(None); i = len(affs) - 1
+            else: act_route = action = None
+        if action and "go_to" in action and act_route is None:
             resolved = self.world.resolve(action["go_to"], per, place); e = next((e for n, e in enumerate(per.get("entities", [])) if self.world.entity_ids.get(n) == resolved.get("id")), None) if resolved and resolved["kind"] == "screen" else None
             if resolved and (e or resolved["kind"] != "screen"):
                 affs.append({"verb": "approach", "target": (e or {}).get("name", action["go_to"]), "at": (e or {}).get("at")}); targets.append(resolved.get("id")); preds.append(None); i = len(affs) - 1
@@ -228,6 +232,17 @@ class Loop:
         fresh = [t for t in texts if t not in seen and _key(t) not in known]
         for text in (t for t in texts if t not in seen): self.mem.know(text, src="game_text", step=step)
         if fresh: self.notebook.note(step, f"text at {self.world.place_label(place) if place else '?'}: " + " / ".join(f'"{t}"' for t in fresh)); self.text_pending = True
+    def _unexplored(self, place):
+        """Route to the nearest untried edge (edges into unseen cells first), plus the step across it."""
+        if not self.tile_px: return None
+        seen = set((self.mem.get("seen", place) or {}).get("cells", []))
+        best = None
+        for (x, y), d in frontier(self.mem, place):
+            dirs = route(self.mem, place, self.pos, (x, y))
+            if dirs is None: continue
+            key = (f"{x + DIRS[d][0]},{y + DIRS[d][1]}" in seen, len(dirs))
+            if best is None or key < best[0]: best = (key, [*dirs, d])
+        return {"dirs": best[1]} if best else None
     def _moved(self, src, dst, via, step):
         label = self.world.place_label
         self.notebook.note(step, f"went from {label(src)} to {label(dst)}" + (f" via {via}" if via else ""))
@@ -243,7 +258,8 @@ class Loop:
         if not goal or goal.get("status") in FINISHED: return "no focus goal yet" if not goal else f"focus {self.notebook.focus} is {goal['status']}"
         if self.text_pending and per.get("screen") == "world": return "new game text was seen (see the log)"
         stuck = next((f for f in self.flags if f in ("same_action", "no_progress")), None)
-        return f"stuck: {stuck}" if stuck else None
+        # ponytail: 8-step floor on stuck replans; m1_gp replanned every ~3 steps into button-level goals
+        return f"stuck: {stuck}" if stuck and (self.last_plan is None or self.step_no + 1 - self.last_plan >= 8) else None
     def state(self):
         return {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "reperception_used": self.reperception_used, "perception": self.cached, "frame_hash": self.cached_hash, "perception_marked": self.cached_marked, "frame_mark_eligible": self.prev_frame_mark_eligible, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "pending_via": self.pending_via, "flags": self.flags, "planner": {"last": self.last_plan, "text_pending": self.text_pending, "focus_closed": self.focus_closed}}
     def restore(self, state):
