@@ -238,6 +238,7 @@ class Loop:
         seen = set((self.mem.get("seen", place) or {}).get("cells", []))
         best = None
         for (x, y), d in frontier(self.mem, place):
+            if ((self.mem.get("tiles", f"{place}@{x},{y}") or {}).get("exit") or {}).get("dir") == d: continue  # an exit, even inferred, is not unexplored (m1_gp2: walked back through the front door)
             dirs = route(self.mem, place, self.pos, (x, y))
             if dirs is None: continue
             key = (f"{x + DIRS[d][0]},{y + DIRS[d][1]}" in seen, len(dirs))

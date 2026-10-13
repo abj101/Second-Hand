@@ -1,6 +1,6 @@
 # GP: Goal planner — goals worked backwards to one focus, plus a done log
 
-Status: STOP 7c (outcome goals + `go_to unexplored` + pixel drift veto built; offline only; live run needs caps) · Branch: feat/lean-agent · Follows: [PS.md](PS.md) §9c · User decision 2026-10-13: Option B (event-triggered planner)
+Status: STOP 7d (option-C clean-boot run reached Pallet Town at step 113, then bounced at its own door; ledger exhausted) · Branch: feat/lean-agent · Follows: [PS.md](PS.md) §9c · User decision 2026-10-13: Option B (event-triggered planner)
 
 ## 0. Why (evidence)
 - **Run `runs/m1_ps_fp`, steps 81–180.** The agent never left the house and its party stayed at 0. Spend: 113 requests. Haiku extracted the evidence from `notebook.history` and the trace.
@@ -162,3 +162,25 @@ Status: STOP 7c (outcome goals + `go_to unexplored` + pixel drift veto built; of
   - The stationary-drift test is now parametrised: with views it vetoes, without views it still corrects.
 - **Offline P3** (m1_gp 2F stall, 8 requests): not a clean test. The checkpoint-75 log ends inside the Options menu, so the planner rightly plans "exit the menu → select CANCEL". With the inherited goals cleared, its top goal became the outcome "explore the world (done when all map edges are tried)".
 - `pytest tests/agent` is green. **Ledger:** total 1482/1500, M1 1434/1450.
+
+### 9d. Live clean-boot run with option C (`runs/m1_gp2`, 2026-10-13)
+- **Setup:** caps +200 (total 1700, M1 1650). The run stopped at step 137 on the 210-request cap. Ledger: total 1692/1700, M1 1644/1650.
+- **Progress vs `m1_gp`** (which never left 2F in 150 steps):
+
+  | Milestone | Step |
+  |---|---|
+  | Intro done | 46 |
+  | Reached 1F | 84 (via the stairs, while trying things in the room) |
+  | Talked to Mom | 107 (logged: "MOM: Right. All boys leave home…") |
+  | Planner focus: the door mat ("a known exit exists on the map") | 107 |
+  | **Out the front door into Pallet Town (map 0)** | **113** |
+
+  Party 0.
+- **Healthy signs:** no false drift fixes (0, against 2 in m1_gp). The planner closed goals with evidence. The log carried Mom's line and every move.
+- **Failure after step 113: bouncing at its own front door about 10 times** (town ↔ 1F).
+  1. **Bug, fixed.** `go_to "unexplored"` at step 114 walked straight back in. The door tile's *inferred* exit edge counts as untried in `frontier`, so it was the nearest "unexplored" edge at distance 0. `_unexplored` now skips any edge that is an exit, observed or inferred. The regression test fails without the fix.
+  2. **Open.** Outside, act kept choosing "enter the house to find Prof. Oak". "Next door" was read as *this* door, and both buildings are just `world [p_…]`, so nothing names "my house" versus another house.
+  3. **Open.** The focus set inside the house (`reach_room_edge`) was not replanned on arriving outdoors. Arriving in a new place is not a planner trigger.
+- **Next candidates (not built):**
+  - Make "arrived in a place not visited before" a planner trigger.
+  - Name places from what the model sees, so "next door" can mean "not the house I came out of".

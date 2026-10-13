@@ -876,5 +876,9 @@ def test_go_to_unexplored_walks_to_nearest_frontier(tmp_path):
     fold(loop.mem, "p", (0, 0), [{"dir": d, "shift": 0} for d in ("UP", "DOWN", "LEFT")], 16, 1)  # walls on three sides, RIGHT untried
     loop.pos = (0, 0)
     assert loop._unexplored("p") == {"dirs": ["RIGHT"]}
+    from agent.space import mark_exit
+    mark_exit(loop.mem, "q", (0, 0), "DOWN", "r", (0, 0), 2)  # arriving in r: r@(0,0) gets an inferred UP exit back to q
+    fold(loop.mem, "r", (0, 0), [{"dir": d, "shift": 0} for d in ("LEFT", "RIGHT", "DOWN")], 16, 3)
+    assert loop._unexplored("r") is None  # the only open edge is the way back out: not "unexplored"
     loop.tile_px = None
     assert loop._unexplored("p") is None
