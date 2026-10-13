@@ -20,6 +20,7 @@ This file is the single entry point. The orchestrator pastes nothing else; it re
 | 8 | W4: anchors from motion, HUD regions | [W4.md](W4.md) | 0 | continue |
 | 9 | L1: health report against truth, then one long act run | [L1.md](L1.md) | ≤ 220 | done (health red: player identity deadlock) |
 | 10 | TL: lean tracking layer (self spot from motion, probe, audit fixes), then L2 resume (added 2026-10-12) | [TL.md](TL.md) | ≤ 110 | **STOP 5**: user reads progress, then health |
+| 11 | PS: mark the player for the model (red box from the self spot), describe-only perception, decision call builds the action (added 2026-10-13 after STOP 5 A/B) | [PS.md](PS.md) | ≤ 160 (S0 26 + E 26 + L3a 60 + L3b 48) | **STOP 6a** after the offline frame eval (user approves live); **STOP 6b** after L3 |
 
 **Build-first decision (user, 2026-10-12, after STOP 3):** finish the system before judging intelligence. Live 40-step "better than the gated path?" comparisons are retired: both paths were stuck in the same house for reasons unrelated to decision-making, and every live failure so far was a correctness bug. Phases gate on unit tests and on **correctness checks against RAM truth** (player identity, one place per map, cuts change place, seen cells in bounds, actions reach their target), computed offline at 0 requests. Progress (maps, party, text) is reported, never gated, until L1 shows green health.
 
@@ -34,7 +35,7 @@ This file is the single entry point. The orchestrator pastes nothing else; it re
 3. **Game-neutral:** nothing game-specific in `agent/`: no game, place, character, item, route or RAM address. RAM truth (`scripts/truth_pokered.py`, `truth.jsonl`) is for evaluation only and is never read by `agent/`.
 4. **No new gates:** World Memory stores facts, answers queries and executes the model's own `go_to`; it never picks goals, filters options or overrides the model (user decision 2026-10-12).
 5. **Tests:** unit tests use `StubModel`/`GridEnv` from `tests/agent/fakes.py` and make 0 cloud calls. Each non-trivial branch leaves one runnable check. Use `.venv-agent/Scripts/python.exe`, forward-slash paths.
-6. **Cloud calls:** only phases with a request cap in §1 (P2, P3, L1, TL) spend requests, only through the persistent ledger in `scripts/run_agent.py` (`_ledger`, M1 bucket), never above the packet cap. Never reset a ledger, refund or raise a cap. Preserve `.cache/model/`. Runner exit code 3 (cap) or 4 (model unavailable) → checkpoint, report, stop.
+6. **Cloud calls:** only phases with a request cap in §1 (P2, P3, L1, TL, PS) spend requests, only through the persistent ledger in `scripts/run_agent.py` (`_ledger`, M1 bucket), never above the packet cap. Never reset a ledger, refund or raise a cap. Preserve `.cache/model/`. Runner exit code 3 (cap) or 4 (model unavailable) → checkpoint, report, stop.
 7. **Data safety:** never modify `runs/m1/` or its checkpoints; copy to a new directory first, as the packets say. Never `git add -A`, never push.
 
 ## 3. Model tiers
@@ -45,7 +46,7 @@ This file is the single entry point. The orchestrator pastes nothing else; it re
 
 ## 4. Budgets across the program
 
-- **Cloud requests:** P2 ≤ 40 (29 used) + P3 ≤ 80 (43 used) + L1 ≤ 220 (110 used) + TL ≤ 110 (110 used; M1 remaining 191 after TL on 2026-10-12; P3b used 0).
+- **Cloud requests:** P2 ≤ 40 (29 used) + P3 ≤ 80 (43 used) + L1 ≤ 220 (110 used) + TL ≤ 110 (110 used; M1 remaining 191 after TL on 2026-10-12; P3b used 0); 2026-10-13 STOP-5 diagnostics: 24 M1 + 30 smoke, so M1 883/1050, 167 left) + PS ≤ 160.
 - **Lines:** budgets suspended 2026-10-12 (report only; compress after the program). Original estimates, for reference (`agent/`, 1,988 on 2026-10-12): W0 +54 (actual), W1 ≈ +35, W2 ≈ +65, W3 ≈ +105, P4 ≈ −400 or more, W4 ≈ +60. Each packet states its own budget; overruns are reported, never hidden by compacting unrelated code.
 
 ## 5. Commits
