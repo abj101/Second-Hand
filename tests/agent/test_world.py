@@ -1,5 +1,9 @@
+import json
+from types import SimpleNamespace
+
 from agent.memory import Memory
-from agent.world import World
+from agent.world import World, classify
+from tests.agent.fakes import GridEnv
 
 
 def place(mem, id, name, first=1):
@@ -503,3 +507,86 @@ def test_tiers_preserve_transient_interest_and_promote_offscreen_text_names(tmp_
     world._tiers({"entities": [], "text": ["The Old Map points north"], "affordances": []}, "room", {})
     assert mem.get("entities", ui_id)["tier"] == "interest"
     assert mem.get("entities", note_id)["tier"] == "interest"
+
+
+SIZE = (160, 144)
+
+def _per(env, extra=()):
+    per = env.perception()
+    per["entities"].extend(extra)
+    return per
+
+def _drive(world, env, steps, start=1, extra=lambda step: ()):
+    """RIGHT/LEFT alternately (the door is never reached), fed to World as the loop feeds it."""
+    for step in range(start, start + steps):
+        before = env.screenshot()
+        world.before(_per(env, extra(step)), "room", "room", SIZE, step)
+        key, x0 = ("RIGHT" if env.player[0] <= 8 else "LEFT"), env.player[0]
+        env.press(key)
+        moved = env.player[0] - x0
+        scroll = (-16 * moved, 0)
+        skill = SimpleNamespace(scroll=scroll, moves=[(key, scroll if moved else (0, 0))], status="done", reason="", inputs=1, calls=0)
+        world.prepare(skill, "room", False, step); world.after(skill, "room", "room", False, step)
+        world.observe_after(_per(env, extra(step)), env.screenshot(), False, "room", SIZE, step, before=before, skill=skill)
+
+def _anchors(mem):
+    return {r["name"]: r.get("anchor") for r in mem.rows("entities")}
+
+def test_anchor_motion_decides_hud_npc_player_and_world_within_twelve_steps(tmp_path):
+    mem = Memory(tmp_path); env = GridEnv(hud=True, wander=True, animated=True); world = World(mem, 16)
+    decided = lambda a: all(a.get(k) not in (None, "unknown") for k in ("player", "npc", "hp bar", "fountain"))
+    steps = 0
+    while steps < 12 and not decided(_anchors(mem)):
+        steps += 1; _drive(world, env, 1, start=steps)
+    anchors = _anchors(mem)
+    assert decided(anchors) and steps <= 12, (steps, anchors, world.evidence)
+    assert anchors["hp bar"] == "screen" and anchors["npc"] == "actor" and anchors["player"] == "self"
+    assert anchors["fountain"] == "world" and anchors["exit: door"] == "world", (anchors, world.evidence)
+
+def test_anchor_transient_dialogue_box_is_screen_and_not_in_view(tmp_path):
+    mem = Memory(tmp_path); env = GridEnv(); world = World(mem, 16)
+    box = {"name": "dialogue box", "kind": "dialogue_box", "at": [.5, .9]}
+    _drive(world, env, 2, extra=lambda step: [box])
+    row = next(r for r in mem.rows("entities") if r["name"] == "dialogue box")
+    assert row["anchor"] == "screen" and row["transient"] is True
+    assert "HUD dialogue box" not in world.view("", "room")
+
+def test_anchor_classify_rules_ties_and_lists():
+    pair = lambda s1, s2, d, r=False: (s1, s2, d, r)
+    assert classify([pair((3, 3), (3, 3), (-1, 0), True), pair((3, 3), (3, 3), (0, 0), True)]) == "self"
+    assert classify([pair((3, 3), (3, 3), (-1, 0)), pair((3, 3), (3, 3), (-1, 0))]) == "screen"
+    assert classify([pair((3, 3), (2, 3), (-1, 0)), pair((3, 3), (2, 3), (-1, 0))]) == "world"
+    assert classify([pair((3, 3), (3, 4), (-1, 0)), pair((3, 3), (3, 4), (-1, 0))]) == "actor"
+    assert classify([pair((3, 3), (4, 3), (0, 0)), pair((3, 3), (4, 3), (0, 0))]) == "actor"
+    assert classify([pair((3, 3), (3, 3), (0, 0)), pair((3, 3), (3, 3), (0, 0))]) == "unknown"
+    assert classify([pair((3, 3), (2, 3), (-1, 0))]) == "unknown"
+    actor, world = pair((3, 3), (3, 4), (-1, 0)), pair((3, 3), (2, 3), (-1, 0))
+    assert classify([actor, actor, world, world]) == "actor"
+    assert classify([world, world, pair((3, 3), (3, 3), (-1, 0)), pair((3, 3), (3, 3), (-1, 0))]) == "screen"
+    assert classify([[[3, 3], [3, 3], [-1, 0], True], [[3, 3], [3, 3], [-1, 0], True]]) == "self"
+    assert classify([[[3, 3], [3, 3], [-1, 0], False], [[3, 3], [3, 3], [-1, 0], False]]) == "screen"
+
+def test_anchor_hud_change_is_flagged_in_view(tmp_path):
+    mem = Memory(tmp_path); env = GridEnv(hud=True); world = World(mem, 16)
+    _drive(world, env, 4)
+    assert _anchors(mem)["hp bar"] == "screen"
+    env.set_hud_value(3); _drive(world, env, 1, start=5)
+    assert "HUD hp bar changed at step" in world.view("", "room")
+
+def test_anchor_state_round_trip_keeps_camera_evidence_and_self_spot(tmp_path):
+    mem = Memory(tmp_path); env = GridEnv(hud=True, wander=True); world = World(mem, 16)
+    _drive(world, env, 3)  # RIGHT, LEFT, RIGHT: net camera -16 px
+    state = json.loads(json.dumps(world.state()))
+    replay = World(Memory(tmp_path), 16); replay.restore(state)
+    assert replay.cam_px == world.cam_px and replay.self_spot == world.self_spot and replay.evidence == world.evidence
+    assert replay.cam_px != [0, 0] and replay.self_spot is not None
+
+def test_anchor_stand_in_applies_only_while_anchor_unknown(tmp_path):
+    mem = Memory(tmp_path); world = World(mem, 16)
+    per = {"screen": "world", "text": [], "affordances": [], "entities": [
+        {"name": "player", "kind": "player", "at": [.5, .5]},
+        {"name": "guard", "kind": "npc", "at": [.3, .5]}, {"name": "bard", "kind": "npc", "at": [.7, .5]}]}
+    _, _, ids = world.before(per, "room", "room", SIZE, 1)
+    mem.upsert("entities", {**mem.get("entities", ids[1]), "anchor": "world"})
+    _, tiles, _ = world.before(per, "room", "room", SIZE, 2)
+    assert tiles[1] not in world.actor_tiles and tiles[2] in world.actor_tiles

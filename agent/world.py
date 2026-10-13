@@ -4,16 +4,34 @@ from dataclasses import replace
 from itertools import pairwise
 from statistics import median
 from agent.memory import TRANSIENT, _base, _distance, normalize_kind
-from agent.observer import cut
+from agent.observer import changed, cut
 from agent.space import DIRS, exit_to, fold, frontier, mark_exit, route, tile_of
 from agent.skills import SkillResult, approach
 
 TRAVEL_MAX_INPUTS = 120
 MISS_TO_STALE, MISS_TO_GONE, ACTOR_STALE_STEPS = 2, 4, 20
 LANDMARKS_PER_PLACE, MAP_W, MAP_H, VIEW_TOKENS = 8, 21, 15, 500
+POS_TOL, ANCHOR_EVIDENCE = 1, 2
 
-# ponytail: kinds stand in until W4 classifies anchors from motion.
+# ponytail: kinds stand in only for entities whose motion anchor is still unknown.
 ACTOR_KINDS = {"person", "npc", "character", "enemy", "monster", "animal"}
+
+def classify(history):
+    """Anchor class from (s1, s2, dcam, responded) tile-unit evidence; lists accepted."""
+    votes = {"actor": 0, "screen": 0, "world": 0}; responded = 0
+    for s1, s2, dcam, ok in history:
+        s1, s2, dcam = ([round(float(v), 6) for v in p] for p in (s1, s2, dcam))
+        responded += bool(ok)
+        moves = max(abs(v) for v in dcam) >= 1
+        step = max(abs(s2[i] - s1[i]) for i in (0, 1))
+        off = max(abs((s2[i] - s1[i]) - dcam[i]) for i in (0, 1))
+        screen = moves and step < POS_TOL
+        if screen: votes["screen"] += 1
+        elif moves and off < POS_TOL: votes["world"] += 1
+        if not screen and off >= POS_TOL: votes["actor"] += 1
+    if responded >= ANCHOR_EVIDENCE: return "self"
+    ranked = [c for c in ("actor", "screen", "world") if votes[c] >= ANCHOR_EVIDENCE]
+    return max(ranked, key=votes.get) if ranked else "unknown"
 
 class World:
     def __init__(self, mem, tile_px):
@@ -25,6 +43,8 @@ class World:
         self._travelled = None
         self._cut_arrival = None
         self._last_miss_hash = {}
+        self.cam_px, self.evidence, self.self_spot = [0, 0], {}, None
+        self._hud, self._persist = {}, {}
     def _anchor(self, per, size):
         h = self.anchors
         p = next((e.get("at") for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
@@ -32,14 +52,17 @@ class World:
         if p and self.tile_px and per.get("screen") == "world" and (not h or max(abs(p[i] - mid()[i]) * size[i] for i in (0, 1)) <= 1.5 * self.tile_px): h.append(list(p)); del h[:-9]
         return mid() if h else p
     def fix_player(self, per, size):
-        if per.get("screen") != "world" or len(self.anchors) < 3 or not self.tile_px: return None
+        if per.get("screen") != "world" or not self.tile_px: return None
+        if self.self_spot is None and len(self.anchors) < 3: return None
         entities = per.get("entities", [])
         player = next((e for e in entities if e.get("kind", "").casefold() == "player"), None)
         if not player or not isinstance(player.get("at"), list) or len(player["at"]) != 2: return None
-        median = [sorted(a[i] for a in self.anchors)[len(self.anchors) // 2] for i in (0, 1)]
+        # ponytail: a motion-decided self spot (W4) replaces the follow-camera median, which is kept as the fallback.
+        if self.self_spot is not None: median = self.self_spot
+        else: median = [sorted(a[i] for a in self.anchors)[len(self.anchors) // 2] for i in (0, 1)]
         dist = lambda at: max(abs(at[i] - median[i]) * size[i] for i in (0, 1))
         if dist(player["at"]) <= 1.5 * self.tile_px: return None
-        # ponytail: assumes a camera that follows the player (fixed screen spot); W4 motion anchors replace it for fixed-screen games.
+        # ponytail: assumes a camera that follows the player (fixed screen spot) when no self spot is decided.
         candidates = [(dist(e["at"]), e) for e in entities if e is not player and isinstance(e.get("at"), list) and len(e["at"]) == 2]
         near = min(candidates, key=lambda item: item[0]) if candidates else None
         old = list(player["at"])
@@ -58,8 +81,8 @@ class World:
         self.pa = pa
         proj = lambda at: tile_of(at, pa, self.pos, size, self.tile_px) if pa and self.tile_px and isinstance(at, list) and len(at) == 2 else None
         tiles = {i: t for i, e in enumerate(per.get("entities", [])) if e.get("kind", "").casefold() != "player" and (t := proj(e.get("at")))}
-        self.actor_tiles = frozenset(tiles[i] for i, e in enumerate(per.get("entities", [])) if i in tiles and normalize_kind(e.get("kind")) in ACTOR_KINDS)
         ids = self.mem.observe(per, place, step, tiles)
+        self.actor_tiles = frozenset(tiles[i] for i, e in enumerate(per.get("entities", [])) if i in tiles and self._actor(ids.get(i), e))
         self.entity_ids, self.entity_tiles = ids, {ids[i]: p for i, p in tiles.items() if i in ids}
         self.entities = [{"id": ids.get(i), "name": e.get("name"), "kind": e.get("kind"), "at": e.get("at")}
                          for i, e in enumerate(per.get("entities", []))]
@@ -73,6 +96,11 @@ class World:
             if is_exit and row.get("place") and self._failed_exit(row, row["place"]):
                 if row.get("tier") != "landmark": self.mem.upsert("entities", {**row, "tier": "landmark"})
             elif row and row.get("tier") != "interest": self.mem.upsert("entities", {**row, "tier": "interest"})
+    def _actor(self, ident, entity):
+        anchor = (self.mem.get("entities", ident) or {}).get("anchor") if ident else None
+        if anchor == "actor": return True
+        if anchor in ("world", "self", "screen"): return False
+        return normalize_kind(entity.get("kind")) in ACTOR_KINDS
     def _tiers(self, per, place, ids):
         record = self.mem.get("places", place)
         if not record or record.get("state") == "merged": return
@@ -95,7 +123,7 @@ class World:
             named = bool(name and name in text)
             tier = "interest" if row.get("tier") == "interest" else "transient" if kind in TRANSIENT else row.get("tier") or "landmark"
             if failed_exit: tier = "landmark"
-            elif kind in ACTOR_KINDS or is_exit or matched or named: tier = "interest"
+            elif self._actor(ident, entity) or is_exit or matched or named: tier = "interest"
             if tier != row.get("tier"): self.mem.upsert("entities", {**row, "tier": tier})
             if matched: promote.add(ident)
         promote.update(r["id"] for r in self.mem.rows("entities")
@@ -141,11 +169,11 @@ class World:
             if row.get("place") not in live: continue
             ident, old_status = row["id"], row.get("status", "remembered")
             status = old_status
-            kind, tier = normalize_kind(row.get("kind")), row.get("tier", "landmark")
+            tier = row.get("tier", "landmark")
             is_matched = row.get("place") == place and ident in matched
             if is_matched: continue
             if status == "seen": row = {**row, "status": "remembered"}; status = "remembered"
-            if kind in ACTOR_KINDS:
+            if self._actor(ident, row):
                 if step - row.get("last", step) >= ACTOR_STALE_STEPS and status != "stale":
                     self.mem.upsert("entities", {**row, "status": "stale"})
                 elif old_status != status: self.mem.upsert("entities", row)
@@ -189,7 +217,55 @@ class World:
                 "scroll": list(skill.scroll) if skill.scroll is not None else None}
     def mark_exit(self, place, direction, to, arrive, step):
         mark_exit(self.mem, place, self._prepared[4], direction, to, arrive, step)
-    def observe_after(self, per, frame, reused, place, size, step):
+    def _box(self, image, centre):
+        t = self.tile_px; w, h = image.size
+        x0, y0 = (min(max(round(centre[i] - t / 2), 0), max(n - t, 0)) for i, n in ((0, w), (1, h)))
+        return (x0, y0, x0 + t, y0 + t)
+    def _learn(self, per, frame, before, skill, size, old_ids, old_entities, step):
+        old_index = {ident: j for j, ident in old_ids.items()}
+        for i, e in enumerate(per.get("entities", [])):
+            ident = self.entity_ids.get(i); j = old_index.get(ident)
+            if ident is None or j is None or j >= len(old_entities): continue
+            a0, a1 = old_entities[j].get("at"), e.get("at")
+            if not (isinstance(a0, list) and isinstance(a1, list) and len(a0) == 2 and len(a1) == 2): continue
+            px = [a0[k] * size[k] for k in (0, 1)]
+            s1 = [v / self.tile_px for v in px]
+            s2 = [a1[k] * size[k] / self.tile_px for k in (0, 1)]
+            dcam = [v / self.tile_px for v in getattr(skill, "scroll", None) or (0, 0)]
+            # appearance before vs after, each at its own position: scroll and own translation cancel out
+            qx = [a1[k] * size[k] for k in (0, 1)]
+            responded = bool(getattr(skill, "moves", None)) and changed(before.crop(self._box(before, px)), frame.crop(self._box(frame, qx))) > .05
+            history = [*self.evidence.get(ident, []), [s1, s2, dcam, responded]][-6:]
+            self.evidence[ident] = history
+            row = self.mem.get("entities", ident)
+            anchor = "self" if row.get("anchor") == "self" else classify(history)
+            if row.get("anchor") != anchor: self.mem.upsert("entities", {**row, "anchor": anchor})
+            if anchor == "self": self.self_spot = list(a1)
+    def _screen_things(self, per, frame, place, size, step):
+        for i, e in enumerate(per.get("entities", [])):
+            ident = self.entity_ids.get(i); row = self.mem.get("entities", ident) if ident else None
+            kind = normalize_kind(e.get("kind"))
+            if not row or kind == "player": continue
+            if kind in TRANSIENT:
+                # ponytail: transient kinds are screen-anchored unless motion already decided them world/actor/self.
+                anchor = row.get("anchor") if row.get("anchor") in ("world", "actor", "self") else "screen"
+                if (row.get("anchor"), row.get("transient")) != (anchor, True): self.mem.upsert("entities", {**row, "anchor": anchor, "transient": True})
+            elif isinstance(e.get("at"), list) and len(e["at"]) == 2:
+                key = (str(e.get("name", "")).casefold(), kind, tuple(round(v, 2) for v in e["at"]))
+                places = self._persist.setdefault(key, set()); places.add(place)
+                if len(places) >= 2 and row.get("anchor") not in ("self", "screen"): self.mem.upsert("entities", {**row, "anchor": "screen"})
+            if not self.tile_px or per.get("screen") != "world" or kind in TRANSIENT or not isinstance(e.get("at"), list) or len(e["at"]) != 2: continue
+            row = self.mem.get("entities", ident)
+            if row.get("anchor") != "screen": continue
+            box = self._box(frame, [e["at"][k] * size[k] for k in (0, 1)])
+            if row.get("region") != list(box): self.mem.upsert("entities", {**row, "region": list(box)})
+            hud = self._hud.setdefault(ident, {"crop": None, "changed": None}); crop = frame.crop(box)
+            if hud["crop"] is not None and changed(hud["crop"], crop) > .05: hud["changed"] = step
+            hud["crop"] = crop
+    def observe_after(self, per, frame, reused, place, size, step, before=None, skill=None):
+        old_ids, old_entities = self.entity_ids, self.entities
+        scroll = getattr(skill, "scroll", None)
+        if scroll is not None: self.cam_px = [self.cam_px[0] + scroll[0], self.cam_px[1] + scroll[1]]
         player = next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         aa = self._anchor(per, size) if player else None
         tiles = {i: tile_of(e["at"], aa, self.pos, size, self.tile_px) for i, e in enumerate(per.get("entities", []))
@@ -206,6 +282,9 @@ class World:
                 if drift and drift == self.drift: self.pos = (self.pos[0] + dx, self.pos[1] + dy); drift_fix = (dx, dy); tiles = {i: (p[0] + dx, p[1] + dy) for i, p in tiles.items()}; self.drift = self.drift_ref = None
                 else: self.drift, self.drift_ref = drift, anchor if drift else None
         self.entity_ids = self.mem.observe(per, place, step, tiles)
+        if not reused and before is not None and self.tile_px and getattr(skill, "scroll", None) is not None and old_ids:
+            self._learn(per, frame, before, skill, size, old_ids, old_entities, step)
+        self._screen_things(per, frame, place, size, step)
         self._tiers(per, place, self.entity_ids)
         self._record_view(per, frame, reused, place, size, step, aa, self.entity_ids)
         self.entity_tiles = {self.entity_ids[i]: p for i, p in tiles.items() if i in self.entity_ids}; self._travelled = None
@@ -214,13 +293,16 @@ class World:
     def state(self):
         return {"pos": self.pos, "drift": self.drift, "drift_ref": self.drift_ref, "entity_tiles": self.entity_tiles,
                 "entity_ids": self.entity_ids, "anchors": self.anchors,
-                "last_miss_hash": self._last_miss_hash}
+                "last_miss_hash": self._last_miss_hash, "cam_px": self.cam_px, "evidence": self.evidence,
+                "self_spot": self.self_spot, "hud_changed": {k: v["changed"] for k, v in self._hud.items() if v["changed"] is not None}}
 
     def restore(self, state):
         self.pos, self.drift = tuple(state.get("pos", (0, 0))), tuple(state["drift"]) if state.get("drift") else None
         self.drift_ref, self.entity_tiles = state.get("drift_ref"), state.get("entity_tiles", {})
         self.entity_ids, self.anchors = {int(i): v for i, v in state.get("entity_ids", {}).items()}, state.get("anchors", [])
         self._last_miss_hash = state.get("last_miss_hash", {})
+        self.cam_px, self.evidence, self.self_spot = list(state.get("cam_px", [0, 0])), state.get("evidence", {}), state.get("self_spot")
+        self._hud = {k: {"crop": None, "changed": v} for k, v in state.get("hud_changed", {}).items()}
     def _paths(self, start):
         live = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged"}; links = {}
         for r in self.mem.rows("tiles"):
@@ -414,6 +496,9 @@ class World:
         flags = list(getattr(self, "view_flags", ()))
         if self.merge_pending: flags.append(f"merge_pending: {self.merge_pending}")
         if self._travelled and self._travelled.status != "done": flags.append(f"travel: {self._travelled.reason}")
+        for ident, hud in self._hud.items():
+            row = self.mem.get("entities", ident)
+            if hud["changed"] is not None and row and row.get("place") == place: flags.append(f"HUD {row['name']} changed at step {hud['changed']}")
         for line in (f"Flag: {flag}" for flag in dict.fromkeys(flags)):
             if len("\n".join((*output, line))) <= VIEW_TOKENS * 4: output.append(line)
         return "\n".join(output)

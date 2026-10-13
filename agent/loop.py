@@ -157,7 +157,7 @@ class Loop:
             "act": {"place": a.place, "ops": applied, "why": a.why, "action": a.action, "flags": act_flags}, **({"flags": [f"merge_pending: {self.world.merge_pending}"]} if self.world.merge_pending else {})}
         self.step_no += 1
         (self.mem.root.parent / row["frame"]).parent.mkdir(parents=True, exist_ok=True); before.save(self.mem.root.parent / row["frame"])
-        drift_fix = self.world.observe_after(after_per, after, after_reused, next_place, after.size, self.step_no)
+        drift_fix = self.world.observe_after(after_per, after, after_reused, next_place, after.size, self.step_no, before=before, skill=skill)
         row["tile"], row["drift_fix"] = self.world.pos if self.tile_px else None, list(drift_fix) if drift_fix else None
         for text in after_per.get("text", []):
             if text not in per.get("text", []): self.mem.know(text, src="game_text", step=self.step_no)

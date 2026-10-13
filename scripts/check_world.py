@@ -3,22 +3,27 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import sys
 import tempfile
 from collections import Counter, defaultdict
+from itertools import pairwise
 from pathlib import Path
 from statistics import median
 from types import SimpleNamespace
+
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from agent.env_pyboy import PyBoyEnv
 from agent.memory import Memory, _base, normalize_kind
+from agent.observer import changed
 from agent.skills import Ctx
 from agent.space import tile_of
-from agent.world import ACTOR_KINDS, World
+from agent.world import ACTOR_KINDS, World, classify
 from scripts.eval_run import map_id, read as eval_read, replay
 from scripts.truth_pokered import read
 
@@ -382,12 +387,167 @@ def cut_check(run: Path, step: int) -> int:
     return 0 if got != prev else 1
 
 
+ANCHOR_SIZE, ANCHOR_TILE = (160, 144), 16
+ANCHOR_DIRS = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}
+
+
+def _at(entity: dict):
+    at = entity.get("at")
+    return at if isinstance(at, list) and len(at) == 2 else None
+
+
+def _frame(run: Path, row: dict):
+    path = run / row["frame"] if row.get("frame") else None
+    if path is None or not path.exists():
+        return None
+    with Image.open(path) as img:
+        return img.convert("RGB")
+
+
+def _actor_slots(truth: list[dict]) -> set[int]:
+    """Truth sprite slots whose screen motion differs from the camera motion by >= 8 px in some consecutive pair."""
+    by_step = {r["step"]: r for r in truth}
+    actors = set()
+    for r in truth:
+        n = by_step.get(r["step"] + 1)
+        if n is None or n["map"] != r["map"]:
+            continue
+        cam = (-(n["x"] - r["x"]) * 16, -(n["y"] - r["y"]) * 16)
+        now = {s["slot"]: s for s in n["sprites"]}
+        for s in r["sprites"]:
+            t = now.get(s["slot"])
+            if s["slot"] == 0 or t is None:
+                continue
+            disp = (t["x"] - s["x"], t["y"] - s["y"])
+            if max(abs(disp[i] - cam[i]) for i in (0, 1)) >= 8:
+                actors.add(s["slot"])
+    return actors
+
+
+def _tile_of(truth_row: dict, me: dict, px) -> tuple[int, int]:
+    """Map tile of a screen point (centre px), relative to the player's truth sprite centre."""
+    return (truth_row["x"] + round((px[0] - me["x"] - 8) / 16), truth_row["y"] + round((px[1] - me["y"] - 8) / 16))
+
+
+def anchors_check(run: Path) -> int:
+    """Replays the learned anchor evidence over recorded world entities; scores against truth sprites."""
+    trace_all = rows(run / "trace.jsonl")
+    truth = rows(run / "truth.jsonl")
+    truth_by = {r["step"]: r for r in truth}
+    actors = _actor_slots(truth)
+    world_rows = [r for r in trace_all if r.get("entities") and r.get("screen") == "world"]
+
+    # replay: same evidence tuple as World._learn; responded needs a frame pair (else False)
+    box = World(None, ANCHOR_TILE)._box
+    history, decided, seen, names = defaultdict(list), {}, Counter(), {}
+    for r in world_rows:
+        for e in r["entities"]:
+            if e.get("id") and _at(e):
+                seen[e["id"]] += 1
+                names.setdefault(e["id"], (e.get("name"), e.get("kind")))
+    for a, b in pairwise(world_rows):
+        if b["step"] != a["step"] + 1 or a.get("scene_cut") or a.get("scroll") is None or a.get("place") != b.get("place"):
+            continue
+        before, after = _frame(run, a), _frame(run, b)
+        moves = bool((a.get("skill") or {}).get("inputs"))
+        dcam = [v / ANCHOR_TILE for v in a["scroll"]]
+        later = {e.get("id"): _at(e) for e in b["entities"]}
+        for e in a["entities"]:
+            ident, a0 = e.get("id"), _at(e)
+            a1 = later.get(ident)
+            if not ident or a0 is None or a1 is None:
+                continue
+            px = [a0[k] * ANCHOR_SIZE[k] for k in (0, 1)]
+            s1 = [v / ANCHOR_TILE for v in px]
+            s2 = [a1[k] * ANCHOR_SIZE[k] / ANCHOR_TILE for k in (0, 1)]
+            qx = [a1[k] * ANCHOR_SIZE[k] for k in (0, 1)]
+            responded = bool(moves and before is not None and after is not None
+                             and changed(before.crop(box(before, px)), after.crop(box(after, qx))) > .05)
+            history[ident] = [*history[ident], [s1, s2, dcam, responded]][-6:]
+            decided[ident] = classify(history[ident])
+
+    # truth: majority sprite slot per entity over the world steps it was seen on
+    slot_votes = defaultdict(list)
+    for r in world_rows:
+        t = truth_by.get(r["step"])
+        for e in r["entities"]:
+            at = _at(e)
+            if t is None or not e.get("id") or at is None:
+                continue
+            p = (at[0] * ANCHOR_SIZE[0], at[1] * ANCHOR_SIZE[1])
+            near = [(math.dist(p, (s["x"] + 8, s["y"] + 8)), s["slot"]) for s in t["sprites"]]
+            near = [d for d in near if d[0] <= 16]
+            slot_votes[e["id"]].append(min(near)[1] if near else None)
+    truth_label = {}
+    for ident, votes in slot_votes.items():
+        slot = Counter(votes).most_common(1)[0][0]
+        truth_label[ident] = "self" if slot == 0 else "actor" if slot in actors else "world"
+
+    scored = {i for i in seen if seen[i] >= 3}
+    print("entity: name kind steps decided truth scored")
+    for ident in sorted(seen):
+        name, kind = names[ident]
+        print(f"{ident}: {name} {kind} steps={seen[ident]} decided={decided.get(ident, 'unknown')} "
+              f"truth={truth_label.get(ident, 'world')} scored={ident in scored}")
+    cols = ("actor", "screen", "world", "self", "unknown")
+    conf = {t: Counter() for t in ("actor", "world", "self")}
+    for ident in scored:
+        conf[truth_label.get(ident, "world")][decided.get(ident, "unknown")] += 1
+    print("confusion (rows truth, cols decided): " + " ".join(f"{c:>8}" for c in cols))
+    for t in conf:
+        print(f"{t:>8}: " + " ".join(f"{conf[t][c]:>8}" for c in cols))
+
+    dec = [i for i in scored if decided.get(i, "unknown") != "unknown"]
+    matches = sum(decided[i] == truth_label.get(i, "world") for i in dec)
+    accuracy = matches / len(dec) if dec else 0.0
+    undecided = (len(scored) - len(dec)) / len(scored) if scored else 1.0
+    print(f"decided: {len(dec)}/{len(scored)} = {len(dec) / len(scored) if scored else 0.0:.3f}")
+    print(f"accuracy: {accuracy:.3f} ({matches}/{len(dec)})")
+    print(f"undecided_fraction: {undecided:.3f}")
+
+    # actor_walls: blocked presses onto a truth sprite that no decided-actor entity occupies
+    violations = checked = skipped = 0
+    actor_ids = {i for i in decided if decided[i] == "actor"}
+    for r in trace_all:
+        if "blocked" not in str((r.get("skill") or {}).get("reason", "")):
+            continue
+        choice, act = r.get("choice") or {}, r.get("act") or {}
+        name = next((str(v).casefold() for v in (act.get("action"), choice.get("target"), choice.get("verb"))
+                     if str(v).casefold() in ANCHOR_DIRS), None)
+        t = truth_by.get(r["step"])
+        me = next((s for s in t["sprites"] if s["slot"] == 0), None) if t else None
+        if name is None or me is None:
+            skipped += 1
+            continue
+        checked += 1
+        dx, dy = ANCHOR_DIRS[name]
+        dest = (t["x"] + dx, t["y"] + dy)
+        if not any(_tile_of(t, me, (s["x"] + 8, s["y"] + 8)) == dest for s in t["sprites"] if s["slot"] != 0):
+            continue
+        on_screen = [_tile_of(t, me, (_at(e)[0] * ANCHOR_SIZE[0], _at(e)[1] * ANCHOR_SIZE[1]))
+                     for e in r.get("entities") or [] if _at(e) and e.get("id") in actor_ids]
+        if dest not in on_screen:
+            violations += 1
+    print(f"blocked_rows_checked: {checked}")
+    print(f"skipped_blocked_rows: {skipped}")
+    print(f"actor_walls: {violations}")
+
+    fails = []
+    if accuracy < .90: fails.append(f"accuracy {accuracy:.3f} < 0.90")
+    if undecided > .30: fails.append(f"undecided_fraction {undecided:.3f} > 0.30")
+    if violations: fails.append(f"actor_walls {violations} != 0")
+    print("GATE PASS" if not fails else "GATE FAIL: " + "; ".join(fails))
+    return 0 if not fails else 1
+
+
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv == ["merge"]:
         return merge_check()
     if argv[:1] == ["roles"] and len(argv) == 2:
         return roles_check(ROOT / argv[1])
+    if argv[:1] == ["anchors"] and len(argv) == 2:
+        return anchors_check(ROOT / argv[1])
     if argv[:1] == ["cut"] and len(argv) == 3:
         return cut_check(ROOT / argv[1], int(argv[2]))
     parser = argparse.ArgumentParser()

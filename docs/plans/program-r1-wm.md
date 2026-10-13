@@ -38,7 +38,7 @@ This file is the single entry point. The orchestrator pastes nothing else; it re
 
 ## 3. Model tiers
 
-- **From 2026-10-12 (after P3b):** orchestrator **Claude Sonnet** (Claude Code session); subagents **Claude Haiku** for every WP, set explicitly (`model: "haiku"`) on every spawn. This overrides the "Tier" column in packets (which says gpt-6-luna high). Never Opus. P2–P3b ran on GPT-6.1 Sol + gpt-6-luna high.
+- **Current (2026-10-12, for L1):** orchestrator **GPT-6.1 Sol**; subagents **gpt-6-luna at high reasoning effort** for every WP, set explicitly on every spawn. P4 and W4 ran on a Claude Sonnet orchestrator with Haiku subagents; P2–P3b ran on GPT-6.1 Sol with gpt-6-luna high. Never Opus.
 - The orchestrator writes exact WP specs from the packet, delegates, reviews diffs against the card, and runs every acceptance command itself.
 - One WP per subagent. Paste: §2 rules, the WP card, and the contracts.md text the card cites. A subagent that fails a WP twice → the orchestrator stops and reports; it does not take over the implementation itself.
 
@@ -53,4 +53,4 @@ At each gate pass: `git add` the paths the packet lists plus `docs/`, message `<
 
 ## 6. Kickstart prompt
 
-The current prompt (Sonnet orchestrator, Haiku subagents) is in [kickstart.md](kickstart.md).
+The current prompt (GPT-6.1 Sol orchestrator, gpt-6-luna high subagents) is in [kickstart.md](kickstart.md).
