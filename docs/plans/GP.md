@@ -184,3 +184,17 @@ Status: STOP 7d (option-C clean-boot run reached Pallet Town at step 113, then b
 - **Next candidates (not built):**
   - Make "arrived in a place not visited before" a planner trigger.
   - Name places from what the model sees, so "next door" can mean "not the house I came out of".
+
+### 9e. Name-entry stall (`runs/m1_gp3`, `runs/m1_gp4`, 2026-10-13; preferred names removed per user, `9a5b1bd`)
+- **Symptom.** Steps 21–93 were spent on the name keyboard. Pressing `A` entered the letter "A" twice (steps 31 and 41), but `type` always failed with "keyboard not identified", and about half the replies produced no action.
+- **Causes, all fixed in `962661e`:**
+  1. The model replies `{"type": "RED"}` or `{"verb": "type", "text": "RED"}`. `act` dropped the first shape and ignored text inside `action`, so there was no action or an empty text.
+  2. `type_text` rejected correct keyboard readings whose rows were lists of cells, or whose `done_key` was null.
+  3. `type_text` with empty text read back the "A" the agent had entered and **erased it with B**.
+  4. The prompt never said that picking an offered preset is fine. Before today the "Hand" preference pushed it to type.
+  5. A reply with no valid action changed nothing and said nothing. It now raises a flag on the next step.
+- **Offline, real model + emulator:**
+  - `type_text("RED")` on the m1_gp4 step-25 save state typed the name, pressed the done key, and RAM `player_name = RED`. The game continued ("Right! So your name is RED!"). 2 requests.
+  - Act on the name menu (frame 20: NEW NAME / RED / ASH / JACK) chose `select RED` 2/2.
+  - Act on the question box (frame 19) now returns `type` with text "Red", parsed correctly.
+- **Ledger:** total 1886/1975, M1 1838/1925.
