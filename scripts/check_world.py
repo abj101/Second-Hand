@@ -25,6 +25,7 @@ from scripts.truth_pokered import read
 RUN = ROOT / "runs/m1"
 CHECKPOINT = RUN / "checkpoint/000094"
 SCRATCH = ROOT / ".tmp/w2"
+VIEW_SCRATCH = ROOT / ".tmp/w3"
 MAP_LABELS = {0x26: "2F", 0x25: "1F", 0x00: "Town"}
 
 
@@ -69,6 +70,32 @@ def setup(mode: str):
     trace = rows(RUN / "trace.jsonl")
     truth = rows(RUN / "truth.jsonl")
     return root, env, model, ctx, mem, world, place, perception, harness, trace, truth
+
+
+def view_check() -> int:
+    VIEW_SCRATCH.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="view-", dir=VIEW_SCRATCH))
+    shutil.copytree(CHECKPOINT / "memory", root / "memory")
+    harness = json.loads((CHECKPOINT / "harness.json").read_text(encoding="utf-8"))
+    mem = Memory(root / "memory")
+    world = World(mem, harness.get("tile_px"))
+    world.restore(harness)
+    place = harness["place"]
+    world.current_place = place
+    for row in mem.rows("places"):
+        if row.get("state") != "merged": world._tiers({}, row["id"], {})
+    view = world.view("", place)
+    print(view)
+    again = world.view("", place)
+    labels = [world.place_label(p["id"]) for p in mem.rows("places") if p.get("state") != "merged"]
+    resolved = world.resolve("world [p_world]", {}, place)
+    deterministic = view == again
+    print(f"chars={len(view)} deterministic={deterministic} labels={len(labels)} unique_labels={len(set(labels))} "
+          f"resolve={resolved} model_calls=0 scratch={root} start={place}")
+    return 0 if (len(view) <= 2000 and view == again and "Here:" in view and "map:" in view
+                 and "Place:" in view and "world [p_world_2]" in view and "world [p_world]" in view
+                 and len(labels) == len(set(labels))
+                 and resolved and resolved.get("kind") == "place" and resolved.get("id") == "p_world") else 1
 
 
 def place_maps(mem: Memory, trace: list[dict], truth: list[dict]) -> dict[int, str]:
@@ -311,10 +338,12 @@ def main(argv=None) -> int:
     if argv == ["merge"]:
         return merge_check()
     parser = argparse.ArgumentParser()
-    parser.add_argument("check", choices=("graph", "travel", "fetch"))
+    parser.add_argument("check", choices=("graph", "travel", "fetch", "view"))
     args = parser.parse_args(argv)
     if not CHECKPOINT.is_dir():
         parser.error(f"missing checkpoint: {CHECKPOINT}")
+    if args.check == "view":
+        return view_check()
     bundle = setup(args.check)
     try:
         if args.check == "graph":

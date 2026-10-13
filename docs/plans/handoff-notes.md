@@ -1,60 +1,64 @@
 # Handoff notes
 
-Last written by: GPT-6.1 Sol orchestrator, 2026-10-12. W2 gate passed; next phase W3, not started.
+Last written by: GPT-6.1 Sol orchestrator, 2026-10-12. W3 gate passed; next STOP 2, then P3 after approval.
 
 ## State of the code
-- Branch feat/lean-agent; this gate commit completes W2; prior accepted W2 WIP is ae412b2.
-- W0/W1/W2.1/W2.2 remain accepted; W2.3 graph/travel/fetch and the full suite now pass.
-- W2 adds scripts/check_world.py checks and a tested World.plan unknown-neighbor repair.
-- This session stops after W2; W3 has not started; no push.
+- Branch feat/lean-agent; this session's W3 gate commit completes evidence, seen, tiers and the act view.
+- W0/W1/W2 and P2 remain accepted; do not redo them.
+- World.view replaces chooser/describe facts on the act path; gated branch keeps mem.view and describe.
+- This session stops at STOP 2; P3 not started; no push.
 
 ## Decisions in force
 - Root GPT-6.1 Sol; one gpt-6-luna HIGH subagent per WP, explicit model and effort.
-- Line budgets suspended program-wide; record counts, never trim for them.
-- Read code only via codegraph_explore; Ponytail full; Headroom for large output.
-- Cross-place readers skip rows whose place state is merged, including evaluator selectors.
-- Duplicate world names: travel targets truth-selected Town id; resolve("world") is informational.
-- Fetch resolves the selected entity by name; never fabricate aliases, exits, arrivals or tiles.
-- Never edit contracts.md, loop/ or runs/m1; use fresh checkpoint copies.
-- No cloud before P3; W3 -> STOP 2 requires user approval before live P3 spend.
+- Line budgets suspended; record counts, never trim for them.
+- Code reads via codegraph_explore; Ponytail full; Headroom for large output.
+- Every cross-place reader skips merged-place rows.
+- Place labels use name [id] when live names collide; no renaming or label aliases.
+- World.resolve accepts exact labels/ids before name matching; evidence/tier never filters model options.
+- Gone things are hidden from the view, but explicit model go_to still resolves them.
+- Never edit contracts.md, loop/ or runs/m1; work on fresh checkpoint copies.
+- STOP 2 requires user approval for up to 80 live M1 requests before P3 (454 left).
 
 ## Measured numbers
-- Parent graph: 14 live places, 4 exits; 2F p_world_2 -> 1F p_dialogue_box_2 -> Town p_world.
-- Parent travel: map0x00,x5/y6,17 inputs,one travel call,zero model calls; legs1/16/0 inputs.
-- Parent fetch: e_table_3 table,stored(-1,1),truth target(4,4); map0x25,x4/y3,distance1,6 inputs,zero model calls.
-- Fetch legs1/5 inputs; 1F coordinate offset(5,3),trace55/truth56; 18 offline pairs agree.
-- resolve("world") returns place p_world_2,tile(0,0),staleFalse; information only.
-- Parent repair unit: 2 passed,5 deselected,0.16s; unknown-neighbor and existing resolve/plan tests.
-- Parent full suite: 236 passed,1 SDL library warning,308.94s (0:05:08)..
-- agent/2,214 lines (+99 across W2); tracked tests/agent Python files3,520.
-- scripts/check_world.py330 (+270); world244 (+4 repair); test_world170 (+21 repair).
-- Requests spent0; ledger total614/M1596/smoke18,M1 remaining454; protected changes0/269.
+- W3 parent world gate: 19 passed, 17.35s; label gate: 3 passed/16 deselected, 9.21s.
+- W3 checker: 1,989/2,000 chars, deterministic, 14/14 unique live labels, 0 model calls.
+- Checkpoint Here: world [p_world_2] (-1,0), 30 walked, 0 seen, 27 untried/27 unseen edges.
+- From 2F, resolve("world [p_world]") gives p_world, tile(0,0), stale false.
+- W3 act gate: 5 passed/45 deselected, 32.34s.
+- W3 full suite: 248 passed, 1 SDL warning, 329.87s (0:05:29).
+- Parent W3.2 acceptance: 71 passed, 1 SDL warning, 247.95s.
+- GridEnv seen union: 99 cells, 2 upserts; repeated rectangle adds no row and no floor.
+- agent/2,448 lines (+234 W3); tracked tests/agent Python3,765 (+245); scripts2,501 (+29).
+- world468, memory384, loop223, test_world415, checker359 lines.
+- Requests0; ledger total614/M1596/smoke18; M1 left454; protected changes0/443.
 
 ## Environment and gotchas
-- Use .venv-agent/Scripts/python.exe and forward-slash paths; ROM and checkpoint94 present.
-- Gate commands: scripts/check_world.py graph/travel/fetch, then -m pytest tests/agent -q.
-- Regression args: -m pytest tests/agent/test_world.py -q -k 'unknown_entity_neighbor or resolve_and_plan'.
-- Evidence under .tmp/w2/: final-graph.log,final-travel.log,final-fetch.log,final-suite.log,repair-unit.log.
-- Protected baseline .tmp/w2/retry-protected-before.json includes 267 runs/m1 files,contracts.md,runs/e3_budget.json.
-- Trace K place/frame pair with truth K; trace K tile/next_place pair with truth K+1.
-- Evaluator map selection uses non-merged screen=world places; Town's candidate state remains eligible.
-- Headroom proxy localhost8787 unreachable; local compression/retrieval available.
+- Use .venv-agent/Scripts/python.exe and forward-slash paths.
+- Gate logs: .tmp/w3/gate-world.log, gate-label.log, gate-view.log, gate-act.log, gate-suite.log.
+- Checkpoint view copy: .tmp/w3/view-tpcl_ba2/memory; never modify runs/m1/checkpoint/000094/memory.
+- W3 Result in docs/plans/W3.md includes full literal view, commands and golden rationale.
+- tests/agent/data is ignored; new seen.jsonl fixtures were force-added for both golden episodes.
+- World.state optional last_miss_hash keeps last eligible miss-counted frame across resume.
+- W2 graph/travel/fetch checker modes keep .tmp/w2; view mode uses .tmp/w3.
+- Trace K place/frame pairs truth K; tile/next_place pairs truth K+1.
+- Headroom proxy localhost8787 unreachable; local compression/retrieval works.
 - Existing untracked .claude/ predates this work; preserve it.
 
 ## Deviations from plan and contracts
-- Initial fetch had no plan because all four entity neighbors were unknown, excluded by floor=True-only candidates.
-- One allowed World.plan repair admits unknown/non-false reachable neighbors, preserving ordering and facing press.
-- No stored facts were fabricated; World folds actual travel moves only into scratch memory.
-- Existing optional travel(trace=None) is backward-compatible; unseen arrivals still retain expected identity.
-- Gate establishes checkpoint94 movement; general arrival verification remains unproven.
-- No contract change required or proposed; no loop/ edits.
+- One diagnosis round fixed actor remembered persistence, transient interest retention, offscreen text tiers and integer blocker moves.
+- Regressions failed before fixes; parent W3.1 repair acceptance passed15 in7.19s.
+- Both affected goldens regenerated: evidence/tier rows and 2 seen rows each; no non-W3 final entity change.
+- Gated golden trace unchanged; act golden trace only changes view_ids to [].
+- Integrated act/label checks are in card-owned test_world.py; test_loop.py unchanged.
+- No contract changes, no loop/ edits, no checkpoint edits, no new gates.
 
 ## Do not retry
-- Do not redo accepted W0/W1/W2 or P2.
-- Never reset/refund/raise ledgers, fabricate checkpoint facts, git add -A or push.
-- Do not start P3 without STOP 2 approval.
+- Do not redo W0/W1/W2/P2 or regenerate unrelated goldens.
+- Never reset/refund/raise ledgers, fabricate facts, git add -A or push.
+- Do not start P3 or spend live requests before STOP 2 approval.
 
-## Open issues for W3
-- No open W2 gate blocker; start from W3.md when authorized to continue.
-- W3 evidence states, seen tiles and known-things view remain unimplemented by this session.
-- W3 gate must pass before STOP 2 live-spend approval; preserve truth/navigation separation.
+## Open issues for STOP 2 then P3
+- No W3 gate blocker; approve up to 80 live requests from the M1 bucket to authorize P3.
+- Checkpoint predates seen store (0 cells); view fills its budget at the Town heading amid legacy shelf duplicates.
+- P3 measures live seen accuracy, duplicate identities and repeated actions/re-entries.
+- General arrival verification remains unproven; W4 motion anchors/HUD are still deferred.

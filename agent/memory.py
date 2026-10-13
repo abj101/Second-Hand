@@ -147,7 +147,7 @@ class Memory:
 
     def observe(self, perception: dict, place: str, step: int,
                 tiles: dict[int, tuple[int, int]] | None = None) -> dict[int, str]:
-        result, used = {}, set()
+        result, used = {}, set(); actors = {"person", "npc", "character", "enemy", "monster", "animal"}
         for i, entity in enumerate(perception.get("entities", [])):
             name, kind = str(entity.get("name", "")).strip(), str(entity.get("kind", "unknown"))
             if not name:
@@ -159,7 +159,7 @@ class Memory:
             all_candidates = [r for r in self.rows("entities")
                           if (normalize_kind(r.get("kind")) == nk and _distance(r.get("name", ""), name) <= 1
                               if global_key else r.get("place") == place and _distance(r.get("name", ""), name) <= 1)]
-            candidates = [r for r in all_candidates if r["id"] not in used and (not tile or not r.get("tile") or max(abs(tile[0] - r["tile"][0]), abs(tile[1] - r["tile"][1])) <= 1)]
+            candidates = [r for r in all_candidates if r["id"] not in used and (not tile or not r.get("tile") or max(abs(tile[0] - r["tile"][0]), abs(tile[1] - r["tile"][1])) <= (min(4, 1 + max(0, step - r.get("last", step)) // 4) if nk in actors else 1))]
             exact = [r for r in candidates if _base(r.get("name", "")) == _base(name)]
             pool = exact or candidates
             row = pool[0] if len(pool) == 1 else min(pool, key=lambda r: max(abs(tile[0] - r["tile"][0]), abs(tile[1] - r["tile"][1])) if r.get("tile") else 2) if tile and pool else max(exact, key=lambda r: r.get("seen", 0), default=None)  # several same-name: nearest tile, like resolve(); no tile = no evidence of a distinct object (fuzzy ties still mint)
@@ -174,7 +174,7 @@ class Memory:
                        "at": entity.get("at"), "attrs": {}, "first": step, "last": step,
                        "seen": 0, "src": "observed"}
             row.update(kind=kind, name=row.get("name", name), at=entity.get("at"), last=step,
-                       seen=row.get("seen", 0) + 1)
+                       seen=row.get("seen", 0) + 1, status="seen", misses=0)
             if tile:
                 row["tile"] = list(tile)
             eid = self.upsert("entities", row)["id"]

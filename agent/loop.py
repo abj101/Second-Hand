@@ -55,13 +55,21 @@ class Loop:
         changed_tasks = self.tasks.check(self.step_no + 1); task = self.tasks.active()
         on_screen = [ids[i] for i in ids if i < len(per.get("entities", []))]
         ctx = {"place": place, "task": task["id"], "on_screen": on_screen, "recent": self.recent, "step": self.step_no + 1}
-        view, view_ids = self.mem.view("chooser", ctx); view = (view + "\n" + describe(self.mem, place, self.pos)).strip()
+        if self.act_mode:
+            view_ids = []
+            self.world.view_flags = self.flags
+            goals = " ".join(f"{key} {value.get('text', '')}" for key, value in self.notebook.data["goals"].items()
+                              if value.get("status", "active") == "active")
+            view = self.world.view(goals, place)
+        else:
+            view, view_ids = self.mem.view("chooser", ctx)
+            view = (view + "\n" + describe(self.mem, place, self.pos)).strip()
         affs = list(per.get("affordances", [])); targets = [resolve_target(self.mem, a.get("target", ""), place, proj(a.get("at"))) for a in affs]
         preds = [predict(self.mem, a, targets[i], place) for i, a in enumerate(affs)]
         choice, exit_test, player = None, False, next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         candidate = act_route = travel_legs = None
         if self.act_mode:
-            a = act(self.model, before, per, self.notebook.render(), view, self.flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=list(dict.fromkeys(n for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True) for n in [p.get("name"), *p.get("aliases", [])] if n))[:12])
+            a = act(self.model, before, per, self.notebook.render(), view, self.flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]])
             applied = self.notebook.apply(a.ops, self.step_no + 1)
             named = self.world.name(place, a.place, self.step_no + 1)
             if named != place:  # model says this new arrival is a known place
@@ -117,6 +125,8 @@ class Loop:
             if self.act_mode: skill = self.world.travel(skillctx, travel_legs, self.step_no + 1, self.trace) if travel_legs is not None and choice else wait_until(skillctx) if not affs or choice is None else press_seq(skillctx, affs[choice.i]["target"].split()) if affs[choice.i].get("verb") == "buttons" else run_affordance(skillctx, affs[choice.i], per, text=choice.text, exit=False, **({"route": planned_route} if planned_route else {}))
             else: skill = wait_until(skillctx) if not affs else run_affordance(skillctx, affs[choice.i], per, text=choice.text, exit=exit_test or bool(planned_route), **({"route": planned_route} if planned_route else {}))
         except BaseException: self.pending_cut, self.pending_via = cut(before, self.env.screenshot()), affs[choice.i].get("target") if choice else None; self.cached = self.cached_hash = None; raise
+        if choice and skill.status == "done" and affs[choice.i].get("verb") in ("approach", "interact") and choice.i < len(targets) and targets[choice.i]:
+            self.world._promote([targets[choice.i]])
         self.tile_px = skillctx.tile_px; self.world.tile_px = self.tile_px
         scene_cut = self.world._travel_cut if travel_legs is not None else skill.blank_seen or skill.reason == "scene cut" or (cut(skill.before, skill.after) and (self.env.pointer or not choice or affs[choice.i].get("verb") not in ("approach", "interact") or skill.scroll == (0, 0)))
         moves = getattr(skill, "moves", []); spatial = self.world.prepare(skill, place, scene_cut, self.step_no + 1); exit_key, cut_dir = spatial["exit_key"], spatial["cut_dir"]

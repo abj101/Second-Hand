@@ -3,12 +3,14 @@ import hashlib, json
 from dataclasses import replace
 from itertools import pairwise
 from statistics import median
-from agent.memory import _base, _distance, normalize_kind
+from agent.memory import TRANSIENT, _base, _distance, normalize_kind
 from agent.observer import cut
-from agent.space import DIRS, exit_to, fold, mark_exit, route, tile_of
+from agent.space import DIRS, exit_to, fold, frontier, mark_exit, route, tile_of
 from agent.skills import SkillResult, approach
 
 TRAVEL_MAX_INPUTS = 120
+MISS_TO_STALE, MISS_TO_GONE, ACTOR_STALE_STEPS = 2, 4, 20
+LANDMARKS_PER_PLACE, MAP_W, MAP_H, VIEW_TOKENS = 8, 21, 15, 500
 
 # ponytail: kinds stand in until W4 classifies anchors from motion.
 ACTOR_KINDS = {"person", "npc", "character", "enemy", "monster", "animal"}
@@ -21,6 +23,7 @@ class World:
         self.entities, self.pa, self._prepared = [], None, None
         self.current_place, self.merge_pending, self.new_arrival = None, None, False
         self._travelled = None
+        self._last_miss_hash = {}
     def _anchor(self, per, size):
         h = self.anchors
         p = next((e.get("at") for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
@@ -40,10 +43,113 @@ class World:
         self.entity_ids, self.entity_tiles = ids, {ids[i]: p for i, p in tiles.items() if i in ids}
         self.entities = [{"id": ids.get(i), "name": e.get("name"), "kind": e.get("kind"), "at": e.get("at")}
                          for i, e in enumerate(per.get("entities", []))]
+        self._tiers(per, place, ids)
         return proj, tiles, ids
+    def _promote(self, ids):
+        for ident in ids:
+            row = self.mem.get("entities", ident)
+            if row and row.get("place") and (self.mem.get("places", row["place"]) or {}).get("state") == "merged": continue
+            is_exit = bool(row and (normalize_kind(row.get("kind")) == "exit" or str(row.get("name", "")).casefold().startswith("exit:")))
+            if is_exit and row.get("place") and self._failed_exit(row, row["place"]):
+                if row.get("tier") != "landmark": self.mem.upsert("entities", {**row, "tier": "landmark"})
+            elif row and row.get("tier") != "interest": self.mem.upsert("entities", {**row, "tier": "interest"})
+    def _tiers(self, per, place, ids):
+        record = self.mem.get("places", place)
+        if not record or record.get("state") == "merged": return
+        for row in self.mem.rows("entities"):
+            if row.get("place") == place and ("tier" not in row or "status" not in row or "misses" not in row):
+                kind = normalize_kind(row.get("kind"))
+                tier = "interest" if kind in ACTOR_KINDS else "transient" if kind in TRANSIENT else "landmark"
+                self.mem.upsert("entities", {**row, "tier": row.get("tier", tier),
+                                               "status": row.get("status", "remembered"), "misses": row.get("misses", 0)})
+        text = " ".join(map(str, per.get("text", []))).casefold()
+        targets = [str(a.get("target", "")).casefold() for a in per.get("affordances", [])]
+        promote = set()
+        for i, entity in enumerate(per.get("entities", [])):
+            ident = ids.get(i); row = self.mem.get("entities", ident) if ident else None
+            if not row or row.get("place") not in (place, None): continue
+            kind, name = normalize_kind(entity.get("kind")), str(entity.get("name", "")).casefold()
+            is_exit = kind == "exit" or str(entity.get("name", "")).casefold().startswith("exit:")
+            failed_exit = is_exit and self._failed_exit(row, place)
+            matched = any(name and (name in target or _distance(name, target) <= 1) for target in targets)
+            named = bool(name and name in text)
+            tier = "interest" if row.get("tier") == "interest" else "transient" if kind in TRANSIENT else row.get("tier") or "landmark"
+            if failed_exit: tier = "landmark"
+            elif kind in ACTOR_KINDS or is_exit or matched or named: tier = "interest"
+            if tier != row.get("tier"): self.mem.upsert("entities", {**row, "tier": tier})
+            if matched: promote.add(ident)
+        promote.update(r["id"] for r in self.mem.rows("entities")
+                       if r.get("place") == place and r.get("name") and str(r["name"]).casefold() in text)
+        promote.update(r.get("s") for r in self.mem.rows("relations")
+                       if r.get("src") == "observed" and r.get("sup", 0) and r.get("s"))
+        self._promote(i for i in promote if self.mem.get("entities", i) and self.mem.get("entities", i).get("place") == place)
+    def _failed_exit(self, entity, place):
+        if not entity.get("tile"): return False
+        x, y = entity["tile"]; tile = self.mem.get("tiles", f"{place}@{x},{y}")
+        if not tile or tile.get("floor") is not True or tile.get("exit"): return False
+        relations = any(r.get("s") == entity["id"] and r.get("p") == "leads_to" and r.get("state") == "refuted" for r in self.mem.rows("relations"))
+        edges = self.mem.get("places", place).get("edges", [])
+        return relations or any(e.get("ok", 0) == 0 and _distance(e.get("via", ""), entity.get("name", "")) <= 1 for e in edges)
+    def _view_rect(self, anchor, size):
+        if not anchor or not self.tile_px: return None
+        width, height = size[0] // self.tile_px, size[1] // self.tile_px
+        if not width or not height: return None
+        ax, ay = (round(anchor[i] * size[i] / self.tile_px - .5) for i in (0, 1))
+        x0, y0 = self.pos[0] - ax, self.pos[1] - ay
+        return (x0, y0, x0 + width - 1, y0 + height - 1)
+    def _record_view(self, per, frame, reused, place, size, step, anchor, ids):
+        live = {r["id"] for r in self.mem.rows("places") if r.get("state") != "merged"}
+        rect = self._view_rect(anchor, size) if place in live else None
+        world_screen = per.get("screen") == "world"
+        modal = any(normalize_kind(e.get("kind")) in {"dialogue_box", "menu", "keyboard", "input_field"}
+                    for e in per.get("entities", []))
+        if rect and world_screen:
+            x0, y0, x1, y1 = rect
+            seen = self.mem.get("seen", place) or {"id": place, "cells": [], "step": step}
+            cells = set(seen.get("cells", [])); added = {f"{x},{y}" for x in range(x0, x1 + 1) for y in range(y0, y1 + 1)} - cells
+            if added: self.mem.upsert("seen", {"id": place, "cells": sorted(cells | added), "step": step})
+        distinct = False
+        if rect and world_screen and not modal and not reused:
+            digest = hashlib.sha256(frame.tobytes()).hexdigest()
+            distinct = self._last_miss_hash.get(place) != digest
+            if distinct: self._last_miss_hash[place] = digest
+        if rect:
+            x0, y0, x1, y1 = rect
+            mx0, my0, mx1, my1 = x0 + 1, y0 + 1, x1 - 1, y1 - 1
+        matched = set(ids.values()) if place in live else set()
+        for row in self.mem.rows("entities"):
+            if row.get("place") not in live: continue
+            ident, old_status = row["id"], row.get("status", "remembered")
+            status = old_status
+            kind, tier = normalize_kind(row.get("kind")), row.get("tier", "landmark")
+            is_matched = row.get("place") == place and ident in matched
+            if is_matched: continue
+            if status == "seen": row = {**row, "status": "remembered"}; status = "remembered"
+            if kind in ACTOR_KINDS:
+                if step - row.get("last", step) >= ACTOR_STALE_STEPS and status != "stale":
+                    self.mem.upsert("entities", {**row, "status": "stale"})
+                elif old_status != status: self.mem.upsert("entities", row)
+                continue
+            if (row.get("place") == place and distinct and tier in ("interest", "landmark") and row.get("tile") and
+                    mx0 <= row["tile"][0] <= mx1 and my0 <= row["tile"][1] <= my1):
+                misses = row.get("misses", 0) + 1
+                status = "gone" if misses >= MISS_TO_GONE else "stale" if misses >= MISS_TO_STALE else status
+                row = {**row, "misses": misses, "status": status}
+            if row.get("status") != self.mem.get("entities", ident).get("status") or row.get("misses") != self.mem.get("entities", ident).get("misses"):
+                self.mem.upsert("entities", row)
     def prepare(self, skill, place, scene_cut, step):
         if skill is self._travelled: self._prepared = (skill, place, step, None, self.pos); return {"cut_dir": None, "exit_key": None}
         moves = getattr(skill, "moves", []); move_rows = moves[:-1] if scene_cut and moves else moves
+        at = self.pos
+        for direction, shift in move_rows:
+            if direction not in DIRS: continue
+            if shift in ((0, 0), 0):
+                target = at[0] + DIRS[direction][0], at[1] + DIRS[direction][1]
+                self._promote(i for i, tile in self.entity_tiles.items() if tile == target)
+            elif self.tile_px and isinstance(shift, (tuple, int)):
+                dx, dy = ((round(-shift / self.tile_px), 0) if direction in ("LEFT", "RIGHT") else (0, round(-shift / self.tile_px))) if isinstance(shift, int) else (round(-v / self.tile_px) for v in shift)
+                n = max(abs(dx), abs(dy))
+                if n: at = (at[0] + ((dx > 0) - (dx < 0)) * n, at[1] + ((dy > 0) - (dy < 0)) * n)
         if self.tile_px: self.pos = fold(self.mem, place, self.pos, move_rows, self.tile_px, step, actors=self.actor_tiles)
         cut_dir = moves[-1][0] if scene_cut and moves else None
         self._prepared = (skill, place, step, cut_dir, self.pos)
@@ -77,17 +183,21 @@ class World:
                 if drift and drift == self.drift: self.pos = (self.pos[0] + dx, self.pos[1] + dy); drift_fix = (dx, dy); tiles = {i: (p[0] + dx, p[1] + dy) for i, p in tiles.items()}; self.drift = self.drift_ref = None
                 else: self.drift, self.drift_ref = drift, anchor if drift else None
         self.entity_ids = self.mem.observe(per, place, step, tiles)
+        self._tiers(per, place, self.entity_ids)
+        self._record_view(per, frame, reused, place, size, step, aa, self.entity_ids)
         self.entity_tiles = {self.entity_ids[i]: p for i, p in tiles.items() if i in self.entity_ids}; self._travelled = None
         return drift_fix
 
     def state(self):
         return {"pos": self.pos, "drift": self.drift, "drift_ref": self.drift_ref, "entity_tiles": self.entity_tiles,
-                "entity_ids": self.entity_ids, "anchors": self.anchors}
+                "entity_ids": self.entity_ids, "anchors": self.anchors,
+                "last_miss_hash": self._last_miss_hash}
 
     def restore(self, state):
         self.pos, self.drift = tuple(state.get("pos", (0, 0))), tuple(state["drift"]) if state.get("drift") else None
         self.drift_ref, self.entity_tiles = state.get("drift_ref"), state.get("entity_tiles", {})
         self.entity_ids, self.anchors = {int(i): v for i, v in state.get("entity_ids", {}).items()}, state.get("anchors", [])
+        self._last_miss_hash = state.get("last_miss_hash", {})
     def _paths(self, start):
         live = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged"}; links = {}
         for r in self.mem.rows("tiles"):
@@ -99,18 +209,132 @@ class World:
                 if edge["to"] not in paths: paths[edge["to"]] = [*paths[p], (p, row, edge)]; queue.append(edge["to"])
         return paths
     def resolve(self, name, per, place):
-        name = str(name or "").strip().removeprefix("exit:").strip()
-        if not name: return None
-        live = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged"}; dist = {p: len(path) for p, path in self._paths(place).items()}
+        requested = str(name or "").strip()
+        if not requested: return None
+        places = [p for p in self.mem.rows("places") if p.get("state") != "merged"]
+        live = {p["id"] for p in places}
+        exact = next((p for p in places if requested == p["id"] or requested.casefold() == self.place_label(p["id"]).casefold()), None)
+        if exact:
+            incoming = [r for r in self.mem.rows("tiles") if r.get("place") in live and (r.get("exit") or {}).get("to") == exact["id"]]
+            tile = (incoming[0].get("exit") or {}).get("arrive") if incoming else next(
+                ((r["x"], r["y"]) for r in self.mem.rows("tiles") if r.get("place") == exact["id"] and r.get("floor") is True), None)
+            return {"kind": "place", "place": exact["id"], "tile": tuple(tile) if tile else None, "id": exact["id"], "stale": False}
+        name = requested.removeprefix("exit:").strip()
+        dist = {p: len(path) for p, path in self._paths(place).items()}
         screen = [(i, e) for i, e in enumerate(per.get("entities", [])) if e.get("name") and _distance(e["name"], name) <= 1]
         if screen: i, e = min(screen, key=lambda pair: (_distance(pair[1]["name"], name), -(self.mem.get("entities", self.entity_ids.get(pair[0], "")) or {}).get("seen", 0))); ident = self.entity_ids.get(i); return {"kind": "screen", "place": place, "tile": self.entity_tiles.get(ident), "id": ident, "stale": False}
-        rows = [e for e in self.mem.rows("entities") if e.get("place") in live and e.get("tile") and e.get("status") != "gone" and _distance(e.get("name", ""), name) <= 1]
+        rows = [e for e in self.mem.rows("entities") if e.get("place") in live and e.get("tile") and _distance(e.get("name", ""), name) <= 1]
         if rows: e = min(rows, key=lambda e: (e["place"] != place, dist.get(e["place"], 10**9), -e.get("seen", 0))); return {"kind": "memory", "place": e["place"], "tile": tuple(e["tile"]), "id": e["id"], "stale": e.get("status") == "stale"}
         rows = [p for p in self.mem.rows("places") if p.get("id") in live and any(_distance(v, name) <= 1 for v in [p.get("name", ""), *p.get("aliases", [])])]
         if not rows: return None
         p = min(rows, key=lambda p: (p["id"] != place, dist.get(p["id"], 10**9), -p.get("visits", 0))); incoming = [r for r in self.mem.rows("tiles") if r.get("place") in live and (r.get("exit") or {}).get("to") == p["id"]]
         tile = (incoming[0].get("exit") or {}).get("arrive") if incoming else next(((r["x"], r["y"]) for r in self.mem.rows("tiles") if r.get("place") == p["id"] and r.get("floor") is True), None)
         return {"kind": "place", "place": p["id"], "tile": tuple(tile) if tile else None, "id": p["id"], "stale": False}
+
+    def place_label(self, place):
+        rows = [p for p in self.mem.rows("places") if p.get("state") != "merged"]
+        row = self.mem.get("places", place)
+        if not row: return place
+        name = str(row.get("name") or place)
+        duplicates = sum(str(p.get("name") or p["id"]).casefold() == name.casefold() for p in rows) > 1
+        return f"{name} [{place}]" if duplicates else name
+
+    def view(self, goal_text, place):
+        live = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged"}
+        places = [p for p in self.mem.rows("places") if p.get("id") in live]
+        goal = str(goal_text or "").casefold()
+        promoted = [e["id"] for e in self.mem.rows("entities") if e.get("place") in live and e.get("name")
+                    and _base(e["name"]) in goal]
+        self._promote(promoted)
+
+        current = self.mem.get("places", place) or {"id": place, "name": place}
+        label = self.place_label(place)
+        tier = lambda e: e.get("tier", "interest" if normalize_kind(e.get("kind")) in ACTOR_KINDS else "transient" if normalize_kind(e.get("kind")) in TRANSIENT else "landmark")
+        tiles = [r for r in self.mem.rows("tiles") if r.get("place") == place]
+        seen = self.mem.get("seen", place) or {"cells": []}
+        seen_cells = set(seen.get("cells", []))
+        edges = frontier(self.mem, place)
+        unseen = sum(f"{x + DIRS[d][0]},{y + DIRS[d][1]}" not in seen_cells for (x, y), d in edges)
+        walked = sum(r.get("floor") is True for r in tiles)
+        lines = [f"Here: {label} ({self.pos[0]},{self.pos[1]})  map: {walked} walked, {len(seen_cells)} seen, {len(edges)} untried edges ({unseen} into unseen)"]
+
+        x0, y0 = self.pos[0] - MAP_W // 2, self.pos[1] - MAP_H // 2
+        x1, y1 = x0 + MAP_W - 1, y0 + MAP_H - 1
+        cells = {(r["x"], r["y"]): r for r in tiles}
+        entities = [e for e in self.mem.rows("entities") if e.get("place") == place and e.get("tile")
+                    and e.get("status", "remembered") != "gone" and tier(e) in ("interest", "landmark")]
+        landmarks = sorted((e for e in entities if tier(e) == "landmark"), key=lambda e: (-e.get("seen", 0), e["id"]))[:LANDMARKS_PER_PLACE]
+        entities = [e for e in entities if tier(e) == "interest"] + landmarks
+        entities = [e for e in entities if not ((normalize_kind(e.get("kind")) == "exit" or str(e.get("name", "")).casefold().startswith("exit:")) and self._failed_exit(e, place))]
+        entities.sort(key=lambda e: (tier(e) != "interest", e["id"]))
+        symbols = "ABCDFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        marks, legend = {}, []
+        mapped = set()
+        for i, e in enumerate(e for e in entities if x0 <= e["tile"][0] <= x1 and y0 <= e["tile"][1] <= y1 and tuple(e["tile"]) not in marks):
+            if i == len(symbols): break
+            symbol = symbols[i]; marks[tuple(e["tile"])] = symbol
+            mapped.add(e["id"])
+            status = e.get("status", "remembered")
+            last = f"last seen {tuple(e['tile'])} step {e.get('last', 0)}; may have moved" if status == "stale" else f"{status} step {e.get('last', 0)}"
+            legend.append(f"{'Thing' if tier(e) == 'interest' else 'Landmark'} {symbol} {e.get('name', e['id'])} {tuple(e['tile'])} {normalize_kind(e.get('kind'))} {last}")
+        for y in range(y0, y1 + 1):
+            row = []
+            for x in range(x0, x1 + 1):
+                tile = cells.get((x, y), {})
+                glyph = "@" if (x, y) == tuple(self.pos) else "E" if tile.get("exit") else marks.get((x, y))
+                if glyph is None:
+                    for d, (dx, dy) in DIRS.items():
+                        source = cells.get((x - dx, y - dy), {})
+                        if d in source.get("blocked", []):
+                            glyph = "#"; break
+                if glyph is None: glyph = "." if tile.get("floor") is True else "," if f"{x},{y}" in seen_cells else " "
+                row.append(glyph)
+            lines.append("".join(row))
+        lines.append("Map: . walked, , seen, # blocked side, E exit, @ you; letters mark things and landmarks")
+        exits = sorted((r for r in tiles if r.get("exit")), key=lambda r: (r["y"], r["x"], r["exit"].get("dir", "")))
+        lines.extend(f"E {r['exit'].get('dir')} ({r['x']},{r['y']}) -> {self.place_label(r['exit'].get('to'))}"
+                     for r in exits if r.get("place") in live and r["exit"].get("to") in live)
+        lines.extend(legend)
+        current_things = sorted((e for e in self.mem.rows("entities") if e.get("place") == place and
+                                 tier(e) == "interest" and e.get("status", "remembered") != "gone" and
+                                 e["id"] not in mapped), key=lambda e: e["id"])
+        for e in current_things:
+            tile = tuple(e["tile"]) if e.get("tile") else "?"
+            status = e.get("status", "remembered")
+            last = f"last seen {tile} step {e.get('last', 0)}; may have moved" if status == "stale" else f"{status} step {e.get('last', 0)}"
+            lines.append(f"Thing: {e.get('name', e['id'])} {tile} {normalize_kind(e.get('kind'))} {last}")
+
+        paths = self._paths(place)
+        words = {w.strip(".,!?;:()[]{}\"'") for w in goal.split() if w.strip(".,!?;:()[]{}\"'")}
+        others = sorted((p for p in places if p["id"] != place), key=lambda p: (
+            len(paths.get(p["id"], ())) if p["id"] in paths else 10**9,
+            -len(words & {w.strip(".,!?;:()[]{}\"'") for w in " ".join(map(str, [p.get("name", ""), *p.get("aliases", []), *(e.get("name", "") for e in self.mem.rows("entities") if e.get("place") == p["id"] and tier(e) == "interest")])).casefold().split()}),
+            -p.get("last", p.get("visits", 0)), p["id"]))
+        for other in others:
+            pid = other["id"]
+            aliases = other.get("aliases", [])
+            lines.append(f"Place: {self.place_label(pid)}" + (f" aliases: {', '.join(map(str, aliases))}" if aliases else ""))
+            links = sorted((r for r in self.mem.rows("tiles") if r.get("place") == pid and (r.get("exit") or {}).get("to") in live),
+                           key=lambda r: (r["y"], r["x"], r["exit"].get("dir", "")))
+            lines.extend(f"  Exit {r['exit'].get('dir')} -> {self.place_label(r['exit']['to'])}" for r in links)
+            for e in sorted((e for e in self.mem.rows("entities") if e.get("place") == pid and tier(e) == "interest" and e.get("status", "remembered") != "gone"), key=lambda e: e["id"]):
+                status = e.get("status", "remembered")
+                fact = f"last seen {tuple(e['tile']) if e.get('tile') else '?'} step {e.get('last', 0)}; may have moved" if status == "stale" else status
+                lines.append(f"  Thing: {e.get('name', e['id'])} {fact}")
+            other_edges = frontier(self.mem, pid)
+            other_seen = set((self.mem.get("seen", pid) or {}).get("cells", []))
+            other_unseen = sum(f"{x + DIRS[d][0]},{y + DIRS[d][1]}" not in other_seen for (x, y), d in other_edges)
+            lines.append(f"  Edges: {len(other_edges)} untried ({other_unseen} into unseen)")
+
+        flags = list(getattr(self, "view_flags", ()))
+        if self.merge_pending: flags.append(f"merge_pending: {self.merge_pending}")
+        if self._travelled and self._travelled.status != "done": flags.append(f"travel: {self._travelled.reason}")
+        lines.extend(f"Flag: {flag}" for flag in dict.fromkeys(flags))
+        output = []
+        for line in lines:
+            candidate = "\n".join((*output, line))
+            if len(candidate) <= VIEW_TOKENS * 4: output.append(line)
+        return "\n".join(output)
     def plan(self, target):
         if not target or not target.get("tile") or not self.current_place or not self.tile_px: return None
         path = self._paths(self.current_place).get(target["place"])
