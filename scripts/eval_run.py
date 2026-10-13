@@ -36,6 +36,51 @@ def rate(n, d):
     return n / d if d else None
 
 
+def _no_effect_streak(trace):
+    longest = streak = 0
+    for row in trace:
+        if (row.get("outcome") or {}).get("effects") == ["no_change"]:
+            streak += 1
+            longest = max(longest, streak)
+        else:
+            streak = 0
+    return longest
+
+
+def _health(result, world_maps):
+    places = result.get("place_ids_per_map")
+    p3 = ({mid: len((places or {}).get(mid, [])) for mid in sorted(world_maps)}
+          if world_maps else None)
+    seen = result.get("seen_in_bounds")
+    tile = (result.get("spatial") or {}).get("tile_accuracy_per_visit", {}).get("accuracy")
+    repeats = result.get("repeat_actions")
+    values = (
+        ("player_role_errors", result.get("player_role_errors"), 0),
+        ("cut_self_loops", result.get("cut_self_loops"), 0),
+        ("place_ids_per_map", p3, 1),
+        ("screen_places", result.get("screen_places"), 0),
+        ("seen_in_bounds", seen.get("rate") if seen else None, .98),
+        ("tile_accuracy", tile, .95),
+        ("no_effect_streak_max", result.get("no_effect_streak_max"), 5),
+        ("repeat_actions_max_length", max((len(r.get("steps", [])) for r in repeats), default=0)
+         if repeats is not None else None, 5),
+    )
+    health = []
+    for field, value, limit in values:
+        if field == "place_ids_per_map":
+            green = all(count == limit for count in value.values()) if value else None
+        elif value is None or (field == "cut_self_loops" and result.get("no_effect_streak_max") is None):
+            green = None
+        elif field in ("player_role_errors", "cut_self_loops", "screen_places"):
+            green = value == limit
+        elif field in ("seen_in_bounds", "tile_accuracy"):
+            green = value >= limit
+        else:
+            green = value <= limit
+        health.append({"field": field, "value": value, "green": green})
+    return health
+
+
 def _position(row):
     try:
         return int(row["x"]), int(row["y"])
@@ -144,6 +189,13 @@ def _p3_metrics(run, trace, truth_rows):
     has_trace, has_truth = (run / "trace.jsonl").exists(), (run / "truth.jsonl").exists()
     has_places, has_knowledge = paths["places"].exists(), paths["knowledge"].exists()
     places = {r.get("id"): r for r in read(paths["places"]) if r.get("id")} if has_places else {}
+    trace_steps = {r.get("step") for r in trace} if has_trace else set()
+    screen_kinds = {"dialogue_box", "dialogue_screen", "menu"}
+    screen_places = (len({r["id"] for r in read(paths["places"]) if r.get("id")
+                          if r.get("first") in trace_steps and
+                          ((r.get("screen") is not None and str(r["screen"]).casefold() != "world") or
+                           str(r.get("name", "")).casefold() in screen_kinds)})
+                     if has_trace and trace and has_places else None)
     live_trace = ([r for r in trace if r.get("place") in places and places[r["place"]].get("state") != "merged"]
                   if has_trace and has_places else [])
     truth = {r.get("step"): r for r in truth_rows}
@@ -321,6 +373,7 @@ def _p3_metrics(run, trace, truth_rows):
 
     return {"place_ids_per_map": ({mid: sorted(ids) for mid, ids in sorted(place_ids.items())}
                                   if has_trace and has_truth and has_places else None),
+            "screen_places": screen_places,
             "seen_in_bounds": seen_in_bounds,
             "stuck_streak_max": streak_max if has_trace and has_truth and has_knowledge else None,
             "travel": ({"started": len(travel_cases), "arrived": sum(c["arrived"] for c in travel_cases),
@@ -624,9 +677,13 @@ def evaluate(run, *, repredict=False, hide_memory=False):
                                               "legacy": legacy_duplicates,
                                               "new_after_resume": new_duplicates},
                         "known_exit_id_reuse": exit_reuse},
-            **_e4_metrics(run, trace, truth_rows), **_p3b_metrics(trace, truth_rows), **p3}
+            **_e4_metrics(run, trace, truth_rows), **_p3b_metrics(trace, truth_rows), **p3,
+            "no_effect_streak_max": _no_effect_streak(trace) if (run / "trace.jsonl").exists() and trace else None}
     if repredict:
         result.update(_repredict(run, trace, hide_memory))
+    world_maps = {map_id(actual["map"]) for row in trace if row.get("screen") == "world"
+                  if (actual := truth.get(row.get("step"), {})).get("map") is not None}
+    result["health"] = _health(result, world_maps)
     return result
 
 
@@ -634,9 +691,17 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     flags = {arg for arg in args if arg.startswith("--")}
     paths = [arg for arg in args if not arg.startswith("--")]
-    if len(paths) != 1 or flags - {"--repredict", "--hide-memory", "--no-write"} or ("--hide-memory" in flags and "--repredict" not in flags):
-        raise SystemExit("usage: eval_run.py runs/<id> [--repredict [--hide-memory]] [--no-write]")
+    if len(paths) != 1 or flags - {"--repredict", "--hide-memory", "--no-write", "--health"} or ("--hide-memory" in flags and "--repredict" not in flags):
+        raise SystemExit("usage: eval_run.py runs/<id> [--repredict [--hide-memory]] [--no-write] [--health]")
     result = evaluate(paths[0], repredict="--repredict" in flags, hide_memory="--hide-memory" in flags)
     if "--no-write" not in flags:
         (Path(paths[0]) / "summary.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(result, indent=2))
+    if "--health" in flags:
+        print("| Field | Value | Green |")
+        print("|---|---:|:---:|")
+        for row in result["health"]:
+            value = json.dumps(row["value"], ensure_ascii=False) if isinstance(row["value"], (dict, list)) else row["value"]
+            print(f"| {row['field']} | {value if value is not None else 'unknown'} | "
+                  f"{str(row['green']).lower() if row['green'] is not None else 'unknown'} |")
+    else:
+        print(json.dumps(result, indent=2))

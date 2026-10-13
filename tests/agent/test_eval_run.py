@@ -468,6 +468,62 @@ def test_p3_goal_evidence_must_quote_game_text_and_missing_sources_are_null(tmp_
                                                "reentries", "interest_entity_duplicates"))
 
 
+def test_l1_screen_places_only_count_if_created_on_a_run_step(tmp_path):
+    run = tmp_path / "screen-places"
+    write(run / "trace.jsonl", [{"step": 10}, {"step": 12}])
+    write(run / "memory" / "places.jsonl", [
+        {"id": "world", "screen": "world", "name": "world", "first": 10},
+        {"id": "dialogue", "screen": "dialogue_screen", "first": 12},
+        {"id": "named-menu", "screen": "world", "name": "menu", "first": 10},
+        {"id": "before-run", "screen": "menu", "first": 9},
+        {"id": "after-run", "screen": "dialogue_box", "first": 13},
+    ])
+
+    assert evaluate(run)["screen_places"] == 2
+
+
+def test_l1_no_effect_streak_requires_exact_effect_list(tmp_path):
+    run = tmp_path / "no-effect-streak"
+    effects = [["no_change"], ["no_change", "screen_changes"], ["no_change"],
+               ["no_change"], ["no_change"], [], ["no_change"]]
+    write(run / "trace.jsonl", [{"step": i, "outcome": {"effects": value}}
+                                 for i, value in enumerate(effects, 1)])
+
+    assert evaluate(run)["no_effect_streak_max"] == 3
+
+
+def test_l1_health_keeps_missing_evidence_unknown(tmp_path):
+    health = evaluate(tmp_path / "missing")["health"]
+
+    assert all(row["green"] is None for row in health)
+
+
+def test_l1_health_does_not_ignore_world_maps_without_place_ids(tmp_path):
+    run = tmp_path / "unmapped-world"
+    write(run / "trace.jsonl", [{"step": 1, "screen": "world"}])
+    write(run / "truth.jsonl", [{"step": 1, "map": 0x26}])
+
+    row = next(row for row in evaluate(run)["health"] if row["field"] == "place_ids_per_map")
+
+    assert row == {"field": "place_ids_per_map", "value": {"0x26": 0}, "green": False}
+
+
+def test_cli_health_prints_table_without_writing_summary(tmp_path):
+    import subprocess, sys
+    from pathlib import Path
+    run = tmp_path / "health-cli"
+    write(run / "trace.jsonl", [{"step": 1}])
+    script = Path(__file__).resolve().parents[2] / "scripts" / "eval_run.py"
+
+    done = subprocess.run([sys.executable, str(script), str(run), "--no-write", "--health"],
+                          cwd=tmp_path, capture_output=True, text=True)
+
+    assert done.returncode == 0, done.stderr
+    assert "| Field | Value | Green |" in done.stdout
+    assert "| player_role_errors | unknown | unknown |" in done.stdout
+    assert not (run / "summary.json").exists()
+
+
 def test_p3_stuck_streak_resets_on_new_text_and_truth_map_change(tmp_path):
     maps = (0x26, 0x26, 0x25, 0x25, 0x25, 0x25)
     places = [{"id": "a", "state": "place"}, {"id": "b", "state": "place"}]
