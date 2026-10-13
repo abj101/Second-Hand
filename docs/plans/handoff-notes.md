@@ -1,6 +1,6 @@
 # Handoff notes
 
-Last written: 2026-10-13, after GP §9e and the `m1_gp5` clean-boot run. Branch `feat/lean-agent`, HEAD `43750cc`.
+Last written: 2026-10-13, after GP §9e and the `m1_gp5` clean-boot run; updated after the cleanup (`d95e656`) and the failure-key/cycle fixes (`46920f2`). Branch `feat/lean-agent`.
 Active packet: [GP.md](GP.md) (goal planner; results §9–9e). [PS.md](PS.md) is superseded: its STOP 6a / L3 never ran.
 
 ## 1. Where the agent gets to (clean boot, no hints)
@@ -17,8 +17,8 @@ Never yet: talking to Oak, a Pokémon, or a battle.
 1. **After Mom the agent goes back upstairs instead of out the door** (`m1_gp5`, steps 82–150).
    - The planner chose the focus "find Oak's lab", and act took the stairs. In `m1_gp2` the same moment went out the door.
    - **Partly fixed, not yet run live** (`43750cc`): matching on return ignored the bedroom's stored views because the bedroom was first recorded under a dialogue box (screen type "dialogue"). So the bedroom was re-created as `world [p_world_2]` at step 83, and the planner was told "arrived somewhere new". Matching now ignores screen type. Offline, the step-84 frame matches the bedroom.
-2. **The cycle detector misses slow cycles.** It needs 4 alternating moves within 15 steps. The 1F↔2F moves in `m1_gp5` came 8–20 steps apart (82, 84, 102, 114, 122), so it never fired. Widen the window, or count A↔B returns without a progress event.
-3. **Act ignores "failed here before" when the input changes slightly.** Failures are keyed by the exact `verb target` string, so `buttons UP A`, `buttons UP` and `go_to stairs` count separately. The model gets past each one by rewording.
+2. ~~**The cycle detector misses slow cycles.**~~ Fixed in `46920f2`, not yet run live: four A↔B moves running, however far apart, and a closing focus clears the history. It needs 4 alternating moves within 15 steps. The 1F↔2F moves in `m1_gp5` came 8–20 steps apart (82, 84, 102, 114, 122), so it never fired. Widen the window, or count A↔B returns without a progress event.
+3. ~~**Act ignores "failed here before" when the input changes slightly.**~~ Fixed in `46920f2`: `Loop._fail_key` merges button presses by direction and target actions regardless of verb; cycle marks use the same key (they never matched before). Act still ignored the warning in `m1_gp5` (25 no-op `UP A`); the warnings are only advice. Failures are keyed by the exact `verb target` string, so `buttons UP A`, `buttons UP` and `go_to stairs` count separately. The model gets past each one by rewording.
 4. **Act prefers raw buttons.** In `m1_gp5`: 84 `buttons`, 48 `advance`, 7 `thing`, 6 `go_to`, and `go_to "unexplored"` only rarely across runs. Routing and "unexplored" exist but are seldom chosen.
 5. **"Next door" is ambiguous.** Outside (`m1_gp2`) the agent re-entered its own house to "find Oak". Descriptive names now work for some places (`bedroom`), but 1F and the town were still named `world`.
 6. **Dialogue, menu and title screens become places.** `m1_gp5` has 12 live places, 6 of them `dialogue`, plus `lab` and `battle screen` from the intro.
@@ -53,13 +53,10 @@ Never yet: talking to Oak, a Pokémon, or a battle.
 - **Other:** preferred names removed (`9a5b1bd`); Windows `os.replace` retry in the notebook.
 
 ## 4. Repo state and gotchas
-- **Uncommitted work from another session, not mine; leave it or ask:**
-  - `agent/loop.py`: a `_live()` hook writing `live.json`, and an `"after"` frame in each trace row.
-  - `scripts/watch_run.py`, `tests/agent/test_watch_run.py`.
-  - `tests/agent/test_world_golden.py`: drops `"after"`.
-  - When committing `loop.py` changes, stage only your own hunks. I built the HEAD version plus my hunk and tested it in a clean worktree.
+- The live-viewer work (`live.json`, after-frames) is committed (`6c53cc0`). `.claude/settings.json` is untracked on purpose.
+- **Legacy removed** (`d95e656`): `loop/`, `tests/loop/`, `benchmarks/` and the loop-only scripts are gone; `pyproject.toml` declares only httpx, numpy, pillow and pyboy. README, `system.md` and older docs still mention the old stack.
 - **Golden snapshot:** `tests/agent/data/` is gitignored but tracked. Regenerate with `W0_REGEN=1`, then `git add -f`.
-- **Tests:** `pytest tests/agent`: 252 passed on the working tree. The committed HEAD passed 251 + 1 skipped in a clean worktree before `43750cc`.
+- **Tests:** `pytest tests/agent`: 254 passed at `46920f2`.
 - **Live viewer:** `scripts/watch_run.py` on 127.0.0.1:8765 follows the newest run (see CLAUDE.md).
 
 ## 5. Budget
@@ -70,7 +67,6 @@ Never yet: talking to Oak, a Pokémon, or a battle.
 ## 6. Suggested next steps
 1. Re-run a clean boot (needs caps) to see whether `43750cc` stops the 2F re-mint and the upstairs bounce.
 2. Stop modal screens (dialogue/menu/title) from becoming places (§2.6). Root-cause cleanup; it touches `match_place` and the cut/modal logic in `Loop.step`.
-3. Detect slow cycles and key failures more loosely (§2.2, §2.3).
 4. Then the next milestone: Oak and the starter.
 
 ## 7. Working rules in force
