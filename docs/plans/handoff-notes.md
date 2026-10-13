@@ -31,8 +31,9 @@ Last written by: the user's Claude session, 2026-10-12, after the W4 run. P4 com
 - Do not tune thresholds or the replay to pass the anchor gate on `runs/m1_act`; it has no camera motion.
 - No 40-step live comparisons; do not resume L1 from runs/m1 checkpoints; never git add -A, commit runs/ or .tmp/, reset a ledger, or push.
 
-## Open issues for L1
-- After the first half, run `check_world.py anchors runs/m1_long` with the health table. It is W4's deferred gate row (≥ 90% decided correct, undecided ≤ 30%, 0 actor walls).
-- Live risk: once motion decides `self_spot`, it overrides the screen-spot rule in `fix_player`. A wrong `self` shows as `player_role_errors` > 0. Report the confusion matrix and worst steps; the user decides whether to revert the W4 commit. Do not tune.
-- The fixture facing marker (2×2) sits near the 0.05 `changed` threshold; widen it if the anchor tests become flaky.
-- Compression candidates after the program: `Memory.view` leftovers and the inline `recent:` block in `Loop.step`.
+## Open issues for TL (next phase, docs/plans/TL.md)
+- L1 failed on player identity: the perceiver labelled Mom as the player; `run_affordance` took `player_at` from that label (skills.py:219); `fix_player` never fired.
+- Duplicates are a naming bug (`_base` strips one `#n`; the model echoes `furniture#2`) plus two observe calls per step. They are not an identity-design problem.
+- Walls in L1 were correct. A false inferred reverse exit LEFT sits at `p_world@0,0` (mark_exit).
+- Build-first: checks report, they do not block. Full suite before L2; L2 resumes runs/m1_long from checkpoint 70 (back up to runs/m1_long_l1 first).
+- Measured: one LEFT step's scroll-compensated residual has 202/230 px in the player box; scroll 2 px every other frame.
