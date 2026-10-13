@@ -112,6 +112,7 @@ def test_cut_before_frame_suppresses_marker_and_same_raw_after_frame_reuses(tmp_
     from PIL import Image
     from agent import loop as module
     env = GridEnv(); frame = Image.new("RGB", (160, 144), "black")
+    frame.paste((90, 90, 90), (0, 0, 160, 72))  # not uniform: a one-colour frame counts as a blank transition (observer._blank)
     env.screenshot = lambda: frame.copy()
     loop = Loop(env, StubModel([]), Memory(tmp_path/"memory"), "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True

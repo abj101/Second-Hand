@@ -1,6 +1,6 @@
 # PS: Mark the player for the model, and split describing from deciding
 
-Status: gate failed (S1 failed its one repair round; orchestrator confirmed, 2026-10-13; no cloud requests spent) · Branch: feat/lean-agent · Program: [program-r1-wm.md](program-r1-wm.md) row 11 · Follows: [TL.md](TL.md) §7 STOP 5
+Status: in progress (S1 resolved 2026-10-13 after its failed repair: fixture fix + golden regen, full suite 238 passed; next S0; 0 requests spent) · Branch: feat/lean-agent · Program: [program-r1-wm.md](program-r1-wm.md) row 11 · Follows: [TL.md](TL.md) §7 STOP 5
 
 ## 0. Why this phase exists (evidence, 2026-10-13, 54 diagnostic requests)
 - **The L2 stall started with perception.** The model cannot pick out the player when the sprite faces away. In L2 it labelled the TV, then Mom, as `player`, and the real player as `monster`/`rival`/`NPC`. From step 37 onward the notebook's only goal was "go talk to the character in the centre", i.e. the player. 87 identical choices followed.
@@ -230,6 +230,22 @@ Status: gate failed (S1 failed its one repair round; orchestrator confirmed, 202
 
 ## 9. Result (filled in by the orchestrator)
 
+**S1 resolution (2026-10-13, user session after the stop below; 0 requests):**
+- **Cause, verified.**
+  - The failing test's fixture was a uniform black frame. `observer._blank` (observer.py:16) treats a frame where one colour covers 95% or more as a blank transition frame.
+  - Step 1's `wait_until` therefore reported `blank_seen`, which set `scene_cut`, so `after_mark_eligible` was False. The code was right; the fixture was not.
+  - Fix: `tests/agent/test_loop.py` fills the fixture's top half grey (one line plus a comment). The test now passes unchanged otherwise.
+- **Golden regenerated** with `W0_REGEN=1`; only `act/trace.jsonl` changed, row by row:
+  - every row gains `marked`;
+  - steps 3–8 are `marked: true`, and their act flags gain `the sprite inside the red box is you`;
+  - steps 1–2 are unmarked (no previous frame, then a scene cut);
+  - memory files are unchanged.
+  - S2 regenerates it again for its own changes.
+- **Full suite:** `.venv-agent/Scripts/python.exe -m pytest tests/agent -q -p no:cacheprovider` → `238 passed, 1 warning in 269.00s`.
+- **Next:** S0 (baseline = today's prompts + S1 marker), as §3 orders. The stop record below is kept for history.
+
+**Stop record (orchestrator, before the resolution):**
+
 - **Decision:** stop at S1. The slice failed its first check and its single repair round; the orchestrator did not take over implementation or authorize another repair. This is a broken test suite, the stopping condition in §1. S0, S2, E and L3 are unstarted. No STOP 6a comparison table exists yet.
 - **Progress:** no PS live play or frame-eval requests; no new maps, party or gameplay progress measured. Historical L2 progress remains house only / party 0 (TL §7).
 - **Health:** build/check health red. The unresolved test expects the second same-raw step to be marked and reuse the after perception; it observes `marked == False`. Test: `tests/agent/test_loop.py:112`, assertion at `:138`. Its fixture is a uniform black frame; whether blank-frame settling or eligibility causes the expectation mismatch remains an open question, not a verified diagnosis.
@@ -246,7 +262,7 @@ Status: gate failed (S1 failed its one repair round; orchestrator confirmed, 202
 - **Models/tools:** one gpt-6-luna HIGH subagent for S1, same subagent for its one repair; no Opus. Self-contained prompt `.tmp/ps/s1_prompt.txt` contained the card, program §2, cited contracts, exact scope and checks. CodeGraph first; Ponytail full. Headroom local compression/retrieval worked, but its configured proxy was unreachable.
 - **Requests:** PS 0/160; S0 0/26, E 0/26, L3a 0/60, L3b 0/48. Ledger before and after identical: `total=931, smoke=48, m1=883, stage_a=142, stage_b=297, stage_p=25, stage_q=60, stage_c=306`; total 169 remaining, M1 167 remaining. No cap reset, refund or increase. No runner exit 3/4 occurred.
 - **Deviations:** stopped before S0 because S1 failed twice, as the kickstart requires. Added private `seen_image`/`seen_marked` fields so `_see` retains its existing four-value return shape. Added `frame_mark_eligible` checkpoint state to preserve the after-frame eligibility decision on the next identical before frame. No cap or phase scope changed. Packet §2's stale-budget correction is already present in program §4 (M1 883/1050, 167 left); docs/plan.md now uses that ledger.
-- **Open questions:** resolve the cut/cache fixture versus blank-frame behavior under a revised S1 packet or explicit new repair authorization. Do not run S0 or spend live requests from this failed packet. The golden regeneration remains deferred to S2 after S1 is resolved. Place fragmentation and stale player/rival notebook evidence remain out of scope (§7).
+- **Open questions (resolved above):** resolve the cut/cache fixture versus blank-frame behavior under a revised S1 packet or explicit new repair authorization. The golden regeneration remains deferred to S2 after S1 is resolved. Place fragmentation and stale player/rival notebook evidence remain out of scope (§7).
 
 **Exact proposed contract text for S1 only (not applied; contracts.md is unchanged):**
 
