@@ -616,11 +616,11 @@ def test_stage_b_cap_override_keeps_phase_and_m1_limits(tmp_path, monkeypatch):
     data=json.loads(path.read_text()); assert data["stage_b"] == 300
     with pytest.raises(run_agent.CallCap): run_agent._ledger(Path("runs/m1"),"b",300)
     assert json.loads(path.read_text()) == data
-    phase_exhausted={**data,"total":1300,"stage_b":181}
+    phase_exhausted={**data,"total":1500,"stage_b":181}
     path.write_text(json.dumps(phase_exhausted))
     with pytest.raises(run_agent.CallCap): run_agent._ledger(Path("runs/m1"),"b",300)
     assert json.loads(path.read_text()) == phase_exhausted
-    m1_exhausted={**data,"m1":1250,"stage_b":181}
+    m1_exhausted={**data,"m1":1450,"stage_b":181}
     path.write_text(json.dumps(m1_exhausted))
     with pytest.raises(run_agent.CallCap): run_agent._ledger(Path("runs/m1"),"b",300)
     assert json.loads(path.read_text()) == m1_exhausted
