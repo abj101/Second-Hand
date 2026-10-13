@@ -84,3 +84,17 @@ def test_route_and_frontier_never_cross_known_exit(tmp_path):
     for pos in [(1, 0), (1, -1), (1, -2), (0, -2)]: tile(mem, "town", pos)
     assert route(mem, "town", (0, 0), (0, -2))[0] != "UP"  # detours (4 steps), never UP through the exit
     assert ((0, 0), "UP") not in frontier(mem, "town")
+def test_successful_move_clears_blocked_direction(tmp_path):
+    mem = Memory(tmp_path)
+    tile(mem, "hall", (0, 0), blocked=["RIGHT"])
+
+    assert fold(mem, "hall", (0, 0), [("RIGHT", (-16, 0))], 16, 2) == (1, 0)
+    assert mem.get("tiles", "hall@0,0")["blocked"] == []
+
+
+def test_inferred_exit_does_not_block_route_or_frontier(tmp_path):
+    mem = Memory(tmp_path)
+    mark_exit(mem, "town", (0, 0), "UP", "house", (0, 1), 1)
+
+    assert route(mem, "house", (0, 1), (0, 2)) == ["DOWN"]
+    assert ((0, 1), "DOWN") in frontier(mem, "house")

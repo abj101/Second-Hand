@@ -250,7 +250,7 @@ def test_legacy_trace_without_spatial_values_is_unmeasured(tmp_path):
     assert metric["visits"] == []
 
 
-def test_p3b_evaluator_counts_player_role_cut_loop_and_recent_line(tmp_path):
+def test_p3b_evaluator_counts_cut_loop_and_recent_line(tmp_path):
     run = tmp_path / "p3b"
     write(run / "trace.jsonl", [
         world(1, "p", [0, 0]) | {"entities": [{"kind": "player", "at": [0.45, 68 / 144]}]},
@@ -265,17 +265,74 @@ def test_p3b_evaluator_counts_player_role_cut_loop_and_recent_line(tmp_path):
 
     result = evaluate(run)
 
-    assert result["player_role_errors"] == 1
     assert result["cut_self_loops"] == 1
     assert result["recent_line_steps"] == 1
 
 
-def test_player_role_errors_is_null_when_truth_has_no_sprites(tmp_path):
-    run = tmp_path / "no-sprites"
-    write(run / "trace.jsonl", [world(1, "p", [0, 0])])
-    write(run / "truth.jsonl", [{"step": 1, "map": 0x26, "sprites": []}])
+def test_self_spot_uses_native_frame_size_and_after_step_truth(tmp_path):
+    from PIL import Image
 
-    assert evaluate(run)["player_role_errors"] is None
+    run = tmp_path / "self-spot"
+    rows = [world(i, "p", [i - 1, 0]) | {"frame": f"frames/{i}.png",
+             "self_spot": [.45, 68 / 144], "self_locked": True} for i in (1, 2)]
+    write(run / "trace.jsonl", rows)
+    write(run / "truth.jsonl", [
+        {"step": i, "map": 0x26, "sprites": [{"slot": 0, "x": 64, "y": 60}]}
+        for i in (1, 2, 3)])
+    for row in rows:
+        frame = run / row["frame"]
+        frame.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (160, 144)).save(frame)
+
+    result = evaluate(run)
+    resumed = evaluate(run, from_step=2)
+
+    assert result["self_spot_accuracy"] == 1.0
+    assert result["self_spot_coverage"] == 1.0
+    assert resumed["self_spot_accuracy"] == 1.0
+    assert resumed["self_spot_measured"] == 1
+    assert resumed["from_step"] == 2
+    assert not any(row["field"] == "seen_in_bounds" for row in resumed["health"])
+
+
+def test_false_wall_requires_a_later_crossing_and_from_step_filters_it(tmp_path):
+    run = tmp_path / "false-wall"
+    write(run / "trace.jsonl", [world(1, "p", [0, 0]), world(2, "p", [1, 0])])
+    write(run / "truth.jsonl", [])
+    write(run / "memory" / "tiles.jsonl", [
+        {"id": "p@0,0", "place": "p", "x": 0, "y": 0, "blocked": ["RIGHT"], "step": 1},
+        # The existing row step can be stale when B1 removes a block from a known floor.
+        {"id": "p@0,0", "place": "p", "x": 0, "y": 0, "blocked": [], "step": 1},
+    ])
+
+    assert evaluate(run)["false_walls"] == 1
+    assert evaluate(run, from_step=2)["false_walls"] == 1
+    assert evaluate(run, from_step=3)["false_walls"] == 0
+
+
+def test_from_step_scopes_battles_and_calls_but_keeps_starter_progress(tmp_path):
+    run = tmp_path / "resumed-segment"
+    write(run / "trace.jsonl", [
+        {"step": 1, "screen": "world", "calls": 2},
+        {"step": 3, "screen": "world", "calls": 1},
+        {"step": 4, "screen": "world", "calls": 3},
+    ])
+    write(run / "truth.jsonl", [
+        {"step": 1, "party": 1, "battle": 2}, {"step": 2, "battle": 2},
+        {"step": 3, "battle": 0}, {"step": 4, "battle": 2},
+    ])
+    write(run / "calls.jsonl", [
+        {"step": 1, "ok": True, "model": "local", "requests": 1},
+        {"step": 1, "ok": True, "model": "local", "requests": 1},
+        {"step": 3, "ok": True, "model": "local", "requests": 1},
+        {"step": 4, "ok": True, "model": "local", "requests": 1},
+    ])
+
+    full, resumed = evaluate(run), evaluate(run, from_step=3)
+
+    assert full["battles"] == 2 and resumed["battles"] == 1
+    assert full["cost"]["total_asks"] == 4 and resumed["cost"]["total_asks"] == 2
+    assert resumed["steps_to_starter"] == 0
 
 
 def test_e4_metrics_and_offline_repredict_preserve_chooser_guess(tmp_path):
@@ -520,7 +577,8 @@ def test_cli_health_prints_table_without_writing_summary(tmp_path):
 
     assert done.returncode == 0, done.stderr
     assert "| Field | Value | Green |" in done.stdout
-    assert "| player_role_errors | unknown | unknown |" in done.stdout
+    assert "| self_spot_accuracy | unknown | unknown |" in done.stdout
+    assert "| self_spot_coverage | unknown | unknown |" in done.stdout
     assert not (run / "summary.json").exists()
 
 

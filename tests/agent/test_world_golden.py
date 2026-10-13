@@ -30,6 +30,7 @@ def test_act_eight_steps(tmp_path, monkeypatch):
     replies = [{"action":{"go_to":"door"}}, {"action":{"buttons":["RIGHT"]}}, *([{"action":None}] * 6)]
     model = StubModel([SimpleNamespace(data=r) for r in replies])
     loop = Loop(env, model, Memory(tmp_path / "memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     rows = [loop.step() for _ in range(8)]
     assert rows[0]["choice"]["target"] == "door" and env.scene == 1 and rows[1]["choice"]["verb"] == "buttons" and env.player == (3, 8)
     assert len(rows) == model.calls == 8

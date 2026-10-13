@@ -235,3 +235,7 @@ def test_name_place_merges_new_arrival_retargets_refs_and_keeps_established_plac
     assert mem.name_place("other", "cave", 6) == "other" and mem.get("places", "other")["state"] == "place"
     assert mem.name_place("other", "Lakeside", 6) == "other"
     assert mem.get("places", "other")["name"] == "Lakeside" and mem.get("places", "other")["aliases"] == ["Lakeside"]
+def test_base_removes_repeated_numeric_suffixes():
+    from agent.memory import _base
+
+    assert _base("Furniture#2#3") == "furniture"

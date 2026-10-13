@@ -22,7 +22,7 @@ def _key(value: str) -> str:
 
 
 def _base(value: str) -> str:
-    return re.sub(r"#\d+$", "", _key(value)).removeprefix("exit:").strip()  # "exit: path south" == "path south"
+    return re.sub(r"(#\d+)+$", "", _key(value)).removeprefix("exit:").strip()  # "exit: path south" == "path south"
 
 
 def _via(value) -> str: return _key(value or "").removeprefix("exit:").strip()

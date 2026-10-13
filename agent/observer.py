@@ -24,6 +24,56 @@ def changed(a: Image.Image, b: Image.Image, thresh: int = 16) -> float:
     return float(np.mean(np.max(np.abs(a - b), axis=-1) > thresh))
 
 
+def _residual(frames: list[Image.Image], shifts: list[tuple[int, int]]):
+    if len(frames) < 2 or len(shifts) != len(frames): return None, 0, 0, False
+    first = np.asarray(frames[0]).astype(np.int16); h, w = first.shape[:2]
+    heat = np.zeros((h, w), dtype=np.uint16)
+    for frame, (dx, dy) in zip(frames[1:], shifts[1:]):
+        image = np.asarray(frame).astype(np.int16)
+        sx, sy = w - abs(dx), h - abs(dy)
+        if sx <= 0 or sy <= 0: continue
+        a = first[max(-dy, 0):max(-dy, 0) + sy, max(-dx, 0):max(-dx, 0) + sx]
+        b = image[max(dy, 0):max(dy, 0) + sy, max(dx, 0):max(dx, 0) + sx]
+        changed_pixels = np.max(np.abs(a - b), axis=-1) > 16
+        heat[max(-dy, 0):max(-dy, 0) + sy, max(-dx, 0):max(-dx, 0) + sx] += changed_pixels
+    total = int(heat.sum())
+    if not total: return None, 0, 0, False
+    # ponytail: infer one tile from this move's largest cumulative camera shift; callers already calibrate tile_px.
+    tile = max(1, max(max(abs(x), abs(y)) for x, y in shifts))
+    ys, xs = np.nonzero(heat)
+    threshold = max(1, int(heat.max() * .2))
+    ys, xs = np.nonzero(heat >= threshold)
+    if not len(xs): return None, tile, 0, False
+    raw = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+    limit = max(1, int(1.5 * tile)); summed = np.pad(heat.cumsum(0, dtype=np.int64).cumsum(1, dtype=np.int64), ((1, 0), (1, 0)))
+    best, best_weight = None, 0
+    for y0 in range(h):
+        y1 = min(h, y0 + limit)
+        for x0 in range(w):
+            x1 = min(w, x0 + limit)
+            weight = int(summed[y1, x1] - summed[y0, x1] - summed[y1, x0] + summed[y0, x0])
+            if weight > best_weight: best, best_weight = (x0, y0, x1, y1), weight
+    coverage = best_weight / total
+    if coverage < .8: return raw, tile, coverage, False
+    x0, y0, x1, y1 = best
+    ys, xs = np.nonzero(heat[y0:y1, x0:x1])
+    return (x0 + int(xs.min()), y0 + int(ys.min()), x0 + int(xs.max()) + 1, y0 + int(ys.max()) + 1), tile, coverage, True
+
+
+def residual_box(frames: list[Image.Image], shifts: list[tuple[int, int]]) -> tuple[int, int, int, int] | None:
+    box = _residual(frames, shifts)[0]
+    if box is None: return None
+    dx, dy = (round(v / 2) for v in shifts[-1])
+    return box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy
+
+
+def residual(frames: list[Image.Image], shifts: list[tuple[int, int]]) -> tuple[float, float] | None:
+    box, _tile, _coverage, accepted = _residual(frames, shifts)
+    if box is None or not accepted: return None
+    x0, y0, x1, y1 = box; dx, dy = shifts[-1]; w, h = frames[0].size
+    return ((x0 + x1 + dx) / (2 * w), (y0 + y1 + dy) / (2 * h))
+
+
 def wait_settled(env, *, quiet: int = 24, max_frames: int = 600) -> Settle:
     quiet = max(1, quiet)
     frame = env.screenshot()

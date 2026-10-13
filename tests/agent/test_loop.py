@@ -45,11 +45,19 @@ def test_verified_edge_only_counts_for_previously_unknown_place(tmp_path, monkey
     assert model.calls == 2
 
 def test_twenty_steps_have_contract_keys_and_reuse(tmp_path):
-    model=StubModel([reply(perception()), *[act_reply(None) for _ in range(20)]]); loop=Loop(GridEnv(),model,Memory(tmp_path/"memory"),"grid")
+    from collections import deque
+    class Roles(StubModel):
+        def __init__(self):
+            super().__init__([]); self.replies = {"perceiver": deque([reply(perception()), reply(perception())]),
+                                                   "act": deque(act_reply(None) for _ in range(20))}
+        def ask(self, *args, **kwargs): self.calls += 1; return self.replies[kwargs["role"]].popleft()
+    model=Roles(); loop=Loop(GridEnv(),model,Memory(tmp_path/"memory"),"grid")
     rows=[loop.step() for _ in range(20)]
-    keys={"step","t","place","screen","task","frame","options","choice","pred","used","skill","outcome","verdict","calls","ms","shortcut"}
+    keys={"step","t","place","screen","task","frame","options","choice","pred","used","skill","outcome","verdict","calls","ms","shortcut","self_spot","self_locked"}
     assert all(keys <= row.keys() for row in rows)
-    assert model.calls == 21 and rows[1]["perception_reused"] and rows[1]["calls"] == 1
+    assert model.calls == 22 and rows[1]["perception_reused"] and rows[1]["calls"] == 1
+    assert rows[0]["calls"] == 2 and not rows[0]["perception_reused"]
+    assert sum(row["calls"] == 2 for row in rows) == 2  # initial perception plus one streak-triggered re-perception
 
 def test_act_receives_controls_as_text(tmp_path, monkeypatch):
     from agent import loop as loop_module
@@ -91,6 +99,7 @@ def test_stationary_two_fresh_frames_confirm_drift(tmp_path, monkeypatch):
         return SimpleNamespace(status="done",reason="",inputs=0,calls=0,before=before,after=after,scroll=(0,0),blank_seen=False,moves=[])
     monkeypatch.setattr(module, "run_affordance", still)
     loop = Loop(env, StubModel([]), Memory(tmp_path/"memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     loop.step(); offset[0] = .75; first = loop.step()
     assert loop.pos == (0, 0) and first["drift_fix"] is None and loop.world.drift == (-1, 0)
     second = loop.step()
@@ -113,7 +122,7 @@ def test_loop_fixes_swapped_player_before_approaching_target(tmp_path, monkeypat
     monkeypatch.setattr(module, "perceive", perceive)
     monkeypatch.setattr(module, "act", fake_act(0))
     loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
-    loop.world.anchors = [[.5, .5]] * 3
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
 
     row = loop.step()
 
@@ -166,6 +175,62 @@ def test_perceiver_guides_whole_name_entry(tmp_path):
     assert 'Name every visible passage "exit: <what it is>"' in model.prompt
     assert loop.prompt_version == "e5-perceiver-8"
 
+def test_reperception_bypasses_cached_frame_with_player_hint(tmp_path, monkeypatch):
+    from agent import loop as loop_module
+
+    prompts = []
+    data = perception()
+    monkeypatch.setattr(loop_module, "perceive", lambda _model, _frame, prompt: (prompts.append(prompt) or data, reply(data)))
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    frame = loop.env.screenshot()
+
+    assert loop._see(frame, None)[2] is False
+    assert loop._see(frame, None)[2] is True
+    assert loop._see(frame, None, force=True, relook=True)[2] is False
+    assert len(prompts) == 2
+    assert prompts[-1].endswith("Your last labels may be wrong; look again at who the player is.")
+
+def test_probe_act_uses_post_probe_frame_and_perception(tmp_path, monkeypatch):
+    from agent import loop as loop_module
+
+    env = GridEnv(); env.tile_px = 16
+    monkeypatch.setattr(loop_module, "perceive", lambda _model, _frame, _prompt: (env.perception(), reply(env.perception())))
+    def probe(_ctx):
+        env.scene = 1
+        return {"presses": 1, "locked": False, "scene_cut": False}
+    def act_spy(_model, frame, per, *args, **kwargs):
+        assert frame.tobytes() == env.screenshot().tobytes()
+        assert per == env.perception()
+        return fake_act(None)(*args, **kwargs)
+    monkeypatch.setattr(loop_module, "act", act_spy)
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
+    monkeypatch.setattr(loop.world, "probe", probe)
+
+    row = loop.step()
+
+    assert row["probe"] == {"presses": 1, "locked": False}
+    assert not row["perception_reused"]
+
+def test_recent_keeps_no_effect_head_when_trimming(tmp_path, monkeypatch):
+    from agent import loop as loop_module
+
+    captured = {}
+    def capture(_model, _frame, _per, _notes, _view, flags, *_a, **_k):
+        captured["flags"] = flags
+        return fake_act(None)()
+    monkeypatch.setattr(loop_module, "act", capture)
+    loop = Loop(GridEnv(), StubModel([reply(perception())]), Memory(tmp_path / "memory"), "grid")
+    loop.stuck.n = 3
+    loop.recent = [{"step": i, "choice": {"verb": "approach", "target": f"very long target {i}" * 4},
+                    "skill": {"status": "blocked", "reason": "no progress " * 4},
+                    "outcome": {"effects": ["no_change"]}} for i in range(10)]
+
+    loop.step()
+
+    recent = next(flag for flag in captured["flags"] if flag.startswith("recent:"))
+    assert recent.startswith("recent: no effect x3;")
+    assert len(recent) <= 200
+
 def test_dialogue_opening_over_world_keeps_place(tmp_path, monkeypatch):
     from agent import loop as loop_module
     env = GridEnv()
@@ -174,6 +239,7 @@ def test_dialogue_opening_over_world_keeps_place(tmp_path, monkeypatch):
     destination = perception(); destination["screen"] = "dialogue"; destination["text"] = ["Hello!"]
     model = StubModel([reply(start), act_reply(0), reply(destination)])
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     def interact(ctx, aff, per, text=None, exit=False):
         env.scene = 1
         return SimpleNamespace(status="done", reason="", inputs=4, calls=0,
@@ -191,6 +257,7 @@ def test_interact_scroll_with_new_text_is_not_a_cut(tmp_path, monkeypatch):
     destination = perception(); destination["screen"] = "world"; destination["text"] = ["Hello!"]
     model = StubModel([reply(start), act_reply(0), reply(destination)])
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     def interact(ctx, aff, per, text=None, exit=False):
         env.scene = 1
         return SimpleNamespace(status="done", reason="", inputs=12, calls=0,
@@ -207,6 +274,7 @@ def test_modal_overlay_at_step_start_keeps_place(tmp_path, monkeypatch):
     dialogue = perception(); dialogue["screen"] = "dialogue"
     model = StubModel([reply(world), act_reply(0), reply(world), reply(dialogue), act_reply(0)])
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     monkeypatch.setattr(loop_module, "cut", lambda *args: True)
     moves = [0]
     def stay(ctx, aff, per, text=None, exit=False):
@@ -228,6 +296,7 @@ def test_explicit_transition_into_dialogue_creates_place(tmp_path, monkeypatch):
     dialogue = perception(); dialogue["screen"] = "dialogue"
     model = StubModel([reply(world), act_reply(0), reply(dialogue)])
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     def transition(ctx, aff, per, text=None, exit=False):
         before = env.screenshot(); env.scene = 1; after = env.screenshot()
         return SimpleNamespace(status="done", reason="scene cut", inputs=1, calls=0,
@@ -244,6 +313,7 @@ def test_directional_world_exit_into_new_place_is_place_changes(tmp_path, monkey
     dest = perception(); dest["screen"] = screen; dest["entities"] = [{"kind": "tree", "name": "Oak", "at": [500, 500]}]
     model = StubModel([reply(world), act_reply(0), reply(dest)])
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     def transition(ctx, aff, per, text=None, exit=False):
         before = env.screenshot(); env.scene = 1; after = env.screenshot()
         return SimpleNamespace(status="done", reason="scene cut", inputs=1, calls=0, moves=moves,
@@ -261,6 +331,7 @@ def test_blocked_exit_overrides_pixel_prediction_and_cannot_hit(tmp_path, monkey
     start["affordances"] = [{"verb": "approach", "target": "exit: door mat", "at": [0.3, 0.9]}]
     model = StubModel([reply(start), act_reply(0), reply(start)])
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     monkeypatch.setattr(loop_module, "predict", lambda *args: {"effect": "screen_changes", "detail": "movement"})
     monkeypatch.setattr(loop_module, "cut", lambda *args: False)
     def blocked(ctx, aff, per, text=None, exit=False, **kwargs):
@@ -285,10 +356,14 @@ def test_mislabelled_player_does_not_shift_tiles_or_duplicate_entities(tmp_path,
         before = env.screenshot(); env.phase += 1
         return SimpleNamespace(status="done",reason="",inputs=0,calls=0,before=before,after=env.screenshot(),scroll=(0,0),blank_seen=False,moves=[])
     monkeypatch.setattr(module, "run_affordance", still); monkeypatch.setattr(module, "act", fake_act(0))
-    loop = Loop(env, StubModel([]), Memory(tmp_path/"memory"), "grid"); loop.step()
+    loop = Loop(env, StubModel([]), Memory(tmp_path/"memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    loop.step()
     lamps = [e for e in loop.mem.rows("entities") if e["name"].startswith("lamp")]
-    assert len(seen) == 2 and len(lamps) == 1 and lamps[0]["tile"] == [2, 0] and loop.world.anchors == [[.5, .5]]
-    resumed = Loop(env, StubModel([]), loop.mem, "grid"); resumed.restore(loop.state()); assert resumed.world.anchors == [[.5, .5]]
+    assert len(seen) == 2 and len(lamps) == 1 and lamps[0]["tile"] == [2, 0]
+    assert loop.trace.tail(1)[0]["self_locked"] is True
+    resumed = Loop(env, StubModel([]), loop.mem, "grid"); resumed.restore(loop.state())
+    assert resumed.world.self_spot == [.5, .5] and resumed.world._self_from_motion
 
 def test_malformed_parse_gets_one_repair_and_resumes(tmp_path, monkeypatch):
     from agent import loop as module
@@ -297,13 +372,13 @@ def test_malformed_parse_gets_one_repair_and_resumes(tmp_path, monkeypatch):
         def ask(self,*a,**k):
             if k.get("role") == "perceiver": self.perceiver_prompts = getattr(self,"perceiver_prompts",[]) + [a[1]]
             return super().ask(*a,**k)
-    model=Captures([reply({"wrong_root":True}),reply(None),reply(perception())]); loop=Loop(GridEnv(),model,Memory(tmp_path/"memory"),"grid")
+    model=Captures([reply({"wrong_root":True}),reply(None),reply({"wrong_root":True})]); loop=Loop(GridEnv(),model,Memory(tmp_path/"memory"),"grid")
     for _ in range(8): loop.step()
     assert loop.state()["repair_pending"] and loop.state()["repair_used"]
     restored=Loop(loop.env,model,loop.mem,"grid"); restored.restore(loop.state()); row=restored.step()
-    # ponytail: act path leaves frames unchanged, so only the repair call re-perceives; it stays malformed and repair is not repeated
+    # The re-look and one repair both get a call; the repair stays malformed and is not repeated.
     assert row["options"] == 0 and not restored.state()["repair_pending"] and restored.state()["repair_used"]
-    assert len(model.perceiver_prompts) == 2 and "previous JSON was empty or malformed" in model.perceiver_prompts[-1]
+    assert len(model.perceiver_prompts) == 3 and "previous JSON was empty or malformed" in model.perceiver_prompts[-1]
 
 def test_string_text_is_valid_perception(tmp_path):
     data=perception(); data["text"]="A visible dialogue line"
@@ -320,8 +395,8 @@ def test_failed_parse_repair_is_not_repeated(tmp_path):
             return reply(None)
     model=AlwaysMalformed(); loop=Loop(GridEnv(),model,Memory(tmp_path/"memory"),"grid")
     for _ in range(8): loop.step()
-    loop.step(); assert loop.state()["repair_used"] and len(model.prompts)==2
-    loop.step(); assert len(model.prompts)==2
+    loop.step(); assert loop.state()["repair_used"] and len(model.prompts)==3
+    loop.step(); assert len(model.prompts)==3
 
 def test_old_checkpoint_invalidates_cached_perception(tmp_path):
     model=StubModel([reply(perception()),reply(perception())]); env=GridEnv(); loop=Loop(env,model,Memory(tmp_path/"memory"),"grid")
@@ -662,7 +737,7 @@ def test_act_recent_groups_by_action_and_caps_mixed_outcomes(tmp_path, monkeypat
 
     row = loop.step()
 
-    flag = row["act"]["flags"][-1]
+    flag = next(flag for flag in row["act"]["flags"] if flag.startswith("recent:"))
     assert "approach npc x5 since step 77; last blocked (both axes blocked)" in flag
     assert "screen unchanged x2" in flag and "detector-id-123" not in flag
     assert len(flag) <= 200 and flag in model.prompts[0]

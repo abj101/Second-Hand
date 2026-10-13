@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 
 from agent.memory import Memory
-from agent.world import World, classify
+from agent.world import World
 from tests.agent.fakes import GridEnv
 
 
@@ -14,8 +14,8 @@ def entity(mem, id, name, place, tile, seen=2):
     mem.upsert("entities", {"id": id, "name": name, "kind": "object", "place": place, "tile": tile, "seen": seen})
 
 
-def test_fix_player_swaps_entity_at_anchor_median(tmp_path):
-    world = World(Memory(tmp_path), 16); world.anchors = [[.5, .5]] * 3
+def test_fix_player_swaps_entity_near_locked_self_spot(tmp_path):
+    world = World(Memory(tmp_path), 16); world.self_spot, world._self_from_motion = [.5, .5], True
     player = {"name": "Guide", "kind": "player", "at": [.75, .5]}
     npc = {"name": "Hero", "kind": "npc", "at": [.5, .5]}
     per = {"screen": "world", "entities": [player, npc]}
@@ -24,18 +24,41 @@ def test_fix_player_swaps_entity_at_anchor_median(tmp_path):
     assert player["kind"] == "character" and npc["kind"] == "player"
 
 
-def test_fix_player_moves_to_median_or_leaves_perception_alone(tmp_path):
+def test_fix_player_moves_to_locked_spot_or_leaves_perception_alone(tmp_path):
     world = World(Memory(tmp_path), 16); player = {"kind": "player", "at": [.75, .5]}
     per = {"screen": "world", "entities": [player, {"kind": "object", "at": [.75, .8]}]}
-    world.anchors = [[.5, .5]] * 3
+    world.self_spot, world._self_from_motion = [.5, .5], True
     assert world.fix_player(per, (160, 144)) == {"from": [.75, .5], "to": [.5, .5]}
     assert player["at"] == [.5, .5]
 
     unchanged = {"kind": "player", "at": [.5, .5]}
     assert world.fix_player({"screen": "world", "entities": [unchanged]}, (160, 144)) is None
     assert world.fix_player({"screen": "menu", "entities": [{"kind": "player", "at": [.75, .5]}]}, (160, 144)) is None
-    world.anchors = []
+    world.self_spot, world._self_from_motion = None, False
     assert world.fix_player({"screen": "world", "entities": [{"kind": "player", "at": [.75, .5]}]}, (160, 144)) is None
+
+
+def test_motion_self_spot_locks_persists_and_unlocks_after_two_contradictions(tmp_path):
+    from PIL import Image
+
+    world = World(Memory(tmp_path), 16)
+    frame = Image.new("RGB", (160, 144))
+    def observe(spot, step, screen="world"):
+        move = {"dir": "RIGHT", "shift": (-16, 0), "self_at": spot}
+        skill = SimpleNamespace(scroll=(-16, 0), moves=[move])
+        world.observe_after({"screen": screen, "entities": []}, frame, True, "room", SIZE, step, skill=skill)
+
+    observe((.5, .5), 1)
+    assert world.self_spot == [.5, .5]
+    world.before({"screen": "world", "entities": [{"kind": "player", "at": [.31, .5]}]}, "room", "room", SIZE, 2)
+    assert world.pa == [.5, .5]
+    state = json.loads(json.dumps(world.state()))
+    replay = World(Memory(tmp_path), 16); replay.restore(state)
+    assert replay.self_spot == [.5, .5]
+    observe((.75, .5), 3, "menu")
+    assert world.self_spot == [.5, .5]
+    observe((.75, .5), 4)
+    assert world.self_spot is None
 
 
 def test_merge_shifts_unions_redirects_and_collapses(tmp_path):
@@ -201,7 +224,9 @@ def test_loop_travel_fetch_leg_traverses_three_rooms_and_faces_remembered_target
     entity(mem, "fern", "Fern", "c", [1, 0]); mem.upsert("entities", {**mem.get("entities", "fern"), "status": "remembered"})
     env = ThreeRooms(); player = {"name": "Player", "kind": "player", "at": [.5, .5]}; fern = {"name": "Fern", "kind": "npc", "at": [.6, .5]}
     initial = {"screen": "world", "text": [], "entities": [player], "affordances": []}; final = {**initial, "entities": [player, fern]}; model = StubModel([SimpleNamespace(data=initial), SimpleNamespace(data=final)])
-    loop = Loop(env, model, mem, "grid"); loop.place, loop.prev_frame = "a", env.screenshot(); acts, calls = [], []
+    loop = Loop(env, model, mem, "grid"); loop.place, loop.prev_frame = "a", env.screenshot()
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    acts, calls = [], []
     monkeypatch.setattr(loop_module, "act", lambda *_a, **_k: (acts.append(model.calls) or SimpleNamespace(place="a", ops=[], action={"go_to": "Fern"}, expect="screen_changes", why="test", text=None)))
     approach = world_module.approach
     def watch(ctx, *args, **kwargs):
@@ -433,6 +458,7 @@ def test_loop_act_uses_world_facts_active_goals_and_labels(tmp_path, monkeypatch
                                                                   {"name": "Chest", "kind": "object", "at": [.6, .5]}], "affordances": []}
     env = GridEnv(); model = StubModel([SimpleNamespace(data=per)]); loop = Loop(env, model, mem, "grid")
     loop.place, loop.prev_frame = "home", env.screenshot()
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     loop.notebook.data["goals"] = {"active": {"text": "Find Chest", "status": "active"},
                                    "finished": {"text": "Find Oak", "status": "done"}}
     loop.notebook.data["hints"] = {"hint": {"text": "Oak", "status": "active"}}
@@ -442,7 +468,7 @@ def test_loop_act_uses_world_facts_active_goals_and_labels(tmp_path, monkeypatch
 
     loop.step()
 
-    assert "Here: Home" in seen["view"] and "Thing" in seen["view"] and "Chest" in seen["view"]
+    assert "Here: Home" in seen["view"] and "Thing" in seen["view"] and "chest" in seen["view"].casefold()
     assert "world [p_world]" in seen["places"] and "world [p_world2]" in seen["places"]
     assert mem.get("entities", "chest")["tier"] == "interest" and mem.get("entities", "oak")["tier"] == "landmark"
 
@@ -529,20 +555,6 @@ def _drive(world, env, steps, start=1, extra=lambda step: ()):
         world.prepare(skill, "room", False, step); world.after(skill, "room", "room", False, step)
         world.observe_after(_per(env, extra(step)), env.screenshot(), False, "room", SIZE, step, before=before, skill=skill)
 
-def _anchors(mem):
-    return {r["name"]: r.get("anchor") for r in mem.rows("entities")}
-
-def test_anchor_motion_decides_hud_npc_player_and_world_within_twelve_steps(tmp_path):
-    mem = Memory(tmp_path); env = GridEnv(hud=True, wander=True, animated=True); world = World(mem, 16)
-    decided = lambda a: all(a.get(k) not in (None, "unknown") for k in ("player", "npc", "hp bar", "fountain"))
-    steps = 0
-    while steps < 12 and not decided(_anchors(mem)):
-        steps += 1; _drive(world, env, 1, start=steps)
-    anchors = _anchors(mem)
-    assert decided(anchors) and steps <= 12, (steps, anchors, world.evidence)
-    assert anchors["hp bar"] == "screen" and anchors["npc"] == "actor" and anchors["player"] == "self"
-    assert anchors["fountain"] == "world" and anchors["exit: door"] == "world", (anchors, world.evidence)
-
 def test_anchor_transient_dialogue_box_is_screen_and_not_in_view(tmp_path):
     mem = Memory(tmp_path); env = GridEnv(); world = World(mem, 16)
     box = {"name": "dialogue box", "kind": "dialogue_box", "at": [.5, .9]}
@@ -551,35 +563,26 @@ def test_anchor_transient_dialogue_box_is_screen_and_not_in_view(tmp_path):
     assert row["anchor"] == "screen" and row["transient"] is True
     assert "HUD dialogue box" not in world.view("", "room")
 
-def test_anchor_classify_rules_ties_and_lists():
-    pair = lambda s1, s2, d, r=False: (s1, s2, d, r)
-    assert classify([pair((3, 3), (3, 3), (-1, 0), True), pair((3, 3), (3, 3), (0, 0), True)]) == "self"
-    assert classify([pair((3, 3), (3, 3), (-1, 0)), pair((3, 3), (3, 3), (-1, 0))]) == "screen"
-    assert classify([pair((3, 3), (2, 3), (-1, 0)), pair((3, 3), (2, 3), (-1, 0))]) == "world"
-    assert classify([pair((3, 3), (3, 4), (-1, 0)), pair((3, 3), (3, 4), (-1, 0))]) == "actor"
-    assert classify([pair((3, 3), (4, 3), (0, 0)), pair((3, 3), (4, 3), (0, 0))]) == "actor"
-    assert classify([pair((3, 3), (3, 3), (0, 0)), pair((3, 3), (3, 3), (0, 0))]) == "unknown"
-    assert classify([pair((3, 3), (2, 3), (-1, 0))]) == "unknown"
-    actor, world = pair((3, 3), (3, 4), (-1, 0)), pair((3, 3), (2, 3), (-1, 0))
-    assert classify([actor, actor, world, world]) == "actor"
-    assert classify([world, world, pair((3, 3), (3, 3), (-1, 0)), pair((3, 3), (3, 3), (-1, 0))]) == "screen"
-    assert classify([[[3, 3], [3, 3], [-1, 0], True], [[3, 3], [3, 3], [-1, 0], True]]) == "self"
-    assert classify([[[3, 3], [3, 3], [-1, 0], False], [[3, 3], [3, 3], [-1, 0], False]]) == "screen"
-
 def test_anchor_hud_change_is_flagged_in_view(tmp_path):
     mem = Memory(tmp_path); env = GridEnv(hud=True); world = World(mem, 16)
-    _drive(world, env, 4)
-    assert _anchors(mem)["hp bar"] == "screen"
-    env.set_hud_value(3); _drive(world, env, 1, start=5)
+    _drive(world, env, 1)
+    row = next(r for r in mem.rows("entities") if r["name"] == "hp bar")
+    mem.upsert("entities", {**row, "anchor": "screen"})
+    frame = env.screenshot()
+    at = next(e["at"] for e in env.perception()["entities"] if e["name"] == "hp bar")
+    world._hud[row["id"]] = {"crop": frame.crop(world._box(frame, [at[i] * SIZE[i] for i in (0, 1)])), "changed": None}
+    env.set_hud_value(3); _drive(world, env, 1, start=2)
     assert "HUD hp bar changed at step" in world.view("", "room")
 
-def test_anchor_state_round_trip_keeps_camera_evidence_and_self_spot(tmp_path):
+def test_old_anchor_checkpoint_keys_are_ignored_and_motion_spot_restores(tmp_path):
     mem = Memory(tmp_path); env = GridEnv(hud=True, wander=True); world = World(mem, 16)
-    _drive(world, env, 3)  # RIGHT, LEFT, RIGHT: net camera -16 px
+    _drive(world, env, 3)
+    world.self_spot, world._self_from_motion = [.5, .5], True
     state = json.loads(json.dumps(world.state()))
+    assert "cam_px" not in state and "evidence" not in state
+    state.update(cam_px=[-16, 0], evidence={"old": [[0, 0, 0, False]]})
     replay = World(Memory(tmp_path), 16); replay.restore(state)
-    assert replay.cam_px == world.cam_px and replay.self_spot == world.self_spot and replay.evidence == world.evidence
-    assert replay.cam_px != [0, 0] and replay.self_spot is not None
+    assert replay.self_spot == world.self_spot and replay._self_from_motion
 
 def test_anchor_stand_in_applies_only_while_anchor_unknown(tmp_path):
     mem = Memory(tmp_path); world = World(mem, 16)
@@ -590,3 +593,48 @@ def test_anchor_stand_in_applies_only_while_anchor_unknown(tmp_path):
     mem.upsert("entities", {**mem.get("entities", ids[1]), "anchor": "world"})
     _, tiles, _ = world.before(per, "room", "room", SIZE, 2)
     assert tiles[1] not in world.actor_tiles and tiles[2] in world.actor_tiles
+
+def test_probe_locks_after_a_move_and_here_flag_uses_tile_facts(tmp_path, monkeypatch):
+    from agent import world as world_module
+    from agent.skills import Ctx
+    from tests.agent.fakes import StubModel
+
+    mem = Memory(tmp_path); env = GridEnv(); world = World(mem, 16); world.current_place = "room"
+    mem.upsert("tiles", {"id": "room@0,0", "place": "room", "x": 0, "y": 0,
+                         "floor": True, "blocked": ["RIGHT"], "pushed": [], "exit": None, "step": 1})
+    mem.upsert("tiles", {"id": "room@0,1", "place": "room", "x": 0, "y": 1,
+                         "floor": True, "blocked": [], "pushed": [], "exit": None, "step": 1})
+    world.self_spot = [.5, .5]  # legacy spot is present but has no motion evidence
+    assert world.here_flag() == "here: blocked RIGHT; open DOWN; untried UP, LEFT; self unlocked"
+    original = world_module.press
+
+    def lock_after_press(ctx, direction):
+        result = original(ctx, direction)
+        result.moves[0]["self_at"] = (.5, .5)
+        return result
+
+    monkeypatch.setattr(world_module, "press", lock_after_press)
+    result = world.probe(Ctx(env, StubModel([]), tile_px=16))
+
+    assert result["presses"] == 1 and result["locked"] and world.self_spot == [.5, .5]
+def test_before_reuses_ids_after_observe_after_cached_perception(tmp_path, monkeypatch):
+    from PIL import Image
+
+    mem = Memory(tmp_path)
+    calls = 0
+    observe = mem.observe
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return observe(*args, **kwargs)
+
+    monkeypatch.setattr(mem, "observe", counted)
+    world = World(mem, 16)
+    first = {"screen": "world", "entities": [{"name": "chair", "kind": "object"}]}
+    second = {"screen": "world", "entities": [{"name": "chair", "kind": "object"}]}
+    world.before(first, "p", None, (160, 144), 1)
+    world.observe_after(second, Image.new("RGB", (160, 144)), False, "p", (160, 144), 2)
+    world.before(second, "p", "p", (160, 144), 3)
+
+    assert calls == 2

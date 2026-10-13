@@ -1,7 +1,7 @@
 import numpy as np
 from PIL import Image
 
-from agent.observer import changed, cut, for_model, snap, scroll, wait_settled
+from agent.observer import changed, cut, for_model, residual, snap, scroll, wait_settled
 
 
 class StubEnv:
@@ -79,3 +79,13 @@ def test_changed_model_scaling_and_tile_snap():
     assert for_model(image, 80).size == (80, 80)
     assert for_model(Image.new("RGB", (2, 640))).size == (2, 640)
     assert snap([0.13, 0.13], (64, 64), 16) == [0.125, 0.125]
+
+
+def test_residual_finds_compact_screen_anchored_motion():
+    tile = np.random.default_rng(4).integers(0, 160, (16, 16, 3), dtype=np.uint8)
+    image = np.tile(tile, (9, 10, 1))[:144, :160]
+    first = image.copy(); first[68:76, 80:88] = (255, 20, 20)
+    moved = np.roll(image, 16, axis=1); moved[68:76, 80:88] = (255, 20, 20)
+    spot = residual([Image.fromarray(first), Image.fromarray(moved)], [(0, 0), (16, 0)])
+    assert spot is not None
+    assert abs(spot[0] - .5) <= 8 / 160 and abs(spot[1] - 72 / 144) <= 8 / 144

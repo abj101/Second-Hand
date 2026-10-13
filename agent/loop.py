@@ -21,15 +21,17 @@ class Loop:
         self.move_frames = 16; self.stuck = Stuck()
         self.recent = self.trace.tail(5); self.cached = None; self.cached_hash = None; self.prev_frame = None; self.prompt_version = "e5-perceiver-8"; self.cached_version = self.prompt_version
         self.pending_cut, self.pending_via, self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = False, None, False, 0, False, False
+        self.reperception_used = False
         self.world = World(mem, self.tile_px)
     @property
     def pos(self): return self.world.pos
     @pos.setter
     def pos(self, value): self.world.pos = tuple(value)
-    def _see(self, frame, previous):
+    def _see(self, frame, previous, *, force=False, relook=False):
         key = hashlib.sha256(frame.tobytes()).hexdigest()
-        if key == self.cached_hash and self.cached is not None and self.cached_version == self.prompt_version and not self.repair_pending: return self.cached, key, True, []
+        if not force and key == self.cached_hash and self.cached is not None and self.cached_version == self.prompt_version and not self.repair_pending: return self.cached, key, True, []
         ctx = GENERAL + "\n" + load_brief(self.game) + "\nOn a visible editable text field with its on-screen keyboard, expose one type affordance for the whole field; dialogue questions alone are advance, preset name menus are select. Never list letter buttons separately. A visible modal dialogue or selection menu blocks world movement; offer only its applicable advance, select, or cancel actions until it closes. Previous-place memory is reference only; include details only if visible now." + ("\nThe previous JSON was empty or malformed. Retry with compact JSON containing string screen and list text, entities, affordances; no prose. Use empty lists only for genuinely absent content and report visible details only." if self.repair_pending else "")
+        if relook: ctx += "\nYour last labels may be wrong; look again at who the player is."
         view, ids = self.mem.view("perceiver", {"place": previous, "task": None, "on_screen": [], "recent": [], "step": self.step_no})
         if view: ctx += "\n" + view
         per, reply = perceive(self.model, for_model(frame), ctx); data = reply.data
@@ -39,7 +41,11 @@ class Loop:
     def step(self):
         start, calls = time.perf_counter(), self.model.calls
         before_set = wait_settled(self.env); before = before_set.frame; prior = self.place;
-        per, frame_hash, reused, _ = self._see(before, prior); player_fix = self.world.fix_player(per, before.size); self.empty_streak = self.empty_streak + 1 if self.parse_failed else 0; self.repair_used = self.repair_used if self.parse_failed else False
+        if self.stuck.n < 2: self.reperception_used = False
+        relook = self.stuck.n >= 2 and not self.reperception_used
+        per, frame_hash, reused, _ = self._see(before, prior, force=relook, relook=relook)
+        if relook: self.reperception_used = True
+        player_fix = self.world.fix_player(per, before.size); self.empty_streak = self.empty_streak + 1 if self.parse_failed else 0; self.repair_used = self.repair_used if self.parse_failed else False
         via = next((a.get("target") for a in per.get("affordances", []) if a.get("verb") == "approach"), None)
         modal = self.prev and {self.prev.get("screen"), per.get("screen")} <= {"world", "dialogue", "menu"} and self.prev.get("screen") != per.get("screen") and "world" in (self.prev.get("screen"), per.get("screen")) and not (self.pending_cut or before_set.blank_seen)
         place = self.mem.match_place(per, self.step_no + 1, prev=prior, cut=bool((self.pending_cut or prior and cut(self.prev_frame, before, before_set.blank_seen)) and not modal), via=self.pending_via or via)
@@ -47,6 +53,21 @@ class Loop:
         size = before.size
         proj = self.world.before(per, place, prior, size, self.step_no + 1)[0]
         drift_fix = None
+        probe = None
+        if per.get("screen") == "world" and not modal and not self.world._self_from_motion and self.tile_px:
+            probe_ctx = Ctx(self.env, self.model, self.tile_px, self.move_frames); probe_ctx.step = self.step_no + 1
+            probe = self.world.probe(probe_ctx)
+            if probe["presses"]:
+                probe_set = wait_settled(self.env); probe_frame = probe_set.frame
+                probe_per, probe_hash, probe_reused, _ = self._see(probe_frame, place, force=True)
+                probe_fix = self.world.fix_player(probe_per, probe_frame.size); player_fix = player_fix or probe_fix
+                if probe["scene_cut"]:
+                    probe_place = self.mem.match_place(probe_per, self.step_no + 1, prev=place, cut=True)
+                    self.world.after(probe["skill"], place, probe_place, True, self.step_no + 1)
+                    place = self.place = probe_place
+                per, frame_hash, reused = probe_per, probe_hash, probe_reused
+                before, size = probe_frame, probe_frame.size
+                proj = self.world.before(per, place, place, size, self.step_no + 1)[0]
         for text in per.get("text", []):
             if text not in (self.prev or {}).get("text", []): self.mem.know(text, src="game_text", step=self.step_no + 1)
         self.world.view_flags = self.flags
@@ -58,7 +79,7 @@ class Loop:
         choice, player = None, next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         act_route = travel_legs = None
         act_flags = list(self.flags)
-        if self.recent:
+        if self.recent or self.stuck.n:
             runs = []
             for recent in self.recent:
                 action = recent.get("choice") or {}; skill = recent.get("skill") or {}; outcome = recent.get("outcome") or {}
@@ -71,7 +92,7 @@ class Loop:
                     runs[-1][2] += 1; runs[-1][3] |= runs[-1][4] != result; runs[-1][4] = result; runs[-1][5] += unchanged
                 else:
                     runs.append([key, recent.get("step", self.step_no), 1, False, result, int(unchanged)])
-            summaries = []
+            summaries = [f"no effect x{self.stuck.n}"] if self.stuck.n else []
             for (verb, target), step, count, mixed, (status, reason), unchanged in runs:
                 label = f"{verb[:16]} {target[:24]}".strip()
                 summary = (f"{label} x{count} since step {step}; last {status}" if mixed else
@@ -81,8 +102,9 @@ class Loop:
                 summaries.append(summary)
             recent_flag = "recent: " + "; ".join(summaries)
             while len(recent_flag) > 200 and len(summaries) > 1:
-                summaries.pop(0); recent_flag = "recent: " + "; ".join(summaries)
+                summaries.pop(1 if self.stuck.n else 0); recent_flag = "recent: " + "; ".join(summaries)
             act_flags.append(recent_flag[:197] + "..." if len(recent_flag) > 200 else recent_flag)
+        act_flags.append(self.world.here_flag())
         a = act(self.model, before, per, self.notebook.render(), view, act_flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]])
         applied = self.notebook.apply(a.ops, self.step_no + 1)
         named = self.world.name(place, a.place, self.step_no + 1)
@@ -155,10 +177,12 @@ class Loop:
             "ranker": None, "perception_reused": reused, "frame_hash": frame_hash,
             "scene_cut": scene_cut, "next_place": next_place, "verified_edge": verified_edge, "view_ids": [], "tile": self.world.pos if self.tile_px else None, "drift_fix": list(drift_fix) if drift_fix else None, "player_fix": player_fix, "entities": self.world.entities, "scroll": spatial["scroll"], **({"exit": list(exit_key)} if scene_cut and not modal and next_place != place and exit_key else {}),
             "act": {"place": a.place, "ops": applied, "why": a.why, "action": a.action, "flags": act_flags}, **({"flags": [f"merge_pending: {self.world.merge_pending}"]} if self.world.merge_pending else {})}
+        row["probe"] = {"presses": probe["presses"], "locked": probe["locked"]} if probe is not None else None
         self.step_no += 1
         (self.mem.root.parent / row["frame"]).parent.mkdir(parents=True, exist_ok=True); before.save(self.mem.root.parent / row["frame"])
         drift_fix = self.world.observe_after(after_per, after, after_reused, next_place, after.size, self.step_no, before=before, skill=skill)
         row["tile"], row["drift_fix"] = self.world.pos if self.tile_px else None, list(drift_fix) if drift_fix else None
+        row["self_spot"], row["self_locked"] = self.world.self_spot, self.world._self_from_motion
         for text in after_per.get("text", []):
             if text not in per.get("text", []): self.mem.know(text, src="game_text", step=self.step_no)
         self.place, self.prev, self.prev_frame, self.cached, self.cached_hash = next_place, after_per, after, after_per, after_hash
@@ -169,12 +193,13 @@ class Loop:
         self.trace.write(row); self.recent = [*self.recent, row][-5:]
         return row
     def state(self):
-        return {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "perception": self.cached, "frame_hash": self.cached_hash, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "pending_via": self.pending_via, "flags": self.flags}
+        return {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "reperception_used": self.reperception_used, "perception": self.cached, "frame_hash": self.cached_hash, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "pending_via": self.pending_via, "flags": self.flags}
     def restore(self, state):
         self.step_no, self.place = int(state.get("step", 0)), state.get("place")
         self.tile_px, self.move_frames = state.get("tile_px"), int(state.get("move_frames", 16))
         self.world.tile_px = self.tile_px; self.world.restore(state)
         self.stuck.restore(state.get("stuck", {})); self.prev = state.get("perception"); self.prev_frame = self.env.screenshot()
+        self.reperception_used = bool(state.get("reperception_used", False))
         digest = hashlib.sha256(self.prev_frame.tobytes()).hexdigest()
         self.cached, self.cached_hash, self.cached_version = state.get("perception"), state.get("frame_hash"), state.get("perception_version")
         self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = bool(state.get("parse_failed")), int(state.get("empty_streak", 0)), bool(state.get("repair_used")), bool(state.get("repair_pending")); self.pending_cut, self.pending_via = bool(state.get("pending_cut")), state.get("pending_via"); self.flags = state.get("flags", [])

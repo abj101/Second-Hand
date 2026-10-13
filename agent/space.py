@@ -18,6 +18,7 @@ def fold(mem, place, pos, moves, tile_px, step, actors: frozenset[tuple[int, int
         if shift == (0, 0) or shift == 0:
             if direction not in row["blocked"]: row["blocked"].append(direction); row["step"] = step
             _save(mem, row, before); continue
+        if direction in row["blocked"]: row["blocked"].remove(direction)
         sx, sy = DIRS[direction]; shift = (shift, 0) if isinstance(shift, int) and sx else (0, shift) if isinstance(shift, int) else shift
         dx, dy = (round(-v / tile_px) for v in shift); count = max(abs(dx), abs(dy)); sx = (dx > 0) - (dx < 0); sy = (dy > 0) - (dy < 0)
         for _ in range(count):
@@ -42,7 +43,8 @@ def route(mem, place, start, goal):
         for direction, (dx, dy) in DIRS.items():
             nxt = (at[0] + dx, at[1] + dy)
             cell = _get(mem, place, nxt)
-            if direction in row.get("blocked", []) or direction == (row.get("exit") or {}).get("dir") or nxt in seen or cell and cell.get("floor") is False and nxt != goal or not (bounds[0] <= nxt[0] <= bounds[1] and bounds[2] <= nxt[1] <= bounds[3]): continue
+            edge = row.get("exit") or {}
+            if direction in row.get("blocked", []) or edge.get("src") != "inferred" and direction == edge.get("dir") or nxt in seen or cell and cell.get("floor") is False and nxt != goal or not (bounds[0] <= nxt[0] <= bounds[1] and bounds[2] <= nxt[1] <= bounds[3]): continue
             seen.add(nxt); queue.append((nxt, path + [direction]))
     return None
 def outward(mem, place, tile, placement=None):
@@ -56,5 +58,6 @@ def frontier(mem, place):
     for row in mem.rows("tiles"):
         if row.get("place") != place or row.get("floor") is not True: continue
         for direction, (dx, dy) in DIRS.items():
-            if direction not in row.get("blocked", []) and direction not in row.get("pushed", []) and direction != (row.get("exit") or {}).get("dir") and not _get(mem, place, (row["x"] + dx, row["y"] + dy)): result.append(((row["x"], row["y"]), direction))
+            edge = row.get("exit") or {}
+            if direction not in row.get("blocked", []) and direction not in row.get("pushed", []) and (edge.get("src") == "inferred" or direction != edge.get("dir")) and not _get(mem, place, (row["x"] + dx, row["y"] + dy)): result.append(((row["x"], row["y"]), direction))
     return result

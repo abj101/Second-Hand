@@ -6,32 +6,13 @@ from statistics import median
 from agent.memory import TRANSIENT, _base, _distance, normalize_kind
 from agent.observer import changed, cut
 from agent.space import DIRS, exit_to, fold, frontier, mark_exit, route, tile_of
-from agent.skills import SkillResult, approach
+from agent.skills import SkillResult, approach, press
 
 TRAVEL_MAX_INPUTS = 120
 MISS_TO_STALE, MISS_TO_GONE, ACTOR_STALE_STEPS = 2, 4, 20
 LANDMARKS_PER_PLACE, MAP_W, MAP_H, VIEW_TOKENS = 8, 21, 15, 500
-POS_TOL, ANCHOR_EVIDENCE = 1, 2
 
-# ponytail: kinds stand in only for entities whose motion anchor is still unknown.
 ACTOR_KINDS = {"person", "npc", "character", "enemy", "monster", "animal"}
-
-def classify(history):
-    """Anchor class from (s1, s2, dcam, responded) tile-unit evidence; lists accepted."""
-    votes = {"actor": 0, "screen": 0, "world": 0}; responded = 0
-    for s1, s2, dcam, ok in history:
-        s1, s2, dcam = ([round(float(v), 6) for v in p] for p in (s1, s2, dcam))
-        responded += bool(ok)
-        moves = max(abs(v) for v in dcam) >= 1
-        step = max(abs(s2[i] - s1[i]) for i in (0, 1))
-        off = max(abs((s2[i] - s1[i]) - dcam[i]) for i in (0, 1))
-        screen = moves and step < POS_TOL
-        if screen: votes["screen"] += 1
-        elif moves and off < POS_TOL: votes["world"] += 1
-        if not screen and off >= POS_TOL: votes["actor"] += 1
-    if responded >= ANCHOR_EVIDENCE: return "self"
-    ranked = [c for c in ("actor", "screen", "world") if votes[c] >= ANCHOR_EVIDENCE]
-    return max(ranked, key=votes.get) if ranked else "unknown"
 
 class World:
     def __init__(self, mem, tile_px):
@@ -39,30 +20,24 @@ class World:
         self.pos, self.drift, self.drift_ref = (0, 0), None, None
         self.entity_tiles, self.entity_ids, self.anchors, self.actor_tiles = {}, {}, [], frozenset()
         self.entities, self.pa, self._prepared = [], None, None
+        self._observed_per = None
         self.current_place, self.merge_pending, self.new_arrival = None, None, False
         self._travelled = None
         self._cut_arrival = None
         self._last_miss_hash = {}
-        self.cam_px, self.evidence, self.self_spot = [0, 0], {}, None
+        self.self_spot, self._self_contradictions, self._self_from_motion = None, 0, False
         self._hud, self._persist = {}, {}
     def _anchor(self, per, size):
-        h = self.anchors
-        p = next((e.get("at") for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
-        mid = lambda: h[0] if len(h) < 3 else [sorted(x[i] for x in h)[len(h) // 2] for i in (0, 1)]
-        if p and self.tile_px and per.get("screen") == "world" and (not h or max(abs(p[i] - mid()[i]) * size[i] for i in (0, 1)) <= 1.5 * self.tile_px): h.append(list(p)); del h[:-9]
-        return mid() if h else p
+        return next((e.get("at") for e in per.get("entities", [])
+                     if e.get("kind", "").casefold() == "player"), None)
     def fix_player(self, per, size):
-        if per.get("screen") != "world" or not self.tile_px: return None
-        if self.self_spot is None and len(self.anchors) < 3: return None
+        if per.get("screen") != "world" or not self.tile_px or not self._self_from_motion or self.self_spot is None: return None
         entities = per.get("entities", [])
         player = next((e for e in entities if e.get("kind", "").casefold() == "player"), None)
         if not player or not isinstance(player.get("at"), list) or len(player["at"]) != 2: return None
-        # ponytail: a motion-decided self spot (W4) replaces the follow-camera median, which is kept as the fallback.
-        if self.self_spot is not None: median = self.self_spot
-        else: median = [sorted(a[i] for a in self.anchors)[len(self.anchors) // 2] for i in (0, 1)]
+        median = self.self_spot
         dist = lambda at: max(abs(at[i] - median[i]) * size[i] for i in (0, 1))
         if dist(player["at"]) <= 1.5 * self.tile_px: return None
-        # ponytail: assumes a camera that follows the player (fixed screen spot) when no self spot is decided.
         candidates = [(dist(e["at"]), e) for e in entities if e is not player and isinstance(e.get("at"), list) and len(e["at"]) == 2]
         near = min(candidates, key=lambda item: item[0]) if candidates else None
         old = list(player["at"])
@@ -75,13 +50,16 @@ class World:
         return {"from": old, "to": fixed}
     def before(self, per, place, prior, size, step):
         self.current_place = place
-        if prior and place != prior: self.pos, self.drift, self.drift_ref = (0, 0), None, None
+        if prior and place != prior:
+            self.pos, self.drift, self.drift_ref = (0, 0), None, None
+            self._observed_per = None
         player = next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
-        pa = self._anchor(per, size) if player else None
+        pa = self.self_spot if self._self_from_motion else self._anchor(per, size) if player else None
         self.pa = pa
         proj = lambda at: tile_of(at, pa, self.pos, size, self.tile_px) if pa and self.tile_px and isinstance(at, list) and len(at) == 2 else None
         tiles = {i: t for i, e in enumerate(per.get("entities", [])) if e.get("kind", "").casefold() != "player" and (t := proj(e.get("at")))}
-        ids = self.mem.observe(per, place, step, tiles)
+        ids = self.entity_ids if per is self._observed_per else self.mem.observe(per, place, step, tiles)
+        self._observed_per = per
         self.actor_tiles = frozenset(tiles[i] for i, e in enumerate(per.get("entities", [])) if i in tiles and self._actor(ids.get(i), e))
         self.entity_ids, self.entity_tiles = ids, {ids[i]: p for i, p in tiles.items() if i in ids}
         self.entities = [{"id": ids.get(i), "name": e.get("name"), "kind": e.get("kind"), "at": e.get("at")}
@@ -189,7 +167,8 @@ class World:
         if skill is self._travelled: self._prepared = (skill, place, step, None, self.pos); return {"cut_dir": None, "exit_key": None}
         moves = getattr(skill, "moves", []); move_rows = moves[:-1] if scene_cut and moves else moves
         at = self.pos
-        for direction, shift in move_rows:
+        for move in move_rows:
+            direction, shift = (move.get("dir"), move.get("shift")) if isinstance(move, dict) else move
             if direction not in DIRS: continue
             if shift in ((0, 0), 0):
                 target = at[0] + DIRS[direction][0], at[1] + DIRS[direction][1]
@@ -199,9 +178,47 @@ class World:
                 n = max(abs(dx), abs(dy))
                 if n: at = (at[0] + ((dx > 0) - (dx < 0)) * n, at[1] + ((dy > 0) - (dy < 0)) * n)
         if self.tile_px: self.pos = fold(self.mem, place, self.pos, move_rows, self.tile_px, step, actors=self.actor_tiles)
-        cut_dir = moves[-1][0] if scene_cut and moves else None
+        cut_dir = (moves[-1].get("dir") if isinstance(moves[-1], dict) else moves[-1][0]) if scene_cut and moves else None
         self._prepared = (skill, place, step, cut_dir, self.pos)
         return {"cut_dir": cut_dir, "exit_key": (*self.pos, cut_dir) if cut_dir and self.tile_px else None}
+
+    def probe(self, ctx):
+        place = self.current_place
+        result = {"presses": 0, "locked": self._self_from_motion}
+        if (not place or self.tile_px is None or self._self_from_motion): return result
+        step = getattr(ctx, "step", 0)
+        tried = set()
+        for _ in range(4):
+            tile = self.mem.get("tiles", f"{place}@{self.pos[0]},{self.pos[1]}") or {}
+            direction = next((d for d in DIRS if d not in tile.get("blocked", []) and d not in tried), None)
+            if direction is None: break
+            tried.add(direction)
+            skill = press(ctx, direction)
+            scene_cut = skill.blank_seen or cut(skill.before, skill.after)
+            self.prepare(skill, place, scene_cut, step)
+            result.update(presses=result["presses"] + skill.inputs, skill=skill, scene_cut=scene_cut)
+            if not scene_cut: self.after(skill, place, place, False, step)
+            move = skill.moves[-1] if skill.moves else {}
+            spot, shift = move.get("self_at"), move.get("shift")
+            if (spot is not None and isinstance(shift, tuple) and max(map(abs, shift)) >= self.tile_px):
+                self.self_spot, self._self_contradictions, self._self_from_motion = list(spot), 0, True
+            result["locked"] = self._self_from_motion
+            if scene_cut or skill.status != "done" or result["locked"]: break
+        return result
+
+    def here_flag(self):
+        tile = self.mem.get("tiles", f"{self.current_place}@{self.pos[0]},{self.pos[1]}") or {}
+        blocked = set(tile.get("blocked", []))
+        open_dirs = {d for d, (dx, dy) in DIRS.items()
+                     if (neighbor := self.mem.get("tiles", f"{self.current_place}@{self.pos[0] + dx},{self.pos[1] + dy}"))
+                     and neighbor.get("floor") is True}
+        opened = open_dirs - blocked
+        untried = set(DIRS) - blocked - opened
+        parts = []
+        for label, dirs in (("blocked", blocked), ("open", opened), ("untried", untried)):
+            parts.append(f"{label} {', '.join(d for d in DIRS if d in dirs) or 'none'}")
+        parts.append("self locked" if self._self_from_motion else "self unlocked")
+        return "here: " + "; ".join(parts)
     def after(self, skill, place, next_place, scene_cut, step):  # call after prepare() for the same step
         if skill is self._travelled:
             self._cut_arrival = None; self.current_place = next_place
@@ -221,26 +238,6 @@ class World:
         t = self.tile_px; w, h = image.size
         x0, y0 = (min(max(round(centre[i] - t / 2), 0), max(n - t, 0)) for i, n in ((0, w), (1, h)))
         return (x0, y0, x0 + t, y0 + t)
-    def _learn(self, per, frame, before, skill, size, old_ids, old_entities, step):
-        old_index = {ident: j for j, ident in old_ids.items()}
-        for i, e in enumerate(per.get("entities", [])):
-            ident = self.entity_ids.get(i); j = old_index.get(ident)
-            if ident is None or j is None or j >= len(old_entities): continue
-            a0, a1 = old_entities[j].get("at"), e.get("at")
-            if not (isinstance(a0, list) and isinstance(a1, list) and len(a0) == 2 and len(a1) == 2): continue
-            px = [a0[k] * size[k] for k in (0, 1)]
-            s1 = [v / self.tile_px for v in px]
-            s2 = [a1[k] * size[k] / self.tile_px for k in (0, 1)]
-            dcam = [v / self.tile_px for v in getattr(skill, "scroll", None) or (0, 0)]
-            # appearance before vs after, each at its own position: scroll and own translation cancel out
-            qx = [a1[k] * size[k] for k in (0, 1)]
-            responded = bool(getattr(skill, "moves", None)) and changed(before.crop(self._box(before, px)), frame.crop(self._box(frame, qx))) > .05
-            history = [*self.evidence.get(ident, []), [s1, s2, dcam, responded]][-6:]
-            self.evidence[ident] = history
-            row = self.mem.get("entities", ident)
-            anchor = "self" if row.get("anchor") == "self" else classify(history)
-            if row.get("anchor") != anchor: self.mem.upsert("entities", {**row, "anchor": anchor})
-            if anchor == "self": self.self_spot = list(a1)
     def _screen_things(self, per, frame, place, size, step):
         for i, e in enumerate(per.get("entities", [])):
             ident = self.entity_ids.get(i); row = self.mem.get("entities", ident) if ident else None
@@ -263,11 +260,23 @@ class World:
             if hud["crop"] is not None and changed(hud["crop"], crop) > .05: hud["changed"] = step
             hud["crop"] = crop
     def observe_after(self, per, frame, reused, place, size, step, before=None, skill=None):
-        old_ids, old_entities = self.entity_ids, self.entities
-        scroll = getattr(skill, "scroll", None)
-        if scroll is not None: self.cam_px = [self.cam_px[0] + scroll[0], self.cam_px[1] + scroll[1]]
+        for move in getattr(skill, "moves", []):
+            if not isinstance(move, dict): continue
+            shift, spot = move.get("shift"), move.get("self_at")
+            if not self.tile_px or not isinstance(shift, tuple) or max(map(abs, shift)) < self.tile_px: continue
+            if spot is None:
+                self._self_contradictions = 0
+            elif self.self_spot is None:
+                self.self_spot, self._self_contradictions, self._self_from_motion = list(spot), 0, True
+            elif not self._self_from_motion:
+                self.self_spot, self._self_contradictions, self._self_from_motion = list(spot), 0, True
+            elif max(abs(spot[i] - self.self_spot[i]) * size[i] for i in (0, 1)) > self.tile_px:
+                self._self_contradictions += 1
+                if self._self_contradictions >= 2: self.self_spot, self._self_contradictions, self._self_from_motion = None, 0, False
+            else:
+                self._self_contradictions = 0
         player = next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
-        aa = self._anchor(per, size) if player else None
+        aa = (self.self_spot if self._self_from_motion else self._anchor(per, size)) if player else None
         tiles = {i: tile_of(e["at"], aa, self.pos, size, self.tile_px) for i, e in enumerate(per.get("entities", []))
                  if aa and e.get("kind", "").casefold() != "player" and isinstance(e.get("at"), list) and self.tile_px}
         drift_fix = None
@@ -281,9 +290,9 @@ class World:
                 dx, dy = (sorted(v[0][j] for v in delta)[len(delta) // 2] for j in (0, 1)); drift = (dx, dy) if (dx, dy) != (0, 0) else None
                 if drift and drift == self.drift: self.pos = (self.pos[0] + dx, self.pos[1] + dy); drift_fix = (dx, dy); tiles = {i: (p[0] + dx, p[1] + dy) for i, p in tiles.items()}; self.drift = self.drift_ref = None
                 else: self.drift, self.drift_ref = drift, anchor if drift else None
-        self.entity_ids = self.mem.observe(per, place, step, tiles)
-        if not reused and before is not None and self.tile_px and getattr(skill, "scroll", None) is not None and old_ids:
-            self._learn(per, frame, before, skill, size, old_ids, old_entities, step)
+        if not reused:
+            self.entity_ids = self.mem.observe(per, place, step, tiles)
+            self._observed_per = per
         self._screen_things(per, frame, place, size, step)
         self._tiers(per, place, self.entity_ids)
         self._record_view(per, frame, reused, place, size, step, aa, self.entity_ids)
@@ -293,15 +302,19 @@ class World:
     def state(self):
         return {"pos": self.pos, "drift": self.drift, "drift_ref": self.drift_ref, "entity_tiles": self.entity_tiles,
                 "entity_ids": self.entity_ids, "anchors": self.anchors,
-                "last_miss_hash": self._last_miss_hash, "cam_px": self.cam_px, "evidence": self.evidence,
-                "self_spot": self.self_spot, "hud_changed": {k: v["changed"] for k, v in self._hud.items() if v["changed"] is not None}}
+                "last_miss_hash": self._last_miss_hash,
+                "self_spot": self.self_spot, "self_contradictions": self._self_contradictions,
+                "self_from_motion": self._self_from_motion,
+                "hud_changed": {k: v["changed"] for k, v in self._hud.items() if v["changed"] is not None}}
 
     def restore(self, state):
         self.pos, self.drift = tuple(state.get("pos", (0, 0))), tuple(state["drift"]) if state.get("drift") else None
         self.drift_ref, self.entity_tiles = state.get("drift_ref"), state.get("entity_tiles", {})
         self.entity_ids, self.anchors = {int(i): v for i, v in state.get("entity_ids", {}).items()}, state.get("anchors", [])
         self._last_miss_hash = state.get("last_miss_hash", {})
-        self.cam_px, self.evidence, self.self_spot = list(state.get("cam_px", [0, 0])), state.get("evidence", {}), state.get("self_spot")
+        self.self_spot = state.get("self_spot")
+        self._self_contradictions = int(state.get("self_contradictions", 0))
+        self._self_from_motion = bool(state.get("self_from_motion", False))
         self._hud = {k: {"crop": None, "changed": v} for k, v in state.get("hud_changed", {}).items()}
     def _paths(self, start):
         live = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged"}; links = {}
@@ -348,10 +361,7 @@ class World:
         live = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged"}
         places = [p for p in self.mem.rows("places") if p.get("id") in live]
         goal = str(goal_text or "").casefold()
-        def base_name(name):
-            base = _base(name)
-            while (stripped := _base(base)) != base: base = stripped
-            return base
+        base_name = _base
         promoted = [e["id"] for e in self.mem.rows("entities") if e.get("place") in live and e.get("name")
                     and _base(e["name"]) in goal]
         self._promote(promoted)
@@ -560,10 +570,11 @@ class World:
         self.current_place, self.drift, self.drift_ref = place, None, None; self.entity_tiles, self.entity_ids, self.actor_tiles = {}, {}, frozenset()
     def _facing_target(self, leg, result):
         target = leg.get("target"); dx, dy = DIRS[leg["dirs"][-1]] if leg["dirs"] else (0, 0)
-        if not target or target.get("kind") != "memory" or [m[0] for m in result.moves] != leg["dirs"]: return False
+        if not target or target.get("kind") != "memory" or [m.get("dir") if isinstance(m, dict) else m[0] for m in result.moves] != leg["dirs"]: return False
         return (self.pos[0]+dx, self.pos[1]+dy) == tuple(target["tile"])
     def _travel_result(self, results, status, reason, ctx):
-        self._travelled = SkillResult(status, f"travel: {reason}" if reason else "", sum(r.inputs for r in results), sum(r.calls for r in results), results[0].before if results else ctx.env.screenshot(), results[-1].after if results else ctx.env.screenshot(), tuple(map(sum, zip(*(r.scroll for r in results)))) if results else (0, 0), any(r.blank_seen for r in results), [m for r in results for m in r.moves]); return self._travelled
+        moves = [m for r in results for m in r.moves]
+        self._travelled = SkillResult(status, f"travel: {reason}" if reason else "", sum(r.inputs for r in results), sum(r.calls for r in results), results[0].before if results else ctx.env.screenshot(), results[-1].after if results else ctx.env.screenshot(), tuple(map(sum, zip(*(r.scroll for r in results)))) if results else (0, 0), any(r.blank_seen for r in results), moves, next((m.get("self_at") for m in reversed(moves) if isinstance(m, dict) and m.get("self_at") is not None), None)); return self._travelled
     def name(self, place, name, step):
         self.new_arrival, self.merge_pending = False, None
         cut_arrival, self._cut_arrival = self._cut_arrival, None

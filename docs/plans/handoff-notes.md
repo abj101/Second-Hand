@@ -1,39 +1,52 @@
 # Handoff notes
 
-Last written by: the user's Claude session, 2026-10-12, after the W4 run. P4 committed (143e0e6). W4 committed with its offline anchor row deferred to L1 (user, option 1). Next: L1.
+Last written by: Codex, 2026-10-12, after TL and L2. Next: the user's STOP 5 review; no further phase or live spend authorized.
 
 ## State of the code
-- Branch feat/lean-agent. HEAD = W4 commit. W4 contents: `agent/world.py` (`classify`, `POS_TOL`, `ANCHOR_EVIDENCE`, anchor/region/transient fields, HUD change flag, `_actor`, `self_spot` path in `fix_player`, state keys `cam_px`/`evidence`/`self_spot`/`hud_changed`), one call in `agent/loop.py` (`observe_after(..., before=, skill=)`), `tests/agent/fakes.py` (GridEnv `hud`/`wander`/`animated`, `perception()`), `tests/agent/test_world.py` (7 `anchor` tests), regenerated act golden entities, `scripts/check_world.py anchors`.
-- Kept from P3b: `fix_player`, the cut rule, the `recent:` flag. The act path is the only path (P4).
-- `ACTOR_KINDS` is the stand-in and is used only for `unknown` anchors.
+- Branch feat/lean-agent; TL B1–B4 built and L2 completed; see TL.md §7 for checks, data review and exact proposed contract text.
+- Tracking: observer.residual, dict moves with self_at, World motion lock/unlock, bounded probe, once-per-streak re-perception, true recent/here feedback.
+- W4 classify/_learn/evidence/cam_px and median identity rule removed; still-used HUD/regions and W3 statuses retained.
+- Cached perceptions are role-corrected; Memory observes once per perception; successful crossing clears blocked; inferred exits do not block route/frontier.
+- Resume state and memory: runs/m1_long/checkpoint/000170; L1 evidence preserved in runs/m1_long_l1 (112 source files SHA256 verified).
+- New checker: scripts/check_track.py dupes/self/probe; evaluator --from-step and self_spot/false_walls metrics.
 
 ## Decisions in force
-- Build-first: gates are unit tests plus offline checks vs RAM truth; the only live spend left is L1 (two halves of 100 steps, <= 110 requests each, fresh boot into `runs/m1_long`; check `runs/e3_budget.json`: stop if M1 < 220 left).
-- L1 tier: orchestrator GPT-6.1 Sol, subagents gpt-6-luna HIGH (set explicitly), one WP each, never Opus. No game-specific code in `agent/`; World never picks goals; never edit contracts.md or loop/.
+- STOP 5: progress first, then health; checks report, not progress gates; no further implementation or spend before the user's next approved packet.
+- Every subagent gpt-6-luna HIGH, one slice each; never Opus; orchestrator reviews and runs acceptance.
+- No game-specific code in agent/, no new goals/filters/gates, no contracts.md or loop/ edits.
+- TL cap consumed: 110/110; M1 191 remaining is not authorization to resume TL.
+- Proposed contract delta is in TL.md §7; user applies it.
 
 ## Measured numbers
-- Full suite: 215 passed (~4.3 min). P4 alone was 209.
-- W4 synthetic: `-k anchor` 7 passed; player self, npc actor, hp bar screen, fountain/door world within 2 steps.
-- W4 offline `check_world.py anchors runs/m1_act` (exit 1): decided 0/7, undecided 1.000 (gate <= 0.30), actor_walls 0 vacuous (56 blocked rows have no direction). Cause: only 1 camera scroll in 40 steps.
-- Lines: agent 2178 -> 2263, scripts 2667 -> 2827, tests 3346 -> 3469. Ledger unchanged (657 / M1 639 / stage_c 86).
+- Full prelive: 233 passed,1 SDL2 warning,249.27s; closing: 233 passed,1 warning,248.98s.
+- L2 runner exit0; 100 steps71–170; 110 HTTP requests,0 retries,1 cache hit.
+- Truth maps: 1F0x25 at71/73/76/81; 2F0x26 at72/74/80; no Town/lab; party0; final1F(7,1).
+- Self spot accuracy99/99=1.0, coverage99/100=.99; lock at72; two probes/three presses.
+- Health red:2 live IDs per house map, no-effect max90, same-place/action repeats87; false walls0 is a lower bound.
+- Worst window81–170:90 blocked NPC actions,0 inputs,one frame hash; reason target is the player.
+- B2 checker: m1 locks firstLEFT5px; m1_long fifthLEFT2px after four compact-heat misses; probe checker stops2presses on real1F→2F cut.
+- Lines agent2263→2369(+106),scripts2892→3122(+230),tests3525→3775(+250); report only.
+- Ledger runs/e3_budget.json: total877/smoke18/M1859/a142/b297/p25/q60/c306; M1 remaining191.
 
 ## Environment and gotchas
-- `.venv-agent/Scripts/python.exe`, forward slashes. pyflakes installed via `uv pip install --python .venv-agent/Scripts/python.exe pyflakes`.
-- `eval_run.py` needs `--no-write` on runs/m1 and runs/m1_act. `_ledger` buckets by run name (`m1` in name -> M1).
-- Regenerate goldens only with `W0_REGEN=1`; review the diff.
-- GridEnv with `hud/wander/animated` uses a different vertical origin (64) so tiles sit on `observer.snap`'s grid; default geometry is unchanged.
+- Use .venv-agent/Scripts/python.exe and forward-slash paths; only warning is pysdl2-dll2.32.10.
+- Use `scripts/eval_run.py runs/m1_long --no-write --health --from-step 71` for TL; the stored summary was not overwritten.
+- Truth is sampled before probe, act frame/place after probe: two probed rows excluded from before-place ID counts; spot scored against next truth.
+- False-wall reconstruction skips probes/cuts/drift/place changes and diagonal/multi-axis paths; it cannot prove absence of all false walls.
+- Goldens changed only entities upserts44→17(same4IDs) and trace tracking/feedback fields; regen only W0_REGEN=1, force-stage data.
 
 ## Deviations from plan and contracts
-- W4: `classify` history in tile units; `responded` = appearance before at s1 vs after at s2; contracts.md text for `classify` says px-agnostic, no edit made.
-- Act golden regenerated twice (P4: task/wake removed; W4: anchor fields). Trace keeps `"task": None`.
+- Packet CLI spacing corrected: `110--stage c` became `--max-calls 110 --stage c`; no cap changed.
+- One B3 repair fixed stale probe frame and fixture call queues; one B2 repair fixed a legacy three-return _step mock in test_type_text.py.
+- Exact approved TL contract proposals await the user; contracts.md SHA256 unchanged.
 
 ## Do not retry
-- Do not tune thresholds or the replay to pass the anchor gate on `runs/m1_act`; it has no camera motion.
-- No 40-step live comparisons; do not resume L1 from runs/m1 checkpoints; never git add -A, commit runs/ or .tmp/, reset a ledger, or push.
+- Never overwrite runs/m1_long_l1, runs/m1, runs/m1_act; copy TL evidence before any future live continuation.
+- No more TL requests, ledger reset/refund/cap increase, git add -A, runs/.tmp commits or push.
+- Do not tune residual thresholds to hide m1_long's initial misses, filter model choices or add progress gates.
 
-## Open issues for TL (next phase, docs/plans/TL.md)
-- L1 failed on player identity: the perceiver labelled Mom as the player; `run_affordance` took `player_at` from that label (skills.py:219); `fix_player` never fired.
-- Duplicates are a naming bug (`_base` strips one `#n`; the model echoes `furniture#2`) plus two observe calls per step. They are not an identity-design problem.
-- Walls in L1 were correct. A false inferred reverse exit LEFT sits at `p_world@0,0` (mark_exit).
-- Build-first: checks report, they do not block. Full suite before L2; L2 resumes runs/m1_long from checkpoint 70 (back up to runs/m1_long_l1 first).
-- Measured: one LEFT step's scroll-compensated residual has 202/230 px in the player box; scroll 2 px every other frame.
+## Open issues for STOP 5 review
+- Player location is correct, but role-swapped NPC name/affordance still points to the player (trace78/84/170); model repeats despite explicit feedback.
+- Inspect cached entity IDs across place merge: at84 choice id e_npc_2 while perception NPC id e_npc_3.
+- Places fragment and act echoes readable labels such as world[p_world_6], leaving merge_pending; live IDs/map2.
+- Decide the next correctness packet for target/name consistency and place ownership before any new live spend.

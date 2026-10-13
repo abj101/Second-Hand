@@ -1,6 +1,7 @@
 """Summarize one agent run and evaluate the Pokémon M1 gate."""
 import json
 import re
+import struct
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -51,15 +52,14 @@ def _health(result, world_maps):
     places = result.get("place_ids_per_map")
     p3 = ({mid: len((places or {}).get(mid, [])) for mid in sorted(world_maps)}
           if world_maps else None)
-    seen = result.get("seen_in_bounds")
     tile = (result.get("spatial") or {}).get("tile_accuracy_per_visit", {}).get("accuracy")
     repeats = result.get("repeat_actions")
     values = (
-        ("player_role_errors", result.get("player_role_errors"), 0),
+        ("self_spot_accuracy", result.get("self_spot_accuracy"), .95),
+        ("self_spot_coverage", result.get("self_spot_coverage"), .95),
         ("cut_self_loops", result.get("cut_self_loops"), 0),
         ("place_ids_per_map", p3, 1),
         ("screen_places", result.get("screen_places"), 0),
-        ("seen_in_bounds", seen.get("rate") if seen else None, .98),
         ("tile_accuracy", tile, .95),
         ("no_effect_streak_max", result.get("no_effect_streak_max"), 5),
         ("repeat_actions_max_length", max((len(r.get("steps", [])) for r in repeats), default=0)
@@ -71,9 +71,9 @@ def _health(result, world_maps):
             green = all(count == limit for count in value.values()) if value else None
         elif value is None or (field == "cut_self_loops" and result.get("no_effect_streak_max") is None):
             green = None
-        elif field in ("player_role_errors", "cut_self_loops", "screen_places"):
+        elif field in ("cut_self_loops", "screen_places"):
             green = value == limit
-        elif field in ("seen_in_bounds", "tile_accuracy"):
+        elif field in ("self_spot_accuracy", "self_spot_coverage", "tile_accuracy"):
             green = value >= limit
         else:
             green = value <= limit
@@ -151,36 +151,97 @@ def _tile_metrics(trace, truth):
 
 
 def _p3b_metrics(trace, truth_rows):
-    has_sprites = any(isinstance(r.get("sprites"), list) and r["sprites"] for r in truth_rows)
-    errors = 0
-    truth = {r.get("step"): r for r in truth_rows}
-    for row in trace:
-        if row.get("screen") != "world":
-            continue
-        actual = truth.get(row.get("step")) or {}
-        sprite = next((s for s in actual.get("sprites", [])
-                       if isinstance(s, dict) and s.get("slot") == 0), None)
-        entities = row.get("entities") or []
-        player = next((e for e in entities if isinstance(e, dict) and
-                       str(e.get("kind", "")).casefold() == "player"), None)
-        at = (player or {}).get("at")
-        if not sprite or not isinstance(at, (list, tuple)) or len(at) != 2:
-            continue
-        try:
-            # Sprite RAM records its top-left; perception records the avatar center.
-            dx = float(at[0]) * 160 - (float(sprite["x"]) + 8)
-            dy = float(at[1]) * 144 - (float(sprite["y"]) + 8)
-        except (KeyError, TypeError, ValueError):
-            continue
-        errors += (dx * dx + dy * dy) ** .5 > 16
     recent = 0
     for row in trace:
         flags = (row.get("act") or {}).get("flags") or []
         recent += "recent:" in flags if isinstance(flags, str) else any("recent:" in str(flag) for flag in flags)
-    return {"player_role_errors": errors if has_sprites else None,
-            "cut_self_loops": sum(r.get("scene_cut") is True and r.get("place") is not None and
+    return {"cut_self_loops": sum(r.get("scene_cut") is True and r.get("place") is not None and
                                   r.get("next_place") == r.get("place") for r in trace),
             "recent_line_steps": recent}
+
+
+def _frame_size(run, row):
+    try:
+        data = (run / row["frame"]).read_bytes()[:24]
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return struct.unpack(">II", data[16:24])
+    except (KeyError, OSError, TypeError):
+        pass
+    return None
+
+
+def _self_spot_metrics(run, trace, truth_rows):
+    truth = {r.get("step"): r for r in truth_rows}
+    world_steps = locked = correct = measured = 0
+    for row in trace:
+        if row.get("screen") != "world":
+            continue
+        world_steps += 1
+        if row.get("self_locked") is not True:
+            continue
+        locked += 1
+        spot = row.get("self_spot")
+        actual = truth.get((row.get("step") or 0) + 1, {})
+        sprite = next((s for s in actual.get("sprites", [])
+                       if isinstance(s, dict) and s.get("slot") == 0), None)
+        size = _frame_size(run, row)
+        if (not isinstance(spot, (list, tuple)) or len(spot) != 2 or not sprite or
+                not size or size[0] <= 0 or size[1] <= 0):
+            continue
+        try:
+            dx = float(spot[0]) * size[0] - (float(sprite["x"]) + 8)
+            dy = float(spot[1]) * size[1] - (float(sprite["y"]) + 8)
+        except (KeyError, TypeError, ValueError):
+            continue
+        correct += (dx * dx + dy * dy) ** .5 <= 8
+        measured += 1
+    return {"self_spot_accuracy": rate(correct, measured),
+            "self_spot_coverage": rate(locked, world_steps),
+            "self_spot_correct": correct, "self_spot_measured": measured,
+            "self_locked_world_steps": locked, "world_steps": world_steps}
+
+
+def _false_walls(trace, tile_rows, from_step=None):
+    steps = {}
+    for row in tile_rows:
+        if isinstance(row.get("step"), int):
+            for direction in row.get("blocked", []):
+                steps.setdefault((row.get("place"), row.get("x"), row.get("y"), direction), []).append(row["step"])
+    dirs = {"UP": (0, -1), "DOWN": (0, 1), "LEFT": (-1, 0), "RIGHT": (1, 0)}
+    crossed = set()
+    ordered = sorted((r for r in trace if r.get("screen") == "world"), key=lambda r: r.get("step", -1))
+    for before, after in zip(ordered, ordered[1:]):
+        if (before.get("place") != after.get("place") or
+                after.get("step") != before.get("step", -2) + 1 or
+                before.get("scene_cut") or after.get("scene_cut") or
+                before.get("drift_fix") or after.get("drift_fix") or
+                (before.get("probe") or {}).get("presses", 0) or
+                (after.get("probe") or {}).get("presses", 0) or
+                before.get("next_place") not in (None, before.get("place")) or
+                after.get("next_place") not in (None, after.get("place"))):
+            continue
+        if from_step is not None and after.get("step", 0) < from_step:
+            continue
+        a, b = before.get("tile"), after.get("tile")
+        if not (isinstance(a, (list, tuple)) and len(a) == 2 and
+                isinstance(b, (list, tuple)) and len(b) == 2):
+            continue
+        try:
+            dx, dy = int(b[0]) - int(a[0]), int(b[1]) - int(a[1])
+            ax, ay = int(a[0]), int(a[1])
+        except (TypeError, ValueError):
+            continue
+        if not dx and not dy:
+            continue
+        if dx and dy:
+            continue
+        direction = "RIGHT" if dx > 0 else "LEFT" if dx < 0 else "DOWN" if dy > 0 else "UP"
+        sx, sy = dirs[direction]
+        for n in range(max(abs(dx), abs(dy))):
+            key = (after["place"], ax + sx * n, ay + sy * n, direction)
+            if any(step < after["step"] for step in steps.get(key, ())):
+                crossed.add(key)
+    return len(crossed)
 
 
 def _p3_metrics(run, trace, truth_rows):
@@ -203,6 +264,8 @@ def _p3_metrics(run, trace, truth_rows):
 
     place_ids = defaultdict(set)
     for row in world_rows if has_trace and has_truth and has_places else ():
+        if (row.get("probe") or {}).get("presses", 0):
+            continue  # Probe may have changed place after the runner's before-action truth sample.
         actual = truth.get(row.get("step")) or {}
         if actual.get("map") is not None:
             place_ids[map_id(actual["map"])].add(row["place"])
@@ -453,14 +516,16 @@ def _known_exit_reuse(trace, truth_rows, tile_history):
             "pass": reused == total if total else None}
 
 
-def _e4_metrics(run, trace, truth_rows):
+def _e4_metrics(run, trace, truth_rows, from_step=None):
     from agent.memory import normalize_kind
     kinds = {r["id"]: normalize_kind(r.get("kind")) for r in replay(run / "memory" / "entities.jsonl")}
     verified = {c.get("id") for r in trace if (c := r.get("choice") or {}).get("verb") == "approach" and
                 kinds.get(c.get("id")) in {"door", "exit"} and "place_changes" in (o := r.get("outcome") or {}).get("effects", []) and
                 (o.get("basis") or {}).get("place_changes") == "pixel"}
     truth_rows = sorted(truth_rows, key=lambda x: x.get("step", 0))
-    battles = sum(r.get("battle") == 2 and (i == 0 or truth_rows[i-1].get("battle") != 2) for i, r in enumerate(truth_rows))
+    battles = sum(r.get("battle") == 2 and (i == 0 or truth_rows[i-1].get("battle") != 2) and
+                  (from_step is None or r.get("step", 0) >= from_step)
+                  for i, r in enumerate(truth_rows))
     moves = sum((r.get("choice") or {}).get("verb") == "select" and
                  (truth := next((t for t in truth_rows if t.get("step") == r.get("step")), {})).get("battle") == 2
                  for r in trace)
@@ -536,13 +601,14 @@ def _repredict(run, trace, hide_memory=False):
             "excluded": excluded, "coverage": rate(n, len(trace))}
 
 
-def evaluate(run, *, repredict=False, hide_memory=False):
+def evaluate(run, *, repredict=False, hide_memory=False, from_step=None):
     run = Path(run)
-    trace, truth_rows = read(run / "trace.jsonl"), read(run / "truth.jsonl")
+    full_trace, truth_rows = read(run / "trace.jsonl"), read(run / "truth.jsonl")
+    trace = [row for row in full_trace if from_step is None or row.get("step", 0) >= from_step]
     truth = {r.get("step"): r for r in truth_rows}
     places = {r["id"]: r for r in read(run / "memory" / "places.jsonl") if r.get("id")}
     step_places = defaultdict(Counter)
-    for row in trace:
+    for row in full_trace:
         t = truth.get(row.get("step"))
         pid = row.get("place")
         if t and pid in places and places[pid].get("state") == "place" and t.get("map") is not None:
@@ -560,7 +626,7 @@ def evaluate(run, *, repredict=False, hide_memory=False):
     distinct_places = [pid for pid in matched.values() if pid]
 
     valid_edges = set()
-    for row in trace:
+    for row in full_trace:
         outcome = row.get("outcome") or {}
         basis = outcome.get("basis") or {}
         pixel_cut = row.get("scene_cut") is True and any(
@@ -591,15 +657,20 @@ def evaluate(run, *, repredict=False, hide_memory=False):
     calls_path = run / "calls.jsonl"
     calls = read(calls_path)
     has_call_log = calls_path.exists()
-    call_count = len(calls) if has_call_log else sum(int(r.get("calls") or 0) for r in trace)
-    cloud_calls = sum(1 for c in calls if c.get("ok") and not c.get("cached") and
-                      (str(c.get("model", "")).endswith("-cloud") or ":cloud" in str(c.get("model", "")))) if has_call_log else None
-    cache_hits = sum(c.get("cached") is True for c in calls) if has_call_log else None
+    call_steps_known = from_step is None or all(isinstance(c.get("step"), int) for c in calls)
+    selected_calls = ([c for c in calls if c.get("step", 0) >= from_step]
+                      if from_step is not None and has_call_log and call_steps_known else calls)
+    selected_call_log = has_call_log and call_steps_known
+    call_count = (len(selected_calls) if selected_call_log else
+                  sum(int(r.get("calls") or 0) for r in trace) if from_step is not None or not has_call_log else len(calls))
+    cloud_calls = sum(1 for c in selected_calls if c.get("ok") and not c.get("cached") and
+                      (str(c.get("model", "")).endswith("-cloud") or ":cloud" in str(c.get("model", "")))) if selected_call_log else None
+    cache_hits = sum(c.get("cached") is True for c in selected_calls) if selected_call_log else None
     http_attempts = sum(c["requests"] if type(c.get("requests")) is int else
                         0 if c.get("cached") else 1 + int(c.get("retries") or 0)
-                        for c in calls) if has_call_log else None
-    retries = sum(int(c.get("retries") or 0) for c in calls if not c.get("cached")) if has_call_log else None
-    call_roles = Counter(c.get("role") for c in calls if c.get("role"))
+                        for c in selected_calls) if selected_call_log else None
+    retries = sum(int(c.get("retries") or 0) for c in selected_calls if not c.get("cached")) if selected_call_log else None
+    call_roles = Counter(c.get("role") for c in selected_calls if c.get("role")) if selected_call_log else Counter()
     reused = [r for r in trace if isinstance(r.get("perception_reused"), bool)]
     choices = [r.get("choice") or {} for r in trace if isinstance(r.get("choice"), dict)]
     no_call = sum(c.get("called") is False for c in choices)
@@ -638,7 +709,10 @@ def evaluate(run, *, repredict=False, hide_memory=False):
                                                 if isinstance(r.get("first"), int) and r["first"] <= 54])
     tile_accuracy = _tile_metrics(trace, truth)
     p3 = _p3_metrics(run, trace, truth_rows)
-    exit_reuse = _known_exit_reuse(trace, truth_rows, read(run / "memory" / "tiles.jsonl"))
+    tile_rows = read(run / "memory" / "tiles.jsonl")
+    exit_reuse = _known_exit_reuse(trace, truth_rows, tile_rows)
+    spot_metrics = _self_spot_metrics(run, trace, truth_rows)
+    false_walls = _false_walls(full_trace, tile_rows, from_step)
     game_text = sum(r.get("src") == "game_text" for r in knowledge)
     m1 = {"m1_starter": bool(party_steps), "steps_to_starter": max(0, min(party_steps) - 1) if party_steps else None,
           "place_purity": purity, "places_matched": len(set(distinct_places)) == 4,
@@ -662,7 +736,7 @@ def evaluate(run, *, repredict=False, hide_memory=False):
                      "total_asks_per_step": rate(call_count, len(trace)),
                      "uncached_cloud_successful_asks": cloud_calls,
                      "uncached_cloud_asks_per_step": rate(cloud_calls, len(trace)) if cloud_calls is not None else None,
-                     "cache_hits": cache_hits, "cache_hit_share": rate(cache_hits, len(calls)) if cache_hits is not None else None,
+                     "cache_hits": cache_hits, "cache_hit_share": rate(cache_hits, len(selected_calls)) if cache_hits is not None else None,
                      "http_attempts": http_attempts, "retries": retries,
                      "escalations": call_roles.get("escalate", 0) if has_call_log else None,
                      "time_per_step_seconds": rate(sum(elapsed), len(elapsed)) / 1000 if elapsed else None,
@@ -677,23 +751,43 @@ def evaluate(run, *, repredict=False, hide_memory=False):
                                               "legacy": legacy_duplicates,
                                               "new_after_resume": new_duplicates},
                         "known_exit_id_reuse": exit_reuse},
-            **_e4_metrics(run, trace, truth_rows), **_p3b_metrics(trace, truth_rows), **p3,
+            **_e4_metrics(run, trace, truth_rows, from_step), **_p3b_metrics(trace, truth_rows), **p3,
+            **spot_metrics, "false_walls": false_walls,
+            "probe_unmeasured_world_steps": sum(r.get("screen") == "world" and
+                (r.get("probe") or {}).get("presses", 0) > 0 for r in trace),
             "no_effect_streak_max": _no_effect_streak(trace) if (run / "trace.jsonl").exists() and trace else None}
     if repredict:
         result.update(_repredict(run, trace, hide_memory))
-    world_maps = {map_id(actual["map"]) for row in trace if row.get("screen") == "world"
+    world_maps = {map_id(actual["map"]) for row in trace if row.get("screen") == "world" and
+                  not (row.get("probe") or {}).get("presses", 0)
                   if (actual := truth.get(row.get("step"), {})).get("map") is not None}
     result["health"] = _health(result, world_maps)
+    result["from_step"] = from_step
     return result
 
 
 if __name__ == "__main__":
     args = sys.argv[1:]
-    flags = {arg for arg in args if arg.startswith("--")}
-    paths = [arg for arg in args if not arg.startswith("--")]
+    flags, paths, from_step = set(), [], None
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--from-step":
+            i += 1
+            try:
+                from_step = int(args[i])
+                if from_step < 0: raise ValueError
+            except (IndexError, ValueError):
+                raise SystemExit("--from-step requires a non-negative integer")
+        elif arg.startswith("--"):
+            flags.add(arg)
+        else:
+            paths.append(arg)
+        i += 1
     if len(paths) != 1 or flags - {"--repredict", "--hide-memory", "--no-write", "--health"} or ("--hide-memory" in flags and "--repredict" not in flags):
-        raise SystemExit("usage: eval_run.py runs/<id> [--repredict [--hide-memory]] [--no-write] [--health]")
-    result = evaluate(paths[0], repredict="--repredict" in flags, hide_memory="--hide-memory" in flags)
+        raise SystemExit("usage: eval_run.py runs/<id> [--repredict [--hide-memory]] [--no-write] [--health] [--from-step N]")
+    result = evaluate(paths[0], repredict="--repredict" in flags, hide_memory="--hide-memory" in flags,
+                      from_step=from_step)
     if "--no-write" not in flags:
         (Path(paths[0]) / "summary.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     if "--health" in flags:

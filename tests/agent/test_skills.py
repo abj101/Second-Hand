@@ -124,7 +124,7 @@ def test_route_presses_directions_in_order_and_records_moves():
     env = RecordingEnv(); dirs = ["UP", "RIGHT"]
     result = run_affordance(ctx(env), {"verb": "approach", "at": point(env, (10, 6))},
                             {"entities": [{"kind": "player", "at": [.5, .5]}]}, route={"dirs": dirs})
-    assert env.keys == dirs and [move[0] for move in result.moves] == dirs
+    assert env.keys == dirs and [move["dir"] for move in result.moves] == dirs
     assert result.status == "done"
 
 
@@ -140,7 +140,7 @@ def test_exit_route_pushes_before_side_steps():
     result = run_affordance(ctx(env), {"verb": "approach", "at": point(env, (10, 8))},
                             {"entities": [{"kind": "player", "at": [.5, .5]}]}, exit=True,
                             route={"dirs": [], "push": "RIGHT"})
-    assert result.status == "done" and env.keys[0] == "RIGHT" and result.moves[0][0] == "RIGHT"
+    assert result.status == "done" and env.keys[0] == "RIGHT" and result.moves[0]["dir"] == "RIGHT"
 
 
 def test_blocked_exit_push_continues_into_side_steps():
@@ -155,10 +155,23 @@ def test_blocked_exit_push_continues_into_side_steps():
 def test_interact_and_directional_press_preserve_move_records():
     env = GridEnv()
     result = interact(ctx(env), point(env, env.npc), [.5, .5])
-    assert result.moves and all(direction in {"UP", "DOWN", "LEFT", "RIGHT"} for direction, _ in result.moves)
+    assert result.moves and all(move["dir"] in {"UP", "DOWN", "LEFT", "RIGHT"} and set(move) == {"dir", "shift", "self_at"} for move in result.moves)
     env = GridEnv(); env.player = (9, 8)
     result = run_affordance(ctx(env), {"verb": "press", "target": "RIGHT"}, {"entities": []})
-    assert env.scene == 1 and result.moves[-1][0] == "RIGHT"
+    assert env.scene == 1 and result.moves[-1]["dir"] == "RIGHT"
+    assert result.self_at == result.moves[-1]["self_at"]
+
+
+def test_skill_result_carries_last_non_none_self_at(monkeypatch):
+    import agent.skills as skills
+
+    spots = iter(((.4, .5), (.6, .5), None))
+    def step(ctx, direction, before):
+        return type("End", (), {"frame": before, "blank_seen": False})(), (-16, 0), False, next(spots)
+    monkeypatch.setattr(skills, "_step", step)
+    result = approach(ctx(RecordingEnv()), [.8, .5], [.5, .5], route={"dirs": ["RIGHT", "LEFT", "UP"]})
+    assert result.self_at == (.6, .5)
+    assert [move["self_at"] for move in result.moves] == [(.4, .5), (.6, .5), None]
 
 
 def test_press_seq_presses_in_order_and_stops_at_blocked_key():
@@ -197,3 +210,30 @@ def test_select_uses_one_model_call_then_moves_and_confirms():
     assert result.status == "done" and result.inputs == 3
     assert env.cursor == 2 and env.selected == "OPTION"
     assert result.calls == model.calls == 1
+def test_step_remeasures_entire_move_when_a_frame_shift_is_uncertain(monkeypatch):
+    import agent.skills as skills
+
+    calls = []
+
+    def measured(a, b, **kwargs):
+        calls.append(kwargs)
+        return (1, 0) if len(calls) == 1 else None if not kwargs else (8, 0)
+
+    monkeypatch.setattr(skills, "scroll", measured)
+    env = GridEnv()
+    _, move, _, self_at = skills._step(ctx(env), "RIGHT", env.screenshot())
+
+    assert move == (8, 0)
+    assert self_at is None
+    assert calls[-1] == {"max_shift": 16}
+
+
+def test_step_keeps_position_unknown_when_whole_move_is_uncertain(monkeypatch):
+    import agent.skills as skills
+
+    monkeypatch.setattr(skills, "scroll", lambda *args, **kwargs: None)
+    env = GridEnv()
+    _, move, _, self_at = skills._step(ctx(env), "RIGHT", env.screenshot())
+
+    assert move is None
+    assert self_at is None

@@ -5,7 +5,7 @@ from PIL import Image
 from agent.env import Env
 from agent.locate import refine
 from agent.model import Ollama
-from agent.observer import _blank, changed, cut, for_model, scroll, wait_settled
+from agent.observer import _blank, _residual, changed, cut, for_model, scroll, wait_settled
 @dataclass
 class SkillResult:
     status: Literal["done", "failed", "blocked"]
@@ -16,7 +16,8 @@ class SkillResult:
     after: Image.Image
     scroll: tuple[int, int]
     blank_seen: bool
-    moves: list[tuple[str, tuple[int, int] | None]] = field(default_factory=list)
+    moves: list[dict] = field(default_factory=list)
+    self_at: tuple[float, float] | None = None
 @dataclass
 class Ctx:
     env: Env
@@ -25,14 +26,29 @@ class Ctx:
     move_frames: int = 16
     max_inputs: int = 30
 def _settled(ctx): return wait_settled(ctx.env)
-def _result(status, reason, inputs, calls, before, after, total=(0, 0), blank=False, moves=None):
-    return SkillResult(status, reason, inputs, calls, before, after, tuple(total), blank, moves or [])
+def _result(status, reason, inputs, calls, before, after, total=(0, 0), blank=False, moves=None, self_at=None):
+    moves = moves or []
+    return SkillResult(status, reason, inputs, calls, before, after, tuple(total), blank, moves, self_at or next((m.get("self_at") for m in reversed(moves) if isinstance(m, dict) and m.get("self_at") is not None), None))
 def _step(ctx, direction, before):
     frames = []
     ctx.env.press(direction, ctx.move_frames, on_frame=frames.append)
-    end = _settled(ctx); shifts = [s for s in (scroll(a, b) for a, b in zip([before, *frames], frames)) if s is not None]
-    if not shifts and (s := scroll(before, end.frame, max_shift=max(4, ctx.tile_px or 16))) is not None: shifts = [s]
-    move = tuple(sum(s[i] for s in shifts) for i in (0, 1)); return end, move if shifts else None, end.blank_seen or any(_blank(f) for f in frames)
+    end = _settled(ctx); shifts = [scroll(a, b) for a, b in zip([before, *frames], frames)]
+    if any(s is None for s in shifts):
+        move = scroll(before, end.frame, max_shift=max(4, ctx.tile_px or 16))
+        ctx._last_residual_box, ctx._last_residual_box_coverage = None, 0
+        return end, move, end.blank_seen or any(_blank(f) for f in frames), None
+    move = tuple(sum(s[i] for s in shifts) for i in (0, 1))
+    cumulative, at = [(0, 0)], [0, 0]
+    for shift in shifts:
+        at[:] = [at[i] + shift[i] for i in (0, 1)]; cumulative.append(tuple(at))
+    box, _tile, coverage, accepted = _residual([before, *frames], cumulative) if shifts else (None, 0, 0, False)
+    ctx._last_residual_box_coverage = coverage
+    if box:
+        dx, dy = (round(v / 2) for v in cumulative[-1]); ctx._last_residual_box = (box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy)
+    else: ctx._last_residual_box = None
+    self_at = ((box[0] + box[2] + cumulative[-1][0]) / (2 * before.width),
+               (box[1] + box[3] + cumulative[-1][1]) / (2 * before.height)) if accepted else None
+    return end, move if shifts else None, end.blank_seen or any(_blank(f) for f in frames), self_at
 def _pointer(ctx, at, target):
     first = _settled(ctx)
     if ctx.max_inputs < 1: return _result("blocked", "input limit", 0, 0, first.frame, first.frame, blank=first.blank_seen)
@@ -53,7 +69,7 @@ def approach(ctx: Ctx, target_at: list[float], player_at: list[float] | None, *,
     total, blocked, inputs, last_dir, pushed, axis_dirs, moves = [0, 0], set(), 0, None, False, {}, []
     result = lambda *args: _result(*args, moves=moves)
     def step(direction, old):
-        end, move, saw_blank = _step(ctx, direction, old); moves.append((direction, move)); return end, move, saw_blank
+        end, move, saw_blank, self_at = _step(ctx, direction, old); moves.append({"dir": direction, "shift": move, "self_at": self_at}); return end, move, saw_blank
     if route is not None:
         dirs = route.get("dirs", [])[:max(0, ctx.max_inputs)]
         for direction in dirs:
@@ -122,7 +138,7 @@ def interact(ctx: Ctx, target_at: list[float], player_at: list[float] | None) ->
         dy = (target_at[1] - player_at[1]) * start.frame.height + total[1]
         face = ("RIGHT" if dx > 0 else "LEFT") if abs(dx) >= abs(dy) and dx else ("DOWN" if dy > 0 else "UP")
         if face in ctx.env.inputs() and inputs < ctx.max_inputs:
-            end, move, saw_blank = _step(ctx, face, moved.after); inputs += 1; moved.moves.append((face, move))
+            end, move, saw_blank, self_at = _step(ctx, face, moved.after); inputs += 1; moved.moves.append({"dir": face, "shift": move, "self_at": self_at})
             face_blank = saw_blank
             if move is not None: total[:] = [total[i] + move[i] for i in (0, 1)]
             if cut(moved.after, end.frame, saw_blank):
@@ -151,9 +167,9 @@ def press(ctx: Ctx, key: str) -> SkillResult:
     start = _settled(ctx); keys = ctx.env.inputs(); words = set(re.findall(r"[a-z0-9]+", key.casefold())); matches = [k for k in keys if k.casefold() in words]
     key = key if key in keys else matches[0] if len(matches) == 1 else None
     if key is None or ctx.max_inputs < 1: return _result("blocked", "unsupported input" if key is None else "input limit", 0, 0, start.frame, start.frame, blank=start.blank_seen)
-    end, move, blank = _step(ctx, key, start.frame) if key in ("UP", "DOWN", "LEFT", "RIGHT") else (None, None, False)
+    end, move, blank, self_at = _step(ctx, key, start.frame) if key in ("UP", "DOWN", "LEFT", "RIGHT") else (None, None, False, None)
     if end is None: ctx.env.press(key, ctx.move_frames); end = _settled(ctx)
-    return _result("done", "", 1, 0, start.frame, end.frame, blank=start.blank_seen or end.blank_seen or blank, moves=[(key, move)] if key in ("UP", "DOWN", "LEFT", "RIGHT") else [])
+    return _result("done", "", 1, 0, start.frame, end.frame, blank=start.blank_seen or end.blank_seen or blank, moves=[{"dir": key, "shift": move, "self_at": self_at}] if key in ("UP", "DOWN", "LEFT", "RIGHT") else [], self_at=self_at)
 def press_seq(ctx: Ctx, keys: list[str]) -> SkillResult:
     if not keys: frame = ctx.env.screenshot(); return _result("failed", "no keys", 0, 0, frame, frame)
     results = []
@@ -161,7 +177,8 @@ def press_seq(ctx: Ctx, keys: list[str]) -> SkillResult:
         results.append(press(ctx, key))
         if results[-1].status != "done": break
     first, last = results[0], results[-1]
-    return _result(last.status, last.reason, sum(r.inputs for r in results), sum(r.calls for r in results), first.before, last.after, blank=any(r.blank_seen for r in results), moves=[m for r in results for m in r.moves])
+    moves = [m for r in results for m in r.moves]
+    return _result(last.status, last.reason, sum(r.inputs for r in results), sum(r.calls for r in results), first.before, last.after, blank=any(r.blank_seen for r in results), moves=moves)
 def advance(ctx: Ctx) -> SkillResult: return press(ctx, "A")
 def cancel(ctx: Ctx) -> SkillResult: return press(ctx, "B")
 def wait_until(ctx: Ctx, max_frames: int = 240) -> SkillResult:

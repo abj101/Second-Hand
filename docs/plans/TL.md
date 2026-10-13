@@ -1,6 +1,6 @@
 # TL: Build the lean tracking layer and get the agent out of the house
 
-Status: not started · Branch: feat/lean-agent · Program: [program-r1-wm.md](program-r1-wm.md) row 10 · Spec: [tracking-layer.md](tracking-layer.md)
+Status: gate passed (build, suite and L2 run completed per §0; progress stalled, health red; STOP 5 review, 2026-10-12) · Branch: feat/lean-agent · Program: [program-r1-wm.md](program-r1-wm.md) row 10 · Spec: [tracking-layer.md](tracking-layer.md)
 
 ## 0. How this phase works (user decision 2026-10-12: build and progress first)
 - **Build in small slices.** Each slice ends with one quick check that it works; the full suite runs only at the end of the phase.
@@ -100,11 +100,115 @@ Status: not started · Branch: feat/lean-agent · Program: [program-r1-wm.md](pr
 - Object tracks, NCC tracking, fixed-camera mode, overlay mask, tile hashing, appearance memory: spec §5.
 - `loop/`. Edits to contracts.md (the user applies the drafted delta).
 
-## 7. Result (filled in by the orchestrator)
-- Each slice's check output (pass, or a note carried forward).
-- Suite summary line.
-- L2: progress, health on steps ≥ 71, probes, the worst stuck window, requests and ledger.
-- Contract delta text, line counts and open issues.
+## 7. Result (2026-10-12)
+
+**Completion:** B1–B4 built and reviewed, both required full-suite runs green, L2 completed 100 steps (71–170), runner exit 0. Per §0, health/progress report rather than gate. **STOP 5: progress remains stalled; health is red.** No further live spend in this phase.
+
+### L2 progress first
+- Command: `.venv-agent/Scripts/python.exe scripts/run_agent.py --run runs/m1_long --resume --from-step 70 --steps 100 --max-calls 110 --stage c`.
+- Resumed checkpoint 70 with its memory; finished checkpoint `runs/m1_long/checkpoint/000170/`. Before spending, copied L1 to `runs/m1_long_l1/` and SHA-256 verified all 112 files.
+- Truth samples: house 1F (`0x25`) at 71; house 2F (`0x26`) at 72; 1F at 73; 2F at 74; 1F at 76; 2F at 80; 1F at 81 through terminal truth 171. These are before-action sample steps, not exact warp times. Both maps were already known in L1.
+- **Town: not reached. Lab: not reached. Party: 0 throughout.** Final truth: map `0x25`, tile `(7,1)`, party 0. No new truth map reached.
+- Probes: step 71 = 2 presses, unlocked, stopped on the 1F→2F blank/cut; step 72 = 1 press, locked. Two probes / three presses. Lock starts at 72 and persists to 170.
+- Worst no-effect window: **81–170 (90 actions), zero inputs, all blocked `target is the player`, one frame hash**. Longest same-place/action repeat: 84–170 (87 actions).
+- Frames: [81](../../runs/m1_long/frames/000081.png), [84](../../runs/m1_long/frames/000084.png), [170](../../runs/m1_long/frames/000170.png). Frames 84 and 170 inspected; the scene is unchanged.
+- Step 170 act `why`: “I want to interact with the NPC to see if they provide any information or quests.” Its affordance point `[0.443,0.468]` is on the true player; the corrected entity is named `NPC` but has `kind=player`. Role correction has not repaired the name/affordance association. At 78 the role swap already occurred; the model still selected that NPC affordance.
+- The true streak is present in feedback (`recent: no effect x89` before action 170; checkpoint `Stuck.n=90`). The model continued the same choice.
+
+### L2 health, steps ≥ 71
+Commands: `.venv-agent/Scripts/python.exe scripts/eval_run.py runs/m1_long --no-write --health --from-step 71` and the same command without `--health` for JSON details. Both exit 0; no evidence summaries overwritten.
+- `self_spot_accuracy=1.0`: **99/99** locked world steps measured within 8 px of truth sprite 0; `self_spot_coverage=0.99`: **99/100** world steps locked.
+- `place_ids_per_map`: **2 each**, red. 1F = `p_world,p_world_3`; 2F = `p_world_4,p_world_6` (live, non-merged IDs from measured rows).
+- `cut_self_loops=0`, `screen_places=0`, `tile_accuracy=1.0` (100/100 reported), green.
+- `no_effect_streak_max=90`, `repeat_actions_max_length=87`, red.
+- `false_walls=0` detected. This is a **lower bound**: only consecutive collinear end-tile crossings are reconstructable; probes, cuts, place changes, drift fixes and diagonal/multi-axis paths are skipped.
+- `probe_unmeasured_world_steps=2`: runner truth is sampled before probe, while act frame/place are after probe. Those rows are excluded from before-place ID counts. Post-action spot uses truth at `step+1`; pixel distances use native PNG dimensions and sprite centre `(x+8,y+8)`.
+- Tile accuracy retains the existing per-visit offset method; its 100/100 is not independent evidence that probe-time place alignment or all routes are correct. The two probe rows still appear in that legacy tile metric.
+- Execution done **6/100**; 110 successful uncached cloud asks plus 1 cache hit, 110 HTTP attempts, 0 retries. Perception reuse 0.96. Historical duplicate/progress aggregates remain historical; `new_after_resume` in the legacy duplicate metric still means after step 54, not the TL start at 71.
+
+### Slice checks and repairs
+All commands below use `.venv-agent/Scripts/python.exe`, 0 game-model requests.
+- **B1:** parent `-m pytest tests/agent/test_memory.py tests/agent/test_space.py tests/agent/test_skills.py tests/agent/test_world.py -q -p no:cacheprovider`: **81 passed in 84.31s**. Strengthened inferred-exit test to exercise the actual DOWN reverse direction; parent rerun **1 passed in 0.16s**.
+- **B1 dupes:** `scripts/check_track.py dupes`: furniture 3 rows at distinct tiles `(-2,-3),(-1,0),(0,1)`, RED 1, rival 1. One row per furniture item; historical nested suffix labels remain, base matching no longer cascades.
+- **B2:** parent observer/skills/world tests with `-k 'residual or motion_self_spot or self_at or step_remeasures or step_keeps_position_unknown'`: **5 passed, 59 deselected in 2.51s**.
+- **B2 self:** `scripts/check_track.py self`: m1 first LEFT locks at **5 px**; m1_long first four compact heat masses `0.792,0.731,0.779,0.709` miss the 0.80 requirement, fifth LEFT locks at **2 px**. Numeric miss carried forward under §0; thresholds stayed 80% and 1.5 tiles. Broad heat boxes printed as required.
+- **B3:** initial parent complete loop check found a re-perception reply queue mismatch; a frame spy also proved act had a pre-probe frame with post-probe perception. One repair round corrected frame/size, actual lock checks and streak trimming, with affected fixture inputs adjusted rather than assertions weakened.
+- **B3 repaired:** parent `-m pytest tests/agent/test_loop.py -q -p no:cacheprovider`: **45 passed, 1 warning in 137.90s**. Parent focused probe/re-look/frame/streak checks: **4 passed, 75 deselected in 6.20s**.
+- **B3 probe:** `scripts/check_track.py probe`: `presses=2 locked=False self_spot=None distance=None`. RAM diagnostic confirmed map 37→38 with a blank/cut, so it safely stopped at a warp; lock target not met, carried forward.
+- **B4:** subagent normal focused suite (eval/world/loop/golden): **111 passed, 1 warning in 167.55s**. Parent all-step `eval_run.py runs/m1_long --no-write --health` runs: legacy spot accuracy unknown / coverage 0, tile accuracy 1, streak/repeats 33, screen places 6. Parent `--from-step 71` before L2 correctly reported an unmeasured segment.
+- First parent full suite: **1 failed, 232 passed, 1 warning in 250.15s**; only failure was a legacy three-value `_step` mock in `test_type_text.py:116`. One B2 repair updated that fixture to four values, leaving all three scenario assertions. Parent single case: **1 passed in 0.14s**.
+- **Full suite before L2:** `.venv-agent/Scripts/python.exe -m pytest tests/agent -q -p no:cacheprovider` → **233 passed, 1 warning in 249.27s (0:04:09)**.
+- **Full suite at phase end:** same command → **233 passed, 1 warning in 248.98s (0:04:08)**. Read pytest's own summary lines. Only warning: installed `pysdl2-dll 2.32.10` binaries.
+- `git diff --check` clean after B1 removed its extra EOF blank line. Line-ending conversion notices are informational.
+
+### Golden data review
+Regenerated only via `W0_REGEN=1 .venv-agent/Scripts/python.exe -m pytest tests/agent/test_world_golden.py -q -p no:cacheprovider` (PowerShell environment set only for that invocation, then unset). Subagent confirmed invocation but did not retain a standalone regeneration summary; the later normal 111-test check and both parent full suites verify the result.
+- `act/memory/entities.jsonl`: **44→17 upsert rows, same 4 unique entity IDs**. B1 stops observing the same cached perception twice; W4 unknown-anchor classification/evidence writes are removed. Final player/door seen counts 15→3. Genuine tile/status/last-seen updates and still-used screen/region information remain.
+- `act/trace.jsonl`: same 8 actions and outcomes. Adds `probe,self_spot,self_locked`, `here:` facts and true no-effect feedback. Fixture starts with an established motion lock so its static perceptions continue to test the original route; probe behavior is tested separately.
+- Places, relations, seen and tiles goldens unchanged. Force-stage `tests/agent/data/w0_golden`.
+
+### Exact contract delta proposed for the user
+No edits to `contracts.md`; TL §0/§4 authorizes drafting these changes here for later application.
+
+Add to **observer**:
+```python
+def residual(frames: list[Image], shifts: list[tuple[int, int]]) -> tuple[float, float] | None
+    # frames includes the initial frame; shifts has the same length, starts (0,0),
+    # and is cumulative content scroll from that initial frame to each frame.
+    # A compact box must hold >=80% of residual heat inside 1.5 inferred tiles.
+    # Returns a screen-fraction centre, or None.
+```
+The implemented tile estimate is the largest cumulative shift of one direction press (marked `ponytail:`); midpoint compensation assumes following-camera motion. Fixed-camera tracking and overlays remain deferred.
+
+Replace **skills** move field and add the last-motion result:
+```python
+moves: list[dict] = field(default_factory=list)
+    # one direction press: {"dir": str, "shift": tuple[int,int] | None,
+    #                       "self_at": tuple[float,float] | None}
+self_at: tuple[float, float] | None = None
+    # last non-None self_at across the skill, including sequence/travel aggregation
+```
+Private `_step` now returns `(settle, shift_or_none, blank_seen, self_at)`; `fold`/World prepare still accept legacy tuple move records. Any uncertain frame shift causes a whole-move remeasurement; if also unknown, no position is advanced.
+
+Replace the W4 learned-self semantics under **world** with:
+```python
+def probe(self, ctx: Ctx) -> dict
+    # Loop invokes before act only on a world screen with no modal, known tile size,
+    # and no motion lock. Up to 4 distinct currently-unblocked direction presses.
+    # Folds moves; stops on lock or a pixel-observed cut/blank/screen transition.
+    # Returns {"presses": int, "locked": bool}; a performed probe also carries
+    # internal "skill" and "scene_cut" fields for Loop's place update.
+```
+`self_spot` locks on the first residual box from a >=1-tile scrolled move, survives cuts/menus, and unlocks after two consecutive scrolled boxes more than one tile away. An unknown box breaks the contradiction streak. Persist `self_spot,self_from_motion,self_contradictions`; unlocked `pa` falls back to the current model player point. `fix_player` still repairs roles on cached perceptions using the motion lock. Remove `classify,_learn,cam_px,evidence,POS_TOL,ANCHOR_EVIDENCE` and the three-sighting median identity rule. Old state keys are ignored; `anchors` remains round-tripped for compatibility, with no median identity learning. Still-used HUD/region/transient information remains.
+
+Add to **trace**, always present:
+```json
+{"self_spot": [0.45, 0.4444444444444444], "self_locked": true,
+ "probe": {"presses": 1, "locked": true}}
+```
+`self_spot` is null when absent; `probe` is null when no probe ran; spot/lock are the post-action state. Checkpoint harness additionally persists `reperception_used` (one forced re-look per continuous >=2 no-effect streak, reset below 2).
+
+Add evaluator fields and option:
+```text
+--from-step N: select trace/call/per-step health measurements with step >= N;
+              historical map/party progress aggregates remain historical.
+self_spot_accuracy = correct within 8px / measured locked world steps (None if none).
+self_spot_coverage = locked world steps / world steps (None if none).
+self_spot_correct, self_spot_measured, self_locked_world_steps, world_steps: counts.
+false_walls: distinct recorded blocked sides later contradicted by a measurable crossing;
+             a lower bound from collinear end-tile evidence.
+probe_unmeasured_world_steps: count of moving-probe rows with no aligned pre-act truth.
+```
+Health uses self-spot accuracy/coverage in place of player-role errors; removes seen-in-bounds from health (legacy JSON diagnostic retained). No health row controls actions or further run authorization.
+
+### Budgets, scope and remaining issues
+- Lines: `agent/` **2263→2369 (+106)**, scripts **2892→3122 (+230)**, tests **3525→3775 (+250)**. Report only; no trimming gate.
+- Game-model HTTP requests: **0 through B4; L2 110/110**. Ledger before: total 767 / M1 749 / stage_c 196; after: **total 877 / M1 859 / stage_c 306**; M1 remaining **191**. Full after ledger: `{"total":877,"smoke":18,"m1":859,"stage_a":142,"stage_b":297,"stage_p":25,"stage_q":60,"stage_c":306}`. No reset/refund/cap increase. Runner exit 0; no exit-3/4 event.
+- Four subagents, each `gpt-6-luna` HIGH, one slice each. Orchestrator reviewed diffs and ran acceptance; code fixes stayed delegated. No Opus execution.
+- Scope clarifications: shared check script belongs to packet §2; B4 trace additions touch `agent/loop.py` per the explicit card. Affected loop/golden fixtures and the late `test_type_text.py` mock are within the cards' tests scope. Fixed the packet command's missing space `110--stage` to `110 --stage`. Read-only evaluation used `--no-write` throughout.
+- Protected L1 backup retained; `runs/m1`, `runs/m1_act`, model cache, `loop/` and contracts preserved. Untracked `.claude/` preserved outside the commit. No runs/.tmp staging or push.
+- **Open for STOP 5:** repair name/affordance consistency after player-role correction, and inspect cached IDs after place merging; fix place fragmentation/readable-label echo (`act.place="world [p_world_6]"`, persistent `merge_pending`); determine why the act model ignores the player-target/streak feedback. These are follow-up issues, not new goals/filters/gates in this phase.
+- No additional live spend; next work needs the user's STOP 5 decision and an approved packet. Contracts above await the user's application.
 
 ## 8. Handoff
-Rewrite `docs/plans/handoff-notes.md` per [_template.md §10](_template.md).
+Rewritten in `docs/plans/handoff-notes.md`, under 80 lines with the fixed headings.
