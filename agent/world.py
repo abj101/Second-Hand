@@ -108,7 +108,6 @@ class World:
                 self.mem.upsert("entities", {**row, "tier": row.get("tier", tier),
                                                "status": row.get("status", "remembered"), "misses": row.get("misses", 0)})
         text = " ".join(map(str, per.get("text", []))).casefold()
-        targets = [str(a.get("target", "")).casefold() for a in per.get("affordances", [])]
         promote = set()
         for i, entity in enumerate(per.get("entities", [])):
             ident = ids.get(i); row = self.mem.get("entities", ident) if ident else None
@@ -116,13 +115,11 @@ class World:
             kind, name = normalize_kind(entity.get("kind")), str(entity.get("name", "")).casefold()
             is_exit = kind == "exit" or str(entity.get("name", "")).casefold().startswith("exit:")
             failed_exit = is_exit and self._failed_exit(row, place)
-            matched = any(name and (name in target or _distance(name, target) <= 1) for target in targets)
             named = bool(name and name in text)
             tier = "interest" if row.get("tier") == "interest" else "transient" if kind in TRANSIENT else row.get("tier") or "landmark"
             if failed_exit: tier = "landmark"
-            elif self._actor(ident, entity) or is_exit or matched or named: tier = "interest"
+            elif self._actor(ident, entity) or is_exit or named: tier = "interest"
             if tier != row.get("tier"): self.mem.upsert("entities", {**row, "tier": tier})
-            if matched: promote.add(ident)
         promote.update(r["id"] for r in self.mem.rows("entities")
                        if r.get("place") == place and r.get("name") and str(r["name"]).casefold() in text)
         promote.update(r.get("s") for r in self.mem.rows("relations")

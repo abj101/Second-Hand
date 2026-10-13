@@ -1,55 +1,60 @@
 # Handoff notes
 
-Last written by: Claude (user session), 2026-10-13, after fixing the S0 evaluator. Next: RUN the S0 baseline (no rebuild), then S2, E, STOP 6a.
+Last written by: Codex orchestrator, 2026-10-13, at PS STOP 6a. Next: user approves L3 live spend; then L3a, L3b, STOP 6b.
 
 ## State of the code
-- Branch feat/lean-agent; PS Status in progress; S1 done; S0 evaluator accepted, baseline not yet run.
-- scripts/eval_frames.py + scripts/frames.json (10 frames) are accepted as is: do not rewrite them; just run them (PS.md §9).
-- Baseline: `.venv-agent/Scripts/python.exe scripts/eval_frames.py` (≤26 attempts, ~20 requests, default out .tmp/ps/baseline.json); E: same with `--out .tmp/ps/new.json` after S2.
-- S1 still owns locked player kind/name, marks model inputs on a copy and preserves raw frames/cache/cut behavior.
-- Perception still proposes options; act still selects option indexes until S2.
+- Branch feat/lean-agent; PS in progress at STOP 6a; S1, S0 baseline, S2 and E complete; L3 unstarted.
+- Describe-only perception; act builds the action from a numbered entity or bare advance/cancel/type, go_to or buttons.
+- Loop constructs one affordance after World.name using exact entity_ids[n]; no option/fuzzy-target plumbing.
+- Prompt version e5-perceiver-9; old checkpoint perceptions are invalidated. S1 mark/raw/cache behavior preserved.
+- normalize, World.fix_player and World.mark are unchanged; legacy scripts remain loadable with empty affordances.
+- Accepted scripts/eval_frames.py and scripts/frames.json remain immutable; do not rebuild or relabel them.
 
 ## Decisions in force
-- PS packet order S1 → S0 → S2 → full suite → E → STOP 6a → L3a → L3b → STOP 6b.
-- Every subagent explicitly gpt-6-luna HIGH; one slice each, no Opus; root reviews and runs checks.
-- S0's subagent and repair are used up; the user session fixed the scorer, labels and seeding; S0 needs no more subagent work.
+- STOP 6a requires separate live-spend approval. No L3 run or copy has started.
+- Every subagent explicitly gpt-6-luna HIGH; one slice each; no Opus; root reviews and runs checks.
+- S2 used one repair for two fixtures; it passed. E audit used zero calls/writes.
 - No game-specific agent code, new decision gates, loop/ or contracts.md edits.
+- L3 retains checkpoint 70's stale rival/player memory and notebook goal; repeats ≥10 stop after L3a.
 
 ## Measured numbers
-- Inherited full suite: 238 passed, 1 warning in 246.74s (0:04:06).
-- Closing full suite: 238 passed, 1 warning in 245.97s (0:04:05).
-- Repaired py_compile and --dry passed; all nine dry rows printed with requests 0 (synthetic, not model accuracy).
-- Root decode/wrong-way/cap checks passed; toward-stairs button assertion failed.
-- Lines: agent 2400 unchanged; scripts 3122→3421 (+299); tests 3873 unchanged; goldens unchanged.
-- Ledger total 931 / smoke 48 / M1 883 / a142 b297 p25 q60 c306; M1 left 167; PS spent 0/160.
-- Protected evidence: 934 file hashes verified, zero changes; contracts SHA256 unchanged.
+- S0→E frame ok: 8/10→10/10; world 3/5→5/5; UI 5/5→5/5; self-target flags 2→0.
+- Dialogue 1/1, menu 2/2, keyboard 1/1 in both arms; title 1/1 in both.
+- Pre-fix marked player identity 5/5 in both; E no-fix rows 3/5 (two name-only player character renames).
+- Root targeted repair: 97 passed, 1 warning in 187.31s; root full: 240 passed, 1 warning in 382.40s.
+- Subagent exact full suite: 240 passed, 1 warning in 274.38s. Golden regen: 1 passed in 23.95s.
+- Closing full suite: 240 passed, 1 warning in 244.59s (0:04:04).
+- Lines: S2 agent 2400→2399 (-1); scripts 3413 unchanged; tests/agent 3873→3916 (+43); report only.
+- Ledger total 971 / smoke 48 / M1 923 / a142 b297 p25 q60 c306; M1 left 127; PS spent 40/160.
+- S0 20/26, E 20/26; live 0/108. Protected 934 file hashes and accepted input hashes unchanged.
 
 ## Environment and gotchas
-- Use .venv-agent/Scripts/python.exe and forward-slash paths.
-- Frames: m1_long 3/4/5/18 UI, 37 2F facing up, 73 1F Mom; m1 23 keyboard, 71 1F, 88 2F facing down, 64 1F mid-room. m1_long 74 dropped (target in void).
-- All world frames are marked; frames without a locked previous row use the labelled spot (harness-only, truth_injected).
-- m1_long 71/72 are probes; 80 is black. m1 29 is dialogue, not keyboard; frames >94 stale.
-- _buttons_toward: the first direction must move toward an acceptable point, and no direction may point away (one step toward a diagonal target counts).
-- Evaluator uses no cache, fresh per-frame temporary memory, marker flag, pre-fix labels and a 26-attempt guard.
-- CodeGraph used first; Ponytail full; Headroom proxy unreachable, local compression/retrieval works.
+- Use .venv-agent/Scripts/python.exe and forward-slash paths; full suite tests/agent only, -q -p no:cacheprovider.
+- Results: .tmp/ps/baseline.json, new.json; logs s0_baseline_run.log and e_run.log; same ten frames/seeds verified.
+- UI button scoring is permissive. Baseline m1/88 press point near self is flagged despite why intending UP.
+- Identity metric uses raw player labels before fix; two E fixes change names only, not sprite position/kind.
+- Goldens: only act/trace.jsonl changed. Steps 1–2 i 1→0, options 2→1; steps 3–8 options 1→0.
+- All other trace fields and all memory goldens unchanged; regenerated only with W0_REGEN=1, then unset.
+- CodeGraph first; Ponytail full; Headroom proxy unreachable, local compression/retrieval works.
 
 ## Deviations from plan and contracts
-- S0 stopped once on scoring; fixed outside the orchestrator by the user session (PS.md §9).
-- This is scoring correctness against the card; no model-quality or progress gate was added.
-- S0 draft 299 script lines (subagent final report incorrectly said 264); line counts report only.
-- S0 proposes no contract change. S1's unapplied exact contract text remains in PS.md §9.
+- S0's prior failure was fixed/accepted in the user session; this session only ran the accepted evaluator.
+- S2 first checks failed on raw coordinate scaling and a missing NPC fixture; one authorized repair passed.
+- Approved only the expected prompt-version line in test_trace_brief.py:37, required by S2.
+- Subagent accidentally ran repository-wide pytest; stopped at 17%, no files changed; correct agent suite passed.
+- Exact proposed S2 contract text is in PS.md §9, alongside the retained S1 proposal; contracts are unchanged.
 - Contracts SHA256: cced97713bc8dc71036a052611ba9d6bc05d5b9b678fbb6dca546a743e1ace70.
 
 ## Do not retry
-- Do not rebuild or relabel the S0 evaluator; if the live baseline output looks wrong, report it at STOP 6a.
+- Do not rerun S0/E or spend more offline requests; both completed, 40 total, immutable results saved.
 - Never overwrite runs/m1_long_l1, runs/m1_long, runs/m1, runs/m1_act; L3 copies to runs/m1_ps.
 - Never reset/refund/raise ledger caps, commit runs/ or .tmp/, git add -A or push.
-- Preserve .cache/model/ and unrelated untracked .claude/.
-- Do not change S1 marking eligibility to accommodate blank fixtures; that resolved behavior is correct.
+- Preserve .cache/model/ and unrelated untracked .claude/; never change S1 eligibility for blank fixtures.
 
 ## Open issues for PS
-- Run S0 before S2 (S2 changes the prompts the baseline measures).
-- UI-screen button scoring is lenient (A/START count for advance/select); report it alongside the numbers.
-- S2 still requires fixture migration, unchanged normalize, prompt version bump and explained golden regen.
-- Checkpoint 70's stale rival/player memory and notebook goal remain for the L3a repeat check.
+- Await approval for L3 ≤108 requests (L3a 60 + L3b 48); current M1 127 remaining is sufficient.
+- Before live run full suite, read ledger; copy m1_long→m1_ps, SHA256 verify; trim only copied frames above 70.
+- L3a resumes checkpoint 70 for 30 steps with --max-calls 60 --stage c; repeats ≥10 stop without L3b.
+- L3b resumes L3a's last checkpoint, --steps 40, --max-calls 48; expected cap exit 3 means checkpoint/report/stop.
+- Report live progress first, then health and worst stuck window; eval_run.py --health --from-step 71.
 - Place fragmentation and stale player-evidence goals remain PS §7 exclusions.

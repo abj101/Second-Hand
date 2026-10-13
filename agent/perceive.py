@@ -16,7 +16,7 @@ PLACEMENTS = ("top wall", "bottom wall", "left wall", "right wall", "room edge",
 
 SYSTEM = (
     "You look at a single screenshot of a video game you may have never seen. "
-    "Report what is on screen and every action the player could take right now."
+    "Describe exactly what is on screen. Do not suggest actions."
 )
 
 PROMPT = """Return JSON with:
@@ -24,16 +24,14 @@ PROMPT = """Return JSON with:
 - "text": every piece of readable text on screen, verbatim.
 - "entities": each distinct thing on screen (characters, objects, buttons, icons, cards, menu items), as
   {"kind": short category, "name": its name or visible label, "at": [x, y], "placement": optional position in the room}.
-- "affordances": every action the player could take right now, as
-  {"verb": one of %s, "target": entity name or input, "at": [x, y], "to": [x, y] only for drag, "why": expected result, "placement": optional position in the room}.
 
 For placement, use only top wall, bottom wall, left wall, right wall, room edge, screen edge, or middle, based on what is visible.
 
 Coordinates are the centre of the thing on a 0-1000 grid: [0, 0] is top-left, [1000, 1000] is bottom-right.
-List each clickable thing separately (each card, each button, each menu item, each map node), including small icons.
 Report only what is visible.
 If the player's own character is visible, list it as an entity with kind "player".
-Name every visible passage "exit: <what it is>" (for example, "exit: door", "exit: stairs", or "exit: door mat") and place it on the tile to step onto. Name an exit at the screen edge only where open walkable ground visibly runs off the screen; never inside a walled room.""" % ", ".join(VERBS)
+List each distinct thing separately, including small icons.
+List every visible passage (door, stairs, door mat, opening) as an entity named "exit: <what it is>", placed on the tile to step onto."""
 
 _POINT = {"type": "array", "items": {"type": "number"}}
 SCHEMA = {
@@ -44,11 +42,8 @@ SCHEMA = {
         "entities": {"type": "array", "items": {"type": "object", "properties": {
             "kind": {"type": "string"}, "name": {"type": "string"}, "at": _POINT, "placement": {"type": "string", "enum": list(PLACEMENTS)}},
             "required": ["kind", "name", "at"]}},
-        "affordances": {"type": "array", "items": {"type": "object", "properties": {
-            "verb": {"type": "string"}, "target": {"type": "string"}, "at": _POINT, "to": _POINT,
-            "why": {"type": "string"}, "placement": {"type": "string", "enum": list(PLACEMENTS)}}, "required": ["verb", "target", "at"]}},
     },
-    "required": ["screen", "text", "entities", "affordances"],
+    "required": ["screen", "text", "entities"],
 }
 
 

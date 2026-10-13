@@ -46,7 +46,7 @@ This file is the single entry point. The orchestrator pastes nothing else; it re
 
 ## 4. Budgets across the program
 
-- **Cloud requests:** P2 ≤ 40 (29 used) + P3 ≤ 80 (43 used) + L1 ≤ 220 (110 used) + TL ≤ 110 (110 used; M1 remaining 191 after TL on 2026-10-12; P3b used 0); 2026-10-13 STOP-5 diagnostics: 24 M1 + 30 smoke, so M1 883/1050, 167 left) + PS ≤ 160.
+- **Cloud requests:** P2 ≤ 40 (29 used) + P3 ≤ 80 (43 used) + L1 ≤ 220 (110 used) + TL ≤ 110 (110 used; M1 remaining 191 after TL on 2026-10-12; P3b used 0); 2026-10-13 STOP-5 diagnostics: 24 M1 + 30 smoke, so M1 883/1050, 167 left) + PS ≤ 160 (STOP 6a, 2026-10-13: S0 20 + E 20 = 40 used; live 0/108, awaiting approval; ledger M1 923/1050, 127 left).
 - **Lines:** budgets suspended 2026-10-12 (report only; compress after the program). Original estimates, for reference (`agent/`, 1,988 on 2026-10-12): W0 +54 (actual), W1 ≈ +35, W2 ≈ +65, W3 ≈ +105, P4 ≈ −400 or more, W4 ≈ +60. Each packet states its own budget; overruns are reported, never hidden by compacting unrelated code.
 
 ## 5. Commits

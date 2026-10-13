@@ -1,6 +1,6 @@
 # PS: Mark the player for the model, and split describing from deciding
 
-Status: in progress (S0 evaluator fixed 2026-10-13 by the user session; next: run the S0 baseline, then S2; 0 requests spent) · Branch: feat/lean-agent · Program: [program-r1-wm.md](program-r1-wm.md) row 11 · Follows: [TL.md](TL.md) §7 STOP 5
+Status: in progress (S0 baseline, S2 and E complete; STOP 6a awaiting live-spend approval; PS 40/160 requests, 2026-10-13) · Branch: feat/lean-agent · Program: [program-r1-wm.md](program-r1-wm.md) row 11 · Follows: [TL.md](TL.md) §7 STOP 5
 
 ## 0. Why this phase exists (evidence, 2026-10-13, 54 diagnostic requests)
 - **The L2 stall started with perception.** The model cannot pick out the player when the sprite faces away. In L2 it labelled the TV, then Mom, as `player`, and the real player as `monster`/`rival`/`NPC`. From step 37 onward the notebook's only goal was "go talk to the character in the centre", i.e. the player. 87 identical choices followed.
@@ -229,6 +229,85 @@ Status: in progress (S0 evaluator fixed 2026-10-13 by the user session; next: ru
 - **Cost:** two calls per moving step as before (the L2 trace shows no shortcut fired). The before/after mark decisions must agree (S1), or a frame is perceived twice.
 
 ## 9. Result (filled in by the orchestrator)
+
+**STOP 6a (Codex orchestrator, 2026-10-13): S0 baseline, S2 and E complete; live spend awaits approval.**
+
+**Recorded-frame comparison (same accepted ten frames, one try each):**
+
+| Metric | S0: options + marker | E: describe/decide + marker |
+|---|---:|---:|
+| All frames `ok` | 8/10 | 10/10 |
+| World frames `ok` | 3/5 | 5/5 |
+| UI frames `ok` (including title) | 5/5 | 5/5 |
+| Dialogue `ok` | 1/1 | 1/1 |
+| Menu `ok` (start and preset-name menus) | 2/2 | 2/2 |
+| Keyboard `ok` | 1/1 | 1/1 |
+| Title `ok` | 1/1 | 1/1 |
+| World `self_target` flags | 2/5 | 0/5 |
+| Pre-fix player identity correct on marked world frames | 5/5 | 5/5 |
+| Marked world frames with `player_fix is None` | 5/5 | 3/5 |
+| HTTP attempts charged | 20/26 | 20/26 |
+
+Pre-fix identity means exactly one model-labelled `player` within Chebyshev normalized distance .08 of the labelled truth self spot. The stricter no-fix metric is also shown because L3's packet uses it. E's two fixes (`m1` 71 and 64) renamed `player character` to `player`; their `from` and `to` points are equal, so these are naming corrections, not wrong sprite identities. The title's decorative `Trainer` player label is unmarked and excluded from world identity metrics.
+
+| Frame | S0 choice | E choice | `ok` S0 → E |
+|---|---|---|---|
+| m1_long 3, title | press A | buttons A | true → true |
+| m1_long 4, start menu | select NEW GAME | buttons A | true → true |
+| m1_long 5, dialogue | advance dialogue_box | bare advance | true → true |
+| m1_long 18, preset-name menu | select NEW NAME | select thing 1 | true → true |
+| m1 23, keyboard | type name_input | bare type | true → true |
+| m1_long 37, 2F facing up | approach door, [.452,.375], self-target flag | approach thing 4 (stairs), [.64,.49] | false → true |
+| m1_long 73, 1F Mom | approach NPC, [.253,.812] | buttons DOWN | true → true |
+| m1 71, 1F | approach NPC, [.752,.8] | buttons DOWN RIGHT | true → true |
+| m1 88, 2F facing down | press d-pad up, [.448,.438], self-target flag | go_to exit: stairs, [.45,.26] | false → true |
+| m1 64, 1F mid-room | approach character, [.952,.578] | approach thing 9, [.953,.573] | true → true |
+
+- **Scoring limits (reported, no new gates):** accepted UI button scoring is permissive for A/START. S0's step-88 press point lies at the player, although its `why` says it intends to move up toward stairs; the `self_target` flag does not by itself prove the model chose to approach its own sprite. S0 step 37 says it will exit through a door directly ahead; E says it sees stairs leading elsewhere. These are recorded-frame intent/score measurements; no selected action was executed and no new maps or party progress were measured. The accepted harness and labels were not relabelled or rewritten to change these results.
+- **S2 implementation:** perception describes screen/text/entities and `exit:` entities; action affordances are constructed from the decision reply after place naming, using exact `World.entity_ids[n]`. `act` numbers visible things, marks the player as you, accepts entity/verb and bare advance/cancel/type replies, and keeps `go_to`/buttons. Old option indices are invalid. Perceiver memory context and option-derived tier matching were removed. Prompt version is `e5-perceiver-9`, invalidating old-prompt checkpoint perceptions. `normalize` is unchanged; legacy `scripts/run_goal.py`, `scripts/eval_act.py`, `scripts/e1_perceive.py` remain loadable and see empty affordance lists from the new prompt. No game-specific agent code or new gameplay gates.
+- **Checks and exact commands:**
+  - S0: `.venv-agent/Scripts/python.exe scripts/eval_frames.py` → `status=ok requests=20`; `.tmp/ps/baseline.json`, `.tmp/ps/s0_baseline_run.log`.
+  - E: `.venv-agent/Scripts/python.exe scripts/eval_frames.py --out .tmp/ps/new.json` → `status=ok requests=20`; `.tmp/ps/new.json`, `.tmp/ps/e_run.log`.
+  - S2 targeted: `.venv-agent/Scripts/python.exe -m pytest tests/agent/test_act.py tests/agent/test_perceive.py tests/agent/test_loop.py tests/agent/test_world.py -q -p no:cacheprovider`. Initial agent `2 failed, 95 passed, 1 warning in 162.28s`; root reproduced `2 failed, 95 passed, 1 warning in 159.06s`. One authorized repair corrected raw fixture coordinates to the 0–1000 grid and added the intended NPC entity to a blocked-action fixture without weakening assertions. Repair agent `97 passed, 1 warning in 158.26s`; root `97 passed, 1 warning in 187.31s`.
+  - Golden regeneration: `W0_REGEN=1` with `.venv-agent/Scripts/python.exe -m pytest tests/agent/test_world_golden.py -q -p no:cacheprovider` → `1 passed in 23.95s`; variable unset afterward. Root reviewed the full data diff; see explanation below.
+  - Full suite in background: `.venv-agent/Scripts/python.exe -m pytest tests/agent -q -p no:cacheprovider`. Agent `240 passed, 1 warning in 274.38s`; root `240 passed, 1 warning in 382.40s`. Exact logs `.tmp/ps/s2_repair_agent_full.log` and `.tmp/ps/s2_orchestrator_full.log`.
+  - Final closing full suite: 240 passed, 1 warning in 244.59s (0:04:04). Exact log `.tmp/ps/stop6a_closing_suite.log`.
+  - Root offline comparison checks via `.venv-agent/Scripts/python.exe -`: matching ten frame keys, identical per-row self seed/lock/injection/mark/truth fields, status and attempt counts, accepted hashes and ledger totals all passed. E audit independently confirmed the same metrics and seeding. `git diff --check` passed. Only suite warning: pysdl2-dll 2.32.10.
+- **Every golden change:** only `tests/agent/data/w0_golden/act/trace.jsonl` changed. Steps 1 and 2: `options` 2→1 and `choice.i` 1→0 because the model's sole chosen go_to/buttons action is no longer appended to a perception-proposed option list. Steps 3–8: `options` 1→0 because no valid action was selected; an unchosen perception option is no longer present. All other serialized trace fields are identical, including `marked`, flags, effects, input counts, calls and memory/identity results. All five memory JSONLs (entities, places, relations, seen, tiles) are unchanged. Goldens are staged with `git add -f tests/agent/data/w0_golden`.
+- **Health and progress:** build/check health green after the one S2 repair; recorded-frame scores above. No PS live play, new maps or party measured; historical L2 remains house only / party 0. L3a/L3b unstarted and no live approval inferred from the continuation request.
+- **Scope/safety:** four agent files; six affected test files including the explicitly approved one-line prompt-version expectation in `tests/agent/test_trace_brief.py:37`; golden trace; required docs. `normalize`, `World.fix_player`, `World.mark` verified unchanged. S1 raw-frame/mark/cache/cut/checkpoint behavior and TL motion/probe/HUD/recent/here/routing/merge fixes retained. No `loop/`, contracts, accepted evaluator, label or protected-run changes. 934 protected-run file hashes verified with zero changes. `.cache/model/` and unrelated untracked `.claude/` preserved.
+- **Lines (report only):** S2 agent 2400→2399 (−1); scripts 3413→3413; tests/agent 3873→3916 (+43). PS overall agent 2369→2399 (+30), including S1. S2 diff before docs: 11 tracked files, 121 insertions / 79 deletions. No compression pass or unrelated cleanup.
+- **Models/tools:** S2 subagent gpt-6-luna HIGH, one slice, same agent for one repair; E audit subagent gpt-6-luna HIGH, one slice, zero calls and no writes. No Opus. Full S2 self-contained prompt `.tmp/ps/s2_prompt_current.txt` contains the verbatim card, program §2, cited contracts, exact symbol/file scope and checks; the trace-brief version-only scope addition was explicitly sent. CodeGraph first, Ponytail full, Headroom local compression/retrieval; proxy unreachable.
+- **Requests/ledger:** PS 40/160: S0 20/26, E 20/26, L3a 0/60, L3b 0/48. Ledger before S0 `total=931,m1=883`; after S0 `total=951,m1=903`; after E `total=971,m1=923`. Other fields unchanged: `smoke=48,stage_a=142,stage_b=297,stage_p=25,stage_q=60,stage_c=306`. M1 127 left; total 129 left. No reset, refund or cap increase; no runner exit 3/4. Planned live cap remains 108 (60+48), within both remaining ledger and PS allowance.
+- **Deviations:** the inherited S0 failure was resolved outside this orchestrator by the user session (the accepted fix is retained below). S2 used its single repair for two fixture migrations. One accidental subagent command ran repository-wide pytest; it was interrupted at 17%, no files changed, and the exact prescribed agent-only suite was run successfully afterward. The interrupted log is `.tmp/ps/s2_repair_full.log`; no unrelated suite failure was used as a gate or repaired. No design, ledger cap or accepted scoring rules were changed.
+- **Open questions/next:** STOP 6a awaits approval for L3's ≤108 requests. Then read the ledger, run the full suite before live, copy and SHA-256 verify `runs/m1_long` to `runs/m1_ps`, resume checkpoint 70 for L3a, and stop if a choice repeats ≥10 times; only then L3b within its 48 cap. Checkpoint 70's stale rival/player row and notebook goal are intentionally retained. Place fragmentation and stale player-evidence goals remain §7 exclusions.
+
+**Exact proposed S2 contract text (not applied; contracts.md remains frozen):**
+
+Replace the act action comment in `notebook and act` with:
+
+```python
+    # action: {"thing": n, "verb": "approach"|"interact"|"select"|"click"}
+    #       | {"verb": "advance"|"cancel"|"type"}
+    #       | {"go_to": name} | {"buttons": [<= 8 input names]}; anything else -> None.
+    # n is an integer (not bool) indexing this perception's entities, in range.
+    # A bare verb has no thing field. The old {"i": n} reply is removed.
+    # text is the text to enter for type, otherwise null.
+```
+
+Replace perception's E2 edge-exit prompt paragraph with:
+
+> The perception prompt describes visible screen, text and entities; it does not propose actions. Every visible passage (door, stairs, door mat, opening) is an entity named `exit: <what it is>`, at the tile to step onto. The `affordances` field and `normalize` API remain for legacy callers, but the describe-only prompt/schema omit actions and `normalize` returns `affordances: []` when absent. The player entity line remains.
+
+Replace memory's perceiver-view caller statement with:
+
+> The loop no longer calls `Memory.view("perceiver", ...)`. The method remains for existing test/legacy callers. Describe-only perception receives the game brief, repair/relook context and marker caption, without remembered-place naming context.
+
+Add to trace/loop:
+
+> `options` is 0 or 1, counting the single valid action constructed from the decision reply; `choice.i` is 0 when present. `Stuck` counting `options == 0` now means no valid action. A numbered action's target ID is `World.entity_ids[n]` after place naming; no fuzzy target resolution or all-option prediction pass. The perception prompt version is `e5-perceiver-9`; cache reuse still requires the same raw hash, prompt version and marker state. S1's proposed marker/raw-frame/checkpoint text below remains unchanged.
+
+Contracts SHA-256 remains `cced97713bc8dc71036a052611ba9d6bc05d5b9b678fbb6dca546a743e1ace70`.
 
 **S0 evaluator fix (2026-10-13, user session after the S0 stop below; 0 requests). The evaluator is accepted; the orchestrator only runs it.**
 - **Scoring.** `_buttons_toward` now scores a button press as toward a target when its first direction has a positive component toward an acceptable point and no pressed direction points away from it. One step toward a diagonal target is correct, since one move is all a step can make.

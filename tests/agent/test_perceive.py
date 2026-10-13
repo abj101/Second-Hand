@@ -70,7 +70,7 @@ def test_placement_is_optional_and_normalize_keeps_only_valid_values():
         {"verb": "approach", "target": "MOM", "at": [.5, .5], "why": ""},
     ]
     assert SCHEMA["properties"]["entities"]["items"]["required"] == ["kind", "name", "at"]
-    assert SCHEMA["properties"]["affordances"]["items"]["required"] == ["verb", "target", "at"]
+    assert "affordances" not in SCHEMA["properties"] and SCHEMA["required"] == ["screen", "text", "entities"]
     assert SCHEMA["properties"]["entities"]["items"]["properties"]["placement"]["enum"] == list(PLACEMENTS)
 
 

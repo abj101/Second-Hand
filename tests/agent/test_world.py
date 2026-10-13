@@ -342,7 +342,7 @@ def test_tiers_keep_landmarks_promote_interest_blockers_and_cap_is_not_deletion(
     oak, guide, exit_id, chest, sign = (ids[i] for i in (1, 2, 3, 4, 5))
     assert mem.get("entities", oak)["tier"] == "landmark"
     assert mem.get("entities", guide)["tier"] == "interest"
-    assert mem.get("entities", chest)["tier"] == mem.get("entities", sign)["tier"] == "interest"
+    assert mem.get("entities", chest)["tier"] == "landmark" and mem.get("entities", sign)["tier"] == "interest"
     mem.upsert("places", {**mem.get("places", "room"), "edges": [{"via": "exit: path south", "ok": 0}]})
     mem.upsert("relations", {"id": "failed_exit", "s": exit_id, "p": "leads_to", "o": "other", "src": "observed", "sup": 1, "con": 2, "state": "refuted"})
     world._tiers({"entities": [entities[3]], "text": [], "affordances": [{"verb": "approach", "target": "exit: path south"}]}, "room", {0: exit_id})

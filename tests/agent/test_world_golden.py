@@ -23,7 +23,7 @@ def test_act_eight_steps(tmp_path, monkeypatch):
     from agent import loop as module
     env = GridEnv()
     def perceive(*_):
-        per = {"screen":"world","text":[],"affordances":[{"verb":"approach","target":"door","at":[.7,.5]}],
+        per = {"screen":"world","text":[],
                "entities":[{"name":"player","kind":"player","at":[.5,.5]}, {"name":"door","kind":"exit","at":[.7,.5]}]}
         return per, SimpleNamespace(data=per)
     monkeypatch.setattr(module, "perceive", perceive)

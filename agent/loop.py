@@ -2,7 +2,7 @@
 import hashlib, time
 from agent.act import act
 from agent.brief import GENERAL, _load, defaults, load_brief
-from agent.decide import Choice, resolve_target
+from agent.decide import Choice
 from agent.notebook import Notebook
 from agent.observer import cut, for_model, wait_settled
 from agent.perceive import perceive
@@ -20,7 +20,7 @@ class Loop:
         self.trace = Trace(mem.root.parent / "trace.jsonl"); self.step_no = 0
         self.place = None; self.prev = None; self.tile_px = getattr(env, "tile_px", None)
         self.move_frames = 16; self.stuck = Stuck()
-        self.recent = self.trace.tail(5); self.cached = None; self.cached_hash = None; self.cached_marked = False; self.prev_frame = None; self.prev_frame_mark_eligible = None; self.prompt_version = "e5-perceiver-8"; self.cached_version = self.prompt_version
+        self.recent = self.trace.tail(5); self.cached = None; self.cached_hash = None; self.cached_marked = False; self.prev_frame = None; self.prev_frame_mark_eligible = None; self.prompt_version = "e5-perceiver-9"; self.cached_version = self.prompt_version
         self.seen_image, self.seen_marked = None, False
         self.pending_cut, self.pending_via, self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = False, None, False, 0, False, False
         self.reperception_used = False
@@ -34,15 +34,13 @@ class Loop:
         image, marked = self.world.mark(frame, screen_was_world)
         self.seen_image, self.seen_marked = image, marked
         if not force and key == self.cached_hash and marked == self.cached_marked and self.cached is not None and self.cached_version == self.prompt_version and not self.repair_pending: return self.cached, key, True, []
-        ctx = GENERAL + "\n" + load_brief(self.game) + "\nOn a visible editable text field with its on-screen keyboard, expose one type affordance for the whole field; dialogue questions alone are advance, preset name menus are select. Never list letter buttons separately. A visible modal dialogue or selection menu blocks world movement; offer only its applicable advance, select, or cancel actions until it closes. Previous-place memory is reference only; include details only if visible now." + ("\nThe previous JSON was empty or malformed. Retry with compact JSON containing string screen and list text, entities, affordances; no prose. Use empty lists only for genuinely absent content and report visible details only." if self.repair_pending else "")
+        ctx = GENERAL + "\n" + load_brief(self.game) + ("\nThe previous JSON was empty or malformed. Retry with compact JSON containing string screen and list text and entities; no prose. Use empty lists only for genuinely absent content and report visible details only." if self.repair_pending else "")
         if marked: ctx += "\n" + CAPTION
         if relook: ctx += "\nYour last labels may be wrong; look again at who the player is."
-        view, ids = self.mem.view("perceiver", {"place": previous, "task": None, "on_screen": [], "recent": [], "step": self.step_no})
-        if view: ctx += "\n" + view
         per, reply = perceive(self.model, for_model(image), ctx); data = reply.data
-        valid = isinstance(data, dict) and isinstance(data.get("screen"), str) and isinstance(data.get("text"), (list, str)) and all(isinstance(data.get(k), list) for k in ("entities", "affordances"))
-        self.cached, self.cached_hash, self.cached_marked, self.cached_version = per, key, marked, self.prompt_version; self.repair_pending = False; self.parse_failed = not valid or not any((per["screen"], per["text"], per["entities"], per["affordances"]))
-        return per, key, False, ids
+        valid = isinstance(data, dict) and isinstance(data.get("screen"), str) and isinstance(data.get("text"), (list, str)) and isinstance(data.get("entities"), list)
+        self.cached, self.cached_hash, self.cached_marked, self.cached_version = per, key, marked, self.prompt_version; self.repair_pending = False; self.parse_failed = not valid or not any((per["screen"], per["text"], per["entities"]))
+        return per, key, False, []
     def step(self):
         start, calls = time.perf_counter(), self.model.calls
         before_set = wait_settled(self.env); before = before_set.frame; prior = self.place;
@@ -54,9 +52,8 @@ class Loop:
         per, frame_hash, reused, _ = self._see(before, prior, force=relook, relook=relook, screen_was_world=before_mark); model_frame, marked = self.seen_image, self.seen_marked
         if relook: self.reperception_used = True
         player_fix = self.world.fix_player(per, before.size); self.empty_streak = self.empty_streak + 1 if self.parse_failed else 0; self.repair_used = self.repair_used if self.parse_failed else False
-        via = next((a.get("target") for a in per.get("affordances", []) if a.get("verb") == "approach"), None)
         modal = self.prev and {self.prev.get("screen"), per.get("screen")} <= {"world", "dialogue", "menu"} and self.prev.get("screen") != per.get("screen") and "world" in (self.prev.get("screen"), per.get("screen")) and not (self.pending_cut or before_set.blank_seen)
-        place = self.mem.match_place(per, self.step_no + 1, prev=prior, cut=bool((self.pending_cut or prior and cut(self.prev_frame, before, before_set.blank_seen)) and not modal), via=self.pending_via or via)
+        place = self.mem.match_place(per, self.step_no + 1, prev=prior, cut=bool((self.pending_cut or prior and cut(self.prev_frame, before, before_set.blank_seen)) and not modal), via=self.pending_via)
         self.place, self.pending_cut, self.pending_via = place, False, None
         size = before.size
         proj = self.world.before(per, place, prior, size, self.step_no + 1)[0]
@@ -82,8 +79,7 @@ class Loop:
         goals = " ".join(f"{key} {value.get('text', '')}" for key, value in self.notebook.data["goals"].items()
                           if value.get("status", "active") == "active")
         view = self.world.view(goals, place)
-        affs = list(per.get("affordances", [])); targets = [resolve_target(self.mem, a.get("target", ""), place, proj(a.get("at"))) for a in affs]
-        preds = [predict(self.mem, a, targets[i], place) for i, a in enumerate(affs)]
+        affs, targets, preds = [], [], []
         choice, player = None, next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         act_route = travel_legs = None
         act_flags = list(self.flags)
@@ -121,7 +117,6 @@ class Loop:
             place = self.place = named
             if self.world.new_arrival: self.world.pos = next(((r["x"], r["y"]) for r in self.mem.rows("tiles") if r.get("place") == place and (r.get("exit") or {}).get("to") == prior), self.world.pos)
             proj = self.world.before(per, place, place, size, self.step_no + 1)[0]
-            targets = [resolve_target(self.mem, x.get("target", ""), place, proj(x.get("at"))) for x in affs]; preds = [predict(self.mem, x, targets[j], place) for j, x in enumerate(affs)]
         action, i = a.action, None
         if action and "go_to" in action:
             resolved = self.world.resolve(action["go_to"], per, place); e = next((e for n, e in enumerate(per.get("entities", [])) if self.world.entity_ids.get(n) == resolved.get("id")), None) if resolved and resolved["kind"] == "screen" else None
@@ -131,7 +126,16 @@ class Loop:
             else: action = None
         if action and "buttons" in action:
             affs.append({"verb": "buttons", "target": " ".join(action["buttons"])}); targets.append(None); preds.append(None); i = len(affs) - 1
-        if action and "i" in action: i = action["i"]
+        if action and "thing" in action:
+            n, verb = action["thing"], action.get("verb")
+            if type(n) is int and 0 <= n < len(per.get("entities", [])) and verb in ("approach", "interact", "select", "click"):
+                entity = per["entities"][n]
+                aff = {"verb": verb, "target": entity.get("name", ""), "at": entity.get("at")}
+                affs.append(aff); targets.append(self.world.entity_ids.get(n)); preds.append(predict(self.mem, aff, targets[0], place)); i = 0
+            else: action = None
+        if action and action.get("verb") in ("advance", "cancel", "type"):
+            aff = {"verb": action["verb"], "target": "", "at": None}
+            affs.append(aff); targets.append(None); preds.append(predict(self.mem, aff, None, place)); i = 0
         if action: choice = Choice(i, a.expect, "", [], a.why, True, a.text)
         unknown = bool(choice and affs[choice.i].get("verb") in ("approach", "interact") and not self.env.pointer and
                        not any(e.get("kind", "").casefold() == "player" for e in per.get("entities", [])))

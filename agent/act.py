@@ -11,8 +11,9 @@ SYSTEM = ("You are playing a video game you have never seen, from screenshots on
   "If you are stuck or an action keeps failing, try something different and write down what you learned. Return only JSON.")
 REPLY = ('Reply JSON: {"place": short name for where you are (reuse a known place name if it is the same place), '
   '"notebook": list of edits {"op":"set"|"remove","section":"goals"|"hints"|"lessons","key":short id,"value":{...}}, '
-  '"action": one of {"i": option number} or {"go_to": name of a thing on screen} or {"buttons": up to 8 of %s}, '
-  '"text": text to type if the chosen option types text else null, "expect": one of %s, "why": one sentence}. '
+  '"action": {"thing": n, "verb": "approach"|"interact"|"select"|"click"}, {"verb": "advance"|"cancel"|"type"}, {"go_to": name of a thing on screen, remembered thing or known place}, or {"buttons": up to 8 of %s}; '
+  '"text": text to type when the verb is type, else null, "expect": one of %s, "why": one sentence}. '
+  'On a dialogue or menu screen, use advance, select or cancel. On a text field with an on-screen keyboard, use type with the text. Never pick letter buttons one by one. '
   'Goal values: {"text","why","source":"saw|heard|assumed","evidence","status":"active|done|dropped"}. '
   'Hint values: {"text","source","checked"}. Lesson values: {"text"}. '
   'Only edit the notebook when something changed.')
@@ -24,9 +25,12 @@ SCHEMA = {"type": "object", "properties": {"place": {"type": "string"}, "noteboo
 class Act:
     place: str; ops: list; action: dict | None; text: str | None; expect: str; why: str
 
-def _action(raw, affs: list, buttons: list[str]) -> dict | None:
+def _action(raw, things: list, buttons: list[str]) -> dict | None:
     if not isinstance(raw, dict): return None
-    if type(raw.get("i")) is int and 0 <= raw["i"] < len(affs): return {"i": raw["i"]}
+    n, verb = raw.get("thing"), raw.get("verb")
+    if type(n) is int and 0 <= n < len(things) and verb in ("approach", "interact", "select", "click"):
+        return {"thing": n, "verb": verb}
+    if "thing" not in raw and verb in ("advance", "cancel", "type"): return {"verb": verb}
     if isinstance(raw.get("go_to"), str) and raw["go_to"].strip(): return {"go_to": raw["go_to"].strip()}
     picks = raw.get("buttons")
     if isinstance(picks, list) and picks[:8]:
@@ -36,18 +40,17 @@ def _action(raw, affs: list, buttons: list[str]) -> dict | None:
     return None
 
 def act(model, image, perception: dict, notebook: str, facts: str, flags: list[str], controls: str, prefs: dict, buttons: list[str], places: list[str] = ()) -> Act:
-    affs, things = perception.get("affordances") or [], perception.get("entities") or []
+    things = perception.get("entities") or []
     lines = [f"Notebook:\n{notebook}", f"Known facts:\n{facts or 'none'}", f"Flags: {'; '.join(flags) or 'none'}", f"Controls:\n{controls}",
              f"Preferences: {prefs}", f"Known places: {', '.join(places[:12]) or 'none'}", f"Screen: {perception.get('screen', '')}", f"Text on screen: {'; '.join(str(t) for t in perception.get('text') or [])}", "Things on screen:"]
-    lines += [f"- {e.get('name', '')} ({e.get('kind', '')}) at {e.get('at', '')}" for e in things]
-    lines += ["Options:"] + [f"{i}: {a.get('verb', '')} {a.get('target', '')} — {a.get('why', '')}" for i, a in enumerate(affs)]
+    lines += [f"{i}: {e.get('name', '')} ({e.get('kind', '')}) at {e.get('at', '')}" + (" ← you" if e.get("kind", "").casefold() == "player" else "") for i, e in enumerate(things)]
     lines.append(REPLY % (", ".join(buttons), ", ".join(EFFECTS)))
     reply = model.ask(SYSTEM, "\n".join(lines), [for_model(image)] if image is not None else [], SCHEMA, role="act")
     data = reply.data if isinstance(reply.data, dict) else {}
     place, text, ops = data.get("place"), data.get("text"), data.get("notebook")
     return Act(place=place.strip()[:40] if isinstance(place, str) else "",
                ops=[o for o in ops if isinstance(o, dict)] if isinstance(ops, list) else [],
-               action=_action(data.get("action"), affs, buttons),
+               action=_action(data.get("action"), things, buttons),
                text=text if isinstance(text, str) else None,
                expect=data["expect"] if data.get("expect") in EFFECTS else "screen_changes",
                why=str(data.get("why") or ""))
