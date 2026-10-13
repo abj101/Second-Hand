@@ -65,6 +65,7 @@ Never yet: talking to Oak, a Pokémon, or a battle.
 - **Cost:** about 1.6–1.7 requests per step. A 150-step clean boot costs about 250.
 
 ## 6. Suggested next steps
+0. **Next phase: [OM.md](OM.md)** (truthful memory + options menu; paste block inside; STOP 8 before any live run).
 1. Re-run a clean boot (needs caps) to see whether `43750cc` stops the 2F re-mint and the upstairs bounce.
 2. Stop modal screens (dialogue/menu/title) from becoming places (§2.6). Root-cause cleanup; it touches `match_place` and the cut/modal logic in `Loop.step`.
 4. Then the next milestone: Oak and the starter.
