@@ -168,7 +168,8 @@ class Memory:
         reach = range(-VIEW_REACH, VIEW_REACH + 1) if step else (0,)
         for v in self.rows("views"):
             place, (ox, oy), row = self._home(v["place"])
-            if not row or list(q.shape) != v["shape"] or (place != only if only else place == exclude or row.get("screen") != screen): continue
+            # views are only stored on world screens, so no screen-type check: a place first seen under a dialogue box keeps type "dialogue" (m1_gp5: bedroom re-minted on return)
+            if not row or list(q.shape) != v["shape"] or (place != only if only else place == exclude): continue
             stored = np.frombuffer(base64.b64decode(v["q"]), np.uint8).reshape(v["shape"])
             for dy in reach:
                 for dx in reach:

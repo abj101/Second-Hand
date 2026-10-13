@@ -283,5 +283,5 @@ def test_seen_view_only_locates_within_one_place(tmp_path):
     mem = Memory(tmp_path)
     mem.upsert("places", {"id": "bed", "screen": "dialogue", "state": "place"})  # first seen under a dialogue box
     mem.remember_view("bed", (0, 0), view(0, 0))
-    assert mem.seen_view(view(1, 0), "world", None, 16) is None  # screen type differs
+    assert mem.seen_view(view(1, 0), "world", None, 16) == ("bed", (1, 0))  # recognised despite its "dialogue" screen type
     assert mem.seen_view(view(1, 0), None, None, 16, only="bed") == ("bed", (1, 0))
