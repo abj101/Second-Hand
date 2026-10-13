@@ -5,9 +5,8 @@ from agent.trace import Trace
 
 
 def test_pokemon_brief_defaults_and_size():
-    assert defaults("pokemon_red") == {"name": "Hand", "rival": "Blue"}
+    assert defaults("pokemon_red") == {} and DEFAULTS == {}  # no preferred names
     assert len(load_brief("pokemon_red").encode()) <= 8192
-    assert DEFAULTS == {"name": "Hand"}
 
 
 def test_trace_tail_reads_last_rows(tmp_path):
@@ -24,8 +23,7 @@ def test_general_prompt_has_no_game_specific_words():
     words = set(re.findall(r"\w+", GENERAL.casefold()))
     # Source-derived: pokemon_red.json defaults plus the Pokémon Red truth reader title.
     values = defaults("pokemon_red")
-    game_words = {"pokemon", "pokémon", "red", "rival", *(value.casefold() for value in values.values())}
-    assert {"rival", "blue", "hand"} <= game_words
+    game_words = {"pokemon", "pokémon", "red", "rival", "blue", "hand", *(value.casefold() for value in values.values())}
     assert not words & game_words
 
 

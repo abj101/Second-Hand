@@ -4,7 +4,7 @@ from pathlib import Path
 
 BRIEF_DIR = Path(__file__).parent / "briefs"
 GENERAL = "Read all on-screen text, try common UI conventions, and explore before committing. In top-down views, the way out of an enclosed room is often a distinct floor patch or opening at its edge; name that patch or opening as the exit."
-DEFAULTS = {"name": "Hand"}
+DEFAULTS = {}  # no preferred names: the agent picks names itself (user, 2026-10-13)
 
 
 def _load(game_id: str) -> dict:
