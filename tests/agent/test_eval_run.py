@@ -325,3 +325,139 @@ def test_cli_runs_standalone_outside_repo(tmp_path):
     done = subprocess.run([sys.executable, str(script), str(run)], cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
     assert (run / "summary.json").exists()
+
+
+def test_cli_no_write_preserves_run_directory(tmp_path):
+    import subprocess, sys
+    from pathlib import Path
+    run = tmp_path / "read-only-cli"
+    write(run / "trace.jsonl", [{"step": 1, "place": "p", "choice": {"verb": "press", "target": "a"}}])
+    script = Path(__file__).resolve().parents[2] / "scripts" / "eval_run.py"
+    done = subprocess.run([sys.executable, str(script), str(run), "--no-write"], cwd=tmp_path,
+                          capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert not (run / "summary.json").exists()
+
+
+def p3_run(tmp_path, places, trace, truth, *, seen=(), knowledge=(), entities=(), notebook=None):
+    run = tmp_path / "p3"
+    write(run / "memory" / "places.jsonl", places)
+    write(run / "trace.jsonl", trace)
+    write(run / "truth.jsonl", truth)
+    write(run / "memory" / "seen.jsonl", seen)
+    write(run / "memory" / "knowledge.jsonl", knowledge)
+    write(run / "memory" / "entities.jsonl", entities)
+    if notebook is not None:
+        (run / "memory" / "notebook.json").write_text(json.dumps(notebook), encoding="utf-8")
+    return evaluate(run)
+
+
+def test_p3_place_ids_skip_merged_and_seen_uses_each_visit_offset(tmp_path):
+    places = [{"id": "a", "state": "place"}, {"id": "b", "state": "place"},
+              {"id": "old", "state": "merged", "into": "a"}]
+    trace = [world(1, "a", [10, 10]), world(2, "b", [0, 0]), world(3, "a", [20, 10]),
+             world(4, "old", [0, 0])]
+    truth_rows = [truth(i, 0x26, x, y) | {"map_h": 5, "map_w": 6}
+                  for i, (x, y) in enumerate(((0, 0), (5, 5), (2, 2), (10, 8), (1, 1)), 1)]
+    result = p3_run(tmp_path, places, trace, truth_rows,
+                    seen=[{"id": "a", "cells": ["5,5", "20,20"]},
+                          {"id": "b", "cells": ["0,0"]},
+                          {"id": "old", "cells": ["100,100"]}],
+                    entities=[{"id": "a1", "kind": "person", "name": "Oak", "place": "a",
+                               "tier": "interest", "tile": [1, 1], "first": 55},
+                              {"id": "a2", "kind": "person", "name": "Oak#2", "place": "a",
+                               "tier": "interest", "tile": [2, 1], "first": 75},
+                              {"id": "m1", "kind": "person", "name": "Oak", "place": "old",
+                               "tier": "interest", "tile": [1, 1], "first": 75},
+                              {"id": "m2", "kind": "person", "name": "Oak#2", "place": "old",
+                               "tier": "interest", "tile": [2, 1], "first": 76}])
+
+    assert result["place_ids_per_map"] == {"0x26": ["a", "b"]}
+    assert result["seen_in_bounds"]["by_map"]["0x26"] == {"inside": 2, "total": 5, "rate": 0.4}
+    assert result["interest_entity_duplicates"] == {"total": 1, "new_after_74": 1}
+
+
+def test_p3_repeat_actions_require_three_consecutive_live_place_steps(tmp_path):
+    places = [{"id": "p", "state": "place"}, {"id": "merged", "state": "merged", "into": "p"}]
+    trace = [{"step": i, "place": "merged" if i == 4 else "p", "frame": f"{i}.png",
+              "choice": {"verb": "approach", "target": "door"},
+              "act": {"why": f"reason {i}"}} for i in range(1, 8)]
+    result = p3_run(tmp_path, places, trace, [truth(i, 0x26, i, 0) for i in range(1, 9)])
+
+    assert [case["steps"] for case in result["repeat_actions"]] == [[1, 2, 3], [5, 6, 7]]
+    assert result["repeat_actions"][1]["why"] == ["reason 5", "reason 6", "reason 7"]
+
+
+def test_p3_reentries_use_five_step_window_and_travel_checks_planned_place(tmp_path):
+    places = [{"id": "a", "state": "place", "name": "House"},
+              {"id": "b", "state": "place", "name": "Lab", "aliases": ["Professor Oak's lab"]}]
+    trace = [{"step": i, "place": "a", "frame": f"{i}.png", "screen": "world",
+              "next_place": "b" if i == 1 else "a", "skill": {"reason": "travel: done"},
+              "choice": {"id": "b"}, "entities": [],
+              "act": {"why": f"go {i}", "action": {"go_to": "Lab"}}}
+             for i in range(1, 7)]
+    trace[0]["skill"]["status"] = "done"
+    trace[1]["act"] = {"why": "blocked exact place", "action": {"go_to": "world [b]"}}
+    trace[1]["choice"] = {"id": "e_npc"}
+    trace[1]["skill"]["status"] = "blocked"
+    trace[1]["next_place"] = "a"
+    trace[2]["act"] = {"why": "memory route", "action": {"go_to": "Professor Oak"}}
+    trace[2]["choice"] = {"id": "e_npc"}
+    truth_rows = [truth(i, map_, i, 0) for i, map_ in enumerate((0x26, 0x26, 0x25, 0x26, 0x25, 0x25, 0x28), 1)]
+    entities = [{"id": "e_npc", "kind": "person", "name": "Professor Oak", "place": "b", "tile": [1, 1]}]
+    result = p3_run(tmp_path, places, trace, truth_rows, entities=entities)
+
+    assert [(row["map"], row["left_step"], row["step"]) for row in result["reentries"]] == [
+        ("0x26", 2, 4), ("0x25", 3, 5)]
+    assert result["travel"]["started"] == 6 and result["travel"]["arrived"] == 1
+    assert result["travel"]["cases"][1]["planned_place"] == "b"
+    assert result["travel"]["cases"][1]["arrived"] is False
+
+
+def test_p3_reentry_ignores_return_without_observed_departure(tmp_path):
+    places = [{"id": "a", "state": "place"}, {"id": "b", "state": "place"},
+              {"id": "merged", "state": "merged", "into": "a"}]
+    trace = [world(1, "a", [0, 0]), world(2, "merged", [0, 0]),
+             world(3, "b", [0, 0]), world(4, "a", [0, 0])]
+    truth_rows = [truth(i, map_, 0, 0) for i, map_ in enumerate((0x26, 0x25, 0x25, 0x26, 0x26), 1)]
+
+    result = p3_run(tmp_path, places, trace, truth_rows)
+
+    assert result["reentries"] == []
+
+
+def test_p3_goal_evidence_must_quote_game_text_and_missing_sources_are_null(tmp_path):
+    result = p3_run(tmp_path, [{"id": "p", "state": "place"}], [], [],
+                    knowledge=[{"id": "k1", "src": "game_text", "text": "OAK'S AIDE: OAK is looking for you."}],
+                    notebook={"goals": {"find Oak": {"evidence": 'Mom said "OAK\'S AIDE"'},
+                                         "catch starter": {"evidence": "I choose Bulbasaur"}}})
+    assert result["notebook_goals_with_evidence"] == [
+        {"key": "find Oak", "evidence": "OAK'S AIDE: OAK is looking for you."}]
+
+    sparse = evaluate(tmp_path / "missing")
+    assert all(sparse[key] is None for key in ("place_ids_per_map", "seen_in_bounds", "stuck_streak_max",
+                                               "travel", "notebook_goals_with_evidence", "repeat_actions",
+                                               "reentries", "interest_entity_duplicates"))
+
+
+def test_p3_stuck_streak_resets_on_new_text_and_truth_map_change(tmp_path):
+    maps = (0x26, 0x26, 0x25, 0x25, 0x25, 0x25)
+    places = [{"id": "a", "state": "place"}, {"id": "b", "state": "place"}]
+    trace = [{"step": i, "place": "a" if map_ == 0x26 else "b"} for i, map_ in enumerate(maps, 1)]
+    truth_rows = [truth(i, map_, 0, 0) for i, map_ in enumerate((*maps, 0x25), 1)]
+    result = p3_run(tmp_path, places, trace, truth_rows,
+                    knowledge=[{"id": "k", "src": "game_text", "step": 4, "text": "new"}])
+
+    assert result["stuck_streak_max"] == 2
+
+
+def test_truth_reader_keeps_symbol_map_dimensions_in_two_by_two_blocks():
+    from scripts.truth_pokered import read as read_truth
+
+    class StubEnv:
+        def ram(self, address):
+            return {0xD368: 7, 0xD369: 10}.get(address, 0)
+
+    row = read_truth(StubEnv())
+
+    assert row["map_h"] == 7 and row["map_w"] == 10

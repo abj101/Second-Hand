@@ -3,7 +3,7 @@ from __future__ import annotations
 
 _ADDR = {"map": 0xD35E, "y": 0xD361, "x": 0xD362, "party": 0xD163,
          "battle": 0xD057, "player_name": 0xD158, "rival_name": 0xD34A,
-         "screen_text": 0xC3A0, "sprites": 0xC100}
+         "map_h": 0xD368, "map_w": 0xD369, "screen_text": 0xC3A0, "sprites": 0xC100}
 _CHARS = {**dict(zip(range(0x80, 0x9A), "ABCDEFGHIJKLMNOPQRSTUVWXYZ")),
           **dict(zip(range(0xA0, 0xBA), "abcdefghijklmnopqrstuvwxyz")), 0x7F: " "}
 

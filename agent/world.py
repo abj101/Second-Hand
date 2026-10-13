@@ -243,6 +243,10 @@ class World:
         live = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged"}
         places = [p for p in self.mem.rows("places") if p.get("id") in live]
         goal = str(goal_text or "").casefold()
+        def base_name(name):
+            base = _base(name)
+            while (stripped := _base(base)) != base: base = stripped
+            return base
         promoted = [e["id"] for e in self.mem.rows("entities") if e.get("place") in live and e.get("name")
                     and _base(e["name"]) in goal]
         self._promote(promoted)
@@ -261,11 +265,30 @@ class World:
         x0, y0 = self.pos[0] - MAP_W // 2, self.pos[1] - MAP_H // 2
         x1, y1 = x0 + MAP_W - 1, y0 + MAP_H - 1
         cells = {(r["x"], r["y"]): r for r in tiles}
+        eligible = lambda e: e.get("status", "remembered") != "gone" and not (
+            e.get("src") == "model" and not e.get("tile") and not e.get("seen", 0))
+        current_entities = [e for e in self.mem.rows("entities") if e.get("place") == place
+                            and tier(e) == "interest" and eligible(e)]
         entities = [e for e in self.mem.rows("entities") if e.get("place") == place and e.get("tile")
-                    and e.get("status", "remembered") != "gone" and tier(e) in ("interest", "landmark")]
+                    and eligible(e) and tier(e) in ("interest", "landmark")]
         landmarks = sorted((e for e in entities if tier(e) == "landmark"), key=lambda e: (-e.get("seen", 0), e["id"]))[:LANDMARKS_PER_PLACE]
         entities = [e for e in entities if tier(e) == "interest"] + landmarks
         entities = [e for e in entities if not ((normalize_kind(e.get("kind")) == "exit" or str(e.get("name", "")).casefold().startswith("exit:")) and self._failed_exit(e, place))]
+        grouped = {}
+        for e in entities:
+            grouped.setdefault(base_name(e.get("name", e["id"])), []).append(e)
+        current_groups = {}
+        for e in current_entities:
+            current_groups.setdefault(base_name(e.get("name", e["id"])), []).append(e)
+        status_rank = {"seen": 3, "remembered": 2, "stale": 1}
+        entities = []
+        for base, group in sorted(grouped.items()):
+            members = group + [e for e in current_groups.get(base, ()) if e["id"] not in {r["id"] for r in group}]
+            nearest = min(group, key=lambda e: (sum(abs(e["tile"][i] - self.pos[i]) for i in (0, 1)), e["id"]))
+            best = max(members, key=lambda e: (status_rank.get(e.get("status", "remembered"), 0), e.get("last", 0), e["id"]))
+            entities.append({**nearest, "name": base if len(members) > 1 else nearest.get("name", nearest["id"]),
+                             "status": best.get("status", "remembered"), "last": best.get("last", 0),
+                             "_members": members})
         entities.sort(key=lambda e: (tier(e) != "interest", e["id"]))
         symbols = "ABCDFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
         marks, legend = {}, []
@@ -273,10 +296,13 @@ class World:
         for i, e in enumerate(e for e in entities if x0 <= e["tile"][0] <= x1 and y0 <= e["tile"][1] <= y1 and tuple(e["tile"]) not in marks):
             if i == len(symbols): break
             symbol = symbols[i]; marks[tuple(e["tile"])] = symbol
-            mapped.add(e["id"])
+            mapped.update(member["id"] for member in e["_members"])
             status = e.get("status", "remembered")
             last = f"last seen {tuple(e['tile'])} step {e.get('last', 0)}; may have moved" if status == "stale" else f"{status} step {e.get('last', 0)}"
-            legend.append(f"{'Thing' if tier(e) == 'interest' else 'Landmark'} {symbol} {e.get('name', e['id'])} {tuple(e['tile'])} {normalize_kind(e.get('kind'))} {last}")
+            count = len(e["_members"])
+            name = f"{e['name']} ×{count}" if count > 1 else e.get("name", e["id"])
+            nearest = f" (nearest {tuple(e['tile'])})" if count > 1 else ""
+            legend.append(f"{'Thing' if tier(e) == 'interest' else 'Landmark'} {symbol} {name} {tuple(e['tile'])} {normalize_kind(e.get('kind'))} {last}{nearest}")
         for y in range(y0, y1 + 1):
             row = []
             for x in range(x0, x1 + 1):
@@ -294,15 +320,19 @@ class World:
         exits = sorted((r for r in tiles if r.get("exit")), key=lambda r: (r["y"], r["x"], r["exit"].get("dir", "")))
         lines.extend(f"E {r['exit'].get('dir')} ({r['x']},{r['y']}) -> {self.place_label(r['exit'].get('to'))}"
                      for r in exits if r.get("place") in live and r["exit"].get("to") in live)
-        lines.extend(legend)
-        current_things = sorted((e for e in self.mem.rows("entities") if e.get("place") == place and
-                                 tier(e) == "interest" and e.get("status", "remembered") != "gone" and
-                                 e["id"] not in mapped), key=lambda e: e["id"])
-        for e in current_things:
-            tile = tuple(e["tile"]) if e.get("tile") else "?"
-            status = e.get("status", "remembered")
-            last = f"last seen {tile} step {e.get('last', 0)}; may have moved" if status == "stale" else f"{status} step {e.get('last', 0)}"
-            lines.append(f"Thing: {e.get('name', e['id'])} {tile} {normalize_kind(e.get('kind'))} {last}")
+        current_detail = []
+        for base, group in sorted(current_groups.items()):
+            if any(e["id"] in mapped for e in group): continue
+            best = max(group, key=lambda e: (status_rank.get(e.get("status", "remembered"), 0), e.get("last", 0), e["id"]))
+            tile_rows = [e for e in group if e.get("tile")]
+            nearest = min(tile_rows, key=lambda e: (sum(abs(e["tile"][i] - self.pos[i]) for i in (0, 1)), e["id"])) if tile_rows else None
+            tile = tuple(nearest["tile"]) if nearest else "?"
+            status = best.get("status", "remembered")
+            if len(group) > 1:
+                current_detail.append(f"Thing: {base} ×{len(group)} {status} (nearest {tile})")
+            else:
+                last = f"last seen {tile} step {best.get('last', 0)}; may have moved" if status == "stale" else f"{status} step {best.get('last', 0)}"
+                current_detail.append(f"Thing: {best.get('name', best['id'])} {tile} {normalize_kind(best.get('kind'))} {last}")
 
         paths = self._paths(place)
         words = {w.strip(".,!?;:()[]{}\"'") for w in goal.split() if w.strip(".,!?;:()[]{}\"'")}
@@ -310,30 +340,60 @@ class World:
             len(paths.get(p["id"], ())) if p["id"] in paths else 10**9,
             -len(words & {w.strip(".,!?;:()[]{}\"'") for w in " ".join(map(str, [p.get("name", ""), *p.get("aliases", []), *(e.get("name", "") for e in self.mem.rows("entities") if e.get("place") == p["id"] and tier(e) == "interest")])).casefold().split()}),
             -p.get("last", p.get("visits", 0)), p["id"]))
+        place_headers, place_things = {}, {}
         for other in others:
             pid = other["id"]
             aliases = other.get("aliases", [])
-            lines.append(f"Place: {self.place_label(pid)}" + (f" aliases: {', '.join(map(str, aliases))}" if aliases else ""))
+            header = [f"Place: {self.place_label(pid)}" + (f" aliases: {', '.join(map(str, aliases))}" if aliases else "")]
             links = sorted((r for r in self.mem.rows("tiles") if r.get("place") == pid and (r.get("exit") or {}).get("to") in live),
                            key=lambda r: (r["y"], r["x"], r["exit"].get("dir", "")))
-            lines.extend(f"  Exit {r['exit'].get('dir')} -> {self.place_label(r['exit']['to'])}" for r in links)
-            for e in sorted((e for e in self.mem.rows("entities") if e.get("place") == pid and tier(e) == "interest" and e.get("status", "remembered") != "gone"), key=lambda e: e["id"]):
-                status = e.get("status", "remembered")
-                fact = f"last seen {tuple(e['tile']) if e.get('tile') else '?'} step {e.get('last', 0)}; may have moved" if status == "stale" else status
-                lines.append(f"  Thing: {e.get('name', e['id'])} {fact}")
+            header.extend(f"  Exit {r['exit'].get('dir')} -> {self.place_label(r['exit']['to'])}" for r in links)
+            place_headers[pid] = header
             other_edges = frontier(self.mem, pid)
             other_seen = set((self.mem.get("seen", pid) or {}).get("cells", []))
             other_unseen = sum(f"{x + DIRS[d][0]},{y + DIRS[d][1]}" not in other_seen for (x, y), d in other_edges)
-            lines.append(f"  Edges: {len(other_edges)} untried ({other_unseen} into unseen)")
+            groups = {}
+            for e in self.mem.rows("entities"):
+                if e.get("place") == pid and tier(e) == "interest" and eligible(e):
+                    groups.setdefault(base_name(e.get("name", e["id"])), []).append(e)
+            rendered = []
+            for base, group in sorted(groups.items()):
+                best = max(group, key=lambda e: (status_rank.get(e.get("status", "remembered"), 0), e.get("last", 0), e["id"]))
+                tile_rows = [e for e in group if e.get("tile")]
+                nearest = min(tile_rows, key=lambda e: (sum(abs(e["tile"][i] - self.pos[i]) for i in (0, 1)), e["id"])) if tile_rows else None
+                if len(group) > 1:
+                    rendered.append(f"  Thing: {base} ×{len(group)} {best.get('status', 'remembered')} (nearest {tuple(nearest['tile']) if nearest else '?'})")
+                else:
+                    status = best.get("status", "remembered")
+                    fact = f"last seen {tuple(best['tile']) if best.get('tile') else '?'} step {best.get('last', 0)}; may have moved" if status == "stale" else status
+                    rendered.append(f"  Thing: {best.get('name', best['id'])} {fact}")
+            place_things[pid] = [*rendered, f"  Edges: {len(other_edges)} untried ({other_unseen} into unseen)"]
+
+        # ponytail: place summaries fit before entity detail; raise VIEW_TOKENS only if real maps outgrow it.
+        output = []
+        for line in lines:
+            if len("\n".join((*output, line))) <= VIEW_TOKENS * 4: output.append(line)
+        included = set()
+        for other in others:
+            pid = other["id"]
+            candidate = "\n".join((*output, *place_headers[pid]))
+            if len(candidate) <= VIEW_TOKENS * 4:
+                output.extend(place_headers[pid]); included.add(pid)
+        def add_detail_bundle(label, detail):
+            if not detail or len("\n".join((*output, label, detail[0]))) > VIEW_TOKENS * 4: return
+            output.extend((label, detail[0]))
+            for line in detail[1:]:
+                if len("\n".join((*output, line))) <= VIEW_TOKENS * 4: output.append(line)
+        add_detail_bundle(f"Things here: {label}", [*legend, *current_detail])
+        for other in others:
+            pid = other["id"]
+            if pid in included: add_detail_bundle(f"Things: {self.place_label(pid)}", place_things[pid])
 
         flags = list(getattr(self, "view_flags", ()))
         if self.merge_pending: flags.append(f"merge_pending: {self.merge_pending}")
         if self._travelled and self._travelled.status != "done": flags.append(f"travel: {self._travelled.reason}")
-        lines.extend(f"Flag: {flag}" for flag in dict.fromkeys(flags))
-        output = []
-        for line in lines:
-            candidate = "\n".join((*output, line))
-            if len(candidate) <= VIEW_TOKENS * 4: output.append(line)
+        for line in (f"Flag: {flag}" for flag in dict.fromkeys(flags)):
+            if len("\n".join((*output, line))) <= VIEW_TOKENS * 4: output.append(line)
         return "\n".join(output)
     def plan(self, target):
         if not target or not target.get("tile") or not self.current_place or not self.tile_px: return None

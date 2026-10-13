@@ -105,6 +105,199 @@ def _tile_metrics(trace, truth):
             "post_resume": totals("post_resume")}
 
 
+def _p3_metrics(run, trace, truth_rows):
+    paths = {name: run / "memory" / f"{name}.jsonl"
+             for name in ("places", "seen", "knowledge", "entities")}
+    has_trace, has_truth = (run / "trace.jsonl").exists(), (run / "truth.jsonl").exists()
+    has_places, has_knowledge = paths["places"].exists(), paths["knowledge"].exists()
+    places = {r.get("id"): r for r in read(paths["places"]) if r.get("id")} if has_places else {}
+    live_trace = ([r for r in trace if r.get("place") in places and places[r["place"]].get("state") != "merged"]
+                  if has_trace and has_places else [])
+    truth = {r.get("step"): r for r in truth_rows}
+    world_rows = [r for r in live_trace if r.get("screen") == "world"]
+
+    place_ids = defaultdict(set)
+    for row in world_rows if has_trace and has_truth and has_places else ():
+        actual = truth.get(row.get("step")) or {}
+        if actual.get("map") is not None:
+            place_ids[map_id(actual["map"])].add(row["place"])
+
+    seen_in_bounds = None
+    if paths["seen"].exists() and has_trace and has_truth and has_places:
+        sizes = {map_id(r["map"]): (r.get("map_h"), r.get("map_w")) for r in truth_rows
+                 if r.get("map") is not None and isinstance(r.get("map_h"), int) and isinstance(r.get("map_w"), int)}
+        visits = _tile_metrics(live_trace, truth)
+        seen_by_place = {r.get("id"): r.get("cells", []) for r in read(paths["seen"]) if r.get("id")}
+        by_map = defaultdict(lambda: [0, 0])
+        for visit in visits["visits"]:
+            dims, cells, offset = sizes.get(visit["map"]), seen_by_place.get(visit["place"]), visit["offset"]
+            if not dims or not cells or not offset:
+                continue
+            height, width = dims
+            inside, total = by_map[visit["map"]]
+            for cell in cells:
+                try:
+                    x, y = map(int, cell.split(","))
+                except (AttributeError, ValueError):
+                    continue
+                total += 1
+                inside += 0 <= x + offset[0] < 2 * width and 0 <= y + offset[1] < 2 * height
+            by_map[visit["map"]] = [inside, total]
+        total_inside = sum(v[0] for v in by_map.values())
+        total_cells = sum(v[1] for v in by_map.values())
+        if total_cells:
+            seen_in_bounds = {"inside": total_inside, "total": total_cells,
+                              "rate": rate(total_inside, total_cells),
+                              "by_map": {mid: {"inside": v[0], "total": v[1], "rate": rate(*v)}
+                                         for mid, v in sorted(by_map.items())}}
+
+    knowledge = read(paths["knowledge"]) if has_knowledge else []
+    new_text_steps = {r.get("step") for r in knowledge if r.get("src") == "game_text"}
+    streak = streak_max = 0
+    prior_map = prior_step = None
+    for row in sorted(trace, key=lambda r: r.get("step", -1)) if has_trace and has_truth and has_knowledge else ():
+        step = row.get("step")
+        actual = truth.get(step) or {}
+        mid = map_id(actual["map"]) if actual.get("map") is not None else None
+        if mid is None or (prior_map is not None and
+                           (mid != prior_map or not isinstance(step, int) or step != prior_step + 1)):
+            streak = 0
+        if mid is not None:
+            streak = 0 if step in new_text_steps else streak + 1
+            streak_max = max(streak_max, streak)
+        prior_map, prior_step = mid, step
+
+    entity_rows = read(paths["entities"]) if paths["entities"].exists() else None
+    interest_duplicates = None
+    if entity_rows is not None and has_places and any("tier" in r for r in entity_rows):
+        interest = [r for r in replay_rows(entity_rows)
+                    if r.get("tier") == "interest" and r.get("place") in places
+                    and places[r["place"]].get("state") != "merged"]
+        groups = []
+        for row in interest:
+            name = re.sub(r"(?:#\d+)+$", "", str(row.get("name", "")).casefold()).strip()
+            if not name:
+                continue
+            kind, tile = str(row.get("kind", "")).casefold(), row.get("tile")
+            identity = (row.get("place"), kind, name)
+            group = next((g for g in groups if g[0] == identity and
+                          isinstance(tile, (list, tuple)) and len(tile) == 2 and
+                          isinstance(g[1], (list, tuple)) and len(g[1]) == 2 and
+                          max(abs(int(tile[i]) - int(g[1][i])) for i in (0, 1)) <= 1), None)
+            if group:
+                group[2].append(row)
+            else:
+                groups.append([identity, tile, [row]])
+        duplicate_rows = [row for _, _, rows in groups if len(rows) > 1 for row in rows[1:]]
+        interest_duplicates = {"total": len(duplicate_rows),
+                               "new_after_74": sum(isinstance(r.get("first"), int) and r["first"] > 74
+                                                   for r in duplicate_rows)}
+
+    game_text = [str(r.get("text", "")) for r in knowledge
+                 if r.get("src") == "game_text" and isinstance(r.get("text"), str) and r["text"].strip()]
+    notebook_path = run / "memory" / "notebook.json"
+    goals_with_evidence = None
+    if notebook_path.exists() and has_knowledge:
+        notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+        goals_with_evidence = []
+        for key, goal in (notebook.get("goals") or {}).items():
+            evidence = goal.get("evidence") if isinstance(goal, dict) else None
+            if not isinstance(evidence, str) or not evidence.strip():
+                continue
+            fragments = [evidence.strip(), *re.findall(r"[\"“](.+?)[\"”]", evidence)]
+            quote = next((text for text in game_text for fragment in sorted(fragments, key=len, reverse=True)
+                          if len(fragment) >= 8 and fragment.casefold() in text.casefold()), None)
+            if quote:
+                goals_with_evidence.append({"key": key, "evidence": quote})
+
+    entity_by_id = {r.get("id"): r for r in entity_rows or [] if r.get("id")}
+    def planned_place(row):
+        act = row.get("act") or {}
+        action = act.get("action") or {}
+        target = action.get("go_to")
+        if not isinstance(target, str):
+            return None
+        choice_id = (row.get("choice") or {}).get("id")
+        if choice_id in places and places[choice_id].get("state") != "merged":
+            return choice_id
+        entity = entity_by_id.get(choice_id)
+        if entity and entity.get("place") in places and places[entity["place"]].get("state") != "merged":
+            return entity["place"]
+        match = next((p["id"] for p in places.values() if p.get("state") != "merged" and
+                      target.casefold() in {str(x).casefold() for x in (p.get("id"), p.get("name"), *(p.get("aliases") or [])) if x}), None)
+        return match
+
+    travel_cases = []
+    for row in live_trace:
+        skill = row.get("skill") or {}
+        target_place = planned_place(row)
+        onscreen_ids = {e.get("id") for e in row.get("entities", []) if isinstance(e, dict)}
+        is_memory_go_to = target_place and (row.get("choice") or {}).get("id") not in onscreen_ids
+        if str(skill.get("reason", "")).casefold().startswith("travel") or is_memory_go_to:
+            arrived = bool(target_place and skill.get("status") == "done" and
+                           (row.get("next_place") or row.get("place")) == target_place)
+            travel_cases.append({"step": row.get("step"), "frame": row.get("frame"),
+                                 "why": (row.get("act") or {}).get("why"),
+                                 "planned_place": target_place,
+                                 "arrived": arrived})
+
+    repeat_trace = ([r for r in trace if places.get(r.get("place"), {}).get("state") != "merged"]
+                    if has_places else trace)
+    repeated_actions = []
+    run_rows, prior_action = [], None
+    for row in sorted(repeat_trace, key=lambda r: r.get("step", -1)) if has_trace else ():
+        choice = row.get("choice") or {}
+        action = (str(choice.get("verb", "")).casefold(), str(choice.get("target", "")).casefold())
+        if (not action[0] or row.get("step") != (run_rows[-1].get("step", -2) + 1 if run_rows else None)
+                or action != prior_action):
+            if len(run_rows) >= 3:
+                repeated_actions.append({"verb": prior_action[0], "target": prior_action[1],
+                                         "steps": [r.get("step") for r in run_rows],
+                                         "frames": [r.get("frame") for r in run_rows],
+                                         "why": [(r.get("act") or {}).get("why") for r in run_rows]})
+            run_rows = []
+        if action[0]:
+            run_rows.append(row)
+        prior_action = action
+    if len(run_rows) >= 3:
+        repeated_actions.append({"verb": prior_action[0], "target": prior_action[1],
+                                 "steps": [r.get("step") for r in run_rows],
+                                 "frames": [r.get("frame") for r in run_rows],
+                                 "why": [(r.get("act") or {}).get("why") for r in run_rows]})
+
+    reentries, visited, left = [], set(), {}
+    ordered_truth = sorted(truth_rows, key=lambda r: r.get("step", -1)) if has_truth and has_trace and has_places else []
+    trace_by_step = {r.get("step"): r for r in live_trace}
+    previous = None
+    for actual in ordered_truth:
+        mid, step = map_id(actual["map"]) if actual.get("map") is not None else None, actual.get("step")
+        if step not in trace_by_step:
+            previous = None
+            continue
+        if mid is not None and previous and step == previous[0] + 1 and mid != previous[1]:
+            left[previous[1]] = previous[0]
+            if mid in visited and mid in left and step - left[mid] <= 5:
+                row = trace_by_step.get(step, {})
+                reentries.append({"map": mid, "left_step": left[mid], "step": step,
+                                  "frame": row.get("frame"), "why": (row.get("act") or {}).get("why")})
+        if mid is not None:
+            visited.add(mid)
+            previous = (step, mid)
+        else:
+            previous = None
+
+    return {"place_ids_per_map": ({mid: sorted(ids) for mid, ids in sorted(place_ids.items())}
+                                  if has_trace and has_truth and has_places else None),
+            "seen_in_bounds": seen_in_bounds,
+            "stuck_streak_max": streak_max if has_trace and has_truth and has_knowledge else None,
+            "travel": ({"started": len(travel_cases), "arrived": sum(c["arrived"] for c in travel_cases),
+                        "cases": travel_cases} if has_trace and has_places else None),
+            "notebook_goals_with_evidence": goals_with_evidence,
+            "repeat_actions": repeated_actions if has_trace else None,
+            "reentries": reentries if has_truth and has_trace and has_places else None,
+            "interest_entity_duplicates": interest_duplicates}
+
+
 def _entity_duplicates(rows):
     entities = replay_rows(rows)
     recurring = {"menu_item", "move", "item", "option"}
@@ -358,6 +551,7 @@ def evaluate(run, *, repredict=False, hide_memory=False):
     legacy_duplicates, _ = _entity_duplicates([r for r in unique_entities
                                                 if isinstance(r.get("first"), int) and r["first"] <= 54])
     tile_accuracy = _tile_metrics(trace, truth)
+    p3 = _p3_metrics(run, trace, truth_rows)
     exit_reuse = _known_exit_reuse(trace, truth_rows, read(run / "memory" / "tiles.jsonl"))
     game_text = sum(r.get("src") == "game_text" for r in knowledge)
     m1 = {"m1_starter": bool(party_steps), "steps_to_starter": max(0, min(party_steps) - 1) if party_steps else None,
@@ -397,7 +591,7 @@ def evaluate(run, *, repredict=False, hide_memory=False):
                                               "legacy": legacy_duplicates,
                                               "new_after_resume": new_duplicates},
                         "known_exit_id_reuse": exit_reuse},
-            **_e4_metrics(run, trace, truth_rows)}
+            **_e4_metrics(run, trace, truth_rows), **p3}
     if repredict:
         result.update(_repredict(run, trace, hide_memory))
     return result
@@ -407,8 +601,9 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     flags = {arg for arg in args if arg.startswith("--")}
     paths = [arg for arg in args if not arg.startswith("--")]
-    if len(paths) != 1 or flags - {"--repredict", "--hide-memory"} or ("--hide-memory" in flags and "--repredict" not in flags):
-        raise SystemExit("usage: eval_run.py runs/<id> [--repredict [--hide-memory]]")
+    if len(paths) != 1 or flags - {"--repredict", "--hide-memory", "--no-write"} or ("--hide-memory" in flags and "--repredict" not in flags):
+        raise SystemExit("usage: eval_run.py runs/<id> [--repredict [--hide-memory]] [--no-write]")
     result = evaluate(paths[0], repredict="--repredict" in flags, hide_memory="--hide-memory" in flags)
-    (Path(paths[0]) / "summary.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    if "--no-write" not in flags:
+        (Path(paths[0]) / "summary.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, indent=2))

@@ -315,6 +315,67 @@ def test_world_view_place_ranking_prefers_goal_overlap_and_keeps_duplicate_label
     assert view.index("Place: Forest") < view.index("Place: Cave")
 
 
+def test_world_view_groups_entities_and_hides_unseen_model_stubs(tmp_path):
+    from tests.agent.fakes import GridEnv, StubModel
+
+    mem = Memory(tmp_path); place(mem, "here", "Atrium")
+    for i in range(17):
+        entity(mem, f"shelf-{i}", "shelf#11#16" if i == 16 else f"shelf#{i + 1}", "here", [i % 5, 0], i + 1)
+        row = mem.get("entities", f"shelf-{i}")
+        mem.upsert("entities", {**row, "tier": "interest", "status": "stale" if i == 0 else "remembered"})
+    mem.upsert("entities", {"id": "stub", "name": "path east", "kind": "affordance", "place": "here",
+                            "src": "model", "tile": None, "seen": 0, "tier": "interest"})
+    env, model = GridEnv(), StubModel([])
+    world = World(mem, 16); world.current_place, world.pos = "here", (0, 0)
+    before = mem.rows("entities")
+
+    view = world.view("", "here")
+
+    shelf_lines = [line for line in view.splitlines() if "shelf" in line.casefold()]
+    assert shelf_lines == ["Thing A shelf ×17 (0, 0) object remembered step 0 (nearest (0, 0))"]
+    assert "path east" not in view and "stub" not in view
+    assert mem.rows("entities") == before and model.calls == 0 and env.player == (8, 8)
+
+
+def test_world_view_lists_all_place_exits_before_any_other_place_things(tmp_path):
+    mem = Memory(tmp_path); place(mem, "here", "Atrium")
+    for name in ("North", "South", "West"):
+        place(mem, name.lower(), name)
+        mem.upsert("tiles", {"id": f"{name.lower()}@0,0", "place": name.lower(), "x": 0, "y": 0,
+                              "floor": True, "blocked": [], "pushed": [],
+                              "exit": {"dir": "DOWN", "to": "here", "arrive": [0, 0]}, "step": 1})
+        entity(mem, f"thing-{name}", f"Thing {name}", name.lower(), [1, 0])
+        mem.upsert("entities", {**mem.get("entities", f"thing-{name}"), "tier": "interest"})
+    for i in range(60):
+        mem.upsert("entities", {"id": f"clutter-{i}", "name": f"Clutter {i}", "kind": "object",
+                                "place": "here", "tile": None, "seen": 1, "tier": "interest"})
+    world = World(mem, 16); world.current_place = "here"
+
+    view = world.view("", "here")
+
+    headings = [view.index(f"Place: {name}") for name in ("North", "South", "West")]
+    exit_rows = [line for line in view.splitlines() if line == "  Exit DOWN -> Atrium"]
+    exits = [view.index(line) for line in exit_rows]
+    first_thing = min(i for i in (view.find("Thing "), view.find("Thing:"), view.find("Landmark ")) if i >= 0)
+    assert len(set(headings)) == 3 and len(exits) == 3 and max(headings + exits) < first_thing and len(view) <= 2000
+
+
+def test_world_view_labels_other_place_detail_bundle(tmp_path):
+    mem = Memory(tmp_path); place(mem, "here", "Atrium"); place(mem, "hall", "Hall")
+    for source, target, direction in (("here", "hall", "RIGHT"), ("hall", "here", "LEFT")):
+        mem.upsert("tiles", {"id": f"{source}@0,0", "place": source, "x": 0, "y": 0, "floor": True,
+                              "blocked": [], "pushed": [], "exit": {"dir": direction, "to": target, "arrive": [0, 0]}, "step": 1})
+    entity(mem, "chest", "Chest", "hall", [1, 0])
+    mem.upsert("entities", {**mem.get("entities", "chest"), "tier": "interest"})
+    world = World(mem, 16); world.current_place = "here"
+
+    view = world.view("", "here")
+
+    lines = view.splitlines()
+    assert lines.index("Place: Hall") < lines.index("  Exit LEFT -> Atrium") < lines.index("Things: Hall")
+    assert lines[lines.index("Things: Hall") + 1] == "  Thing: Chest remembered"
+
+
 def test_loop_act_uses_world_facts_active_goals_and_labels_but_gated_view_keeps_describe(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from agent.loop import Loop

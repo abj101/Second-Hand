@@ -72,11 +72,13 @@ def setup(mode: str):
     return root, env, model, ctx, mem, world, place, perception, harness, trace, truth
 
 
-def view_check() -> int:
+def view_check(memory_source=None) -> int:
+    memory_source = Path(memory_source) if memory_source else CHECKPOINT / "memory"
+    checkpoint = memory_source.parent
     VIEW_SCRATCH.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix="view-", dir=VIEW_SCRATCH))
-    shutil.copytree(CHECKPOINT / "memory", root / "memory")
-    harness = json.loads((CHECKPOINT / "harness.json").read_text(encoding="utf-8"))
+    shutil.copytree(memory_source, root / "memory")
+    harness = json.loads((checkpoint / "harness.json").read_text(encoding="utf-8"))
     mem = Memory(root / "memory")
     world = World(mem, harness.get("tile_px"))
     world.restore(harness)
@@ -90,12 +92,22 @@ def view_check() -> int:
     labels = [world.place_label(p["id"]) for p in mem.rows("places") if p.get("state") != "merged"]
     resolved = world.resolve("world [p_world]", {}, place)
     deterministic = view == again
+    source_is_default = memory_source.resolve() == (CHECKPOINT / "memory").resolve()
+    target_section = view.partition("Place: world [p_world]")[2].split("\nPlace:", 1)[0]
+    target_has_exit = "  Exit " in target_section
+    owner, shelf_counts = None, {}
+    for line in view.splitlines():
+        if line.startswith("Things here: "): owner = line.removeprefix("Things here: ")
+        elif line.startswith("Things: "): owner = line.removeprefix("Things: ")
+        elif "shelf" in line.casefold() and line.lstrip().startswith(("Thing", "Landmark")):
+            shelf_counts[owner] = shelf_counts.get(owner, 0) + 1
+    shelves_unique = all(owner is not None and count <= 1 for owner, count in shelf_counts.items())
     print(f"chars={len(view)} deterministic={deterministic} labels={len(labels)} unique_labels={len(set(labels))} "
           f"resolve={resolved} model_calls=0 scratch={root} start={place}")
     return 0 if (len(view) <= 2000 and view == again and "Here:" in view and "map:" in view
-                 and "Place:" in view and "world [p_world_2]" in view and "world [p_world]" in view
-                 and len(labels) == len(set(labels))
-                 and resolved and resolved.get("kind") == "place" and resolved.get("id") == "p_world") else 1
+                 and "Place:" in view and len(labels) == len(set(labels)) and shelves_unique
+                 and (not source_is_default or ("world [p_world_2]" in view and "world [p_world]" in view
+                      and target_has_exit and resolved and resolved.get("kind") == "place" and resolved.get("id") == "p_world"))) else 1
 
 
 def place_maps(mem: Memory, trace: list[dict], truth: list[dict]) -> dict[int, str]:
@@ -339,11 +351,13 @@ def main(argv=None) -> int:
         return merge_check()
     parser = argparse.ArgumentParser()
     parser.add_argument("check", choices=("graph", "travel", "fetch", "view"))
+    parser.add_argument("memory", nargs="?", help="optional memory directory for the view check")
     args = parser.parse_args(argv)
+    if args.memory and args.check != "view": parser.error("memory path is only supported for the view check")
     if not CHECKPOINT.is_dir():
         parser.error(f"missing checkpoint: {CHECKPOINT}")
     if args.check == "view":
-        return view_check()
+        return view_check(args.memory)
     bundle = setup(args.check)
     try:
         if args.check == "graph":
