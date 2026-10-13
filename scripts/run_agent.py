@@ -51,7 +51,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(); ap.add_argument("--game", default="pokemon_red"); ap.add_argument("--steps", type=int, required=True)
     ap.add_argument("--max-calls", type=int, required=True); ap.add_argument("--run", type=Path, required=True)
     ap.add_argument("--resume", action="store_true"); ap.add_argument("--from-step", type=int); ap.add_argument("--stage", choices="abpqc")
-    ap.add_argument("--stage-b-cap", type=int, choices=(180, 300), default=180); ap.add_argument("--act", action="store_true")
+    ap.add_argument("--stage-b-cap", type=int, choices=(180, 300), default=180)
     a = ap.parse_args(argv); run = a.run
     if a.steps < 1 or a.max_calls < 1: ap.error("steps and max-calls must be positive")
     if "m1" in str(run).lower() and a.steps > 600: ap.error("m1 runs are limited to 600 cumulative steps")
@@ -81,7 +81,7 @@ def main(argv=None):
         cap=min(a.max_calls,stage_cap)
         if invocation[0] >= cap: raise CallCap("invocation call cap")
         _ledger(run, a.stage, stage_cap); invocation[0] += 1; return post(payload)
-    model._post = guarded; loop = Loop(env, model, Memory(run / "memory"), a.game, **({"act_mode": True} if a.act else {}))  # kwarg only with --act: existing test fakes take 4 args
+    model._post = guarded; loop = Loop(env, model, Memory(run / "memory"), a.game)
     if cp: loop.restore(state)
     press = env.press; failed = [False]
     def guarded_press(*args, **kwargs):

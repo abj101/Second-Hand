@@ -274,7 +274,6 @@ class World:
                     and _base(e["name"]) in goal]
         self._promote(promoted)
 
-        current = self.mem.get("places", place) or {"id": place, "name": place}
         label = self.place_label(place)
         tier = lambda e: e.get("tier", "interest" if normalize_kind(e.get("kind")) in ACTOR_KINDS else "transient" if normalize_kind(e.get("kind")) in TRANSIENT else "landmark")
         tiles = [r for r in self.mem.rows("tiles") if r.get("place") == place]

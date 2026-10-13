@@ -19,30 +19,6 @@ def golden(root, episode):
     else:
         expected = {p.relative_to(target).as_posix(): list(map(json.loads, p.read_text().splitlines())) for p in target.rglob("*.jsonl")}
         assert actual == expected
-def test_gated_two_floor_exits(tmp_path, monkeypatch):
-    from agent import loop as module
-    class TwoFloor(GridEnv):
-        def __init__(self):
-            super().__init__(); self.door = (-5, -5)
-        def _frame(self):
-            if self._transition:
-                self._transition += 1
-                if self._transition > 2: self.scene, self.player, self._transition = 1-self.scene, (8,9), 0
-                return
-            super()._frame()
-            if not self._moving and self.player == ((8,10) if self.scene == 0 else (8,8)): self._transition = 1
-    env, floors = TwoFloor(), ("2F", "1F"); model = StubModel([])
-    def perceive(*_):
-        dy = (2 if env.scene == 0 else -1) * 16/144
-        per = {"screen":"world","text":[],"affordances":[{"verb":"approach","target":"exit: passage","at":[.5,.5+dy]}],
-               "entities":[{"name":"player","kind":"player","at":[.5,.5]}, {"name":floors[env.scene],"kind":"object","at":[.7,.5]}]}
-        return per, SimpleNamespace(data=per)
-    monkeypatch.setattr(module, "perceive", perceive)
-    loop = Loop(env, model, Memory(tmp_path / "memory"), "grid"); loop.last_plan_step = 0
-    loop.tasks.add("Find the marker", [{"text_seen":"unreachable text"}])
-    places = [loop.step()["next_place"] for _ in range(4)]
-    assert places[0] == places[2] and places[1] == places[3] and places[0] != places[1] and model.calls == 0
-    golden(tmp_path, "gated")
 def test_act_eight_steps(tmp_path, monkeypatch):
     from agent import loop as module
     env = GridEnv()
@@ -53,7 +29,7 @@ def test_act_eight_steps(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "perceive", perceive)
     replies = [{"action":{"go_to":"door"}}, {"action":{"buttons":["RIGHT"]}}, *([{"action":None}] * 6)]
     model = StubModel([SimpleNamespace(data=r) for r in replies])
-    loop = Loop(env, model, Memory(tmp_path / "memory"), "grid", act_mode=True)
+    loop = Loop(env, model, Memory(tmp_path / "memory"), "grid")
     rows = [loop.step() for _ in range(8)]
     assert rows[0]["choice"]["target"] == "door" and env.scene == 1 and rows[1]["choice"]["verb"] == "buttons" and env.player == (3, 8)
     assert len(rows) == model.calls == 8

@@ -8,45 +8,25 @@ from tests.agent.fakes import GridEnv, StubModel
 from agent.model import ModelUnavailable
 
 def reply(data): return type("Reply", (), {"data": data})()
+
+def act_reply(i=0, expect="screen_changes"):
+    return reply({"place": "", "notebook": [], "action": None if i is None else {"i": i}, "text": None, "expect": expect, "why": "test"})
+def fake_act(i=0, expect="screen_changes"):
+    return lambda *a, **k: SimpleNamespace(place="", ops=[], action=None if i is None else {"i": i}, expect=expect, why="test", text=None)
 def perception(*, two=False, press=False):
     affs = ([{"verb":"press","target":"A","at":[500,500]}] if press else
         [{"verb":"approach","target":"player","at":[500,500]}] * (2 if two else 1))
     return {"screen":"room","text":[],"entities":[{"kind":"player","name":"Hand","at":[500,500]}],"affordances":affs}
 
 
-@pytest.mark.parametrize(("start", "surprise"), [(0, True), (49, False)])
-def test_reflection_wake_calls_plan_once_and_ignores_unknown_pattern(tmp_path, monkeypatch, start, surprise):
-    from agent import loop as loop_module
-
-    calls = 0
-    def verdict(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return "surprise" if surprise and calls == 1 else "hit"
-    monkeypatch.setattr(loop_module, "verdict", verdict)
-    class Captures(StubModel):
-        def __init__(self, replies): super().__init__(replies); self.roles = []
-        def ask(self, *args, **kwargs):
-            self.roles.append(kwargs.get("role")); return super().ask(*args, **kwargs)
-    model = Captures([reply(perception()), reply({"tasks": [], "pattern_names": {"p1": "named", "missing": "ignored"}}), reply(perception())])
-    mem = Memory(tmp_path / "memory"); mem.upsert("patterns", {"id": "p1", "name": "old", "state": "candidate"})
-    loop = Loop(GridEnv(), model, mem, "grid"); loop.step_no = start
-
-    first, second = loop.step(), loop.step()
-
-    assert first["wake"] == ("surprise" if surprise else "periodic") and second["wake"] is None
-    assert mem.get("patterns", "p1")["name"] == "named" and mem.get("patterns", "missing") is None
-    assert model.roles.count("plan") == 1 and model.calls == 2
-
-
-@pytest.mark.parametrize(("known", "wake"), [(False, "new_place"), (True, None)])
-def test_verified_edge_wakes_only_for_previously_unknown_place(tmp_path, monkeypatch, known, wake):
+@pytest.mark.parametrize("known", [False, True])
+def test_verified_edge_only_counts_for_previously_unknown_place(tmp_path, monkeypatch, known):
     from agent import loop as loop_module
 
     monkeypatch.setattr(loop_module, "cut", lambda *args, **kwargs: True)
     monkeypatch.setattr(loop_module, "effects", lambda *args, **kwargs: {"effects": ["place_changes"], "basis": {"place_changes": "pixel"}, "to": "destination"})
     monkeypatch.setattr(loop_module, "verdict", lambda *args, **kwargs: "hit")
-    replies = [reply(perception())] + ([reply({"tasks": []})] if not known else [])
+    replies = [reply(perception()), act_reply(0, "place_changes")]
     model = StubModel(replies); mem = Memory(tmp_path / "memory")
     mem.upsert("places", {"id": "source", "name": "Source", "edges": []})
     if known: mem.upsert("places", {"id": "destination", "name": "Destination", "edges": []})
@@ -61,93 +41,30 @@ def test_verified_edge_wakes_only_for_previously_unknown_place(tmp_path, monkeyp
 
     row = loop.step()
 
-    assert row["verified_edge"] and row["wake"] == wake
-    assert model.calls == (1 if known else 2)
+    assert row["verified_edge"]
+    assert model.calls == 2
 
 def test_twenty_steps_have_contract_keys_and_reuse(tmp_path):
-    model=StubModel([reply(perception()), *[reply({"tasks":[]}) for _ in range(10)]]); loop=Loop(GridEnv(),model,Memory(tmp_path/"memory"),"grid")
+    model=StubModel([reply(perception()), *[act_reply(None) for _ in range(20)]]); loop=Loop(GridEnv(),model,Memory(tmp_path/"memory"),"grid")
     rows=[loop.step() for _ in range(20)]
     keys={"step","t","place","screen","task","frame","options","choice","pred","used","skill","outcome","verdict","calls","ms","shortcut"}
     assert all(keys <= row.keys() for row in rows)
-    assert model.calls == 3 and rows[1]["perception_reused"] and rows[1]["calls"] == 0
+    assert model.calls == 21 and rows[1]["perception_reused"] and rows[1]["calls"] == 1
 
-def test_plan_trigger_throttle_and_resume_state(tmp_path):
-    data = perception(); data["text"] = ["A new instruction"]
-    class Model:
-        calls = 0
-        plans = 0
-        def ask(self, *args, **kwargs):
-            self.calls += 1
-            if kwargs.get("role") == "perceiver": return reply(data)
-            if kwargs.get("role") == "plan": self.plans += 1; return reply({"tasks": []})
-            raise AssertionError(f"unexpected model role: {kwargs.get('role')}")
-    model, mem, env = Model(), Memory(tmp_path / "memory"), GridEnv()
-    loop = Loop(env, model, mem, "grid"); loop.step()
-    assert model.plans == 1 and loop.state()["last_plan_step"] == 1
-    mem.know("Another instruction", src="game_text", step=2)
-    resumed = Loop(env, model, mem, "grid"); resumed.restore(loop.state())
-    resumed.step()
-    assert resumed.state()["pending_plan_reason"] == "new game text" and model.plans == 1
-    for _ in range(13): resumed.step()
-    assert model.plans == 1
-    resumed.step()
-    assert model.plans == 2 and resumed.state()["last_plan_step"] == 16
-
-def test_deferred_goal_plan_restores_ended_goal_context(tmp_path):
-    data = perception()
-    class Model:
-        calls = 0
-        prompts = []
-        def ask(self, *args, **kwargs):
-            self.calls += 1
-            if kwargs.get("role") == "perceiver": return reply(data)
-            if kwargs.get("role") == "plan": self.prompts.append(args[1]); return reply({"tasks": []})
-            raise AssertionError(f"unexpected model role: {kwargs.get('role')}")
-    model, mem = Model(), Memory(tmp_path / "memory")
-    loop = Loop(GridEnv(), model, mem, "grid")
-    ended = loop.tasks.add("Remember the open gate", [{"text_seen": "gate is open"}], src="orchestrator")
-    ended.update(status="done"); mem.upsert("tasks", ended)
-    state = loop.state(); state.update(step=15, last_plan_step=1, pending_plan_reason="goal done: Remember the open gate")
-    resumed = Loop(loop.env, model, mem, "grid"); resumed.restore(state); resumed.step()
-    assert "Last goal: Remember the open gate" in model.prompts[-1]
-    assert "Ended: done" in model.prompts[-1]
-
-def test_planner_rejects_goal_whose_condition_is_already_true(tmp_path):
-    data = perception(); data["text"] = ["The gate is open"]
-    class Model:
-        calls = 0
-        def ask(self, *args, **kwargs):
-            self.calls += 1
-            if kwargs.get("role") == "perceiver": return reply(data)
-            if kwargs.get("role") == "plan":
-                return reply({"tasks": [{"goal": "Notice the open gate", "done_when": [{"text_seen": "gate is open"}]}]})
-            raise AssertionError(f"unexpected model role: {kwargs.get('role')}")
-    loop = Loop(GridEnv(), Model(), Memory(tmp_path / "memory"), "grid")
-    loop.step()
-    assert not [t for t in loop.mem.rows("tasks") if t.get("src") == "orchestrator"]
-    assert loop.tasks.active()["src"] == "default"
-
-def test_chooser_receives_controls_as_text(tmp_path, monkeypatch):
+def test_act_receives_controls_as_text(tmp_path, monkeypatch):
     from agent import loop as loop_module
     data = perception(two=True)
     class Captures(StubModel):
         def ask(self, *args, **kwargs):
-            if kwargs.get("role") == "chooser": self.prompt = args[1]
+            if kwargs.get("role") == "act": self.prompt = args[1]
             return super().ask(*args, **kwargs)
     monkeypatch.setattr(loop_module, "_load", lambda _game: {"controls": ["Move with arrows", "Confirm with A"]})
-    model = Captures([reply(data), reply({"i": 0, "effect": "screen_changes"})])
+    model = Captures([reply(data), act_reply(0)])
     Loop(GridEnv(), model, Memory(tmp_path / "memory"), "grid").step()
     assert "Controls:\nMove with arrows\nConfirm with A" in model.prompt
 
-def test_chooser_log_only_when_model_called(tmp_path):
-    root=tmp_path/"memory"; loop=Loop(GridEnv(),StubModel([reply(perception())]),Memory(root),"grid")
-    loop.step(); assert not (tmp_path/"chooser.jsonl").exists()
-    model=StubModel([reply(perception(two=True)),reply({"i":0,"effect":"screen_changes"})])
-    Loop(GridEnv(),model,Memory(tmp_path/"other"/"memory"),"grid").step()
-    assert len((tmp_path/"other"/"chooser.jsonl").read_text().splitlines()) == 1
-
 def test_restore_and_parse_failure(tmp_path):
-    model=StubModel([reply(perception(two=True)),reply(None)])
+    model=StubModel([reply(perception(two=True)),act_reply(0)])
     loop=Loop(GridEnv(),model,Memory(tmp_path/"memory"),"grid"); row=loop.step()
     assert row["choice"]["called"]
     restored=Loop(loop.env,model,loop.mem,"grid"); restored.restore(loop.state())
@@ -168,7 +85,7 @@ def test_stationary_two_fresh_frames_confirm_drift(tmp_path, monkeypatch):
     def perceive(*_):
         return {"screen":"world","text":[],"affordances":[{"verb":"approach","target":"lamp","at":[offset[0],.5]}],"entities":[{"name":"player","kind":"player","at":[.5,.5]}, {"name":"lamp","kind":"object","at":[offset[0],.5]}]}, reply({"screen":"world","text":[],"entities":[],"affordances":[]})
     monkeypatch.setattr(module, "perceive", perceive)
-    monkeypatch.setattr(module, "choose", lambda *a, **k: module.Choice(0,"screen_changes","",[],"test",False))
+    monkeypatch.setattr(module, "act", fake_act(0))
     def still(*a,**k):
         before=env.screenshot(); env.phase+=1; after=env.screenshot()
         return SimpleNamespace(status="done",reason="",inputs=0,calls=0,before=before,after=after,scroll=(0,0),blank_seen=False,moves=[])
@@ -194,10 +111,9 @@ def test_loop_fixes_swapped_player_before_approaching_target(tmp_path, monkeypat
         perceptions.append(data)
         return data, reply({})
     monkeypatch.setattr(module, "perceive", perceive)
-    monkeypatch.setattr(module, "choose", lambda *a, **k: module.Choice(0, "screen_changes", "", [], "test", False))
+    monkeypatch.setattr(module, "act", fake_act(0))
     loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
     loop.world.anchors = [[.5, .5]] * 3
-    loop.tasks.add("Approach Chest", [], src="orchestrator")
 
     row = loop.step()
 
@@ -233,37 +149,10 @@ def test_grid_loop_reuses_two_spatial_exits_between_floors(tmp_path, monkeypatch
         return {"screen":"world","text":[],"affordances":[{"verb":"approach","target":"exit: passage","at":[.5,.5+dy]}],
                 "entities":[{"name":"player","kind":"player","at":[.5,.5]}, {"name":floor,"kind":"object","at":[.7,.5]}]}, reply({})
     monkeypatch.setattr(module, "perceive", perceive)
-    loop=Loop(env,StubModel([]),Memory(tmp_path/"memory"),"grid"); loop.last_plan_step=0; ids=[]
-    loop.tasks.add("Find the marker", [{"text_seen":"unreachable text"}])
+    monkeypatch.setattr(module, "act", fake_act(0, "place_changes"))
+    loop=Loop(env,StubModel([]),Memory(tmp_path/"memory"),"grid"); ids=[]
     for _ in range(4): ids.append(loop.step()["next_place"])
     assert ids[0] == ids[2] and ids[1] == ids[3] and ids[0] != ids[1]
-
-def test_grid_loop_pushes_bottom_wall_mat_down_within_three_steps(tmp_path, monkeypatch):
-    from agent import loop as module
-    from agent.skills import run_affordance as run
-    env=GridEnv(); env.door=(8,12); seen=[]
-    mat={"name":"mat","kind":"object","at":[.5,.5+3*16/144],"placement":"bottom wall"}
-    def perceive(*_):
-        return {"screen":"world" if env.scene==0 else "other room","text":[],"affordances":[],"entities":[{"name":"player","kind":"player","at":[.5,.5]},mat]},reply({})
-    def record(*args,**kwargs):
-        result=run(*args,**kwargs); seen.extend(result.moves); return result
-    monkeypatch.setattr(module,"perceive",perceive); monkeypatch.setattr(module,"run_affordance",record)
-    loop=Loop(env,StubModel([reply({"tasks":[]})]),Memory(tmp_path/"memory"),"grid"); loop.tasks.add("Find another room",[{"new_place":True}])
-    rows=[loop.step()]
-    assert rows[-1]["choice"]["target"]=="mat" and rows[-1]["scene_cut"] and env.scene==1
-    assert seen[-1][0]=="DOWN" and rows[-1]["step"]<=3
-
-def test_visited_spatial_exit_filters_neighbor_without_relation(tmp_path, monkeypatch):
-    from agent import loop as module
-    env=GridEnv(); mem=Memory(tmp_path/"memory")
-    for pid in ("p_room","p_seen"): mem.upsert("places",{"id":pid,"name":pid,"screen":"world","landmarks":[],"edges":[]})
-    mem.upsert("tiles",{"id":"p_room@0,0","place":"p_room","x":0,"y":0,"floor":True,"blocked":[],"pushed":[],"exit":{"dir":"UP","to":"p_seen","arrive":[0,0],"src":"observed"},"step":1})
-    data={"screen":"world","text":[],"affordances":[],"entities":[{"name":"player","kind":"player","at":[.5,.5]}, {"name":"door","kind":"object","at":[.5,.5],"placement":"room edge"}, {"name":"lamp","kind":"object","at":[.75,.5]}]}
-    monkeypatch.setattr(module,"perceive",lambda *a:(data,reply({"screen":"world","text":[],"entities":[],"affordances":[]})))
-    monkeypatch.setattr(module,"run_affordance",lambda *a,**k:SimpleNamespace(status="done",reason="",inputs=0,calls=0,before=env.screenshot(),after=env.screenshot(),scroll=(0,0),blank_seen=False,moves=[]))
-    loop=Loop(env,StubModel([]),mem,"grid"); loop.place="p_room"; loop.prev_frame=env.screenshot(); loop.tasks.add("Find a new room",[{"new_place":True}]); loop.last_plan_step=0
-    row=loop.step()
-    assert row["choice"]["target"]=="lamp" and all(r["s"]!="e_door" for r in mem.rows("relations"))
 
 def test_perceiver_guides_whole_name_entry(tmp_path):
     class CapturesPrompt(StubModel):
@@ -283,7 +172,7 @@ def test_dialogue_opening_over_world_keeps_place(tmp_path, monkeypatch):
     start = perception(); start["screen"] = "world"
     start["affordances"][0]["verb"] = "interact"
     destination = perception(); destination["screen"] = "dialogue"; destination["text"] = ["Hello!"]
-    model = StubModel([reply(start), reply(destination), reply({"tasks": []})])
+    model = StubModel([reply(start), act_reply(0), reply(destination)])
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
     def interact(ctx, aff, per, text=None, exit=False):
         env.scene = 1
@@ -300,7 +189,7 @@ def test_interact_scroll_with_new_text_is_not_a_cut(tmp_path, monkeypatch):
     start = perception(); start["screen"] = "world"
     start["affordances"][0]["verb"] = "interact"
     destination = perception(); destination["screen"] = "world"; destination["text"] = ["Hello!"]
-    model = StubModel([reply(start), reply(destination), reply({"tasks": []})])
+    model = StubModel([reply(start), act_reply(0), reply(destination)])
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
     def interact(ctx, aff, per, text=None, exit=False):
         env.scene = 1
@@ -316,7 +205,7 @@ def test_modal_overlay_at_step_start_keeps_place(tmp_path, monkeypatch):
     env = GridEnv()
     world = perception(); world["screen"] = "world"
     dialogue = perception(); dialogue["screen"] = "dialogue"
-    model = StubModel([reply(world), reply(world), reply({"tasks": []}), reply(dialogue)])
+    model = StubModel([reply(world), act_reply(0), reply(world), reply(dialogue), act_reply(0)])
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
     monkeypatch.setattr(loop_module, "cut", lambda *args: True)
     moves = [0]
@@ -337,7 +226,7 @@ def test_explicit_transition_into_dialogue_creates_place(tmp_path, monkeypatch):
     env = GridEnv()
     world = perception(); world["screen"] = "world"
     dialogue = perception(); dialogue["screen"] = "dialogue"
-    model = StubModel([reply(world), reply(dialogue), reply({"tasks": []})])
+    model = StubModel([reply(world), act_reply(0), reply(dialogue)])
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
     def transition(ctx, aff, per, text=None, exit=False):
         before = env.screenshot(); env.scene = 1; after = env.screenshot()
@@ -353,7 +242,7 @@ def test_directional_world_exit_into_new_place_is_place_changes(tmp_path, monkey
     env = GridEnv()
     world = perception(); world["screen"] = "world"
     dest = perception(); dest["screen"] = screen; dest["entities"] = [{"kind": "tree", "name": "Oak", "at": [500, 500]}]
-    model = StubModel([reply(world), reply(dest), reply({"tasks": []})])
+    model = StubModel([reply(world), act_reply(0), reply(dest)])
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
     def transition(ctx, aff, per, text=None, exit=False):
         before = env.screenshot(); env.scene = 1; after = env.screenshot()
@@ -370,7 +259,7 @@ def test_blocked_exit_overrides_pixel_prediction_and_cannot_hit(tmp_path, monkey
     env = GridEnv()
     start = perception(); start["screen"] = "world"
     start["affordances"] = [{"verb": "approach", "target": "exit: door mat", "at": [0.3, 0.9]}]
-    model = StubModel([reply(start), reply(start)])
+    model = StubModel([reply(start), act_reply(0), reply(start)])
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
     monkeypatch.setattr(loop_module, "predict", lambda *args: {"effect": "screen_changes", "detail": "movement"})
     monkeypatch.setattr(loop_module, "cut", lambda *args: False)
@@ -383,51 +272,27 @@ def test_blocked_exit_overrides_pixel_prediction_and_cannot_hit(tmp_path, monkey
     assert row["pred"]["effect"] == "place_changes" and row["pred"]["detail"] is None
     assert "screen_changes" in row["outcome"]["effects"] and row["verdict"] == "miss"
 
-def test_new_place_tests_bottom_wall_entity_third_and_records_failed_targets(tmp_path, monkeypatch):
-    from agent import loop as loop_module
-    env = GridEnv(); env.door = (8, 12); env.npc = (-5, -5)
-    order = ["marker A", "marker B", "floor patch"]  # code order: wall things, nearest first
-    points = {"marker A": (4, 8), "marker B": (4, 10), "floor patch": env.door}
-    def perceive(_model, _image, _context):
-        def at(pos): return [.5 + (pos[0] - env.player[0]) * 16 / 160,
-                            .5 + (pos[1] - env.player[1]) * 16 / 144]
-        entities = [{"kind": "player", "name": "player", "at": [.5, .5]}]
-        entities += [{"kind": "object", "name": name, "at": at(pos),
-                      "placement": "bottom wall" if name == "floor patch" else "left wall"}
-                     for name, pos in points.items()]
-        data = {"screen": "other room" if env.scene else "world", "text": [], "entities": entities, "affordances": []}
-        return data, reply(data)
-    monkeypatch.setattr(loop_module, "perceive", perceive)
-    loop = Loop(env, StubModel([reply({"tasks": []})]), Memory(tmp_path / "memory"), "grid")
-    rows = [loop.step() for _ in range(3)]
-    assert [r["choice"]["target"] for r in rows] == order
-    assert [r["pred"]["effect"] for r in rows] == ["place_changes"] * 3
-    assert [e["id"] for e in loop.mem.rows("entities") if e["name"] in order]
-    assert [r["ranker"] for r in rows] == [None] * 3
-    assert rows[0]["verdict"] == rows[1]["verdict"] == "miss"
-    assert rows[2]["scene_cut"] and rows[2]["verified_edge"] and env.scene == 1
-    tested = {r["s"] for r in loop.mem.rows("relations") if r.get("p") == "leads_to"}
-    assert len(tested) == 3
-
 def test_mislabelled_player_does_not_shift_tiles_or_duplicate_entities(tmp_path, monkeypatch):
     from agent import loop as module
     env, seen, shot = GridEnv(), [], GridEnv.screenshot; env.phase = 0
     env.screenshot = lambda: (f := shot(env), f.putpixel((0, 0), (env.phase, 0, 0)))[0]
     def perceive(*_):
         seen.append(1); player = [.5, .5] if len(seen) == 1 else [.5, .5 + 3 * 16 / 144]  # second view labels another sprite as the player
-        data = {"screen":"world","text":[],"affordances":[],"entities":[{"name":"player","kind":"player","at":player}, {"name":"lamp","kind":"object","at":[.7,.5]}]}
+        data = {"screen":"world","text":[],"affordances":[{"verb":"approach","target":"lamp","at":[.7,.5]}],"entities":[{"name":"player","kind":"player","at":player}, {"name":"lamp","kind":"object","at":[.7,.5]}]}
         return data, reply(data)
     monkeypatch.setattr(module, "perceive", perceive)
     def still(*a, **k):
         before = env.screenshot(); env.phase += 1
         return SimpleNamespace(status="done",reason="",inputs=0,calls=0,before=before,after=env.screenshot(),scroll=(0,0),blank_seen=False,moves=[])
-    monkeypatch.setattr(module, "run_affordance", still)
+    monkeypatch.setattr(module, "run_affordance", still); monkeypatch.setattr(module, "act", fake_act(0))
     loop = Loop(env, StubModel([]), Memory(tmp_path/"memory"), "grid"); loop.step()
     lamps = [e for e in loop.mem.rows("entities") if e["name"].startswith("lamp")]
     assert len(seen) == 2 and len(lamps) == 1 and lamps[0]["tile"] == [2, 0] and loop.world.anchors == [[.5, .5]]
     resumed = Loop(env, StubModel([]), loop.mem, "grid"); resumed.restore(loop.state()); assert resumed.world.anchors == [[.5, .5]]
 
-def test_malformed_parse_gets_one_repair_and_resumes(tmp_path):
+def test_malformed_parse_gets_one_repair_and_resumes(tmp_path, monkeypatch):
+    from agent import loop as module
+    monkeypatch.setattr(module, "act", fake_act(None))
     class Captures(StubModel):
         def ask(self,*a,**k):
             if k.get("role") == "perceiver": self.perceiver_prompts = getattr(self,"perceiver_prompts",[]) + [a[1]]
@@ -436,7 +301,8 @@ def test_malformed_parse_gets_one_repair_and_resumes(tmp_path):
     for _ in range(8): loop.step()
     assert loop.state()["repair_pending"] and loop.state()["repair_used"]
     restored=Loop(loop.env,model,loop.mem,"grid"); restored.restore(loop.state()); row=restored.step()
-    assert row["options"] == 1 and not restored.state()["repair_pending"]
+    # ponytail: act path leaves frames unchanged, so only the repair call re-perceives; it stays malformed and repair is not repeated
+    assert row["options"] == 0 and not restored.state()["repair_pending"] and restored.state()["repair_used"]
     assert len(model.perceiver_prompts) == 2 and "previous JSON was empty or malformed" in model.perceiver_prompts[-1]
 
 def test_string_text_is_valid_perception(tmp_path):
@@ -472,11 +338,11 @@ def test_resume_preserves_cut_if_post_perception_fails(tmp_path):
             if self.calls==2: self.calls+=1; raise ModelUnavailable("offline")
             return super().ask(*a,**k)
     env=CutEnv(); mem=Memory(tmp_path/"memory")
-    loop=Loop(env,FailsAfterChoice([reply(perception(press=True)),reply({"i":0,"effect":"place_changes"})]),mem,"grid")
+    loop=Loop(env,FailsAfterChoice([reply(perception(press=True)),act_reply(0,"place_changes")]),mem,"grid")
     with pytest.raises(ModelUnavailable): loop.step()
     assert loop.state()["pending_cut"]
     town=perception(); town["screen"]="town"
-    resumed=Loop(env,StubModel([reply(town)]),mem,"grid"); resumed.restore(loop.state())
+    resumed=Loop(env,StubModel([reply(town), act_reply(None)]),mem,"grid"); resumed.restore(loop.state())
     assert mem.get("places",resumed.step()["place"])["state"] == "candidate"
 
 def test_tracked_approach_scroll_does_not_split_but_real_cuts_do(tmp_path, monkeypatch):
@@ -490,7 +356,7 @@ def test_tracked_approach_scroll_does_not_split_but_real_cuts_do(tmp_path, monke
         destination = perception(); destination["screen"] = "other room"
         destination["entities"] += [{"kind":"object", "name":"new landmark", "at":[.2,.2]}, {"kind":"exit", "name":"exit: door", "at":[500,500]}]
         if verb == "interact": destination["text"] = ["Visible dialogue"]
-        model = StubModel([reply(start), reply({"i":0,"effect":"place_changes"}), reply(destination), reply({"tasks": []})])
+        model = StubModel([reply(start), act_reply(0, "place_changes"), reply(destination)])
         mem = Memory(root/"memory"); loop = Loop(env, model, mem, "grid")
 
         def move(ctx, aff, per, text=None, exit=False):
@@ -523,7 +389,7 @@ def test_runner_press_exception_and_truncation(tmp_path, monkeypatch):
         def press(self,*a,**k): raise RuntimeError("focus lost")
         def save(self,path): Path(path).write_text("state")
         def close(self): pass
-    model=StubModel([reply(perception(press=True)),reply({"i":0,"effect":"screen_changes"})]); model._post=lambda p: None
+    model=StubModel([reply(perception(press=True)),act_reply(0)]); model._post=lambda p: None
     monkeypatch.setattr(run_agent,"PyBoyEnv",lambda *a,**k: Broken())
     monkeypatch.setattr(run_agent,"find_rom",lambda:"rom")
     monkeypatch.setattr(run_agent,"Ollama",lambda *a,**kw:model)
@@ -545,7 +411,7 @@ def test_runner_call_cap_and_unavailable_checkpoint(tmp_path, monkeypatch):
     class Posts(StubModel):
         def ask(self,*a,**k): self._post({}); return super().ask(*a,**k)
     monkeypatch.setattr(run_agent,"Ollama",lambda *a,**k:model)
-    model=Posts([reply(perception(press=True)),reply({"i":0,"effect":"screen_changes"})]); model._post=lambda p:None
+    model=Posts([reply(perception(press=True)),act_reply(0)]); model._post=lambda p:None
     assert run_agent.main(["--steps","1","--max-calls","1","--run",str(tmp_path/"cap")]) == 3
     assert (tmp_path/"cap/checkpoint/000000/harness.json").exists()
     class Offline(StubModel):
@@ -624,7 +490,7 @@ def test_from_step_zero_rebuilds_boot_and_preserves_ledger(tmp_path, monkeypatch
         def close(self): pass
     monkeypatch.setattr(run_agent,"PyBoyEnv",lambda *a,**k:Saved()); monkeypatch.setattr(run_agent,"find_rom",lambda:"rom")
     monkeypatch.setattr(run_agent,"read",lambda env:{"map":1})
-    model=StubModel([reply(perception())]); model._post=lambda p:None; monkeypatch.setattr(run_agent,"Ollama",lambda *a,**k:model)
+    model=StubModel([reply(perception()),act_reply(None)]); model._post=lambda p:None; monkeypatch.setattr(run_agent,"Ollama",lambda *a,**k:model)
     assert run_agent.main(["--resume","--from-step","0","--steps","1","--max-calls","5","--run",str(run)]) == 0
     assert (run/"checkpoint/000000/harness.json").exists() and not (run/"checkpoint/000025").exists()
     assert not list((run/"checkpoint/000000/memory").glob("*.jsonl"))
@@ -641,7 +507,7 @@ def test_resume_prunes_checkpoints_after_selected_step(tmp_path, monkeypatch):
         def save(self,path): Path(path).write_text("state")
         def close(self): pass
     monkeypatch.setattr(run_agent,"PyBoyEnv",lambda *a,**k:Saved()); monkeypatch.setattr(run_agent,"find_rom",lambda:"rom"); monkeypatch.setattr(run_agent,"read",lambda env:{})
-    model=StubModel([reply(perception())]); model._post=lambda p:None; monkeypatch.setattr(run_agent,"Ollama",lambda *a,**k:model); monkeypatch.setattr(run_agent,"_ledger",lambda *a:None)
+    model=StubModel([reply(perception()),act_reply(None)]); model._post=lambda p:None; monkeypatch.setattr(run_agent,"Ollama",lambda *a,**k:model); monkeypatch.setattr(run_agent,"_ledger",lambda *a:None)
     assert run_agent.main(["--resume","--from-step","10","--steps","1","--max-calls","5","--run",str(run)]) == 0
     assert not (run/"checkpoint/000025").exists() and (run/"checkpoint/000011").exists()
     assert [json.loads(x)["step"] for x in (run/"trace.jsonl").read_text().splitlines()] == list(range(1,12))
@@ -713,65 +579,14 @@ def test_probe_stage_ledger_persists_thirty_request_cap(tmp_path, monkeypatch):
     with pytest.raises(run_agent.CallCap): run_agent._ledger(Path("runs/m1"), "p", 30)
     assert json.loads(Path("runs/e3_budget.json").read_text()) == data
 
-def test_route_blocked_mid_way_replans_instead_of_ruling_out_target(tmp_path, monkeypatch):
-    from agent import loop as loop_module
-    env = GridEnv(); env.door = (8, 12); env.npc = (-5, -5); env.walls.add((8, 10))
-    def perceive(_model, _image, _context):
-        at = [.5 + (env.door[0] - env.player[0]) * 16 / 160, .5 + (env.door[1] - env.player[1]) * 16 / 144]
-        data = {"screen": "other room" if env.scene else "world", "text": [], "affordances": [],
-                "entities": [{"kind": "player", "name": "player", "at": [.5, .5]},
-                             {"kind": "object", "name": "floor patch", "at": at, "placement": "bottom wall"}]}
-        return data, reply(data)
-    monkeypatch.setattr(loop_module, "perceive", perceive)
-    loop = Loop(env, StubModel([reply({"tasks": []})]), Memory(tmp_path / "memory"), "grid"); loop.tile_px = 16
-    first = loop.step()
-    assert first["skill"]["reason"] == "route blocked"
-    assert not [r for r in loop.mem.rows("relations") if r["p"] == "leads_to"]
-    second = loop.step()
-    assert second["choice"]["target"] == "floor patch" and second["scene_cut"] and env.scene == 1
-
-
-def test_route_blocked_mid_way_commits_to_target_instead_of_taking_nearer_decoy(tmp_path, monkeypatch):
-    from agent import loop as loop_module
-    env = GridEnv(); env.door = (8, 12); env.npc = (-5, -5); env.walls.add((8, 10))
-    def perceive(_model, _image, _context):
-        at = [.5 + (env.door[0] - env.player[0]) * 16 / 160, .5 + (env.door[1] - env.player[1]) * 16 / 144]
-        data = {"screen": "other room" if env.scene else "world", "text": [], "affordances": [],
-                "entities": [{"kind": "player", "name": "player", "at": [.5, .5]},
-                             {"kind": "object", "name": "floor patch", "at": at, "placement": "bottom wall"},
-                             {"kind": "object", "name": "decoy", "at": [0 if env.player == (8, 8) else .45, .5], "placement": "left wall"}]}
-        return data, reply(data)
-    monkeypatch.setattr(loop_module, "perceive", perceive)
-    loop = Loop(env, StubModel([reply({"tasks": []})]), Memory(tmp_path / "memory"), "grid"); loop.tile_px = 16
-    assert loop.step()["skill"]["reason"] == "route blocked" and loop.commit
-    assert loop.restore(loop.state()) is None and loop.commit
-    second = loop.step()
-    assert second["choice"]["target"] == "floor patch" and second["scene_cut"] and env.scene == 1 and loop.commit is None
-
-def test_idless_target_routes_to_its_own_tile_not_another_idless_entitys(tmp_path, monkeypatch):
-    from agent import loop as loop_module
-    env = GridEnv(); env.door = (8, 12); env.npc = (-5, -5)
-    def perceive(_model, _image, _context):
-        at = lambda x, y: [.5 + (x - env.player[0]) * 16 / 160, .5 + (y - env.player[1]) * 16 / 144]
-        data = {"screen": "other room" if env.scene else "world", "text": [], "affordances": [],
-                "entities": [{"kind": "player", "name": "player", "at": [.5, .5]},
-                             {"kind": "object", "name": "", "at": at(5, 8)},
-                             {"kind": "object", "name": "", "at": at(*env.door), "placement": "bottom wall"}]}
-        return data, reply(data)
-    monkeypatch.setattr(loop_module, "perceive", perceive)
-    loop = Loop(env, StubModel([reply({"tasks": []})]), Memory(tmp_path / "memory"), "grid"); loop.tile_px = 16
-    row = loop.step()
-    assert env.scene == 1 and row["scene_cut"]
-
-
-def test_act_mode_names_place_edits_notebook_and_skips_planner(tmp_path):
+def test_act_names_place_edits_notebook_and_skips_planner(tmp_path):
     class Roles(StubModel):
         def __init__(self, replies): super().__init__(replies); self.roles = []
         def ask(self, *args, **kwargs): self.roles.append(kwargs.get("role")); return super().ask(*args, **kwargs)
     act_reply = reply({"place": "Hall", "notebook": [{"op": "set", "section": "goals", "key": "g1", "value": {"text": "leave", "source": "assumed"}}],
                        "action": {"i": 0}, "text": None, "expect": "screen_changes", "why": "try"})
     model = Roles([reply(perception()), act_reply, reply(perception()), reply(perception())])
-    loop = Loop(GridEnv(), model, Memory(tmp_path / "memory"), "grid", act_mode=True)
+    loop = Loop(GridEnv(), model, Memory(tmp_path / "memory"), "grid")
 
     row = loop.step()
 
@@ -802,7 +617,7 @@ def test_act_prompt_summarizes_recent_repeated_blocked_action(tmp_path, monkeypa
     response = {"place": "Room", "notebook": [], "action": {"i": 0}, "text": None,
                 "expect": "screen_changes", "why": "try"}
     model = Captures([reply(response) for _ in range(4)])
-    loop = Loop(GridEnv(), model, Memory(tmp_path / "memory"), "grid", act_mode=True)
+    loop = Loop(GridEnv(), model, Memory(tmp_path / "memory"), "grid")
 
     rows = [loop.step() for _ in range(4)]
 
@@ -813,7 +628,7 @@ def test_act_prompt_summarizes_recent_repeated_blocked_action(tmp_path, monkeypa
     assert flags[-1] in model.prompts[3]
     assert all(row["skill"]["reason"] == "both axes blocked" for row in rows[:3])
     model._replies.append(reply(response))
-    resumed = Loop(loop.env, model, loop.mem, "grid", act_mode=True)
+    resumed = Loop(loop.env, model, loop.mem, "grid")
     resumed_row = resumed.step()
     assert "x4" in model.prompts[4] and resumed_row["act"]["flags"][-1] in model.prompts[4]
 
@@ -839,7 +654,7 @@ def test_act_recent_groups_by_action_and_caps_mixed_outcomes(tmp_path, monkeypat
     response = {"place": "Room", "notebook": [], "action": {"i": 0}, "text": None,
                 "expect": "screen_changes", "why": "try"}
     model = Captures([reply(response)])
-    loop = Loop(GridEnv(), model, Memory(tmp_path / "memory"), "grid", act_mode=True)
+    loop = Loop(GridEnv(), model, Memory(tmp_path / "memory"), "grid")
     loop.recent = [{"step": 77 + i, "choice": {"verb": "approach", "target": "npc", "id": "detector-id-123"},
                     "skill": {"status": "blocked" if i != 1 else "done", "reason": "both axes blocked" if i != 1 else "adjacent"},
                     "outcome": {"effects": ["no_change"] if i in (0, 4) else ["screen_changes"]}}
@@ -859,7 +674,7 @@ def test_act_buttons_are_pressed_in_order(tmp_path):
         def press(self, key, frames=8, on_frame=None): self.keys.append(key); super().press(key, frames, on_frame)
     env = Recording()
     act_reply = reply({"place": "Hall", "notebook": [], "action": {"buttons": ["up", "a"]}, "text": None, "expect": "screen_changes", "why": "walk"})
-    loop = Loop(env, StubModel([reply(perception()), act_reply, reply(perception()), reply(perception())]), Memory(tmp_path / "memory"), "grid", act_mode=True)
+    loop = Loop(env, StubModel([reply(perception()), act_reply, reply(perception()), reply(perception())]), Memory(tmp_path / "memory"), "grid")
 
     row = loop.step()
 
@@ -868,7 +683,7 @@ def test_act_buttons_are_pressed_in_order(tmp_path):
 
 def test_act_invalid_action_waits_and_is_unobservable(tmp_path):
     act_reply = reply({"place": "Hall", "notebook": [], "action": {"i": 9}, "text": None, "expect": "screen_changes", "why": "?"})
-    loop = Loop(GridEnv(), StubModel([reply(perception()), act_reply, reply(perception()), reply(perception())]), Memory(tmp_path / "memory"), "grid", act_mode=True)
+    loop = Loop(GridEnv(), StubModel([reply(perception()), act_reply, reply(perception()), reply(perception())]), Memory(tmp_path / "memory"), "grid")
 
     row = loop.step()
 

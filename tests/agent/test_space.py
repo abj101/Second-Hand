@@ -1,5 +1,5 @@
 from agent.memory import Memory
-from agent.space import describe, exit_to, fold, frontier, mark_exit, outward, route, tile_of
+from agent.space import exit_to, fold, frontier, mark_exit, outward, route, tile_of
 from agent.world import World
 
 
@@ -7,11 +7,9 @@ def tile(mem, place, pos, **values):
     mem.upsert("tiles", {"id": f"{place}@{pos[0]},{pos[1]}", "place": place, "x": pos[0], "y": pos[1], "floor": True, "blocked": [], "pushed": [], "exit": None, "step": 1, **values})
 
 
-def test_tile_of_and_describe(tmp_path):
+def test_tile_of(tmp_path):
     mem = Memory(tmp_path)
     assert tile_of([.59, .5], [.51, .5], (2, 3), (160, 144), 16) == (2, 3)
-    tile(mem, "hall", (2, 3))
-    assert describe(mem, "hall", (2, 3)) == "Here: hall (2,3). Exits: none. Untried edges: 4."
 
 
 def test_fold_walk_blocked_and_none(tmp_path):
@@ -78,7 +76,6 @@ def test_mark_exit_records_observed_and_inferred_reverse(tmp_path):
     assert exit_to(mem, "west", (1, 2), "RIGHT") == {"dir": "RIGHT", "to": "east", "arrive": [0, 2], "src": "observed"}
     assert exit_to(mem, "east", (0, 2), "LEFT") == {"dir": "LEFT", "to": "west", "arrive": [1, 2], "src": "inferred"}
     assert exit_to(mem, "west", (1, 2), "UP") is None
-    assert "(1,2) RIGHT -> East Hall" in describe(mem, "west", (1, 2))
 
 
 def test_route_and_frontier_never_cross_known_exit(tmp_path):

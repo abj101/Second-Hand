@@ -6,7 +6,6 @@ from typing import Callable
 
 from PIL import Image
 from pyboy import PyBoy
-from agent.env import Env
 
 _INPUTS = ("UP", "DOWN", "LEFT", "RIGHT", "A", "B", "START", "SELECT")
 

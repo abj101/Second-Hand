@@ -58,4 +58,3 @@ def frontier(mem, place):
         for direction, (dx, dy) in DIRS.items():
             if direction not in row.get("blocked", []) and direction not in row.get("pushed", []) and direction != (row.get("exit") or {}).get("dir") and not _get(mem, place, (row["x"] + dx, row["y"] + dy)): result.append(((row["x"], row["y"]), direction))
     return result
-def describe(mem, place, pos): links = " ".join(f"({r['x']},{r['y']}) {e['dir']} -> {((mem.get('places', e['to']) or {}).get('name') or e['to'])}" for r in mem.rows("tiles") if r.get("place") == place and (e := r.get("exit"))); return f"Here: {place} ({pos[0]},{pos[1]}). Exits: {links or 'none'}. Untried edges: {len(frontier(mem, place))}."

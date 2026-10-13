@@ -1,7 +1,0 @@
-{"blocked":[],"edges":[],"first":1,"id":"p_world","landmarks":[["2f","object"]],"last":1,"name":"world","screen":"world","state":"candidate","visits":1}
-{"blocked":[],"edges":[],"first":1,"id":"p_world","landmarks":[["2f","object"]],"last":1,"name":"world","screen":"world","state":"place","visits":1}
-{"blocked":[],"edges":[{"n":1,"ok":1,"to":"p_world_2","verb":"approach","via":"exit: passage"}],"first":1,"id":"p_world","landmarks":[["2f","object"]],"last":1,"name":"world","screen":"world","state":"place","visits":1}
-{"blocked":[],"edges":[{"n":2,"ok":2,"to":"p_world_2","verb":"approach","via":"exit: passage"}],"first":1,"id":"p_world","landmarks":[["2f","object"]],"last":1,"name":"world","screen":"world","state":"place","visits":1}
-{"blocked":[],"edges":[],"first":1,"id":"p_world_2","landmarks":[["1f","object"]],"last":1,"name":"world","screen":"world","state":"candidate","visits":1}
-{"blocked":[],"edges":[{"n":1,"ok":1,"to":"p_world","verb":"approach","via":"exit: passage"}],"first":1,"id":"p_world_2","landmarks":[["1f","object"]],"last":1,"name":"world","screen":"world","state":"candidate","visits":1}
-{"blocked":[],"edges":[{"n":2,"ok":2,"to":"p_world","verb":"approach","via":"exit: passage"}],"first":1,"id":"p_world_2","landmarks":[["1f","object"]],"last":1,"name":"world","screen":"world","state":"candidate","visits":1}

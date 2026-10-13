@@ -197,7 +197,7 @@ def test_loop_travel_fetch_leg_traverses_three_rooms_and_faces_remembered_target
     entity(mem, "fern", "Fern", "c", [1, 0]); mem.upsert("entities", {**mem.get("entities", "fern"), "status": "remembered"})
     env = ThreeRooms(); player = {"name": "Player", "kind": "player", "at": [.5, .5]}; fern = {"name": "Fern", "kind": "npc", "at": [.6, .5]}
     initial = {"screen": "world", "text": [], "entities": [player], "affordances": []}; final = {**initial, "entities": [player, fern]}; model = StubModel([SimpleNamespace(data=initial), SimpleNamespace(data=final)])
-    loop = Loop(env, model, mem, "grid", act_mode=True); loop.place, loop.prev_frame = "a", env.screenshot(); acts, calls = [], []
+    loop = Loop(env, model, mem, "grid"); loop.place, loop.prev_frame = "a", env.screenshot(); acts, calls = [], []
     monkeypatch.setattr(loop_module, "act", lambda *_a, **_k: (acts.append(model.calls) or SimpleNamespace(place="a", ops=[], action={"go_to": "Fern"}, expect="screen_changes", why="test", text=None)))
     approach = world_module.approach
     def watch(ctx, *args, **kwargs):
@@ -415,7 +415,7 @@ def test_world_view_labels_other_place_detail_bundle(tmp_path):
     assert lines[lines.index("Things: Hall") + 1] == "  Thing: Chest remembered"
 
 
-def test_loop_act_uses_world_facts_active_goals_and_labels_but_gated_view_keeps_describe(tmp_path, monkeypatch):
+def test_loop_act_uses_world_facts_active_goals_and_labels(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from agent.loop import Loop
     from agent import loop as loop_module
@@ -427,7 +427,7 @@ def test_loop_act_uses_world_facts_active_goals_and_labels_but_gated_view_keeps_
     entity(mem, "oak", "Oak", "home", [2, 0]); mem.upsert("entities", {**mem.get("entities", "oak"), "tier": "landmark"})
     per = {"screen": "world", "text": [], "entities": [{"name": "Player", "kind": "player", "at": [.5, .5]},
                                                                   {"name": "Chest", "kind": "object", "at": [.6, .5]}], "affordances": []}
-    env = GridEnv(); model = StubModel([SimpleNamespace(data=per)]); loop = Loop(env, model, mem, "grid", act_mode=True)
+    env = GridEnv(); model = StubModel([SimpleNamespace(data=per)]); loop = Loop(env, model, mem, "grid")
     loop.place, loop.prev_frame = "home", env.screenshot()
     loop.notebook.data["goals"] = {"active": {"text": "Find Chest", "status": "active"},
                                    "finished": {"text": "Find Oak", "status": "done"}}
@@ -442,16 +442,6 @@ def test_loop_act_uses_world_facts_active_goals_and_labels_but_gated_view_keeps_
     assert "world [p_world]" in seen["places"] and "world [p_world2]" in seen["places"]
     assert mem.get("entities", "chest")["tier"] == "interest" and mem.get("entities", "oak")["tier"] == "landmark"
 
-    gated_mem = Memory(tmp_path / "gated"); place(gated_mem, "home", "Home")
-    gated_env = GridEnv(); gated = Loop(gated_env, StubModel([SimpleNamespace(data=per), SimpleNamespace(data=per)]), gated_mem, "grid", act_mode=False)
-    gated.place, gated.prev_frame = "home", gated_env.screenshot()
-    described = []
-    monkeypatch.setattr(loop_module, "describe", lambda *_args: (described.append(True) or "GATED DESCRIBE"))
-    monkeypatch.setattr(gated.world, "view", lambda *_args: (_ for _ in ()).throw(AssertionError("act world view on gated branch")))
-
-    gated.step()
-
-    assert described
 
 
 def test_evidence_actor_stales_after_twenty_steps(tmp_path):
