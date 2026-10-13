@@ -444,5 +444,19 @@ Text arm ran 30 steps (71-100): 47 requests; steps 85-100 were 14 of 16 `buttons
   - Steps 76–80 were Mom's dialogue. The run ended before the door. Party 0.
 - **Spend:** 13 requests. Ledger is now total 1097/1100 and M1 1049/1050. Further live play needs the caps raised.
 
+### 9c. Live run with caps +200 (2026-10-13)
+
+- **Caps:** user-approved, now total 1300 and M1 1250 (`run_agent._ledger`).
+- **Run:** `runs/m1_ps_fp`, steps 81–180 from checkpoint 80. It cost 113 requests; the ledger is at 1210/1300 and M1 1162/1250.
+- **Outcome:** did not leave the house; party 0. Verdicts were 67 hit, 21 surprise, 11 partial, 1 miss.
+  - Steps 93–130 (about 40 steps) were spent re-talking to Mom.
+  - Steps 134–180 were spent bouncing on the stairs.
+- **New root cause: the name merge.**
+  - `World.name()` merges places whenever act's `place` reply matches another place's name or alias. Act calls every floor "world" or "world [p_world_N]", and those label strings pile up as aliases.
+  - At step 91 it merged 2F (`p_world_2`) into 1F (`p_world`). By step 180 every floor id had been merged into `p_world_3`.
+  - Once both floors were one place, the fingerprint had to exclude it as the place just left, so it minted new ids (`p_world_4` to `p_world_7`). The name merge then folded those back in too.
+  - The fingerprint itself behaved correctly. At step 90 it recognised 2F as `p_world_2`.
+- **Proposed fix (not built):** stored views veto a name merge. If the two places have views within scroll reach of each other at the merge offset and none scores ≥ .9, refuse the merge. Also stop label strings like `world [p_x]` from being stored as aliases.
+
 ## 10. Handoff notes
 Rewrite `docs/plans/handoff-notes.md` per the template §10 (under 80 lines, fixed headings).
