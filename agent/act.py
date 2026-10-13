@@ -16,7 +16,8 @@ REPLY = ('Reply JSON: {"place": short descriptive name for where you are, from w
   '"notebook": list of edits: {"op":"focus","status":"done"|"blocked","evidence":"what you saw"}, {"op":"tried","text":"what you just tried for the focus"}, or {"op":"set"|"remove","section":"hints"|"lessons","key":short id,"value":{...}}, '
   '"action": {"thing": n, "verb": "approach"|"interact"|"select"|"click"}, {"verb": "advance"|"cancel"|"type"}, {"go_to": name of a thing on screen, remembered thing or known place, or "unexplored" to walk to the nearest part of this place you have not explored}, or {"buttons": up to 8 of %s}; '
   '"text": text to type when the verb is type, else null, "expect": one of %s, "why": one sentence}. '
-  'On a dialogue or menu screen, use advance, select or cancel. On a text field with an on-screen keyboard, use type with the text. Never pick letter buttons one by one. '
+  'On a dialogue or menu screen, use advance, select or cancel. If a menu offers ready-made choices (such as suggested names), picking one is fine and quicker than typing. '
+  'On a text field with an on-screen keyboard, use {"verb": "type"} with the text in "text". Never pick letter buttons one by one. '
   'Hint values: {"text","source","checked"}. Lesson values: {"text"}. '
   'Only edit the notebook when something changed.')
 SCHEMA = {"type": "object", "properties": {"place": {"type": "string"}, "notebook": {"type": "array", "items": {"type": "object"}},
@@ -33,6 +34,7 @@ def _action(raw, things: list, buttons: list[str]) -> dict | None:
     if type(n) is int and 0 <= n < len(things) and verb in ("approach", "interact", "select", "click"):
         return {"thing": n, "verb": verb}
     if "thing" not in raw and verb in ("advance", "cancel", "type"): return {"verb": verb}
+    if isinstance(raw.get("type"), str) and raw["type"].strip(): return {"verb": "type"}  # {"type": "RED"}: the model's own shape
     if isinstance(raw.get("go_to"), str) and raw["go_to"].strip(): return {"go_to": raw["go_to"].strip()}
     picks = raw.get("buttons")
     if isinstance(picks, list) and picks[:8]:
@@ -50,6 +52,9 @@ def act(model, image, perception: dict, notebook: str, facts: str, flags: list[s
     reply = model.ask(SYSTEM, "\n".join(lines), [for_model(image)] if image is not None else [], SCHEMA, role="act")
     data = reply.data if isinstance(reply.data, dict) else {}
     place, text, ops = data.get("place"), data.get("text"), data.get("notebook")
+    raw = data.get("action") if isinstance(data.get("action"), dict) else {}
+    if not (isinstance(text, str) and text.strip()):  # the text often comes inside the action: {"verb":"type","text":..} or {"type":..}
+        text = next((v for v in (raw.get("text"), raw.get("type")) if isinstance(v, str) and v.strip() and v != "type"), None)
     return Act(place=place.strip()[:40] if isinstance(place, str) else "",
                ops=[o for o in ops if isinstance(o, dict)] if isinstance(ops, list) else [],
                action=_action(data.get("action"), things, buttons),

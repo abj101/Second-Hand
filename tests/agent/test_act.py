@@ -45,7 +45,7 @@ def test_prompt_has_numbered_things_screen_rules_and_no_game_words():
     user = model.args[0][1]
     assert "Goals: reach the hall" in user and "stuck twice" in user and "0: door (exit) at [0.5, 0.2]" in user
     assert "Options:" not in user and "use advance, select or cancel" in REPLY
-    assert "use type with the text" in REPLY and "Never pick letter buttons one by one" in REPLY
+    assert "with the text in \"text\"" in REPLY and "suggested names" in REPLY and "Never pick letter buttons one by one" in REPLY
     assert not re.search(r"pok[eé]mon|\bred\b|\bblue\b|\brival\b", (SYSTEM + REPLY + user).casefold())
     assert "Known places: none" in user
     assert '"op":"focus","status":"done"|"blocked"' in REPLY and '"section":"hints"|"lessons"' in REPLY and '"goals"' not in REPLY
@@ -55,3 +55,9 @@ def test_prompt_has_numbered_things_screen_rules_and_no_game_words():
 def test_prompt_includes_at_most_twelve_known_places():
     _, model = run({}, places=[f"P{i}" for i in range(13)])
     assert "Known places: " + ", ".join(f"P{i}" for i in range(12)) in model.args[0][1]
+
+
+def test_type_shapes_the_model_actually_sends():
+    for raw, top in (({"type": "RED"}, None), ({"verb": "type", "text": "RED"}, None), ({"verb": "type"}, "RED")):
+        out, _ = run({"action": raw, "text": top, "notebook": [], "expect": "screen_changes"})
+        assert out.action == {"verb": "type"} and out.text == "RED"

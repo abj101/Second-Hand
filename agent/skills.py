@@ -186,17 +186,21 @@ def wait_until(ctx: Ctx, max_frames: int = 240) -> SkillResult:
     return _result("done" if end.settled else "failed", "" if end.settled else "not settled", 0, 0, start.frame, end.frame, blank=start.blank_seen or end.blank_seen)
 def type_text(ctx: Ctx, text: str) -> SkillResult:
     limit = min(60, max(0, ctx.max_inputs)); start = _settled(ctx); frame = start.frame; inputs = calls = 0; reason = ""; blank = start.blank_seen
+    if not str(text or "").strip(): return _result("failed", "no text given to type", 0, 0, start.frame, frame, blank=blank)  # an empty target would erase what is already entered
     layout, readback = ({"type": "object", "properties": {"rows": {"type": "array", "items": {"type": "string"}}, "cursor": {"type": "array", "items": {"type": "integer"}}, "case_toggle": {"anyOf": [{"type": "array", "items": {"type": "integer"}}, {"type": "null"}]}, "done_key": {"type": "array", "items": {"type": "integer"}}, "presets": {"type": "array", "items": {"type": "string"}}}, "required": ["presets"]}, {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]})
     for attempt in range(2):
         reply = ctx.model.ask("Read the visible on-screen name keyboard and return only its layout as JSON.", 'Return rows as strings with one character per cell, cursor/case_toggle/done_key as [row,column] (case_toggle may be null), and presets as visible preset names. Text to enter: ' + text, [for_model(frame)], layout, role="skill")
         calls += 1; data = reply.data or {}; rows, cursor, done = data.get("rows") or data.get("layout"), data.get("cursor"), data.get("done_key")
+        # rows come back as strings ("A B C") or as lists of cells (["A","B","PK"]); keep cells either way
+        rows = [list(r.replace(" ", "")) if isinstance(r, str) else [str(c) for c in r] if isinstance(r, list) else r for r in rows] if isinstance(rows, list) else rows
         preset = next((p for p in data.get("presets", []) if isinstance(p, str) and p.casefold() == text.casefold()), None) if isinstance(data.get("presets"), list) else None
         if preset is not None:
             selected = select(ctx, preset); inputs += selected.inputs; calls += selected.calls; frame = selected.after
             return _result(selected.status, selected.reason, inputs, calls, start.frame, frame, blank=blank or selected.blank_seen)
         valid = lambda p: isinstance(p, list) and len(p) == 2 and all(type(v) is int for v in p) and 0 <= p[0] < len(rows) and 0 <= p[1] < len(rows[p[0]])
-        if not isinstance(rows, list) or not rows or any(not isinstance(r, str) or not r for r in rows) or not valid(cursor) or not valid(done):
+        if not isinstance(rows, list) or not rows or any(not isinstance(r, list) or not r for r in rows) or not valid(cursor):
             return _result("failed", "keyboard not identified", inputs, calls, start.frame, frame, blank=blank)
+        if not valid(done): done = next(([ri, ci] for ri, row in enumerate(rows) for ci, cell in enumerate(row) if cell.casefold() in ("ed", "end", "ok", "done")), None)
         cur = list(cursor)
         def press(key):
             nonlocal inputs
@@ -223,6 +227,7 @@ def type_text(ctx: Ctx, text: str) -> SkillResult:
         check = ctx.model.ask("Read only the name currently shown in the name field.", 'Return JSON with the current name as "name".', [for_model(frame)], readback, role="skill")
         calls += 1; name = (check.data or {}).get("name")
         if isinstance(name, str) and name.casefold() == text.casefold():
+            if done is None: return _result("done", "typed; no done key found, confirm it", inputs, calls, start.frame, frame, blank=blank)
             if not go(done) or not press("A"): return _result("blocked", "input limit", inputs, calls, start.frame, frame, blank=blank)
             settled = _settled(ctx); frame = settled.frame; blank |= settled.blank_seen
             return _result("done", reason, inputs, calls, start.frame, frame, blank=blank)

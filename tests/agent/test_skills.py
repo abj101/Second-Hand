@@ -237,3 +237,17 @@ def test_step_keeps_position_unknown_when_whole_move_is_uncertain(monkeypatch):
 
     assert move is None
     assert self_at is None
+
+
+def test_type_text_accepts_cell_rows_without_done_key_and_never_erases_on_empty_text():
+    from types import SimpleNamespace as NS
+    from agent.skills import Ctx, type_text
+    from tests.agent.fakes import GridEnv
+    env = GridEnv(); pressed = []; env.press = lambda key, frames=8, on_frame=None: pressed.append(key)
+    replies = [NS(data={"layout": [["A", "B"], ["C", "Ed"]], "cursor": [0, 0], "done_key": None, "presets": []}), NS(data={"name": "CAB"})]
+    class Model:
+        calls = 0
+        def ask(self, *a, **k): return replies.pop(0)
+    assert type_text(Ctx(env, Model(), tile_px=16), "").reason == "no text given to type" and pressed == []
+    result = type_text(Ctx(env, Model(), tile_px=16), "CAB")
+    assert result.status == "done" and pressed[-1] == "A" and pressed.count("A") == 4  # C, A, B, then Ed found by name

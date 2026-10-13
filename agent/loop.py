@@ -232,6 +232,7 @@ class Loop:
                 f = self.fails.setdefault(key, {"n": 0}); f.update(n=f["n"] + 1, why=(skill.reason or f"verdict {v}")[:40], step=self.step_no)
                 if f["n"] == 2: self.urgent = self.urgent or f"the same action failed twice here: {key.split('|', 1)[1]} ({f['why']})"
         if a.action and "go_to" in a.action and choice is None: reason = f'go_to "{a.action["go_to"]}": not in memory'
+        if not a.action and not reason: reason = "your last reply had no valid action, so nothing happened: use one of the action shapes"
         self.flags = [x for x in (reason, f"last action {skill.status}: {skill.reason}" if skill.status != "done" else None, f"verdict {v}" if v in ("miss", "surprise") else None, f"merge_pending: {self.world.merge_pending}" if self.world.merge_pending else None) if x]; self.world.merge_pending = None; self.world.new_arrival = False
         self.trace.write(row); self.recent = [*self.recent, row][-5:]
         return row
