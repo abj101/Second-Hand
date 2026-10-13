@@ -67,7 +67,7 @@ Status: not started · Branch: feat/lean-agent · Follows: [GP.md](GP.md) §9e, 
 | Metric | Pass | Measured by |
 |---|---|---|
 | Unit suite | all pass | `.venv-agent/Scripts/python.exe -m pytest tests/agent -q -p no:cacheprovider` |
-| Generality | 0 hits | `git grep -niE "pok[eé]mon\|pallet\|\boak\b\|\bmom\b\|pikachu\|kanto\|rival" -- agent/ ':!agent/briefs/'` |
+| Generality | 0 hits (exit 1) | `git grep -niP "pok[eé]mon\|pallet\|\boak\b\|\bmom\b\|pikachu\|kanto\|\brival\b" -- agent/ ':!agent/briefs/' ':!agent/env_pyboy.py'` (env_pyboy.py is the emulator adapter) |
 | Places (offline replay of m1_gp5 memory rebuild, OM.6) | dialogue/menu/title places = 0; no known-place name equals a screen type | `scripts/eval_act.py --om places` |
 | Decision points (OM.6) | options arm right on ≥ 6/8 cases; old arm (from the recorded trace) right on ≤ 3/8 | `scripts/eval_act.py --om cases` |
 | Fake-exit refutation (OM.6, m1_gp5 2F) | the 2F "doorway" renders as refuted with its evidence by the 3rd failed attempt | `scripts/eval_act.py --om places` |
