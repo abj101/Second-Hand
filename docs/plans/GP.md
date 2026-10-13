@@ -1,6 +1,6 @@
 # GP: Goal planner — goals worked backwards to one focus, plus a done log
 
-Status: STOP 7a (built `aa301bb` + follow-ups; offline eval done 2026-10-13; awaiting live approval) · Branch: feat/lean-agent · Follows: [PS.md](PS.md) §9c · User decision 2026-10-13: Option B (event-triggered planner)
+Status: STOP 7b (clean-boot live run done 2026-10-13: never left 2F; next-step decision pending) · Branch: feat/lean-agent · Follows: [PS.md](PS.md) §9c · User decision 2026-10-13: Option B (event-triggered planner)
 
 ## 0. Why (evidence)
 - **Run `runs/m1_ps_fp`, steps 81–180.** The agent never left the house and its party stayed at 0. Spend: 113 requests. Haiku extracted the evidence from `notebook.history` and the trace.
@@ -125,3 +125,25 @@ Status: STOP 7a (built `aa301bb` + follow-ups; offline eval done 2026-10-13; awa
   - From scratch the planner picks the only exit memory knows, the stairs. Memory at step 80 holds no door or rug on 1F, and both floors are named "world", so nothing says the stairs go back up to the starting bedroom.
   - The expected live behaviour is therefore ADaPT-style: one stairs round trip, then act marks the focus `blocked` ("arrived back in the bedroom"), the planner replans, and the agent heads for the door. The pre-registered P1 gate fails.
 - **Not done.** P1 might pass with distinct place names (e.g. "bedroom" / "living room"), but that would be a perception or naming change outside this packet.
+
+### 9b. Live run from a clean boot (`runs/m1_gp`, 150 steps, 2026-10-13)
+- **Setup.** The user approved a clean boot with empty memory and caps raised by 200 (total 1500, M1 1450).
+- **Spend:** 248 requests. Ledger is now total 1474/1500 and M1 1426/1450.
+- **Outcome:**
+  - The intro and naming took steps 1–45; both names were entered.
+  - From step 46 to 150 the agent stayed in the 2F bedroom.
+  - It visited only tiles x 1–5, y 6–7. The stairs at (7,1) were never on screen.
+  - Party 0. Verdicts: hit 98, miss 37, surprise 14.
+- **What worked (tracking):**
+  - 22 planner calls.
+  - 7 goals were closed `done` with evidence: start game, name, rival name, read the intro, dismiss the dialogue/menu, …
+  - No set/remove churn, and no finished conversation was repeated.
+- **What failed:**
+  1. **The planner micro-manages.**
+     - 17 of the 22 calls came from `stuck` triggers. The planner answered with button-level goals: "press B", "try Start", "navigate to CANCEL", "try a different direction", "interact with the plant/box/cabinet".
+     - Nothing above "explore the current room" ever existed, because the intro text gives no destination.
+  2. **No systematic exploration.**
+     - From step 45 on, act used `buttons` 90 times and `go_to` 0 times.
+     - It concluded that "UP and DOWN fail" from the one blocked tile at (3,6). The view's frontier ("untried edges") was never used, so it never walked right and then up to where the stairs are.
+  3. **About 35 steps (50–85) were lost** to the Start menu and Options after the SNES text: dismissing a dialogue box with START opened the menu.
+- **Reading.** Goal bookkeeping is fixed. The bottleneck is now (a) goals that are moves instead of outcomes, and (b) having no cheap way for the model to say "go somewhere I haven't seen". In `m1_long` the agent left 2F at step 37 via a `go_to`/approach that routed it to the stairs.
