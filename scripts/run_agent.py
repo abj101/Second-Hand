@@ -44,7 +44,7 @@ def _boot_reset(run, rewind):
     if base.exists():
         for p in base.iterdir():
             if p.is_dir() and p.name.isdigit() and p.resolve().parent == base: shutil.rmtree(p)
-    for name in ("trace.jsonl", "chooser.jsonl", "calls.jsonl", "truth.jsonl"):
+    for name in ("trace.jsonl", "chooser.jsonl", "calls.jsonl", "truth.jsonl", "presses.jsonl"):
         if rewind: _truncate(run / name, 0)
         elif (run / name).exists(): (run / name).unlink()
 def main(argv=None):
@@ -67,7 +67,7 @@ def main(argv=None):
             cp = paths[-1].parent; state = json.loads((cp / "harness.json").read_text()); boot = False
             base=(run / "checkpoint").resolve(); [shutil.rmtree(p) for p in base.iterdir() if p.is_dir() and p.name.isdigit() and p.resolve().parent == base and int(p.name) > int(cp.name)]
             if "m1" in str(run).lower() and int(state.get("step",0))+a.steps > 600: ap.error("m1 runs are limited to 600 cumulative steps")
-            for name in ("trace.jsonl", "chooser.jsonl", "calls.jsonl", "truth.jsonl"): _truncate(run / name, int(cp.name))
+            for name in ("trace.jsonl", "chooser.jsonl", "calls.jsonl", "truth.jsonl", "presses.jsonl"): _truncate(run / name, int(cp.name))
             for file in (run / "memory").glob("*"): file.unlink()
             shutil.copytree(cp / "memory", run / "memory", dirs_exist_ok=True)
     elif boot: _boot_reset(run, False)
@@ -83,8 +83,9 @@ def main(argv=None):
         _ledger(run, a.stage, stage_cap); invocation[0] += 1; return post(payload)
     model._post = guarded; loop = Loop(env, model, Memory(run / "memory"), a.game, **({"act_text": True} if a.act_text else {}))
     if cp: loop.restore(state)
-    press = env.press; failed = [False]
+    press = env.press; failed = [False]; keys = []
     def guarded_press(*args, **kwargs):
+        keys.append(args[0] if args else kwargs.get("key"))
         try: return press(*args, **kwargs)
         except BaseException: failed[0] = True; raise
     env.press = guarded_press
@@ -94,10 +95,12 @@ def main(argv=None):
             (run / "frames").mkdir(exist_ok=True); wait_settled(env); truth = {"step": loop.step_no+1, **read(env)}
             with (run / "truth.jsonl").open("a", encoding="utf8") as f: f.write(json.dumps(truth)+"\n")
             active_step[0]=loop.step_no+1; old_calls, old_requests = model.calls, invocation[0]
+            keys.clear()
             try: row = loop.step()
             except Exception as e:
                 if failed[0]: loop.cached = loop.cached_hash = None; cp=_checkpoint(env, loop, run); print(f"input_error={e}; checkpoint={cp}",flush=True); return 0
                 raise
+            with (run / "presses.jsonl").open("a", encoding="utf8") as f: f.write(json.dumps({"step": row["step"], "keys": keys})+"\n")
             choice = row.get("choice") or {}
             print(f"step={row['step']} place={row['place']} task={row['task']} choice={choice.get('verb')}:{choice.get('target')} verdict={row['verdict']} uncached={model.calls-old_calls} requests={invocation[0]-old_requests}", flush=True)
             if loop.step_no % 25 == 0: _checkpoint(env, loop, run)
