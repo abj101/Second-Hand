@@ -239,3 +239,21 @@ def test_base_removes_repeated_numeric_suffixes():
     from agent.memory import _base
 
     assert _base("Furniture#2#3") == "furniture"
+
+
+def test_revisit_recognised_by_stored_view_with_tile_scroll(tmp_path):
+    import numpy as np
+    from PIL import Image
+    rng = np.random.default_rng(0)
+    room = rng.integers(1, 4, (144 + 64, 160 + 64), dtype=np.uint8) * 80  # bigger than one screen
+    view = lambda x, y: Image.fromarray(room[32 + 16 * y:176 + 16 * y, 32 + 16 * x:192 + 16 * x])
+    mem = Memory(tmp_path)
+    up = mem.match_place({"screen": "world", "entities": [{"name": "bed", "kind": "object"}]}, 1, prev=None, cut=True)
+    mem.remember_view(up, (0, 0), view(0, 0))
+    down = mem.match_place({"screen": "world", "entities": [{"name": "table", "kind": "object"}]}, 2, prev=up, cut=True,
+                           frame=Image.fromarray(rng.integers(1, 4, (144, 160), dtype=np.uint8) * 80), tile_px=16)
+    assert down != up and mem.arrival is None
+    # back upstairs, one tile right of the stored view, perceiver names differ: pixels still say it's `up`
+    back = mem.match_place({"screen": "world", "entities": [{"name": "machine", "kind": "object"}]}, 3, prev=down, cut=True,
+                           frame=view(1, 0), tile_px=16)
+    assert back == up and mem.arrival == (up, (1, 0))

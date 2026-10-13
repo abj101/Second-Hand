@@ -399,8 +399,8 @@ def test_world_view_is_bounded_deterministic_promotes_goal_and_caps_landmark_map
 
     assert view == world.view("Find Chest near Maple", "here") and len(view) <= 2000
     assert view.startswith("Here: Atrium (0,0)  map: 2 walked, 2 seen,")
-    assert "Map: . walked, , seen, # blocked side, E exit, @ you" in view
-    assert "E UP (0,-1) -> Kitchen" in view and "Place: Kitchen" in view
+    assert "Map: . walked, , seen, # blocked side, E exit already used, @ you" in view
+    assert "E at (0,-1) push UP -> Kitchen" in view and "Place: Kitchen" in view
     assert "Thing A Chest (1, 0) object last seen (1, 0) step 4; may have moved" in view
     assert "Vanished" not in view and "Merged ghost" not in view
     assert mem.get("entities", "goal")["tier"] == "interest"

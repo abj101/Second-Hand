@@ -54,7 +54,7 @@ class Loop:
         if relook: self.reperception_used = True
         player_fix = self.world.fix_player(per, before.size); self.empty_streak = self.empty_streak + 1 if self.parse_failed else 0; self.repair_used = self.repair_used if self.parse_failed else False
         modal = self.prev and {self.prev.get("screen"), per.get("screen")} <= {"world", "dialogue", "menu"} and self.prev.get("screen") != per.get("screen") and "world" in (self.prev.get("screen"), per.get("screen")) and not (self.pending_cut or before_set.blank_seen)
-        place = self.mem.match_place(per, self.step_no + 1, prev=prior, cut=bool((self.pending_cut or prior and cut(self.prev_frame, before, before_set.blank_seen)) and not modal), via=self.pending_via)
+        place = self.mem.match_place(per, self.step_no + 1, prev=prior, cut=bool((self.pending_cut or prior and cut(self.prev_frame, before, before_set.blank_seen)) and not modal), via=self.pending_via, frame=before, tile_px=self.tile_px)
         self.place, self.pending_cut, self.pending_via = place, False, None
         size = before.size
         proj = self.world.before(per, place, prior, size, self.step_no + 1)[0]
@@ -68,7 +68,7 @@ class Loop:
                 probe_per, probe_hash, probe_reused, _ = self._see(probe_frame, place, force=True, screen_was_world=per.get("screen") == "world" and not probe["scene_cut"]); model_frame, marked = self.seen_image, self.seen_marked
                 probe_fix = self.world.fix_player(probe_per, probe_frame.size); player_fix = player_fix or probe_fix
                 if probe["scene_cut"]:
-                    probe_place = self.mem.match_place(probe_per, self.step_no + 1, prev=place, cut=True)
+                    probe_place = self.mem.match_place(probe_per, self.step_no + 1, prev=place, cut=True, frame=probe_frame, tile_px=self.tile_px)
                     self.world.after(probe["skill"], place, probe_place, True, self.step_no + 1)
                     place = self.place = probe_place
                 per, frame_hash, reused = probe_per, probe_hash, probe_reused
@@ -118,6 +118,7 @@ class Loop:
             place = self.place = named
             if self.world.new_arrival: self.world.pos = next(((r["x"], r["y"]) for r in self.mem.rows("tiles") if r.get("place") == place and (r.get("exit") or {}).get("to") == prior), self.world.pos)
             proj = self.world.before(per, place, place, size, self.step_no + 1)[0]
+        if per.get("screen") == "world" and not modal and self.tile_px: self.mem.remember_view(place, self.world.pos, before)
         action, i = a.action, None
         if action and "go_to" in action:
             resolved = self.world.resolve(action["go_to"], per, place); e = next((e for n, e in enumerate(per.get("entities", [])) if self.world.entity_ids.get(n) == resolved.get("id")), None) if resolved and resolved["kind"] == "screen" else None
@@ -155,7 +156,7 @@ class Loop:
         except BaseException: self.cached = self.cached_hash = None; raise
         modal = {per.get("screen"), after_per.get("screen")} <= {"world", "dialogue", "menu"} and per.get("screen") != after_per.get("screen") and "world" in (per.get("screen"), after_per.get("screen")) and not (skill.blank_seen or skill.reason == "scene cut")
         scene_cut &= not modal
-        next_place = self.world.current_place if travel_legs is not None else place if modal else self.mem.match_place(after_per, self.step_no + 1, prev=place, cut=scene_cut, via=(affs[choice.i].get("target") if choice else None), exit=exit_key, via_id=targets[choice.i] if choice else None)
+        next_place = self.world.current_place if travel_legs is not None else place if modal else self.mem.match_place(after_per, self.step_no + 1, prev=place, cut=scene_cut, via=(affs[choice.i].get("target") if choice else None), exit=exit_key, via_id=targets[choice.i] if choice else None, frame=after, tile_px=self.tile_px)
         spatial = self.world.after(skill, place, next_place, scene_cut, self.step_no + 1); known_exit = spatial["known_exit"]
         if skill.scroll != (0, 0) and next_place == place and self.mem.get("places", place).get("state") == "candidate":
             source = self.mem.get("places", place); source["state"] = "place"; self.mem.upsert("places", source)
@@ -183,7 +184,7 @@ class Loop:
             not any((e.get("verb"), e.get("via"), e.get("to")) == (affs[choice.i]["verb"], affs[choice.i].get("target", ""), next_place) and e.get("ok") for e in edge_rows))
         if choice and scene_cut:
             self.mem.add_edge(place, affs[choice.i]["verb"], affs[choice.i].get("target", ""), next_place, True)
-            if world_exit: self.world.mark_exit(place, cut_dir, next_place, tuple(known_exit["arrive"]) if known_exit else (0,0), self.step_no+1)
+            if world_exit: self.world.mark_exit(place, cut_dir, next_place, self.world.pos, self.step_no+1)
         row = {"step": self.step_no + 1, "t": time.time(), "place": place, "screen": per.get("screen"),
             "task": None, "frame": f"frames/{self.step_no+1:06d}.png", "options": len(affs),
             "choice": ({"i": choice.i, **affs[choice.i], "id": targets[choice.i], "called": choice.called, "text": choice.text, "why": choice.why} if choice else None),

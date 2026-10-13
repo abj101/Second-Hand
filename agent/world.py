@@ -70,7 +70,7 @@ class World:
     def before(self, per, place, prior, size, step):
         self.current_place = place
         if prior and place != prior:
-            self.pos, self.drift, self.drift_ref = (0, 0), None, None
+            self.pos, self.drift, self.drift_ref = self._seen_at(place) or (0, 0), None, None
             self._observed_per = None
         player = next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         pa = self.self_spot if self._self_from_motion else self._anchor(per, size) if player else None
@@ -243,11 +243,14 @@ class World:
         known_exit = exit_to(self.mem, place, self.pos, cut_dir) if scene_cut and cut_dir else None
         self._cut_arrival = (step, next_place, place) if scene_cut and next_place != place else None
         if scene_cut and next_place != place:
-            self.pos = tuple(known_exit["arrive"]) if known_exit else (0, 0)
+            self.pos = self._seen_at(next_place) or (tuple(known_exit["arrive"]) if known_exit else (0, 0))
             self.drift = self.drift_ref = None
             self.entity_tiles = self.entity_ids = {}
         return {"known_exit": known_exit,
                 "scroll": list(skill.scroll) if skill.scroll is not None else None}
+    def _seen_at(self, place):
+        hit = getattr(self.mem, "arrival", None)
+        return tuple(hit[1]) if hit and hit[0] == place else None
     def mark_exit(self, place, direction, to, arrive, step):
         mark_exit(self.mem, place, self._prepared[4], direction, to, arrive, step)
     def _box(self, image, centre):
@@ -446,9 +449,9 @@ class World:
                 if glyph is None: glyph = "." if tile.get("floor") is True else "," if f"{x},{y}" in seen_cells else " "
                 row.append(glyph)
             lines.append("".join(row))
-        lines.append("Map: . walked, , seen, # blocked side, E exit, @ you; letters mark things and landmarks")
+        lines.append("Map: . walked, , seen, # blocked side, E exit already used, @ you; letters mark things and landmarks (kind exit = seen, not yet used)")
         exits = sorted((r for r in tiles if r.get("exit")), key=lambda r: (r["y"], r["x"], r["exit"].get("dir", "")))
-        lines.extend(f"E {r['exit'].get('dir')} ({r['x']},{r['y']}) -> {self.place_label(r['exit'].get('to'))}"
+        lines.extend(f"E at ({r['x']},{r['y']}) push {r['exit'].get('dir')} -> {self.place_label(r['exit'].get('to'))}"
                      for r in exits if r.get("place") in live and r["exit"].get("to") in live)
         current_detail = []
         for base, group in sorted(current_groups.items()):

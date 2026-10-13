@@ -1,7 +1,11 @@
 """Small JSONL-backed world model used by the agent."""
+import base64
 import json
 import re
 from pathlib import Path
+
+import numpy as np
+from PIL import Image
 
 
 TRANSIENT = frozenset({"player", "exit", "cursor", "dialogue_box", "ui_element", "icon", "text", "menu_item", "input_field", "keyboard", "logo"})  # not landmarks
@@ -28,6 +32,25 @@ def _base(value: str) -> str:
 def _via(value) -> str: return _key(value or "").removeprefix("exit:").strip()
 
 
+# ponytail: calibrated on Red's house 1F/2F (same floor >=.958 within 4 tiles, other floor <=.789);
+# pixel-identical interiors in different towns (Poke Centers) will match: add a graph-consistency check then.
+VIEW_MATCH, VIEW_REACH = .9, 4
+
+
+def _thumb(frame) -> np.ndarray:
+    w, h = frame.size
+    return (np.asarray(frame.convert("L").resize((w // 2, h // 2), Image.Resampling.NEAREST)) // 64).astype(np.uint8)
+
+
+def _view_score(a: np.ndarray, b: np.ndarray, sx: int, sy: int) -> float:
+    """Share of equal pixels where b is a shifted by (sx, sy); off-map black in both is ignored."""
+    h, w = a.shape
+    aa = a[max(sy, 0):h + min(sy, 0), max(sx, 0):w + min(sx, 0)]
+    bb = b[max(-sy, 0):h + min(-sy, 0), max(-sx, 0):w + min(-sx, 0)]
+    lit = (aa > 0) | (bb > 0)
+    return float((aa == bb)[lit].mean()) if lit.sum() >= a.size / 4 else 0.0
+
+
 def _distance(a: str, b: str) -> int:
     a, b = _base(a), _base(b)
     if abs(len(a) - len(b)) > 1:
@@ -44,6 +67,8 @@ def _distance(a: str, b: str) -> int:
 
 
 class Memory:
+    arrival = None  # (place, tile) when the last match_place recognised a stored view
+
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -85,9 +110,16 @@ class Memory:
 
     def match_place(self, perception: dict, step: int, *, prev: str | None,
                     cut: bool, via: str | None = None,
-                    exit: tuple[int, int, str] | None = None, via_id: str | None = None) -> str:
+                    exit: tuple[int, int, str] | None = None, via_id: str | None = None,
+                    frame=None, tile_px: int | None = None) -> str:
+        self.arrival = None
         if not cut and prev is not None:
             return prev
+        screen = str(perception.get("screen", "unknown"))
+        if cut and frame is not None and (hit := self.seen_view(frame, screen, prev, tile_px)):
+            self.arrival = hit  # (place, tile you arrived on)
+            row = self.get("places", hit[0])
+            return self.upsert("places", {**row, "visits": row.get("visits", 0) + 1, "last": step})["id"]
         if cut and prev and exit:
             row = self.get("tiles", f"{prev}@{exit[0]},{exit[1]}")
             edge = row.get("exit") if row else None
@@ -101,7 +133,6 @@ class Memory:
         if cut and via_id:
             known = next((r["o"] for r in self.rows("relations") if r.get("s") == via_id and r.get("p") == "leads_to" and r.get("state") == "live" and r.get("o") != prev and self.get("places", r.get("o"))), None)
             if known: return known
-        screen = str(perception.get("screen", "unknown"))
         landmarks = sorted({(str(e.get("name", "")).casefold(), str(e.get("kind", "")).casefold())
                             for e in perception.get("entities", []) if e.get("name") and normalize_kind(e.get("kind")) not in TRANSIENT})
         best, score = None, 0.0
@@ -122,6 +153,31 @@ class Memory:
                                "landmarks": [list(x) for x in landmarks], "edges": [], "blocked": [],
                                "first": step, "last": step})
         return pid
+
+    def remember_view(self, place: str, pos, frame) -> None:
+        """One small greyscale view per (place, tile) so a later arrival can be recognised by pixels."""
+        vid = f"{place}@{pos[0]},{pos[1]}"
+        if frame is None or self.get("views", vid): return
+        q = _thumb(frame)
+        self.upsert("views", {"id": vid, "place": place, "pos": list(pos), "shape": list(q.shape),
+                              "q": base64.b64encode(q.tobytes()).decode()})
+
+    def seen_view(self, frame, screen: str, exclude: str | None, tile_px: int | None):
+        """(place, tile) of the known view this frame matches, allowing whole-tile camera scroll."""
+        q, best, step = _thumb(frame), None, (tile_px or 0) // 2
+        reach = range(-VIEW_REACH, VIEW_REACH + 1) if step else (0,)
+        for v in self.rows("views"):
+            place, (ox, oy) = v["place"], (0, 0)
+            while (row := self.get("places", place)) and row.get("state") == "merged":
+                ox, oy, place = ox + row["offset"][0], oy + row["offset"][1], row["into"]
+            if not row or place == exclude or row.get("screen") != screen or list(q.shape) != v["shape"]: continue
+            stored = np.frombuffer(base64.b64decode(v["q"]), np.uint8).reshape(v["shape"])
+            for dy in reach:
+                for dx in reach:
+                    score = _view_score(stored, q, dx * step, dy * step)
+                    if score >= VIEW_MATCH and (best is None or score > best[0]):
+                        best = (score, place, (v["pos"][0] + ox + dx, v["pos"][1] + oy + dy))
+        return best[1:] if best else None
 
     def name_place(self, place: str, name: str, step: int) -> str:
         name, row = str(name or "").strip(), self.get("places", place)
