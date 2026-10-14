@@ -292,6 +292,8 @@ def dry_gates(d):
         if len(verified) != 1: why.append(f"{len(verified)} verified exits (need the stairs only)")
         elif not re.search(label_re, verified[0]["label"], re.IGNORECASE): why.append(f"the verified exit is not the stairs: {verified[0]['label']!r}")
         elif " beyond)" not in verified[0]["label"]: why.append("the stairs label has no beyond-summary")
+        if len(verified) == 1 and "everything unexplored from here is through this exit" not in (verified[0].get("notes") or []): why.append("the stairs are not named as the way to everything unexplored")
+        why += [f"explore label reports unseen spots: {o['label']!r}" for o in opts if o["tool"] == "explore" and "(0 spots lead anywhere unseen)" not in o["label"]]
     elif floor == "1F":  # the door mat / rug is an unused (unverified) exit
         rug = [o for o in exit_opts if re.search(label_re, o["label"], re.IGNORECASE)]
         if not rug: why.append("no exit row for the door mat / rug")

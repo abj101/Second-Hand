@@ -1,5 +1,5 @@
 """Spatial state and bookkeeping for the act path."""
-import hashlib, json
+import hashlib, json, re
 from dataclasses import replace
 from itertools import pairwise
 from statistics import median
@@ -40,6 +40,10 @@ def _beyond_suffix(far):  # far: one exit's {"unused_exits","unexplored"} from W
 def _cross_key(place, tile, other):  # one 'crossings' row per exit tile and the place on its other side
     return f"{place}@{tile[0]},{tile[1]}>{other}"
 
+def unseen_edges(mem, pid):  # untried edges of pid whose target cell is not in its seen store: "unexplored"
+    seen = set((mem.get("seen", pid) or {}).get("cells", []))
+    return [(t, d) for t, d in frontier(mem, pid) if f"{t[0] + DIRS[d][0]},{t[1] + DIRS[d][1]}" not in seen]
+
 class World:
     def __init__(self, mem, tile_px):
         self.mem, self.tile_px = mem, tile_px
@@ -50,6 +54,7 @@ class World:
         self.current_place, self.merge_pending, self.new_arrival = None, None, False
         self._travelled = None
         self._cut_arrival = None
+        self._lone = None  # (step, dst, src): this step's crossing counted only its leaving side; mark_exit counts the arrival side
         self._last_miss_hash = {}
         self.self_spot, self._self_contradictions, self._self_from_motion = None, 0, False
         self._hud, self._persist = {}, {}
@@ -284,18 +289,34 @@ class World:
         return {"known_exit": known_exit,
                 "scroll": list(skill.scroll) if skill.scroll is not None else None}
     def _cross(self, src, tile, dst, arrive, step):
-        """Count one crossing under the exit it went through, on both sides: (src, tile, dst) and, if the arrival tile is known, (dst, arrive, src).
-        ponytail: a place change seen only by the next observation (Loop._moved, no tile) is not counted; arrive=None counts the leaving side only."""
+        """Count one crossing under the exit it went through, on both sides: (src, tile, dst) and (dst, arrive, src). A side whose tile is
+        unknown is found as the other end of the known one (_partner); if none, only the known side counts.
+        ponytail: a place change seen only by the next observation counts in unseen_cross, and only when its exit tile is within 1 of pos."""
+        tile, arrive = (tuple(tile) if tile else None), (tuple(arrive) if arrive else None)
+        if tile and not arrive: arrive = self._partner(dst, src, tile)
+        if arrive and not tile: tile = self._partner(src, dst, arrive)
+        if tile and not arrive: self._lone = (step, dst, src)  # the exit row for the arrival side is written by mark_exit, after this
         for place, at, other in ((src, tile, dst), (dst, arrive, src)):
-            if not at: continue
-            key = _cross_key(place, at, other)
-            row = self.mem.get("crossings", key) or {"id": key, "n": 0}
-            self.mem.upsert("crossings", {**row, "n": row["n"] + 1, "last": step})
+            if at: self._count(place, at, other, step)
+    def _count(self, place, at, other, step):  # one crossing counted on one side of an exit
+        key = _cross_key(place, at, other)
+        row = self.mem.get("crossings", key) or {"id": key, "n": 0}
+        self.mem.upsert("crossings", {**row, "n": row["n"] + 1, "last": step})
+    def _partner(self, place, to, at):  # the tile of place whose exit leads to `to` and arrives on `at`: the other end of one exit, or None
+        hits = [(r["x"], r["y"]) for r in self.mem.rows("tiles") if r.get("place") == place and (r.get("exit") or {}).get("to") == to
+                and tuple((r.get("exit") or {}).get("arrive") or ()) == at]
+        return hits[0] if len(hits) == 1 else None
+    def unseen_cross(self, src, dst, step):  # a place change first seen at the next observation: pos is still in src, so its exit tile is the one within 1
+        hits = [r for r in self.mem.rows("tiles") if r.get("place") == src and (r.get("exit") or {}).get("to") == dst and max(abs(r["x"] - self.pos[0]), abs(r["y"] - self.pos[1])) <= 1]
+        if len(hits) == 1: self._cross(src, (hits[0]["x"], hits[0]["y"]), dst, hits[0]["exit"].get("arrive"), step)
+        # ponytail: no exit tile within 1 of pos (or two): the crossing is not counted
     def _seen_at(self, place):
         hit = getattr(self.mem, "arrival", None)
         return tuple(hit[1]) if hit and hit[0] == place else None
     def mark_exit(self, place, direction, to, arrive, step):
         mark_exit(self.mem, place, self._prepared[4], direction, to, arrive, step)
+        if self._lone == (step, to, place):  # the arrival side of this step's crossing: now that its exit row exists, count it
+            self._count(to, tuple(arrive), place, step); self._lone = None
     def _box(self, image, centre):
         t = self.tile_px; w, h = image.size
         x0, y0 = (min(max(round(centre[i] - t / 2), 0), max(n - t, 0)) for i, n in ((0, w), (1, h)))
@@ -392,10 +413,10 @@ class World:
         return paths
     def beyond(self, place, screen=()):
         """What lies beyond each verified exit of place: for every place reachable through it (never back through place), its unused
-        (unverified) exits and untried edges, counted per place then summed. dead_end: place has no untried edge or unverified exit and
+        (unverified) exits and unexplored edges (untried edges into unseen cells), counted per place then summed. dead_end: place has no unexplored edge or unverified exit and
         exactly one verified exit leads to anything unexplored (through: that exit's tile). Pure: writes nothing, asks no model."""
         live = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged"}
-        def here(pid, exits): return sum(x["status"] == "unverified" for x in exits), (len(frontier(self.mem, pid)) if self.tile_px else 0)
+        def here(pid, exits): return sum(x["status"] == "unverified" for x in exits), (len(unseen_edges(self.mem, pid)) if self.tile_px else 0)
         own = self._exits(place, live, screen)
         own_unused, own_unexplored = here(place, own)
         exits = {}
@@ -409,7 +430,7 @@ class World:
         dead_end = not own_unused and not own_unexplored and len(beyond) == 1
         return {"exits": exits, "dead_end": dead_end, "through": beyond[0] if dead_end else None}
     def resolve(self, name, per, place):
-        requested = str(name or "").strip()
+        requested = re.sub(r"\s*×\d+$", "", str(name or "").strip())  # a grouped label ("vent ×3") resolves like its name
         if not requested: return None
         places = [p for p in self.mem.rows("places") if p.get("state") != "merged"]
         live = {p["id"] for p in places}
@@ -444,8 +465,8 @@ class World:
 
     def _exits(self, pid, live, screen=()):
         """Exit records of place pid: the one source for World.options and the view. A record is a tile exit to a live place, or a thing
-        named as an exit (remembered, or on screen as (index, entity, id)). Records to the same destination with tiles within 1 are one exit:
-        the best record (crossed or observed, then a tile exit) gives its tile and name. Status: verified when crossed in either direction
+        named as an exit (remembered, or on screen as (index, entity, id)). Records to the same destination with tiles within 1 are one exit, and so is
+        an unverified record with no destination within 1 of a verified one: the best record (crossed or observed, then a tile exit) gives its tile and name. Status: verified when crossed in either direction
         (counted crossings, a confirmed leads_to, or an observed exit arriving on its tile), refuted by the _failed_exit rule, else unverified.
         uses/last count every crossing through the exit's tiles, both directions. Sorted by tile row and column."""
         things = {tuple(e["tile"]): e for e in self.mem.rows("entities") if e.get("place") == pid and e.get("tile") and e.get("name")
@@ -480,8 +501,8 @@ class World:
             rec["alone"] = bool(rec["n"] or rec["sup"] or rec["arrived"] or rec["observed"])
         groups = []  # ponytail: a twin is found by destination and Chebyshev distance 1 against the group's best record only
         for rec in sorted(recs, key=lambda r: (not r["alone"], not r["observed"], not r["pushed"], _yx(r["tile"], r["name"] or r["dir"]))):
-            twin = next((g for g in groups if rec["dest"] and g[0]["dest"] == rec["dest"] and rec["tile"] and g[0]["tile"]
-                         and max(abs(g[0]["tile"][0] - rec["tile"][0]), abs(g[0]["tile"][1] - rec["tile"][1])) <= 1), None)
+            twin = next((g for g in groups if (rec["dest"] and g[0]["dest"] == rec["dest"] or g[0]["alone"] and not rec["alone"] and not rec["dest"]) and rec["tile"] and g[0]["tile"]
+                         and max(abs(g[0]["tile"][0] - rec["tile"][0]), abs(g[0]["tile"][1] - rec["tile"][1])) <= 1), None)  # an unverified thing with no destination next to a verified exit is that exit; a known other destination stays its own exit
             if twin is None: groups.append([rec])
             else: twin.append(rec)
         out = []
@@ -490,7 +511,7 @@ class World:
             sup = [x for m in g for x in m["sup"]]
             steps = [m["last"] for m in g if m["n"] and m["last"] is not None] + [x["step"] for x in sup if x.get("step") is not None]
             uses = max(sum(m["n"] for m in g), sum(x.get("sup", 0) for x in sup), 1 if any(m["observed"] or m["arrived"] for m in g) else 0)
-            name = next((m["name"] for m in g if m["name"]), None); dir_ = next((m["dir"] for m in g if m["dir"]), "")
+            name = best["name"] or next((m["name"] for m in g if m["name"]), None); dir_ = next((m["dir"] for m in g if m["dir"]), "")
             head = (name[5:].strip() if name.casefold().startswith("exit:") else name) if name else dir_
             refuted = not uses and any(self._failed_exit(m["row"], pid) for m in g if m["row"].get("tile"))
             if uses: label = f"exit {head} → {self.place_label(dest)} (used {uses}×" + (f", last step {max(steps)}" if steps else "") + ")"
@@ -507,12 +528,8 @@ class World:
                         "status": status, "label": label})
         return sorted(out, key=lambda x: _yx(x["tile"], x["name"] or x["dir"]))
 
-    def _exit_rows(self, pid, live):
-        """A place's exit table for the view: the _exits records, head shown as the direction for a pushed exit."""
-        return [{**x, "head": x["dir"] if x["pushed"] else x["head"]} for x in self._exits(pid, live)]
-
-    def view(self, goal_text, place):
-        live = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged" and p.get("screen") == "world"}  # navigable places only: the run-start place never lists
+    def view(self, goal_text, place, compact=False):  # compact: the ACT prompt's facts, without what its options already say
+        live ={p["id"] for p in self.mem.rows("places") if p.get("state") != "merged" and p.get("screen") == "world"}  # navigable places only: the run-start place never lists
         populated = {r.get("place") for r in self.mem.rows("tiles")} | {e.get("place") for e in self.mem.rows("entities")}
         places = [p for p in self.mem.rows("places") if p.get("id") in live and (p.get("edges") or p.get("visits") or p["id"] in populated)]
         def exit_text(x, far=None):  # by _exits status: verified "head -> place used N×" + what lies beyond; refuted: its label; else a guess
@@ -532,7 +549,7 @@ class World:
         seen = self.mem.get("seen", place) or {"cells": []}
         seen_cells = set(seen.get("cells", []))
         edges = frontier(self.mem, place)
-        unseen = sum(f"{x + DIRS[d][0]},{y + DIRS[d][1]}" not in seen_cells for (x, y), d in edges)
+        unseen = len(unseen_edges(self.mem, place))
         walked = sum(r.get("floor") is True for r in tiles)
         lines = [f"Here: {label} ({self.pos[0]},{self.pos[1]})  map: {walked} walked, {len(seen_cells)} seen, {len(edges)} untried edges ({unseen} into unseen)"]
 
@@ -564,24 +581,32 @@ class World:
                              "status": best.get("status", "remembered"), "last": best.get("last", 0),
                              "_members": members})
         entities.sort(key=lambda e: (tier(e) != "interest", e["id"]))
+        exit_rows = self._exits(place, live)
+        def owner(e):  # the _exits record an exit-kind thing belongs to: same ident, else its tile within Chebyshev 1
+            if not _is_exit(e): return None
+            return next((x for x in exit_rows if x["ident"] == e["id"] or x["tile"] and e.get("tile")
+                         and max(abs(x["tile"][0] - e["tile"][0]), abs(x["tile"][1] - e["tile"][1])) <= 1), None)
         symbols = "ABCDFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-        marks, legend = {}, []
+        marks, legend, shown = {}, [], set()
         mapped = set()
         for i, e in enumerate(e for e in entities if x0 <= e["tile"][0] <= x1 and y0 <= e["tile"][1] <= y1 and tuple(e["tile"]) not in marks):
             if i == len(symbols): break
-            symbol = symbols[i]; marks[tuple(e["tile"])] = symbol
             mapped.update(member["id"] for member in e["_members"])
+            rec = owner(e)
+            if rec and id(rec) in shown: continue  # one exit, one legend line: its other things are not listed again
+            if rec: shown.add(id(rec))
+            symbol = symbols[i]; marks[tuple(e["tile"])] = symbol
             status = e.get("status", "remembered")
             last = f"last seen {tuple(e['tile'])} step {e.get('last', 0)}; may have moved" if status == "stale" else f"{status} step {e.get('last', 0)}"
             count = len(e["_members"])
-            name = f"{e['name']} ×{count}" if count > 1 else e.get("name", e["id"])
+            name = rec["head"] if rec else f"{e['name']} ×{count}" if count > 1 else e.get("name", e["id"])
             nearest = f" (nearest {tuple(e['tile'])})" if count > 1 else ""
             legend.append(f"{'Thing' if tier(e) == 'interest' else 'Landmark'} {symbol} {name} {tuple(e['tile'])} {normalize_kind(e.get('kind'))} {last}{nearest}{self._notes(e['id'])}")
         for y in range(y0, y1 + 1):
             row = []
             for x in range(x0, x1 + 1):
                 tile = cells.get((x, y), {})
-                glyph = "@" if (x, y) == tuple(self.pos) else "E" if tile.get("exit") else marks.get((x, y))
+                glyph = "@" if (x, y) == tuple(self.pos) else "E" if tile.get("exit") else None if compact else marks.get((x, y))
                 if glyph is None:
                     for d, (dx, dy) in DIRS.items():
                         source = cells.get((x - dx, y - dy), {})
@@ -589,20 +614,20 @@ class World:
                             glyph = "#"; break
                 if glyph is None: glyph = "." if tile.get("floor") is True else "," if f"{x},{y}" in seen_cells else " "
                 row.append(glyph)
-            lines.append("".join(row))
-        lines.append("Map: . walked, , seen, # blocked side, E exit already used, @ you; letters mark things and landmarks (kind exit = seen, not yet used)")
-        exit_rows = self._exit_rows(place, live)
+            lines.append("".join(row).rstrip() if compact else "".join(row))
+        lines.append("Map: . walked, , seen, # blocked side, E exit already used, @ you" + ("" if compact else "; letters mark things and landmarks (kind exit = seen, not yet used)"))
         far = self.beyond(place)  # ponytail: no screen things here; view's live set is navigable places, so a through exit missing from the table prints nothing
-        for e in exit_rows:  # ponytail: beyond suffix on this place's exits only; other places' exits show status alone (each beyond() walks the map)
-            lines.append(f"E at ({e['tile'][0]},{e['tile'][1]}) {'push ' if e['pushed'] else ''}{exit_text(e, far['exits'].get(e['tile']))}")
-        through = [e["head"] for e in exit_rows if e["tile"] == far["through"]] if far["dead_end"] else []
-        if through: lines.append(f"Everything unexplored from here is through: {through[0]}")
+        if not compact:  # the options already name this place's exits and the dead end
+            for e in exit_rows:  # ponytail: beyond suffix on this place's exits only; other places' exits show status alone (each beyond() walks the map)
+                lines.append(f"E at ({e['tile'][0]},{e['tile'][1]}) {exit_text(e, far['exits'].get(e['tile']))}")
+            through = [e["head"] for e in exit_rows if e["tile"] == far["through"]] if far["dead_end"] else []
+            if through: lines.append(f"Everything unexplored from here is through: {through[0]}")
         here = {e["id"] for e in self.mem.rows("entities") if e.get("place") == place} | set(self.entity_ids.values())
         refuted = {}  # most recent first; a thing's first 'not working' note only
         for r in sorted((r for r in self.mem.rows("relations") if r.get("p") == "does_nothing" and r.get("state") == "refuted" and r.get("s") in here), key=lambda r: -r.get("step", 0)):
             note = [n for n in self._notes(r["s"]).split("; ") if n.startswith("not working")]
             if note: refuted.setdefault(r["s"], note[0])
-        if refuted: lines.append("Don't believe: " + "; ".join(f"{(self.mem.get('entities', s) or {}).get('name', s)} ({n})" for s, n in list(refuted.items())[:2]))
+        if refuted and not compact: lines.append("Don't believe: " + "; ".join(f"{(self.mem.get('entities', s) or {}).get('name', s)} ({n})" for s, n in list(refuted.items())[:2]))
         current_detail = []
         for base, group in sorted(current_groups.items()):
             if any(e["id"] in mapped for e in group): continue
@@ -627,12 +652,14 @@ class World:
         for other in others:
             pid = other["id"]
             aliases = other.get("aliases", [])
-            header = [f"Place: {self.place_label(pid)}" + (f" aliases: {', '.join(map(str, aliases))}" if aliases else "")]
-            header.extend(f"  Exit {exit_text(e)}" for e in self._exit_rows(pid, live))
+            label = self.place_label(pid)
+            same = {label.casefold(), str(place_name(other) or "").casefold()}
+            redundant = compact and all(str(a).casefold() in same for a in aliases)  # compact: aliases that only repeat the name say nothing
+            header = [f"Place: {label}" + (f" aliases: {', '.join(map(str, aliases))}" if aliases and not redundant else "")]
+            header.extend(f"  Exit {exit_text(e)}" for e in self._exits(pid, live))
             place_headers[pid] = header
             other_edges = frontier(self.mem, pid)
-            other_seen = set((self.mem.get("seen", pid) or {}).get("cells", []))
-            other_unseen = sum(f"{x + DIRS[d][0]},{y + DIRS[d][1]}" not in other_seen for (x, y), d in other_edges)
+            other_unseen = len(unseen_edges(self.mem, pid))
             groups = {}
             for e in self.mem.rows("entities"):
                 if e.get("place") == pid and tier(e) == "interest" and eligible(e):
@@ -665,10 +692,11 @@ class World:
             output.extend((label, detail[0]))
             for line in detail[1:]:
                 if len("\n".join((*output, line))) <= VIEW_TOKENS * 4: output.append(line)
-        add_detail_bundle(f"Things here: {label}", [*legend, *current_detail])
-        for other in others:
-            pid = other["id"]
-            if pid in included: add_detail_bundle(f"Things: {self.place_label(pid)}", place_things[pid])
+        if not compact:  # the options already name the things; the detail bundles repeat them
+            add_detail_bundle(f"Things here: {label}", [*legend, *current_detail])
+            for other in others:
+                pid = other["id"]
+                if pid in included: add_detail_bundle(f"Things: {self.place_label(pid)}", place_things[pid])
 
         flags = list(getattr(self, "view_flags", ()))
         if self.merge_pending: flags.append(f"merge_pending: {self.merge_pending}")
@@ -676,7 +704,7 @@ class World:
         for ident, hud in self._hud.items():
             row = self.mem.get("entities", ident)
             if hud["changed"] is not None and row and row.get("place") == place: flags.append(f"HUD {row['name']} changed at step {hud['changed']}")
-        for line in (f"Flag: {flag}" for flag in dict.fromkeys(flags)):
+        for line in (f"Flag: {flag}" for flag in dict.fromkeys(flags)) if not compact else ():  # compact: the act prompt's Flags: line carries them
             if len("\n".join((*output, line))) <= VIEW_TOKENS * 4: output.append(line)
         return "\n".join(output)
     def _tile(self, ident):
@@ -739,12 +767,16 @@ class World:
                 if r.get("place") != place or not r.get("tile") or not r.get("name") or r["id"] in on or normalize_kind(r.get("kind")) in TRANSIENT or _is_exit(r): continue
                 tile, name = tuple(r["tile"]), r["name"]
                 row = option("remembered", "go_to", f"go to {name} ({r.get('status', 'remembered')}, seen {step - r.get('last', step)} steps ago)", {"go_to": name}, r["id"], "approach", name, goto=name)
-                if normalize_kind(r.get("kind")) not in ACTOR_KINDS and not row[1]["notes"] and r["id"] not in hist: quiet.append((_yx(tile, name), name)); continue
+                if normalize_kind(r.get("kind")) not in ACTOR_KINDS and not row[1]["notes"] and r["id"] not in hist:
+                    if r.get("status") != "gone" and r.get("anchor") not in ("screen", "self"): quiet.append((_yx(tile, name), name))  # gone things and HUD/self things are not in this place's row
+                    continue
                 remembered.append((_yx(tile, name), row))
             rows += [row for _, row in sorted(remembered, key=lambda kv: kv[0])]
             if self.tile_px:
                 untried = [(t, d) for t, d in frontier(self.mem, place) if ((self.mem.get("tiles", f"{place}@{t[0]},{t[1]}") or {}).get("exit") or {}).get("dir") != d]
-                if untried: rows.append(option("explore", "explore", f"walk to an unexplored part of this place ({len(untried)} spots)", {"go_to": "unexplored"}, None, "approach", "unexplored"))
+                n = len(set(untried) & set(unseen_edges(self.mem, place)))
+                spots = "0 spots lead anywhere unseen" if not n else "1 spot leads somewhere unseen" if n == 1 else f"{n} spots lead somewhere unseen"
+                if untried: rows.append(option("explore", "explore", f"walk to an unexplored part of this place ({spots})", {"go_to": "unexplored"}, None, "approach", "unexplored"))
             places = []
             for p in self.mem.rows("places"):
                 pid = p["id"]
@@ -756,8 +788,13 @@ class World:
             if places and len(rows) + len(places) + bool(quiet) > OPTION_CAP:  # ponytail: all known places share one row; exits and characters are never collapsed, so the cap is soft for them
                 places = [("place", {"tool": "go_to", "label": "go to another known place: " + ", ".join(row[2] for row in places), "action": None, "notes": []}, None)]
             if quiet:
-                names = list(dict.fromkeys(name for _, name in sorted(quiet, key=lambda kv: kv[0])))
-                quiet = [("thing", {"tool": "go_to", "label": "look at or go to a thing here: " + ", ".join(names), "action": None, "notes": []}, None)]
+                groups = {}  # base name, case-insensitive ("vent 1", "vent#2" -> "vent"): [first sort key, base, distinct names]
+                for key, name in sorted(quiet, key=lambda kv: kv[0]):
+                    base = re.sub(r"(\s*#\d+|\s+\d+)$", "", name) or name
+                    g = groups.setdefault(base.casefold(), [key, base, []])
+                    if name not in g[2]: g[2].append(name)
+                names = [g[2][0] if len(g[2]) == 1 else f"{g[1]} ×{len(g[2])}" for g in sorted(groups.values(), key=lambda g: (g[0], g[1]))]
+                quiet =[("thing", {"tool": "go_to", "label": "look at or go to a thing here: " + ", ".join(names), "action": None, "notes": []}, None)]
             rows += places + quiet + [free(free_label)]
         return [{"n": n, **row[1]} for n, row in enumerate(rows, 1)]
     def plan(self, target):

@@ -4,7 +4,9 @@ from types import SimpleNamespace
 import pytest
 from agent.loop import Loop
 from agent.memory import Memory
+from agent.space import mark_exit
 from tests.agent.fakes import GridEnv, StubModel
+from tests.agent.test_options import INPUTS, room
 from agent.model import ModelUnavailable
 
 def reply(data): return type("Reply", (), {"data": data})()
@@ -1045,3 +1047,41 @@ def test_successful_use_clears_a_refuted_thing_in_place(tmp_path, monkeypatch):
     dn = [r for r in loop.mem.rows("relations") if r["s"] == exit_id and r["p"] == "does_nothing" and r["o"] == ""]
     assert len(dn) == 1 and dn[0]["state"] == "live" and dn[0]["con"] == 0 and dn[0]["ev"] == []  # reset in place, not deleted
     assert "not working" not in loop.world.view("", loop.place) and any(r["id"] == exit_id for r in loop.mem.rows("entities"))
+
+
+def _seen_next_step(tmp_path, monkeypatch, pos=(2, 0), exit_tile=True):
+    """Loop in room at pos; its next observation is hall, with no scene cut and no press counted by World.after."""
+    from agent import loop as module
+    mem = Memory(tmp_path / "memory"); room(mem)
+    if exit_tile: mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
+    per = {"screen": "world", "text": [], "entities": [{"name": "player", "kind": "player", "at": [.5, .5]}]}
+    monkeypatch.setattr(module, "perceive", lambda *_: (per, reply({})))
+    monkeypatch.setattr(module, "act", fake_act(None))
+    env = GridEnv(); loop = Loop(env, StubModel([]), mem, "grid")
+    loop.prev_frame = env.screenshot()  # the previous step's frame: same as now, so no cut
+    loop.place, loop.world.current_place, loop.world.pos = "room", "room", pos
+    loop.world._self_from_motion, loop.world.self_spot = True, [.5, .5]  # no probe press
+    loop.mem.match_place = lambda *args, **kwargs: "hall"
+    return loop, mem, per
+
+
+@pytest.mark.parametrize("pos", [(2, 0), (1, 1)])
+def test_place_change_seen_only_by_next_observation_counts_its_exit_on_both_sides(tmp_path, monkeypatch, pos):
+    loop, mem, per = _seen_next_step(tmp_path, monkeypatch, pos)
+    loop.step()
+    assert mem.get("crossings", "room@2,0>hall")["n"] == 1 and mem.get("crossings", "hall@0,0>room")["n"] == 1
+    assert any(o["label"].startswith("exit RIGHT → Hall (used 1×") for o in loop.world.options(per, "room", {}, 3, inputs=INPUTS))
+    assert any(o["label"].startswith("exit LEFT → Room (used 1×") for o in loop.world.options(per, "hall", {}, 3, inputs=INPUTS))
+
+
+def test_place_change_with_no_exit_tile_counts_nothing_and_does_not_crash(tmp_path, monkeypatch):
+    loop, mem, _ = _seen_next_step(tmp_path, monkeypatch, exit_tile=False)
+    assert loop.step()["next_place"] == "hall" and mem.rows("crossings") == []
+
+
+def test_crossing_already_counted_by_the_scene_cut_is_not_counted_again(tmp_path, monkeypatch):
+    loop, mem, _ = _seen_next_step(tmp_path, monkeypatch)
+    loop.world._cross("room", (2, 0), "hall", (0, 0), 1)  # what World.after counts for a scene cut after a press
+    loop.place, loop.world.current_place, loop.world.pos = "hall", "hall", (0, 0)  # the end of that step
+    loop.step()
+    assert mem.get("crossings", "room@2,0>hall")["n"] == 1 and mem.get("crossings", "hall@0,0>room")["n"] == 1

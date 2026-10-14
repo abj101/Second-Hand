@@ -59,7 +59,7 @@ class Loop:
         player_fix = self.world.fix_player(per, before.size); self.empty_streak = self.empty_streak + 1 if self.parse_failed else 0; self.repair_used = self.repair_used if self.parse_failed else False
         modal = self.prev and {self.prev.get("screen"), per.get("screen")} <= {"world", "dialogue", "menu"} and self.prev.get("screen") != per.get("screen") and "world" in (self.prev.get("screen"), per.get("screen")) and not (self.pending_cut or before_set.blank_seen)
         place = self.mem.match_place(per, self.step_no + 1, prev=prior, cut=bool((self.pending_cut or prior and cut(self.prev_frame, before, before_set.blank_seen)) and not modal), via=self.pending_via, frame=before, tile_px=self.tile_px)
-        if prior and place != prior: self._moved(prior, place, self.pending_via, self.step_no + 1)
+        if prior and place != prior: self.world.unseen_cross(prior, place, self.step_no + 1); self._moved(prior, place, self.pending_via, self.step_no + 1)
         self.place, self.pending_cut, self.pending_via = place, False, None
         size = before.size
         proj = self.world.before(per, place, prior, size, self.step_no + 1)[0]
@@ -123,7 +123,7 @@ class Loop:
             act_flags.append(recent_flag[:197] + "..." if len(recent_flag) > 200 else recent_flag)
         act_flags.append(self.world.here_flag())
         options = self.world.options(per, place, self.fails, self.step_no + 1, inputs=list(self.env.inputs()))  # failure history is in the option notes
-        a = act(self.model, None if self.act_text else model_frame, per, self.notebook.render_focus(), view, act_flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged" and p.get("screen") == "world"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]], options=options)
+        a = act(self.model, None if self.act_text else model_frame, per, self.notebook.render_focus(), self.world.view(self._goal_text(), place, compact=True), act_flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged" and p.get("screen") == "world"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]], options=options)
         picked = next((o for o in options if o["n"] == getattr(a, "option", None)), None)
         applied = self.notebook.apply(a.ops, self.step_no + 1, structure=False)
         closed = self.notebook.data["goals"].get(self.notebook.focus or "", {})

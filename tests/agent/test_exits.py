@@ -1,0 +1,96 @@
+from agent.memory import Memory
+from agent.space import mark_exit
+from tests.agent.test_options import INPUTS, at, room, setup, tile, walk
+
+
+def test_unverified_thing_next_to_a_verified_exit_is_that_exit_once(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
+    world, per = setup(mem, [{"name": "exit: door", "kind": "exit", "at": at(2, 0)}, {"name": "exit: stairs", "kind": "exit", "at": at(2, 1)}])
+    labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS)]
+    assert [l.split(" (")[0] for l in labels if l.startswith("exit ")] == ["exit door → Hall"]
+    assert not any("stairs" in l for l in labels)
+    view = world.view("the stairs and the door", "room")
+    assert "E at (2,0) door -> Hall used 1×" in view
+    assert sum(l.startswith("Thing ") and " door " in l for l in view.splitlines()) == 1 and not any("stairs" in l for l in view.splitlines())
+
+
+def test_unverified_exit_three_tiles_away_stays_a_separate_possible_exit(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
+    world, per = setup(mem, [{"name": "exit: stairs", "kind": "exit", "at": at(-1, 0)}])
+    labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS)]
+    assert any(l.startswith("exit RIGHT → Hall (used 1×") for l in labels) and "possible exit stairs (unverified, never crossed)" in labels
+
+
+def test_two_verified_exits_with_different_destinations_next_to_each_other_stay_two(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
+    mark_exit(mem, "room", (2, 1), "DOWN", "cave", (0, 0), 1)
+    world, per = setup(mem, [])
+    labels = [o["label"].split(" (")[0] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["label"].startswith("exit ")]
+    assert labels == ["exit RIGHT → Hall", "exit DOWN → Cave"]
+
+
+def test_every_crossing_counts_on_both_sides_when_the_arrival_tile_is_unknown(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
+    world, per = setup(mem, []); world.pos = (2, 0)
+    walk(world, "room", "hall", "RIGHT", 1); walk(world, "hall", "room", "LEFT", 2)
+    world._cross("room", (2, 0), "hall", None, 3)  # only the leaving tile is known: the arrival tile is found from the exit pair
+    world.current_place = "room"
+    room_labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS)]
+    hall_labels = [o["label"] for o in world.options(per, "hall", {}, 3, inputs=INPUTS)]
+    assert any(l.startswith("exit RIGHT → Hall (used 3×, last step 3)") for l in room_labels)
+    assert any(l.startswith("exit LEFT → Room (used 3×, last step 3)") for l in hall_labels)
+    assert "E at (2,0) RIGHT -> Hall used 3×" in world.view("", "room") and "  Exit RIGHT -> Hall used 3×" in world.view("", "hall")
+    assert "E at (0,0) LEFT -> Room used 3×" in world.view("", "hall") and "  Exit LEFT -> Room used 3×" in world.view("", "room")
+
+
+def test_every_crossing_counts_on_both_sides_when_the_leaving_tile_is_unknown(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
+    world, per = setup(mem, []); world.pos = (2, 0)
+    walk(world, "room", "hall", "RIGHT", 1)
+    world._cross("hall", None, "room", (2, 0), 2)  # only the arrival tile is known
+    world.pos = (2, 0); walk(world, "room", "hall", "RIGHT", 3)
+    room_labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS)]
+    hall_labels = [o["label"] for o in world.options(per, "hall", {}, 3, inputs=INPUTS)]
+    assert any(l.startswith("exit RIGHT → Hall (used 3×") for l in room_labels) and any(l.startswith("exit LEFT → Room (used 3×") for l in hall_labels)
+
+
+def test_unverified_exit_with_another_known_destination_next_to_a_verified_one_stays_separate(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
+    tile(mem, 2, -1, {"dir": "UP", "to": "cave", "arrive": [0, 0], "src": "inferred"})  # known to lead to Cave, never crossed
+    world, per = setup(mem, [])
+    labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["label"].startswith(("exit ", "possible exit"))]
+    assert [l.split(" (")[0] for l in labels] == ["possible exit UP", "exit RIGHT → Hall"]  # sorted by tile row: UP (row -1) first
+
+
+def test_unseen_cross_counts_nothing_when_no_exit_tile_is_within_one(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
+    world, per = setup(mem, []); world.pos = (0, 0)
+    world.unseen_cross("room", "hall", 2)
+    assert mem.rows("crossings") == []
+
+
+def test_unseen_cross_counts_nothing_when_two_exits_to_the_same_place_are_within_one(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
+    tile(mem, 2, 1, {"dir": "DOWN", "to": "hall", "arrive": [0, 1], "src": "observed"})
+    world, per = setup(mem, []); world.pos = (1, 0)
+    world.unseen_cross("room", "hall", 2)
+    assert mem.rows("crossings") == []
+
+
+def test_first_crossing_counts_the_arrival_side_once_its_exit_is_written(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, []); world.pos = (2, 0)
+    walk(world, "room", "hall", "RIGHT", 1)  # first crossing: no exit rows yet, so the arrival tile is unknown
+    world.mark_exit("room", "RIGHT", "hall", world.pos, 1)  # the loop writes the exit pair in the same step
+    walk(world, "hall", "room", "LEFT", 2); walk(world, "room", "hall", "RIGHT", 3)
+    room_labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["tool"] != "buttons"]
+    hall_labels = [o["label"] for o in world.options(per, "hall", {}, 3, inputs=INPUTS) if o["tool"] != "buttons"]
+    assert any(l.startswith("exit RIGHT → Hall (used 3×") for l in room_labels) and any(l.startswith("exit LEFT → Room (used 3×") for l in hall_labels)

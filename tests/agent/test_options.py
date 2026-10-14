@@ -111,7 +111,7 @@ def test_fifteen_remembered_things_share_one_row_and_stay_reachable(tmp_path):
     assert "approach npc" in labels and "interact with npc" in labels
     thing = opts[-2]
     assert thing["tool"] == "go_to" and thing["action"] is None and thing["notes"] == []
-    assert thing["label"].startswith("look at or go to a thing here: ") and sorted(names_in(thing)) == sorted(f"crate {n}" for n in range(15))
+    assert thing["label"].startswith("look at or go to a thing here: ") and sorted(names_in(thing)) == ["crate ×15"]
     assert not any(label.startswith("go to crate") for label in labels)
 
 
@@ -128,7 +128,7 @@ def test_twelve_plain_things_one_character_two_exits(tmp_path):
     assert "approach npc" in labels and "interact with npc" in labels
     things = [o for o in opts if o["label"].startswith("look at or go to a thing here: ")]
     assert len(things) == 1 and things[0]["tool"] == "go_to" and things[0]["action"] is None
-    assert sorted(names_in(things[0])) == sorted(f"lamp {n}" for n in range(12))
+    assert sorted(names_in(things[0])) == ["lamp ×12"]
     assert not any("lamp" in label for label in labels if label != things[0]["label"])
 
 
@@ -144,7 +144,7 @@ def test_a_thing_with_history_keeps_its_own_option(tmp_path):
     assert by["approach sign"]["action"] == {"thing": 13, "verb": "approach"}  # index 0 is the player
     assert by["approach vase"]["notes"] == ["tried here 1×, last: wall"]
     things = [o for o in opts if o["label"].startswith("look at or go to a thing here: ")]
-    assert sorted(names_in(things[0])) == sorted(f"lamp {n}" for n in range(12))  # the sign and the vase are not in the shared row
+    assert sorted(names_in(things[0])) == ["lamp ×12"]  # the sign and the vase are not in the shared row
     assert "sign" not in names_in(things[0]) and "vase" not in names_in(things[0])
     assert len(opts) - 1 <= OPTION_CAP
 
@@ -238,7 +238,7 @@ def chain(mem):
     cell("b", 0, 0, ["UP", "DOWN"], {"dir": "LEFT", "to": "a", "arrive": [0, 0], "src": "observed"})
     cell("b", 1, 0, ["UP", "DOWN"], {"dir": "RIGHT", "to": "c", "arrive": [0, 0], "src": "observed"})
     cell("c", 0, 0, ["UP", "DOWN", "RIGHT"], {"dir": "LEFT", "to": "b", "arrive": [1, 0], "src": "observed"})
-    mem.upsert("entities", {"id": "north", "name": "exit: north", "kind": "exit", "place": "c", "tile": [0, -1], "status": "remembered", "last": 1, "seen": 1})
+    mem.upsert("entities", {"id": "north", "name": "exit: north", "kind": "exit", "place": "c", "tile": [0, -2], "status": "remembered", "last": 1, "seen": 1})
 
 
 def test_beyond_counts_what_lies_through_each_exit_and_finds_the_dead_end(tmp_path):
@@ -271,3 +271,56 @@ def test_view_says_when_everything_unexplored_is_through_one_exit(tmp_path):
     assert "Everything unexplored from here is through: RIGHT" in world.view("", "a")
     world.current_place = "c"
     assert "Everything unexplored from here is through:" not in world.view("", "c")
+
+
+def two_rooms(tmp_path, seen):
+    """Room A's only untried edge is UP (its exit RIGHT leads to Room B, which has unseen edges). seen: A's seen cells."""
+    mem = Memory(tmp_path)
+    for pid, name in (("a", "Room A"), ("b", "Room B")):
+        mem.upsert("places", {"id": pid, "name": name, "screen": "world", "state": "place", "first": 1, "last": 1, "edges": []})
+    def cell(place, x, y, blocked, exit=None): mem.upsert("tiles", {"id": f"{place}@{x},{y}", "place": place, "x": x, "y": y, "floor": True, "blocked": blocked, "pushed": [], "exit": exit, "step": 1})
+    cell("a", 0, 0, ["DOWN", "LEFT"], {"dir": "RIGHT", "to": "b", "arrive": [0, 0], "src": "observed"})
+    cell("b", 0, 0, ["UP"], {"dir": "LEFT", "to": "a", "arrive": [0, 0], "src": "observed"})
+    mem.upsert("seen", {"id": "a", "cells": seen, "step": 1})
+    return mem
+
+
+def test_untried_edge_into_a_seen_cell_is_not_unexplored_so_the_dead_end_fires(tmp_path):
+    world = World(two_rooms(tmp_path, ["0,-1"]), 16); world.current_place = "a"
+    assert world.beyond("a")["dead_end"] is True and world.beyond("a")["through"] == (0, 0)
+    per = {"screen": "world", "text": [], "entities": [player()]}
+    opts = world.options(per, "a", {}, 3, inputs=INPUTS)
+    exit_row = next(o for o in opts if o["label"].startswith("exit RIGHT"))
+    assert exit_row["notes"][0] == "everything unexplored from here is through this exit"
+    explore = next(o for o in opts if o["tool"] == "explore")
+    assert explore["label"] == "walk to an unexplored part of this place (0 spots lead anywhere unseen)" and explore["action"] == {"go_to": "unexplored"}
+    assert "Everything unexplored from here is through: RIGHT" in world.view("", "a")
+
+
+def test_explore_label_counts_only_untried_edges_into_unseen_cells(tmp_path):
+    per = {"screen": "world", "text": [], "entities": [player()]}
+    world = World(two_rooms(tmp_path / "x", ["0,-1"]), 16); world.current_place = "a"
+    assert next(o for o in world.options(per, "a", {}, 3, inputs=INPUTS) if o["tool"] == "explore")["label"].endswith("(0 spots lead anywhere unseen)")
+    world = World(two_rooms(tmp_path / "y", []), 16); world.current_place = "a"  # its one untried edge is now unseen
+    assert next(o for o in world.options(per, "a", {}, 3, inputs=INPUTS) if o["tool"] == "explore")["label"] == "walk to an unexplored part of this place (1 spot leads somewhere unseen)"
+
+
+def test_thing_row_lists_only_this_place_and_groups_numbered_names(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    tile(mem, 2, 0, {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "observed"})
+    tile(mem, 0, -2, {"dir": "UP", "to": "cave", "arrive": [0, 0], "src": "observed"})
+    for n in range(2): mem.upsert("entities", {"id": f"hall{n}", "name": f"hall thing {n}", "kind": "furniture", "place": "hall", "tile": [0, n], "status": "remembered", "last": 1, "seen": 1})
+    mem.upsert("entities", {"id": "gonebox", "name": "old box", "kind": "furniture", "place": "room", "tile": [1, 1], "status": "gone", "last": 1, "seen": 1})
+    names = ["vent", "vent 1", "vent 2", "cabinet#7", "cabinet#6", "cabinet", "PC", "desk", "shelf#4", "lamp 0", "lamp 1", "lamp 2"]
+    world, per = setup(mem, [{"name": n, "kind": "furniture", "at": at(*SPOTS[i])} for i, n in enumerate(names)])
+    opts = world.options(per, "room", {}, 9, inputs=INPUTS)
+    things = [o for o in opts if o["label"].startswith("look at or go to a thing here: ")]
+    assert len(things) == 1 and len(opts) - 1 <= OPTION_CAP
+    assert sorted(names_in(things[0])) == ["PC", "cabinet ×3", "desk", "lamp ×3", "shelf#4", "vent ×3"]
+    assert not any(x in things[0]["label"] for x in ("vent 1", "hall thing", "old box"))
+
+
+def test_grouped_label_resolves_like_its_name(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, [{"name": "vent", "kind": "furniture", "at": at(*SPOTS[0])}])
+    assert world.resolve("vent", per, "room") is not None and world.resolve("vent ×3", per, "room") == world.resolve("vent", per, "room")

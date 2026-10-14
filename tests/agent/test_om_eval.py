@@ -43,7 +43,9 @@ def _opt(n, tool, label, action="a", notes=()):
     return {"n": n, "tool": tool, "label": label, "action": action, "notes": list(notes)}
 
 FREE = _opt(9, "buttons", "free buttons (not checked against memory)", action=None)
-STAIRS_OK = _opt(1, "go_to", "exit stairs → 1F (used 2×, last step 99) (1 unexplored exit, 10 unexplored spots beyond)")
+DEAD_END = "everything unexplored from here is through this exit"
+STAIRS_OK = _opt(1, "go_to", "exit stairs → 1F (used 2×, last step 99) (1 unexplored exit, 10 unexplored spots beyond)", notes=(DEAD_END,))
+EXPLORE_0 = _opt(3, "explore", "walk to an unexplored part of this place (0 spots lead anywhere unseen)", action={"go_to": "unexplored"})
 DOORWAY = _opt(2, "approach", "possible exit doorway (unverified, never crossed)")
 
 def _case_2f(options=None, exits=None, prompt="x" * 400):
@@ -75,6 +77,18 @@ def test_exit_truth_2F_fails_on_each_bad_stairs_label():
     }
     for name, options in bad.items():
         assert _status(eval_act.dry_gates(_case_2f(options=options)))["exit truth"] is False, name
+
+def test_exit_truth_2F_needs_the_dead_end_note_and_a_zero_unseen_explore_label():
+    ok = _case_2f(options=[STAIRS_OK, EXPLORE_0, DOORWAY, FREE])
+    assert _status(eval_act.dry_gates(ok))["exit truth"] is True
+    no_note = _opt(1, "go_to", STAIRS_OK["label"])
+    rows = eval_act.dry_gates(_case_2f(options=[no_note, DOORWAY, FREE]))
+    detail = next(d for g, ok_, d in rows if g == "exit truth")
+    assert _status(rows)["exit truth"] is False and "the stairs are not named as the way to everything unexplored" in detail
+    busy = _opt(3, "explore", "walk to an unexplored part of this place (26 spots lead somewhere unseen)", action={"go_to": "unexplored"})
+    rows = eval_act.dry_gates(_case_2f(options=[STAIRS_OK, busy, DOORWAY, FREE]))
+    detail = next(d for g, ok_, d in rows if g == "exit truth")
+    assert _status(rows)["exit truth"] is False and "explore label reports unseen spots" in detail and "26 spots" in detail
 
 def test_exit_truth_1F_fails_when_the_rug_is_verified():
     options = [_opt(1, "approach", "exit door mat → outside (used 3×, last step 40)"), FREE]

@@ -107,10 +107,10 @@ def test_free_shapes_still_parse_with_options_present():
 def test_prompt_lists_options_with_notes_and_no_things_list():
     out, model = run_with({"action": {"i": 1}, "notebook": []})
     user, system = model.args[0][1], model.args[0][0]
-    assert "Options:\n1. approach door\n2. go_to go to Hall — leads to Hall (used 2×, last step 5); refuted: wall\n3. buttons free input (any of: UP, A)" in user
+    assert "Options:\n1. approach door\n2. go to Hall — leads to Hall (used 2×, last step 5); refuted: wall\n3. buttons free input (any of: UP, A)" in user
     assert "Things on screen:" not in user and "0: door (exit)" not in user
-    assert '"action": {"i": n} to pick one option by number (preferred)' in user and "free buttons option" in user and "'info'" not in user
-    assert "The option notes are what already happened here" in system and "The option notes" not in SYSTEM
+    assert '"action": {"i": n} to pick one option by number (preferred)' in user and "'info'" not in user
+    assert "The option notes are what already happened here" in system and "free buttons option" in system and "The option notes" not in SYSTEM
 
 
 def test_nineteen_thing_room_prompt_fits_the_budget(tmp_path):
@@ -127,9 +127,12 @@ def test_nineteen_thing_room_prompt_fits_the_budget(tmp_path):
     world = World(mem, 16); world.current_place = "room"; world.before(per, "room", None, (160, 144), 1)
     options = world.options(per, "room", {}, 1, inputs=tuple(BUTTONS))
     assert len(options) - 1 <= OPTION_CAP
-    _, model = run_with({"action": {"i": 1}, "notebook": []}, options=options)
+    facts = world.view("", "room", compact=True)
+    model = Capture({"action": {"i": 1}, "notebook": []})
+    act(model, None, PERCEPTION, "Goals: reach the hall", facts, [], "A: press", {}, BUTTONS, options=options)
     system, user = model.args[0][0], model.args[0][1]
     assert len(system + user) / 4 <= 1600  # ponytail: chars/4 estimate, not the tokenizer
+    assert all(word in user for word in ("place", "notebook", "action", "text", "expect", "why", '"i"', '"thing"', '"go_to"', '"buttons"', "advance", "focus", "tried", "hints", "lessons"))
 
 
 def test_option_line_prints_the_tool_word_once():
@@ -137,7 +140,24 @@ def test_option_line_prints_the_tool_word_once():
                {"n": 2, "tool": "go_to", "label": "go to Hall", "action": {"go_to": "Hall"}, "notes": []}]
     _, model = run_with({"action": {"i": 1}, "notebook": []}, options=options)
     user = model.args[0][1]
-    assert "1. approach npc\n2. go_to go to Hall" in user and "approach approach" not in user
+    assert "1. approach npc\n2. go to Hall" in user and "approach approach" not in user
+
+
+def test_option_lines_print_each_tool_word_once_and_keep_remembered_labels():
+    options = [{"n": 1, "tool": "approach", "label": "approach npc", "action": {"thing": 0, "verb": "approach"}, "notes": []},
+               {"n": 2, "tool": "interact", "label": "interact with npc", "action": {"thing": 0, "verb": "interact"}, "notes": []},
+               {"n": 3, "tool": "go_to", "label": "go to computer desk (remembered, seen 30 steps ago)", "action": {"go_to": "computer desk"}, "notes": []},
+               {"n": 4, "tool": "select", "label": "select OK", "action": {"thing": 0, "verb": "select"}, "notes": []},
+               {"n": 5, "tool": "explore", "label": "walk to an unexplored part of this place (0 spots lead anywhere unseen)", "action": {"go_to": "unexplored"}, "notes": []},
+               {"n": 6, "tool": "buttons", "label": "free buttons (not checked against memory): UP", "action": None, "notes": []},
+               {"n": 7, "tool": "advance", "label": "advance", "action": {"verb": "advance"}, "notes": []}]
+    _, model = run_with({"action": {"i": 1}, "notebook": []}, options=options)
+    lines = model.args[0][1].split("Options:\n", 1)[1].split("\n")[:7]
+    assert lines[2] == "3. go to computer desk (remembered, seen 30 steps ago)"
+    for line, o in zip(lines, options):
+        body = line.split(". ", 1)[1]
+        w = o["tool"].replace("_", " ")
+        assert len(re.findall(rf"\b{w}\b", body.split(" (")[0])) == 1  # the tool word appears once
 
 
 def test_prompt_without_options_is_unchanged():
