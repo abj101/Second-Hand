@@ -63,3 +63,12 @@ Merged into contracts.md (memory, notebook and act, world) by WP-G; the OM3 item
 3. A mirror case (leaving tile unknown, arrival known) is not backfilled.
 4. A clean-boot live run needs a cap raise (about 250 requests per 150 steps).
 5. Movement fixes and the perceiver-prompt pass (invalidates the replay cache) remain out of scope.
+
+## 8. OM3.1: why the model pressed free buttons (wording only, no live re-measure)
+Diagnosis of the OM3 live replies (0 requests): (1) the compact view had dropped the exit lines and map letters, so nothing said where the stairs were; (2) the flags said `untried UP` next to `UP A -> done x4`; (3) the free-buttons row carried two conflicting notes and "(not checked against memory)".
+- H: compact view prints one line per current-place exit: `E at (x,y) <head>: used|possible, never crossed|not an exit, <dx> left/right, <dy> up/down` (`on it` when standing on it).
+- I: `here_flag(fails)`: a direction is `untried` only if no failed button combo is recorded under it; new part `failed here: UP A x4, DOWN x2`.
+- J: the free row has one note `failed here: ...`; label is `free buttons: <inputs>`; `_option_text` ignores a colon after the tool word.
+- Size limit raised 1,600 -> 1,700 (user-approved); prompts `.tmp/om/prompts_om3_1/` (OM3 prompts kept in `.tmp/om/om3_prompts/`).
+- Gates (0 requests, ledger 2120/2175, M1 2072/2125 unchanged): dry right 8/8, exit truth 8/8, size 8/8 (1,362 / 1,448 / 1,415 / 1,460 / 1,478 / 1,492 / 1,610 / 1,458); `--om places` PASS; generality 0 hits; suite 333 passed.
+- No live re-measure; the user decides.

@@ -425,9 +425,25 @@ def test_compact_view_drops_what_the_options_say_and_draws_no_letters(tmp_path):
 
     assert "Thing " in default and "E at (0,-1) UP -> Kitchen" in default and "Landmark " not in default
     assert lines[0].startswith("Here: Atrium (0,0)  map: ") and lines[16] == "Map: . walked, , seen, # blocked side, E exit already used, @ you"
-    assert not [l for l in lines if l.lstrip().startswith(("Thing", "Landmark", "E at", "Everything", "Edges"))]
+    assert not [l for l in lines if l.lstrip().startswith(("Thing", "Landmark", "Everything", "Edges"))]
+    assert "E at (0,-1) UP: possible, never crossed, 1 up" in lines and [l for l in lines if l.startswith("E at")] == ["E at (0,-1) UP: possible, never crossed, 1 up"]
     assert "E" in "".join(lines[1:16]) and set("".join(lines[1:16])) <= set("@E.,# ")
     assert "Place: Kitchen" in compact and len(compact) < len(default)
+
+
+def test_compact_view_says_where_each_exit_is_from_you_and_whether_it_was_used(tmp_path):
+    mem = Memory(tmp_path); place(mem, "here", "Atrium"); place(mem, "other", "Kitchen")
+    for x in range(-2, 3):
+        for y in range(-2, 3):
+            exit = {"dir": "LEFT", "to": "other", "arrive": [0, 0], "src": "observed"} if (x, y) == (-2, -1) else \
+                {"dir": "RIGHT", "to": "other", "arrive": [0, 0]} if (x, y) == (2, 1) else None
+            mem.upsert("tiles", {"id": f"here@{x},{y}", "place": "here", "x": x, "y": y, "floor": True, "blocked": [], "pushed": [], "exit": exit, "step": 1})
+    world = World(mem, 16); world.current_place, world.pos = "here", (0, 0)
+
+    compact = world.view("", "here", compact=True)
+
+    assert "E at (-2,-1) LEFT: used, 2 left, 1 up" in compact.splitlines()
+    assert "E at (2,1) RIGHT: possible, never crossed, 2 right, 1 down" in compact.splitlines()
 
 
 def test_compact_view_strips_map_trailing_spaces_flag_lines_and_name_only_aliases(tmp_path):
@@ -829,3 +845,15 @@ def test_view_exit_lines_say_status_and_the_dead_end_line_names_the_through_exit
     assert "E at (0,-2) north: possible exit, unverified (never crossed)" in c  # no destination known: no arrow
     assert "E at (1,2) not an exit: hatch (walked into 3×, steps 104–107)" in c and "E at (0,0) LEFT -> Room B used 1×" in c
     assert "Everything unexplored from here is through" not in c  # its own unverified exit is unexplored ground
+
+def test_here_flag_lists_failed_button_combos_and_drops_them_from_untried(tmp_path):
+    mem = Memory(tmp_path); world = World(mem, 16); world.current_place = "room"
+    mem.upsert("tiles", {"id": "room@0,0", "place": "room", "x": 0, "y": 0,
+                         "floor": True, "blocked": [], "pushed": [], "exit": None, "step": 1})
+    fails = {"room|up": {"n": 4, "why": "x", "step": 9, "act": "buttons UP A"},
+             "other|up": {"n": 1, "why": "x", "step": 10, "act": "buttons UP"}}
+    base = world.here_flag()
+    assert base == "here: blocked none; open none; untried UP, DOWN, LEFT, RIGHT; self unlocked"
+    assert world.here_flag({}) == base
+    flag = world.here_flag(fails)
+    assert "untried DOWN, LEFT, RIGHT;" in flag and "failed here: UP A x4; self unlocked" in flag

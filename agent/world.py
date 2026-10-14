@@ -260,17 +260,23 @@ class World:
             if scene_cut or skill.status != "done" or result["locked"]: break
         return result
 
-    def here_flag(self):
+    def here_flag(self, fails=None):
         tile = self.mem.get("tiles", f"{self.current_place}@{self.pos[0]},{self.pos[1]}") or {}
         blocked = set(tile.get("blocked", []))
         open_dirs = {d for d, (dx, dy) in DIRS.items()
                      if (neighbor := self.mem.get("tiles", f"{self.current_place}@{self.pos[0] + dx},{self.pos[1] + dy}"))
                      and neighbor.get("floor") is True}
         opened = open_dirs - blocked
-        untried = set(DIRS) - blocked - opened
+        failed = sorted(((k, f) for k, f in (fails or {}).items()
+                         if k.startswith(f"{self.current_place}|") and str(f.get("act", "")).startswith("buttons ")),
+                        key=lambda kf: kf[1].get("step", 0), reverse=True)
+        failed_keys = {k for k, _ in failed}
+        untried = {d for d in set(DIRS) - blocked - opened if fail_key(self.current_place, "buttons", d) not in failed_keys}
         parts = []
         for label, dirs in (("blocked", blocked), ("open", opened), ("untried", untried)):
             parts.append(f"{label} {', '.join(d for d in DIRS if d in dirs) or 'none'}")
+        if failed:
+            parts.append("failed here: " + ", ".join(f"{f['act'][len('buttons '):]} x{f['n']}" for _, f in failed[:4]))
         parts.append("self locked" if self._self_from_motion else "self unlocked")
         return "here: " + "; ".join(parts)
     def after(self, skill, place, next_place, scene_cut, step):  # call after prepare() for the same step
@@ -617,6 +623,14 @@ class World:
             lines.append("".join(row).rstrip() if compact else "".join(row))
         lines.append("Map: . walked, , seen, # blocked side, E exit already used, @ you" + ("" if compact else "; letters mark things and landmarks (kind exit = seen, not yet used)"))
         far = self.beyond(place)  # ponytail: no screen things here; view's live set is navigable places, so a through exit missing from the table prints nothing
+        if compact:  # the act prompt needs where this place's exits are from you, not what the options say
+            status_word = {"verified": "used", "unverified": "possible, never crossed", "refuted": "not an exit"}
+            def away(tile):  # "2 left, 1 up"; screen y grows down, "on it" when standing there
+                dx, dy = tile[0] - self.pos[0], tile[1] - self.pos[1]
+                parts = ([f"{abs(dx)} {'left' if dx < 0 else 'right'}"] if dx else []) + ([f"{abs(dy)} {'up' if dy < 0 else 'down'}"] if dy else [])
+                return ", ".join(parts) or "on it"
+            for e in exit_rows:
+                if e["tile"]: lines.append(f"E at ({e['tile'][0]},{e['tile'][1]}) {e['head']}: {status_word[e['status']]}, {away(e['tile'])}")
         if not compact:  # the options already name this place's exits and the dead end
             for e in exit_rows:  # ponytail: beyond suffix on this place's exits only; other places' exits show status alone (each beyond() walks the map)
                 lines.append(f"E at ({e['tile'][0]},{e['tile'][1]}) {exit_text(e, far['exits'].get(e['tile']))}")
@@ -726,11 +740,12 @@ class World:
             for n in (self._notes(ident) if ident else "").split("; "):
                 if n: notes.append(f"refuted: {n}" if n.startswith("not working") else n.replace("says the same as before", "talked; same text as before"))
             return (group, {"tool": tool, "label": label, "action": action, "notes": notes}, goto)
-        def free(label):  # free input has no single target; its notes are this place's button failures, newest first, at most 4
+        def free(label):  # free input has no single target; its one note names this place's failed button combos, newest first, at most 4
             hits = sorted(((f.get("step", 0), k, f) for k, f in fails.items() if k.startswith(f"{place}|") and str(f.get("act", "")).startswith("buttons ")), key=lambda t: (-t[0], t[1]))
             _, row, _ = option("free", "buttons", label, None)
-            return "free", {**row, "notes": [_tried(f) for _, _, f in hits[:4]]}, None
-        free_label = "free buttons (not checked against memory)" + (f": {', '.join(inputs)}" if inputs else "")
+            failed = ", ".join(f"{f['act'][len('buttons '):]} x{f['n']}" for _, _, f in hits[:4])
+            return "free", {**row, "notes": [f"failed here: {failed}"] if failed else []}, None
+        free_label = "free buttons" + (f": {', '.join(inputs)}" if inputs else "")
         if modal:
             choices = [(i, e) for i, e in enumerate(ents) if e.get("name") and normalize_kind(e.get("kind")) not in FURNITURE | TYPING]
             rows = [option("choice", "select", f"select {e['name']}", {"thing": i, "verb": "select"}, self.entity_ids.get(i), "select", e["name"])

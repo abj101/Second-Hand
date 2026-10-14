@@ -103,7 +103,7 @@ SCREEN_TYPES = ("world", "dialogue", "menu", "keyboard", "battle", "title", "oth
 PERCEIVER_MISSES = 3  # more cache misses than this and the replay no longer matches the recording
 FAKE_EXIT = "exit: doorway"  # m1_gp5's 2F doorway: walking into it changes nothing (RAM truth: map 38 stays put)
 DECISION_GATE, OLD_GATE = 6, 3  # of 8 cases
-MAX_OPTIONS, MAX_PROMPT_TOKENS = 10, 1600  # OM2 section 2 size gate: options excluding the free-buttons row; act prompt tokens = len/4
+MAX_OPTIONS, MAX_PROMPT_TOKENS = 10, 1700  # OM2 section 2 size gate: options excluding the free-buttons row; act prompt tokens = len/4
 FLOOR_OF_MAP = {37: "1F", 38: "2F"}  # truth.map of the m1_gp5 house (evaluation only; agent/ never reads truth)
 EXIT_ROWS = ("exit ", "possible exit ", "not an exit")  # option labels of exit records: verified, unverified, refuted
 
@@ -186,7 +186,7 @@ class Replay:
         if role == "act":
             if self.step in self.found:  # the act prompt at a case step; the raw text also goes to scratch files for analysis
                 self.found[self.step]["prompt"] = system + "\n" + user
-                d = Path(".tmp/om/om2_prompts"); d.mkdir(parents=True, exist_ok=True)
+                d = Path(".tmp/om/prompts_om3_1"); d.mkdir(parents=True, exist_ok=True)
                 (d / f"{self.step}_system.txt").write_text(system, encoding="utf-8"); (d / f"{self.step}_user.txt").write_text(user, encoding="utf-8")
             if self.live_step == self.step: return self.real.ask(system, user, images, schema, role=role)
             rec = self.rec.trace.get(self.step, {}); recorded = rec.get("act") or {}; pred = rec.get("pred") or {}

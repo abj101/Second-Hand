@@ -121,7 +121,7 @@ class Loop:
             while len(recent_flag) > 200 and len(summaries) > 1:
                 summaries.pop(1 if self.stuck.n else 0); recent_flag = "recent: " + "; ".join(summaries)
             act_flags.append(recent_flag[:197] + "..." if len(recent_flag) > 200 else recent_flag)
-        act_flags.append(self.world.here_flag())
+        act_flags.append(self.world.here_flag(self.fails))
         options = self.world.options(per, place, self.fails, self.step_no + 1, inputs=list(self.env.inputs()))  # failure history is in the option notes
         a = act(self.model, None if self.act_text else model_frame, per, self.notebook.render_focus(), self.world.view(self._goal_text(), place, compact=True), act_flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged" and p.get("screen") == "world"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]], options=options)
         picked = next((o for o in options if o["n"] == getattr(a, "option", None)), None)

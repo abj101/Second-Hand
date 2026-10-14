@@ -51,7 +51,7 @@ def _action(raw, things: list, buttons: list[str]) -> dict | None:
     return None
 
 def _option_text(o: dict) -> str:  # the tool word once: the label alone when its first words already hold the tool, spaced or raw
-    head, w = o["label"].casefold(), o["tool"].replace("_", " ").casefold()
+    head, w = o["label"].casefold().replace(":", " "), o["tool"].replace("_", " ").casefold()
     return o["label"] if any(f" {t} " in f" {' '.join(head.split()[:3])} " for t in (w, o["tool"].casefold())) else f"{o['tool']} {o['label']}"
 
 def act(model, image, perception: dict, notebook: str, facts: str, flags: list[str], controls: str, prefs: dict, buttons: list[str], places: list[str] = (), options: list[dict] | None = None) -> Act:

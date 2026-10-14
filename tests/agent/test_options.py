@@ -8,7 +8,7 @@ from agent.world import OPTION_CAP, World, fail_key
 from tests.agent.fakes import GridEnv, StubModel
 
 INPUTS = GridEnv().inputs()
-BUTTONS = f"free buttons (not checked against memory): {', '.join(INPUTS)}"
+BUTTONS = f"free buttons: {', '.join(INPUTS)}"
 
 
 def at(dx, dy):  # GridEnv(wander=True) geometry: the player's centre is (88, 72), tiles are 16 px
@@ -177,12 +177,12 @@ def test_options_are_deterministic_and_write_nothing(tmp_path):
 
 def test_free_input_carries_this_places_button_failures_only(tmp_path):
     mem, world, per = scene(tmp_path)
-    fails = {fail_key("room", "buttons", "UP A", INPUTS): {"n": 2, "why": "wall", "step": 70, "act": "buttons UP A"},
-             fail_key("room", "buttons", "A", INPUTS): {"n": 1, "why": "no change", "step": 90, "act": "buttons A"},
+    fails = {fail_key("room", "buttons", "DOWN", INPUTS): {"n": 2, "why": "wall", "step": 70, "act": "buttons DOWN"},
+             fail_key("room", "buttons", "UP A", INPUTS): {"n": 4, "why": "no change", "step": 90, "act": "buttons UP A"},
              fail_key("other", "buttons", "UP A", INPUTS): {"n": 5, "why": "wall", "step": 99, "act": "buttons UP A"},
              fail_key("room", "approach", "npc", INPUTS): {"n": 1, "why": "wall", "step": 95, "act": "approach npc"}}
     opts = world.options(per, "room", fails, 120, inputs=INPUTS)
-    assert opts[-1]["label"] == BUTTONS and opts[-1]["notes"] == ["tried here 1×, last: no change", "tried here 2×, last: wall"]  # newest first; other place and approach rows excluded
+    assert opts[-1]["label"] == BUTTONS and opts[-1]["notes"] == ["failed here: UP A x4, DOWN x2"]  # one note, newest first; other place and approach rows excluded
 
 
 def test_fail_notes_use_the_loop_failure_key_and_mark_cycles(tmp_path):

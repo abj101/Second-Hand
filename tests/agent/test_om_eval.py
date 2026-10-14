@@ -42,7 +42,7 @@ def _synthetic(step=103, floor_map=38, label_re="stairs"):
 def _opt(n, tool, label, action="a", notes=()):
     return {"n": n, "tool": tool, "label": label, "action": action, "notes": list(notes)}
 
-FREE = _opt(9, "buttons", "free buttons (not checked against memory)", action=None)
+FREE = _opt(9, "buttons", "free buttons", action=None)
 DEAD_END = "everything unexplored from here is through this exit"
 STAIRS_OK = _opt(1, "go_to", "exit stairs → 1F (used 2×, last step 99) (1 unexplored exit, 10 unexplored spots beyond)", notes=(DEAD_END,))
 EXPLORE_0 = _opt(3, "explore", "walk to an unexplored part of this place (0 spots lead anywhere unseen)", action={"go_to": "unexplored"})
@@ -103,7 +103,7 @@ def test_size_counts_options_without_the_free_row_and_the_prompt_tokens():
     assert _status(eval_act.dry_gates(_case_2f(options=ten + [FREE])))["size"] is True
     eleven = [_opt(n, "approach", f"approach thing {n}") for n in range(1, 12)]
     assert _status(eval_act.dry_gates(_case_2f(options=eleven + [FREE])))["size"] is False
-    assert _status(eval_act.dry_gates(_case_2f(prompt="x" * 6401)))["size"] is False  # 1,600.25 tokens
+    assert _status(eval_act.dry_gates(_case_2f(prompt="x" * 6801)))["size"] is False  # 1,700.25 tokens
 
 def test_live_is_refused_when_a_dry_gate_fails(monkeypatch, capsys):
     rows = [("right present", False, "step 82: no right option is listed"), ("exit truth", True, ""), ("size", True, "")] * 8

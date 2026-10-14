@@ -131,7 +131,7 @@ def test_nineteen_thing_room_prompt_fits_the_budget(tmp_path):
     model = Capture({"action": {"i": 1}, "notebook": []})
     act(model, None, PERCEPTION, "Goals: reach the hall", facts, [], "A: press", {}, BUTTONS, options=options)
     system, user = model.args[0][0], model.args[0][1]
-    assert len(system + user) / 4 <= 1600  # ponytail: chars/4 estimate, not the tokenizer
+    assert len(system + user) / 4 <= 1700  # ponytail: chars/4 estimate, not the tokenizer
     assert all(word in user for word in ("place", "notebook", "action", "text", "expect", "why", '"i"', '"thing"', '"go_to"', '"buttons"', "advance", "focus", "tried", "hints", "lessons"))
 
 
@@ -149,7 +149,7 @@ def test_option_lines_print_each_tool_word_once_and_keep_remembered_labels():
                {"n": 3, "tool": "go_to", "label": "go to computer desk (remembered, seen 30 steps ago)", "action": {"go_to": "computer desk"}, "notes": []},
                {"n": 4, "tool": "select", "label": "select OK", "action": {"thing": 0, "verb": "select"}, "notes": []},
                {"n": 5, "tool": "explore", "label": "walk to an unexplored part of this place (0 spots lead anywhere unseen)", "action": {"go_to": "unexplored"}, "notes": []},
-               {"n": 6, "tool": "buttons", "label": "free buttons (not checked against memory): UP", "action": None, "notes": []},
+               {"n": 6, "tool": "buttons", "label": "free buttons: UP", "action": None, "notes": []},
                {"n": 7, "tool": "advance", "label": "advance", "action": {"verb": "advance"}, "notes": []}]
     _, model = run_with({"action": {"i": 1}, "notebook": []}, options=options)
     lines = model.args[0][1].split("Options:\n", 1)[1].split("\n")[:7]
