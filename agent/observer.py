@@ -14,9 +14,9 @@ class Settle:
     blank_seen: bool
 
 def _blank(img: Image.Image) -> bool:
-    a = np.asarray(img)
-    _, counts = np.unique(a.reshape(-1, a.shape[-1]), axis=0, return_counts=True)
-    return bool(counts.max() >= 0.95 * a.shape[0] * a.shape[1])
+    a = np.asarray(img).astype(np.uint32)  # one int per pixel: a flat sort, not a row-wise one (~10 ms -> <1 ms per frame)
+    v = (a[..., 0] << 16) | (a[..., 1] << 8) | a[..., 2] if a.ndim == 3 else a
+    return bool(np.unique(v.ravel(), return_counts=True)[1].max() >= 0.95 * a.shape[0] * a.shape[1])
 
 
 def changed(a: Image.Image, b: Image.Image, thresh: int = 16) -> float:
