@@ -61,7 +61,7 @@ def report(summary, rows, steps, status, out):
 
 def main(argv=None):
     ap=argparse.ArgumentParser(); ap.add_argument("--frames",default=",".join(map(str,FRAMES))); ap.add_argument("--max-calls",type=int); ap.add_argument("--out",type=Path,default=OUT)
-    ap.add_argument("--om",choices=("places","cases","outcomes"),help="OM replay eval (no --max-calls needed)"); ap.add_argument("--live",action="store_true",help="--om cases: spend the requests"); ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)"); ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)"); ap.add_argument("--fresh",action="store_true",help="--om cases/outcomes: rebuild the replay snapshots")
+    ap.add_argument("--om",choices=("places","cases","outcomes"),help="OM replay eval (no --max-calls needed)"); ap.add_argument("--live",action="store_true",help="--om cases: spend the requests"); ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)"); ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)"); ap.add_argument("--fresh",action="store_true",help="--om cases/outcomes: rebuild the replay snapshots"); ap.add_argument("--arm",choices=("options","decide"),default="options",help="--om cases: decide = text-only act that answers {why, i}")
     a=ap.parse_args(argv)
     if a.om: return om_main(a, ap)
     if a.max_calls is None: ap.error("the following arguments are required: --max-calls")
@@ -99,6 +99,7 @@ def main(argv=None):
 # by the new code, so the recorded checkpoint memory is not used). Recorded plan and act replies keep the emulator on the
 # recorded path; perceiver replies come from .cache/model only. RAM truth (truth.jsonl) is read here, never by agent/.
 OM_CASES, OM_CAP, OM_MODEL = Path("scripts/om_cases.json"), 10, "gemma4:31b-cloud"  # OM2 section 7: one live measure, at most 10 requests
+DECIDE = False  # --arm decide: case steps use the text-only {why, i} act (act.py _decide); its retries and follow-ups raise the cap to 16
 MODEL_CACHE, BUDGET = Path(".cache/model"), Path("runs/e3_budget.json")
 SCREEN_TYPES = ("world", "dialogue", "menu", "keyboard", "battle", "title", "other")
 PERCEIVER_MISSES = 3  # more cache misses than this and the replay no longer matches the recording
@@ -189,7 +190,7 @@ class Replay:
         if role == "plan":
             return Reply("", {"goals": self.rec.goal_ops.get(self.step, []), "focus": self.rec.focus.get(self.step) or "", "why": "", "lesson": None}, 0.0, None, None)
         if role == "act":
-            if self.step in self.found:  # the act prompt at a case step; the raw text also goes to scratch files for analysis
+            if self.step in self.found and not self.found[self.step]["prompt"]:  # the first act prompt at a case step; the raw text also goes to scratch files for analysis
                 self.found[self.step]["prompt"] = system + "\n" + user
                 d = Path(".tmp/om/prompts_om3_1"); d.mkdir(parents=True, exist_ok=True)
                 (d / f"{self.step}_system.txt").write_text(system, encoding="utf-8"); (d / f"{self.step}_user.txt").write_text(user, encoding="utf-8")
@@ -200,7 +201,7 @@ class Replay:
                               "text": (rec.get("choice") or {}).get("text"), "expect": pred.get("effect") if pred.get("basis") == "guess" and pred.get("effect") else "screen_changes",
                               "why": recorded.get("why") or ""}, 0.0, None, None)
         raise OmAbort(f"unexpected model role {role!r}")
-    def _act(self, model, image, perception, notebook, facts, flags, controls, prefs, buttons, places=(), options=None):
+    def _act(self, model, image, perception, notebook, facts, flags, controls, prefs, buttons, places=(), options=None, decide=False):
         """Stands in for agent.loop.act. At a case step the options are recorded; a live case step also makes the real act
         call (network only for that call), and then the step continues on the recorded reply, so the loop executes the recorded action.
         act() writes nothing, so the extra call leaves memory as the recording has it."""
@@ -209,8 +210,9 @@ class Replay:
             found = self.found[self.step] = {"options": options, "perception": perception, "act": None, "prompt": "", "exits": self._exits_now(perception)}
             if self.step in self.live_steps:
                 self.live_step = self.step
-                try: found["act"] = act(*args, places=places, options=options)
+                try: found["act"] = act(*args, places=places, options=options, decide=DECIDE)
                 finally: self.live_step = None
+            elif DECIDE: act(*args, places=places, options=options, decide=True)  # dry: records the decide prompt (the recorded reply has no "i")
         return act(*args, places=places, options=options)
     def _exits_now(self, perception):
         """Exit records of the current place from the inputs World.options gives _exits (for the dry exit-truth gate)."""
@@ -232,6 +234,7 @@ class Replay:
     def branch(self, d, s, script=None):
         """Run step s alone from the snapshot d. script (step, act reply data): execute that reply, stop when its presses are done."""
         self.restore(d); self.step, self.script, self.armed, self.before, self.after, self.misses = s, script, False, None, None, 0; self.found.pop(s, None)
+        self.loop.decide = DECIDE  # the decide arm's loop drops the image and the red-box flag
         real, loop_mod.act = loop_mod.act, self._act
         try:
             try: self.loop.step()
@@ -401,7 +404,7 @@ def live_cases(cases, counter, before, old_right, fresh=False):
         new_ok = is_right(c, tool, label); new_right += new_ok
         print(f"\ncase {c['run']} step {s} new arm: option {res.option} {tool} {label!r} -> {'right' if new_ok else 'wrong'}  why: {res.why[:120]}")
     n = len(cases)
-    print(f"\nDECISION POINTS: options arm right {new_right}/{n} (gate >= {DECISION_GATE})")
+    print(f"\nDECISION POINTS: {'decide' if DECIDE else 'options'} arm right {new_right}/{n} (gate >= {DECISION_GATE})")
     print(f"OLD ARM right {old_right}/{n} (gate <= {OLD_GATE})")
     print(f"requests={counter['requests']} (cap {OM_CAP}); ledger before total={before.get('total')} m1={before.get('m1')} after total={_budget().get('total')} m1={_budget().get('m1')}")
     ok = new_right >= DECISION_GATE and old_right <= OLD_GATE and counter["requests"] <= OM_CAP
@@ -466,7 +469,9 @@ def om_outcomes(steps=None, fresh=False):
     return 0
 
 def om_main(a, ap):
+    global DECIDE, OM_CAP
     sys.stdout.reconfigure(encoding="utf-8")  # option labels carry arrows; a redirected cp1252 stdout cannot print them
+    if a.arm == "decide": DECIDE, OM_CAP = True, 16
     if a.live and a.dry: ap.error("--live and --dry are exclusive")
     if a.om == "places" and a.live: ap.error("--live applies to --om cases")
     try: return om_places() if a.om == "places" else om_outcomes(a.steps, a.fresh) if a.om == "outcomes" else om_cases(a.live, a.steps, a.fresh)

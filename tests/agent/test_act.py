@@ -176,3 +176,39 @@ def test_why_and_expect_nested_in_action_are_read_and_top_level_wins():
     assert (out.why, out.expect) == ("nested", "place_changes")
     out, _ = run({"action": {"thing": 0, "verb": "approach", "why": "x", "expect": "bogus"}, "notebook": []})
     assert (out.why, out.expect, out.action) == ("x", "screen_changes", {"thing": 0, "verb": "approach"})
+
+
+class Queue:
+    def __init__(self, *datas): self.datas, self.calls = list(datas), []
+    def ask(self, system, user, images, schema, role=""): self.calls.append((user, images, schema, role)); return SimpleNamespace(data=self.datas.pop(0))
+
+
+def decide(*datas, options=OPTIONS):
+    model = Queue(*datas)
+    return act(model, "IMAGE", PERCEPTION, "Goals: reach the hall", "facts", [], "A: press", {"name": "RED"}, BUTTONS, options=options, decide=True), model
+
+
+def test_decide_is_text_only_and_answers_only_an_option_number():
+    out, model = decide({"why": "the hall is the goal", "i": 2})
+    user, images, schema, role = model.calls[0]
+    assert (out.action, out.option, out.why, out.place, out.ops) == ({"go_to": "Hall"}, 2, "the hall is the goal", "", [])
+    assert images == [] and role == "act" and schema["properties"]["i"]["enum"] == [1, 2, 3] and schema["additionalProperties"] is False
+    assert "2. go to Hall — leads to Hall" in user and '"i"' in user and "buttons" not in schema["properties"]
+
+
+def test_decide_retries_once_on_a_free_form_reply_then_gives_up():
+    out, model = decide({"action": {"buttons": ["LEFT"]}, "why": "explore"}, {"why": "ok", "i": "1"})
+    assert out.action == {"thing": 0, "verb": "approach"} and len(model.calls) == 2 and "invalid" in model.calls[1][0]
+    out, model = decide({"i": 9}, {"buttons": ["LEFT"]})
+    assert (out.action, out.option) == (None, None) and len(model.calls) == 2
+
+
+def test_decide_follow_ups_are_enums_for_buttons_names_and_typing():
+    out, model = decide({"why": "w", "i": 3}, {"buttons": ["UP", "ZAP"]}, {"buttons": ["UP", "A"]})
+    assert out.action == {"buttons": ["UP", "A"]} and model.calls[1][2]["properties"]["buttons"]["items"]["enum"] == BUTTONS
+    names = [{"n": 1, "tool": "go_to", "label": "look at or go to a thing here: vent ×3, desk", "action": None, "notes": []}]
+    out, model = decide({"why": "w", "i": 1}, {"name": "vent"}, options=names)
+    assert out.action == {"go_to": "vent"} and model.calls[1][2]["properties"]["name"]["enum"] == ["vent", "desk"]
+    typing = [{"n": 1, "tool": "type", "label": "type text into the field", "action": {"verb": "type"}, "notes": []}]
+    out, model = decide({"why": "w", "i": 1}, {"text": " RED "}, options=typing)
+    assert (out.action, out.text) == ({"verb": "type"}, "RED") and "RED" in model.calls[1][0]

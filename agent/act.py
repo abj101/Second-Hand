@@ -1,5 +1,6 @@
 """One structured model call per step: read the screen and notebook, name the place, edit the notebook, pick an action."""
 
+import re
 from dataclasses import dataclass
 
 from agent.observer import for_model
@@ -54,7 +55,54 @@ def _option_text(o: dict) -> str:  # the tool word once: the label alone when it
     head, w = o["label"].casefold().replace(":", " "), o["tool"].replace("_", " ").casefold()
     return o["label"] if any(f" {t} " in f" {' '.join(head.split()[:3])} " for t in (w, o["tool"].casefold())) else f"{o['tool']} {o['label']}"
 
-def act(model, image, perception: dict, notebook: str, facts: str, flags: list[str], controls: str, prefs: dict, buttons: list[str], places: list[str] = (), options: list[dict] | None = None) -> Act:
+DECIDE_SYSTEM = ("You choose the next action in a video game. You do not see the screen: the facts below come from the game's map memory "
+  "and a screen reader, and they are true. Work on the focus, the last goal in the goal path. Pick exactly one of the numbered options. "
+  "An option whose notes say it failed or had no effect should not be picked again while another option could still work. "
+  "Return only JSON.")
+
+def _ask_valid(model, system, user, schema, check):
+    """One call; if check(data) returns (None, reason), one retry naming the reason. Cloud models do not enforce schemas, so this is the guarantee."""
+    for retry in (False, True):
+        data = model.ask(system, user + (f"\nYour last reply was invalid: {reason}. Reply again." if retry else ""), [], schema, role="act").data
+        value, reason = check(data if isinstance(data, dict) else {})
+        if value is not None: return value, data
+    return None, data
+
+def _decide(model, perception, notebook, facts, flags, controls, prefs, buttons, options) -> Act:
+    """Text-only act: the reply is {"why", "i"} only; a row with no ready action (free buttons, a list of names, typing) gets one follow-up whose answer is an enum too."""
+    ns = [o["n"] for o in options]
+    lines = [f"Goals:\n{notebook}", f"Known facts:\n{facts or 'none'}", f"Flags: {'; '.join(flags) or 'none'}", f"Screen: {perception.get('screen', '')}",
+             f"Text on screen: {'; '.join(str(t) for t in perception.get('text') or []) or 'none'}", "Options:",
+             *[f"{o['n']}. {_option_text(o)}" + (f" — {'; '.join(o['notes'])}" if o["notes"] else "") for o in options],
+             'Reply JSON: {"why": one sentence, "i": the option number}']
+    schema = {"type": "object", "properties": {"why": {"type": "string", "maxLength": 200}, "i": {"type": "integer", "enum": ns}}, "required": ["why", "i"], "additionalProperties": False}
+    def pick(d):
+        n = d.get("i"); n = int(n) if isinstance(n, str) and n.strip().isdigit() else n
+        return (n, None) if type(n) is int and n in ns else (None, f'"i" must be one of {ns}')
+    n, data = _ask_valid(model, DECIDE_SYSTEM, "\n".join(lines), schema, pick)
+    why = str(data.get("why") or "") if isinstance(data, dict) else ""
+    o = next((o for o in options if o["n"] == n), None)
+    action, text, chosen = (dict(o["action"]) if o and o["action"] else None), None, f"You picked option {n}: {_option_text(o)}." if o else ""
+    if o and o["tool"] == "buttons":
+        schema = {"type": "object", "properties": {"buttons": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "enum": list(buttons)}}}, "required": ["buttons"], "additionalProperties": False}
+        ok = lambda d: (d["buttons"], None) if isinstance(d.get("buttons"), list) and 0 < len(d["buttons"]) <= 8 and all(b in buttons for b in d["buttons"]) else (None, f'"buttons" must be 1-8 of {buttons}')
+        picks, _ = _ask_valid(model, DECIDE_SYSTEM, "\n".join(lines[:5] + [f"Controls:\n{controls}", chosen, f'Reply JSON: {{"buttons": up to 8 of {", ".join(buttons)}, in order}}']), schema, ok)
+        action = {"buttons": picks} if picks else None
+    elif o and o["action"] is None and ": " in o["label"]:  # a row that lists names: pick one
+        names = [re.sub(r" ×\d+$", "", s) for s in o["label"].split(": ", 1)[1].split(", ")]
+        schema = {"type": "object", "properties": {"name": {"type": "string", "enum": names}}, "required": ["name"], "additionalProperties": False}
+        name, _ = _ask_valid(model, DECIDE_SYSTEM, "\n".join(lines[:5] + [chosen, f'Reply JSON: {{"name": one of {", ".join(names)}}}']), schema,
+                             lambda d: (d["name"], None) if d.get("name") in names else (None, f'"name" must be one of {names}'))
+        action = {"go_to": name} if name else None
+    elif action == {"verb": "type"}:
+        schema = {"type": "object", "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 40}}, "required": ["text"], "additionalProperties": False}
+        text, _ = _ask_valid(model, DECIDE_SYSTEM, "\n".join(lines[:5] + [f"Preferences: {prefs}", chosen, 'Reply JSON: {"text": the text to type}']), schema,
+                             lambda d: (d["text"].strip()[:40], None) if isinstance(d.get("text"), str) and d["text"].strip() else (None, '"text" must be a non-empty string'))
+        action = action if text else None
+    return Act(place="", ops=[], action=action, text=text, expect="screen_changes", why=why, option=n if o else None)
+
+def act(model, image, perception: dict, notebook: str, facts: str, flags: list[str], controls: str, prefs: dict, buttons: list[str], places: list[str] = (), options: list[dict] | None = None, decide: bool = False) -> Act:
+    if decide and options: return _decide(model, perception, notebook, facts, flags, controls, prefs, buttons, options)
     things = perception.get("entities") or []
     lines = [f"Notebook:\n{notebook}", f"Known facts:\n{facts or 'none'}", f"Flags: {'; '.join(flags) or 'none'}", f"Controls:\n{controls}",
              *([f"Preferences: {prefs}"] if prefs else []), f"Known places: {', '.join(places[:12]) or 'none'}", f"Screen: {perception.get('screen', '')}", f"Text on screen: {'; '.join(str(t) for t in perception.get('text') or [])}"]
