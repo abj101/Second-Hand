@@ -108,7 +108,8 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><title>Avatar Run</t
 <style>
 /* palette and type copied from loop/adaptive/diagnostics_window.py */
 :root{--bg:#080808;--panel:#0d0d0d;--fg:#f2f2f2;--muted:#858585;--dim:#303030;--subtle:#171717}
-*{box-sizing:border-box}body{margin:0;height:100vh;display:flex;flex-direction:column;overflow:hidden;background:var(--bg);color:var(--fg);font:12px/1.45 Consolas,"Courier New",monospace}
+*{box-sizing:border-box;scrollbar-width:thin;scrollbar-color:var(--dim) transparent}*::-webkit-scrollbar{width:8px;height:8px}*::-webkit-scrollbar-track{background:transparent}*::-webkit-scrollbar-thumb{background:var(--dim);border:2px solid transparent;background-clip:content-box}*::-webkit-scrollbar-thumb:hover{background-color:#555}
+body{margin:0;height:100vh;display:flex;flex-direction:column;overflow:hidden;background:var(--bg);color:var(--fg);font:12px/1.45 Consolas,"Courier New",monospace}
 header{display:flex;gap:18px;align-items:center;padding:14px 18px;border-bottom:1px solid var(--fg)}
 header b{font-size:14px}.muted{color:var(--muted)}
 .badge{display:flex;align-items:center;gap:6px;padding:2px 9px;border:1px solid var(--dim);background:var(--panel);font-size:10px;color:var(--muted)}
@@ -134,6 +135,7 @@ h3 span{font-weight:normal;font-size:10px}
 .v-surprise{text-decoration:underline}.v-fail,.v-failed{color:var(--fg);font-weight:bold}
 #goals div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted);padding:1px 0}#goals .focus{color:var(--fg);font-weight:bold}#goals .done{text-decoration:line-through}
 button,select{background:var(--panel);color:var(--fg);border:1px solid var(--dim);padding:2px 8px;font:inherit;font-size:10px}
+#after{width:64px}#overlay{width:92px}
 canvas{display:block;width:100%;background:var(--bg);border:1px solid var(--dim)}
 #edges div{color:var(--muted);border-bottom:1px solid var(--subtle);padding:2px 0}
 footer{display:flex;justify-content:space-between;border-top:1px solid var(--fg);padding:10px 18px;color:var(--muted);font-size:10px}
