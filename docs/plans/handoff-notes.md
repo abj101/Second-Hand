@@ -43,6 +43,7 @@ Last written: 2026-10-13, after OM (STOP 8 reached). Branch `feat/lean-agent`. P
 - A second measure without changing the prompt/labels: the model already ignores listed right options at 4 of 8 steps.
 
 ## Open issues for the next phase (user decides at STOP 8)
+0. **Decided 2026-10-13: next phase is [OM2.md](OM2.md)** (verified exits, beyond-summaries, less noise, parsing; dry gates then one live measure; paste block inside). Diagnosis in OM2 §0.
 1. Model picks free `buttons` over a listed exit (4/8). Options: stronger prompt wording; exit options with their outcome first; dropping the free-input option when an unused exit exists (a gate: needs approval); or move on to the movement packet.
 2. The model echoes `place 3` as its place name; `_nameable` should reject `place <n>`.
 3. `why`/`expect` are nested inside `action` in 7 of 8 replies; `act()` could read them there.
