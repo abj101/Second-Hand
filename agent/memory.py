@@ -153,12 +153,11 @@ class Memory:
             self.arrival = hit  # (place, tile you arrived on)
             row = self.get("places", hit[0])
             return self.upsert("places", {**row, "visits": row.get("visits", 0) + 1, "last": step})["id"]
-        if cut and prev and exit:
-            row = self.get("tiles", f"{prev}@{exit[0]},{exit[1]}")
-            edge = row.get("exit") if row else None
-            edge = edge if edge and edge.get("dir") == exit[2] else None
-            if edge and edge.get("to") and edge["to"] != prev:
-                return edge["to"]
+        if cut and prev and exit:  # the exact exit, else every known exit within one tile (position drifts) if they agree on where they lead
+            near = [(max(abs(r["x"] - exit[0]), abs(r["y"] - exit[1])), r["exit"].get("dir") != exit[2], r["exit"]["to"]) for r in self.rows("tiles")
+                    if r.get("place") == prev and (r.get("exit") or {}).get("to") not in (None, prev) and max(abs(r["x"] - exit[0]), abs(r["y"] - exit[1])) <= 1]
+            if near and (min(near)[:2] == (0, False) or len({n[2] for n in near}) == 1):
+                return min(near)[2]
         if cut and prev:
             for edge in self.get("places", prev).get("edges", []) if self.get("places", prev) else ():
                 if via and _via(edge.get("via")) == _via(via) and edge.get("to") and edge["to"] != prev:

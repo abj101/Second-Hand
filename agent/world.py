@@ -45,6 +45,7 @@ def unseen_edges(mem, pid):  # untried edges of pid whose target cell is not in 
     return [(t, d) for t, d in frontier(mem, pid) if f"{t[0] + DIRS[d][0]},{t[1] + DIRS[d][1]}" not in seen]
 
 class World:
+    _travel_open = False
     def __init__(self, mem, tile_px):
         self.mem, self.tile_px = mem, tile_px
         self.pos, self.drift, self.drift_ref = (0, 0), None, None
@@ -218,7 +219,9 @@ class World:
             if row.get("status") != self.mem.get("entities", ident).get("status") or row.get("misses") != self.mem.get("entities", ident).get("misses"):
                 self.mem.upsert("entities", row)
     def prepare(self, skill, place, scene_cut, step):
-        if skill is self._travelled: self._prepared = (skill, place, step, None, self.pos); return {"cut_dir": None, "exit_key": None}
+        if skill is self._travelled:  # travel already folded pos up to the exit tile; an open cut still crosses from there
+            moves = skill.moves; cut_dir = (moves[-1].get("dir") if isinstance(moves[-1], dict) else moves[-1][0]) if self._travel_open and moves else None
+            self._prepared = (skill, place, step, cut_dir, self.pos); return {"cut_dir": cut_dir, "exit_key": (*self.pos, cut_dir) if cut_dir and self.tile_px else None}
         moves = getattr(skill, "moves", []); move_rows = moves[:-1] if scene_cut and moves else moves
         at = self.pos
         for move in move_rows:
@@ -280,7 +283,7 @@ class World:
         parts.append("self locked" if self._self_from_motion else "self unlocked")
         return "here: " + "; ".join(parts)
     def after(self, skill, place, next_place, scene_cut, step):  # call after prepare() for the same step
-        if skill is self._travelled:
+        if skill is self._travelled and not self._travel_open:
             self._cut_arrival = None; self.current_place = next_place
             return {"known_exit": None, "scroll": list(skill.scroll) if skill.scroll is not None else None}
         cut_dir = self._prepared[3]
@@ -835,7 +838,7 @@ class World:
         if dirs is None: return None
         legs.append({"place": p, "dirs": dirs + ([facing] if facing else []), "push": None, "expect": None, "target": target}); return legs
     def travel(self, ctx, legs, step, trace=None):
-        results, inputs, place = [], 0, self.current_place; self._travel_cut = False
+        results, inputs, place = [], 0, self.current_place; self._travel_cut = self._travel_open = False  # open: a cut travel could not place; the loop re-identifies
         for n, leg in enumerate(legs, 1):
             if inputs >= TRAVEL_MAX_INPUTS: break
             if leg["place"] != place: return self._travel_result(results, "blocked", f"leg {n} unexpected place", ctx)
@@ -851,7 +854,7 @@ class World:
                 wrong = arrival and arrival[0] != leg["expect"]
                 mismatch = wrong or not edge or edge.get("to") != leg["expect"] or arrival and tuple(edge["arrive"]) != arrival[1]
                 if mismatch:
-                    if not arrival: return self._travel_result(results, "blocked", f"leg {n} exit mismatch", ctx)
+                    if not arrival: self._travel_open = True; return self._travel_result(results, "blocked", f"leg {n} exit mismatch", ctx)
                     mark_exit(self.mem, place, tuple(leg["exit_tile"]), leg["push"], *arrival[:2], step); self._cross(place, tuple(leg["exit_tile"]), arrival[0], arrival[1], step)
                     self.pos, place = arrival[:2][1], arrival[0]; self._land(place)
                     return self._travel_result(results, "blocked", f"leg {n} {'arrival' if wrong or edge and edge.get('to') == leg['expect'] else 'exit'} mismatch", ctx)
@@ -861,7 +864,7 @@ class World:
                 self._land(place)
             elif result.status != "done" and not (result.reason == "route blocked" and self._facing_target(leg, result)):
                 return self._travel_result(results, result.status, f"leg {n} {result.reason or result.status}", ctx)
-            if result.reason == "scene cut" and not leg.get("expect"): return self._travel_result(results, "blocked", f"leg {n} unexpected scene cut", ctx)
+            if result.reason == "scene cut" and not leg.get("expect"): self._travel_open = True; return self._travel_result(results, "blocked", f"leg {n} unexpected scene cut", ctx)
         self.current_place = place
         if inputs >= TRAVEL_MAX_INPUTS and len(results) < len(legs): return self._travel_result(results, "blocked", f"leg {len(results)+1} input limit", ctx)
         return self._travel_result(results, "done", "", ctx)

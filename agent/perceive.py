@@ -19,8 +19,9 @@ SYSTEM = (
     "Describe exactly what is on screen. Do not suggest actions."
 )
 
+PLACE_LINE = '\n- "place": a short name for where the player is, specific enough to tell it from similar places (such as "upstairs bedroom" or "town square", not just "house"); null when no map is shown.'
 PROMPT = """Return JSON with:
-- "screen": one of world, dialogue, menu, keyboard, battle, title, other.
+- "screen": one of world, dialogue, menu, keyboard, battle, title, other.""" + PLACE_LINE + """
 - "text": every piece of readable text on screen, verbatim.
 - "entities": each distinct thing on screen (characters, objects, buttons, icons, cards, menu items), as
   {"kind": short category, "name": its name or visible label, "at": [x, y], "placement": optional position in the room}.
@@ -38,6 +39,7 @@ SCHEMA = {
     "type": "object",
     "properties": {
         "screen": {"type": "string", "enum": ["world", "dialogue", "menu", "keyboard", "battle", "title", "other"]},
+        "place": {"type": ["string", "null"]},
         "text": {"type": "array", "items": {"type": "string"}},
         "entities": {"type": "array", "items": {"type": "object", "properties": {
             "kind": {"type": "string"}, "name": {"type": "string"}, "at": _POINT, "placement": {"type": "string", "enum": list(PLACEMENTS)}},
@@ -74,7 +76,7 @@ def normalize(data: dict | None) -> dict:
     if isinstance(text, str): text = text.splitlines()  # Gemma sometimes ignores the array schema
     screen = data.get("screen")
     out = {"screen": screen if screen in ("world", "dialogue", "menu", "keyboard", "battle", "title", "other") else "other", "text": [str(t) for t in text if t],
-           "entities": [], "affordances": []}
+           "entities": [], "affordances": [], **({"place": data["place"].strip()[:40]} if isinstance(data.get("place"), str) and data["place"].strip() else {})}
     for e in data.get("entities") or []:
         if isinstance(e, dict) and (at := _point(e.get("at"))):
             out["entities"].append({"kind": str(e.get("kind") or ""), "name": str(e.get("name") or ""), "at": at,

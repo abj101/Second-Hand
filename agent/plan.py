@@ -13,7 +13,7 @@ SYSTEM = ("You plan for a player of a video game they have never seen. The top g
   "Do not re-create a goal the log says is done. Keep goals that still hold and change only what the trigger calls for. "
   "When a focus is blocked, choose a different way to reach its parent (another exit, another person, another object) and say why. "
   "When the trigger is a cycle or an action that failed twice, the current focus is not working: mark it blocked and pick a different approach, not a rewording of the same one. "
-  "When the trigger is arriving somewhere new, re-check which goals this place serves before keeping the old focus. Return only JSON.")
+  "When the trigger is an arrival, first compare every active goal's done_when with this place and mark the goals it satisfies done; then re-check which goals this place serves before keeping the old focus. Return only JSON.")
 REPLY = ('Reply JSON: {"goals": list of edits {"op":"set"|"remove","section":"goals","key":short id,'
   '"value":{"text","parent":key of the goal this serves or null,"done_when":"one observable sign it is done","source":"saw|heard|assumed","evidence","status":"todo|active|done|blocked|dropped"}}, '
   '"focus": key of the one leaf goal to work on now, "lesson": one short lesson learned or null, "why": one sentence}.')

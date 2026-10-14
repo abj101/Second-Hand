@@ -92,9 +92,11 @@ def test_successful_move_clears_blocked_direction(tmp_path):
     assert mem.get("tiles", "hall@0,0")["blocked"] == []
 
 
-def test_inferred_exit_does_not_block_route_or_frontier(tmp_path):
+def test_inferred_exit_is_avoided_by_routes_unless_it_is_the_only_way_but_stays_in_the_frontier(tmp_path):
     mem = Memory(tmp_path)
-    mark_exit(mem, "town", (0, 0), "UP", "house", (0, 1), 1)
+    mark_exit(mem, "town", (0, 0), "UP", "house", (0, 1), 1)  # house (0,1) DOWN is the guessed way back out
 
+    assert route(mem, "house", (0, 1), (0, 2)) == ["LEFT", "DOWN", "RIGHT"]
+    mem.upsert("tiles", {**mem.get("tiles", "house@0,1"), "blocked": ["LEFT", "RIGHT", "UP"]})  # walled in: the guess is the only way
     assert route(mem, "house", (0, 1), (0, 2)) == ["DOWN"]
     assert ((0, 1), "DOWN") in frontier(mem, "house")

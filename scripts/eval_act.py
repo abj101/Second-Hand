@@ -61,7 +61,7 @@ def report(summary, rows, steps, status, out):
 
 def main(argv=None):
     ap=argparse.ArgumentParser(); ap.add_argument("--frames",default=",".join(map(str,FRAMES))); ap.add_argument("--max-calls",type=int); ap.add_argument("--out",type=Path,default=OUT)
-    ap.add_argument("--om",choices=("places","cases","outcomes"),help="OM replay eval (no --max-calls needed)"); ap.add_argument("--live",action="store_true",help="--om cases: spend the requests"); ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)"); ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)"); ap.add_argument("--fresh",action="store_true",help="--om cases/outcomes: rebuild the replay snapshots"); ap.add_argument("--arm",choices=("options","decide"),default="options",help="--om cases: decide = text-only act that answers {why, i}")
+    ap.add_argument("--run",default="m1_decide",help="--om truth: the recorded run"); ap.add_argument("--exact-exit",action="store_true",help="--om truth: ablate fix 2 (exact exit lookup)"); ap.add_argument("--om",choices=("places","cases","outcomes","truth"),help="OM replay eval (no --max-calls needed)"); ap.add_argument("--live",action="store_true",help="--om cases: spend the requests"); ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)"); ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)"); ap.add_argument("--fresh",action="store_true",help="--om cases/outcomes: rebuild the replay snapshots"); ap.add_argument("--arm",choices=("options","decide"),default="options",help="--om cases: decide = text-only act that answers {why, i}")
     a=ap.parse_args(argv)
     if a.om: return om_main(a, ap)
     if a.max_calls is None: ap.error("the following arguments are required: --max-calls")
@@ -468,13 +468,41 @@ def om_outcomes(steps=None, fresh=False):
     print(f"requests={counter['requests']}; ledger before={before}; after={_budget()}; unchanged={before == _budget()}")
     return 0
 
+def om_truth(run, no_names=True, exact_exit=False):
+    """Replays a recorded run with today's code (recorded decisions, cached perception, 0 requests) and checks place identity
+    against RAM truth: each agent place should cover one game map. Stops where the replay leaves the perceiver cache."""
+    import agent.perceive as P
+    if no_names and hasattr(P, "PLACE_LINE"):  # the recording's perceiver replies were cached under the prompt without the place field
+        P.PROMPT, P.SCHEMA = P.PROMPT.replace(P.PLACE_LINE, ""), {**P.SCHEMA, "properties": {k: v for k, v in P.SCHEMA["properties"].items() if k != "place"}}
+    if exact_exit:  # ablation: the exit lookup as before fix 2 (exact tile and direction only), so the recording holds longer
+        real = Memory.match_place
+        def exact(self, per, step, *, exit=None, **kw):
+            edge = (self.get("tiles", f"{kw.get('prev')}@{exit[0]},{exit[1]}") or {}).get("exit") if exit else None
+            return real(self, per, step, exit=exit if edge and edge.get("dir") == exit[2] else None, **kw)
+        Memory.match_place = exact
+    counter, before = {"requests": 0}, _budget(); rec = stage(run); last = max(rec.trace)
+    rep = Replay(rec, rec.copy / "om_truth", counter=counter); seen, check = [], rep._check
+    def checked(s, row, keys, mem): check(s, row, keys, mem); seen.append((s, row.get("next_place"), truth_read(rep.env)["map"]))
+    rep._check = checked
+    try: rep.run(last)
+    except OmAbort as e: print(f"replay stopped: {e}")
+    maps, places = defaultdict(Counter), defaultdict(set)
+    for s, pid, m in seen:
+        if pid and (rep.loop.mem.get("places", pid) or {}).get("screen") == "world": maps[pid][m] += 1; places[m].add(pid)
+    for pid, c in sorted(maps.items()): print(f"  {pid:<12} label={rep.loop.world.place_label(pid)!r:<28} maps={dict(c)}")
+    mixed = [pid for pid, c in maps.items() if len(c) > 1]
+    print(f"steps replayed={len(seen)} of {last}; first press divergence={rep.drift['presses']}; perceiver misses={rep.misses}")
+    print(f"MIXED places (cover >1 map)={mixed or 0}; ids per map={ {m: len(v) for m, v in sorted(places.items())} }")
+    print(f"requests={counter['requests']}; ledger unchanged={before == _budget()}")
+    return 0 if not mixed else 1
+
 def om_main(a, ap):
     global DECIDE, OM_CAP
     sys.stdout.reconfigure(encoding="utf-8")  # option labels carry arrows; a redirected cp1252 stdout cannot print them
     if a.arm == "decide": DECIDE, OM_CAP = True, 16
     if a.live and a.dry: ap.error("--live and --dry are exclusive")
     if a.om == "places" and a.live: ap.error("--live applies to --om cases")
-    try: return om_places() if a.om == "places" else om_outcomes(a.steps, a.fresh) if a.om == "outcomes" else om_cases(a.live, a.steps, a.fresh)
+    try: return om_truth(a.run, exact_exit=a.exact_exit) if a.om == "truth" else om_places() if a.om == "places" else om_outcomes(a.steps, a.fresh) if a.om == "outcomes" else om_cases(a.live, a.steps, a.fresh)
     except OmAbort as e: print(f"ABORT: {e}", flush=True); return 2
     except run_agent.CallCap as e: print(f"CallCap: {e}", flush=True); return 3
     except ModelUnavailable as e: print(f"model_unavailable={e}", flush=True); return 4

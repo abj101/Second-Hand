@@ -116,3 +116,21 @@ Diagnosis of the OM3 live replies (0 requests): (1) the compact view had dropped
 - Dry (0 requests): right present 8/8, exit truth 8/8, size 8/8; prompt 862-1,097 tokens (was 1,345-1,610). Raw: `.tmp/om/omt_dry.txt`.
 - **Live (8 requests, ledger 2123 -> 2131, M1 2075 -> 2083): decide arm right 8/8** (options arm 1/8, OM3.2 0/3). Every pick was a numbered exit option (rug at 82, door mat at 102/115/122, stairs at 103/110/113/137); no retries, no follow-ups, no free buttons. Raw: `.tmp/om/omt_live.txt`.
 - Not separated: dropping the image and shrinking the job happened together. One sample per case; picks scored by option, not by crossing (OM4-A: the right option crosses at 82/113/137, the door-mat walks stop short in one step).
+
+## 12. m1_decide clean-boot run and five world-memory fixes (0 requests)
+**Run** (`runs/m1_decide`, `--decide`, stopped at step 139, 227 requests, ledger 2358/2425, M1 2310/2375): every pick was a legal option, but the house's two floors shared one place id (`p_place_4`: 2F 18 steps, 1F 34), 2F had 4 ids, no place had a name, the agent left the house at steps 81/87/109 and walked back in (step 82: approach sign pressed UP into the door), and `leave_house` stayed active after reaching outside 3 times.
+
+**Fixes:**
+1. A travel cut short by a scene cut ("unexpected scene cut", "exit mismatch" with no known arrival) is a normal crossing: `World._travel_open`; `prepare`/`after` take the cut path and the loop re-identifies the place with `match_place` instead of keeping the old one.
+2. `Memory.match_place`: the exit just used is the exact (tile, dir) record, else every known exit within one tile if they all lead to the same place (dead reckoning drifts a tile; stairs record the guessed way back with the opposite direction).
+3. `route`: the inferred way back (reverse side of a crossing) is avoided like any exit, unless no route avoids it.
+4. Perceiver reply gets an optional `"place"` name (`perceive.PLACE_LINE`); the loop names with `a.place or per["place"]` (decide names nothing). Prompt version `e5-perceiver-10`; the perceiver cache misses from here on.
+5. Any arrival at a known place sets `Loop.arrived`, a replan trigger after the 3-step floor (new places stay urgent); the planner first checks every active goal's `done_when` on an arrival.
+
+**Check** (`eval_act.py --om truth --run m1_decide`: recorded decisions, cached perception, RAM truth; 0 requests, ledger unchanged):
+| replay | steps until it leaves the cache | mixed places | ids per map (37=1F, 38=2F) |
+|---|---|---|---|
+| before fixes | 139/139 (identical to the run) | `p_place_3`, `p_place_4` | 1F 2, 2F 4 |
+| all fixes | 51 (press divergence 47: step 46 now arrives in the known 2F) | 0 | 1F 1, 2F 1 |
+| fix 2 ablated (`--exact-exit`) | 63 (step 52's cut travel now lands in 1F's id) | 0 | 1F 1, 2F 2 |
+- Not exercised by the replay: fix 3 at step 82 (unit test only), fix 4 (needs new perceiver replies), fix 5 (unit test). Raw: `.tmp/omt/truth_*.txt`. Suite 340 passed.

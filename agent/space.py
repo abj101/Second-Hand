@@ -33,7 +33,7 @@ def mark_exit(mem, place, tile, direction, to, arrive, step):
         row = _get(mem, src, at) or _new(src, at, step); old = dict(row, blocked=list(row["blocked"]), pushed=list(row["pushed"]))
         row.update(exit={"dir": way, "to": dst, "arrive": list(dest), "src": source}, floor=True, step=step); _save(mem, row, old)
 def exit_to(mem, place, tile, direction): row = _get(mem, place, tile); edge = row.get("exit") if row else None; return edge if edge and edge.get("dir") == direction else None
-def route(mem, place, start, goal):
+def route(mem, place, start, goal, strict=True):  # strict: an inferred exit (the guessed way back) is avoided too, unless no route avoids it
     rows = [r for r in mem.rows("tiles") if r.get("place") == place]; xs = [start[0], goal[0], *(r["x"] for r in rows)]; ys = [start[1], goal[1], *(r["y"] for r in rows)]
     bounds = (min(xs) - 1, max(xs) + 1, min(ys) - 1, max(ys) + 1); queue = deque([(start, [])]); seen = {start}
     while queue:
@@ -44,9 +44,9 @@ def route(mem, place, start, goal):
             nxt = (at[0] + dx, at[1] + dy)
             cell = _get(mem, place, nxt)
             edge = row.get("exit") or {}
-            if direction in row.get("blocked", []) or edge.get("src") != "inferred" and direction == edge.get("dir") or nxt in seen or cell and cell.get("floor") is False and nxt != goal or not (bounds[0] <= nxt[0] <= bounds[1] and bounds[2] <= nxt[1] <= bounds[3]): continue
+            if direction in row.get("blocked", []) or (strict or edge.get("src") != "inferred") and direction == edge.get("dir") or nxt in seen or cell and cell.get("floor") is False and nxt != goal or not (bounds[0] <= nxt[0] <= bounds[1] and bounds[2] <= nxt[1] <= bounds[3]): continue
             seen.add(nxt); queue.append((nxt, path + [direction]))
-    return None
+    return route(mem, place, start, goal, False) if strict else None
 def outward(mem, place, tile, placement=None):
     if placement in ("top wall", "bottom wall", "left wall", "right wall"): return {"top wall": "UP", "bottom wall": "DOWN", "left wall": "LEFT", "right wall": "RIGHT"}[placement]
     floors = [r for r in mem.rows("tiles") if r.get("place") == place and r.get("floor") is True]

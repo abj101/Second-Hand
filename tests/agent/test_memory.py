@@ -334,3 +334,16 @@ def test_place_label_echo_is_never_a_name_but_place_words_are(tmp_path):
     mem = Memory(tmp_path)
     mem.upsert("places", {"id": "p", "screen": "world", "state": "candidate", "first": 1, "landmarks": [], "edges": []})
     assert mem.name_place("p", "place 3", 2) == "p" and "name" not in mem.get("places", "p") and mem.get("places", "p").get("aliases") is None
+
+
+def test_cut_arrival_uses_a_known_exit_within_one_tile_when_they_agree(tmp_path):
+    from agent.space import mark_exit
+    mem = Memory(tmp_path)
+    for pid in ("down", "up", "yard"): mem.upsert("places", {"id": pid, "screen": "world", "state": "place", "landmarks": [], "edges": []})
+    mark_exit(mem, "up", (4, -4), "UP", "down", (0, 0), 1)  # down@0,0 DOWN -> up is inferred; the real stairs press is UP from 0,1
+    per = {"screen": "world", "entities": [{"name": "rug", "kind": "object"}]}
+
+    assert mem.match_place(per, 5, prev="down", cut=True, exit=(0, 1, "UP")) == "up"
+    mark_exit(mem, "down", (1, 1), "DOWN", "yard", (0, 0), 6)  # two different exits within one tile: no guess
+    assert mem.match_place(per, 7, prev="down", cut=True, exit=(0, 1, "UP")) not in ("up", "yard")
+    assert mem.match_place(per, 8, prev="down", cut=True, exit=(1, 1, "DOWN")) == "yard"  # the exact exit still wins

@@ -271,7 +271,7 @@ def test_perceiver_guides_whole_name_entry(tmp_path):
     assert "visible editable text field with its on-screen keyboard" not in model.prompt
     assert "Previous-place memory is reference only" not in model.prompt
     assert 'List every visible passage (door, stairs, door mat, opening) as an entity named "exit: <what it is>"' in model.prompt
-    assert loop.prompt_version == "e5-perceiver-9"
+    assert loop.prompt_version == "e5-perceiver-10"
 
 def test_reperception_bypasses_cached_frame_with_player_hint(tmp_path, monkeypatch):
     from agent import loop as loop_module
@@ -1118,3 +1118,18 @@ def test_crossing_already_counted_by_the_scene_cut_is_not_counted_again(tmp_path
     loop.place, loop.world.current_place, loop.world.pos = "hall", "hall", (0, 0)  # the end of that step
     loop.step()
     assert mem.get("crossings", "room@2,0>hall")["n"] == 1 and mem.get("crossings", "hall@0,0>room")["n"] == 1
+
+
+def test_any_arrival_replans_after_the_floor_and_new_places_skip_it(tmp_path):
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    for pid, visits in (("a", 3), ("b", 3), ("c", 1)): loop.mem.upsert("places", {"id": pid, "name": pid.upper(), "screen": "world", "visits": visits})
+    loop.notebook.data["goals"]["g"] = {"text": "leave", "status": "active"}; loop.notebook.focus = "g"
+    loop.step_no, loop.last_plan = 10, 10
+
+    loop._moved("a", "b", "door", 11)
+    assert loop.arrived == "arrived at B (been here before)" and loop.urgent is None
+    assert loop._plan_trigger({}) is None  # inside the 3-step floor
+    loop.step_no = 12
+    assert loop._plan_trigger({}) == loop.arrived
+    loop._moved("b", "c", "door", 13)
+    assert loop.urgent == "arrived somewhere new: C"
