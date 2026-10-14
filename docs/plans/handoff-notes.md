@@ -16,7 +16,7 @@ Last written: 2026-10-13, after OM3 (dry gates 8/8, live 1/8, one measure spent)
 - Commit at gates with explicit paths; never `git add -A`; never push; ledger caps raised only on explicit approval. No re-measure of the same live cases.
 
 ## Measured numbers
-- Unit suite: 331 passed (`pytest tests/agent -q -p no:cacheprovider`, ~5 min).
+- Unit suite: 335 passed (`pytest tests/agent -q -p no:cacheprovider -n auto`, ~30 s with pytest-xdist; serial ~2-3 min). OM evals branch from cached replay snapshots (`.tmp/om/snapshots/`, `--fresh` rebuilds): `--om cases` dry ~6 s, `--om outcomes` ~26 s.
 - `--om places`: PASS. `--om cases` dry: right 8/8, exit truth 8/8, size 8/8 (1,345-1,583 tokens, limit 1,600).
 - **Live decision points: options arm 1/8 (gate >= 6), old arm 0/8.** 5/8 picks were free buttons.
 - Ledger `runs/e3_budget.json`: total 2120/2175, M1 2072/2125 (53 M1 left); OM3 spent 8.
