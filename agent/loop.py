@@ -13,7 +13,7 @@ from agent.skills import Ctx, press_seq, run_affordance, wait_until
 from agent.tasks import Stuck
 from agent.trace import Trace
 from agent.space import DIRS, frontier, outward, route
-from agent.world import World, fail_key
+from agent.world import World, fail_key, open_cells
 CAPTION = 'The sprite inside the red box is the player\'s own character (you); list it with kind "player".'
 class Loop:
     def __init__(self, env, model, mem, game, act_text=False, decide=False):
@@ -260,12 +260,13 @@ class Loop:
         """Route to the nearest untried edge (edges into unseen cells first), plus the step across it."""
         if not self.tile_px: return None
         seen = set((self.mem.get("seen", place) or {}).get("cells", []))
+        past = [tuple(map(int, c.split(","))) for c in open_cells(self.mem, place)]
         best = None
         for (x, y), d in frontier(self.mem, place):
             if ((self.mem.get("tiles", f"{place}@{x},{y}") or {}).get("exit") or {}).get("dir") == d: continue  # an exit, even inferred, is not unexplored (m1_gp2: walked back through the front door)
             dirs = route(self.mem, place, self.pos, (x, y))
             if dirs is None: continue
-            key = (f"{x + DIRS[d][0]},{y + DIRS[d][1]}" in seen, len(dirs))
+            key = (f"{x + DIRS[d][0]},{y + DIRS[d][1]}" in seen, min((abs(x - c[0]) + abs(y - c[1]) for c in past), default=0), len(dirs))  # toward open screen edges
             if best is None or key < best[0]: best = (key, [*dirs, d])
         return {"dirs": best[1]} if best else None
     def _live(self, frame, place, per, choice, a):

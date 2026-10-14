@@ -251,7 +251,7 @@ class Memory:
         if target: return place  # ponytail: two established places claimed equal; merge only new arrivals, full merge needs entity/tile re-keying
         aliases = row.get("aliases", [])
         if key not in {str(a).casefold() for a in aliases}: aliases = [*aliases, name]
-        self.upsert("places", {**row, "name": name, "aliases": aliases})
+        self.upsert("places", {**row, "name": place_name(row) or name, "aliases": aliases})  # the first name sticks; later names are aliases
         return place
 
     def observe(self, perception: dict, place: str, step: int,

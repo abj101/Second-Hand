@@ -134,3 +134,19 @@ Diagnosis of the OM3 live replies (0 requests): (1) the compact view had dropped
 | all fixes | 51 (press divergence 47: step 46 now arrives in the known 2F) | 0 | 1F 1, 2F 1 |
 | fix 2 ablated (`--exact-exit`) | 63 (step 52's cut travel now lands in 1F's id) | 0 | 1F 1, 2F 2 |
 - Not exercised by the replay: fix 3 at step 82 (unit test only), fix 4 (needs new perceiver replies), fix 5 (unit test). Raw: `.tmp/omt/truth_*.txt`. Suite 340 passed.
+
+## 13. m1_decide2 run and fixes A-C (0 requests)
+**Run** (`runs/m1_decide2`, `--decide`, 117 steps, stopped by the 250-request cap; ledger 2608/2675, M1 2560/2625): 3 place ids for 3 maps, none mixed. It reached outside 5 times (steps 41/50/58/73/107) and went straight back in each time; 1F carried 5 names in turn ("tiled room", "library", "room with table", "dining room", "Professor Oak's lab"); steps 88-103 tried the 1F stairs 16 times without crossing. About 2.1 requests per step (perceiver cache cold after its prompt change: perceiver 104, act 132, plan 22, skill 9).
+
+**Causes and fixes:**
+- A. `Memory.name_place` overwrote the name on every perceiver name: the first name now sticks, later names are aliases.
+- B. Outside, the only exit back in carried "everything unexplored from here is through this exit": "unexplored" counted only untried edges into unseen cells, and on arrival the whole open area is on screen. Now each world view also records the cells just past every screen-edge tile that shows something (not uniform void, `_open_edge`, per tile); those not seen since (`open_cells`) count as unexplored in the explore label, the beyond-summaries, the dead-end note and the map header, and `_unexplored` heads toward them.
+- C. On 1F the player stands on the stairs tile on arrival; `go_to stairs` resolved the stairs sprite's projected tile (a wall), faced it and reported done. Exit rows that are off screen and lead to a known place now `go_to` that place, i.e. travel through the verified exit tile and push.
+- Found while checking C: `World.travel` compared the first and last frame of a whole walk with `cut()`, so a long scroll counted as a crossing (replay step 42: a 7-tile walk on 1F "arrived" in 2F). It now uses the skill's own per-press cut report.
+- Eval: old recordings (m1_gp2/gp5, m1_decide) replay with the perceiver prompt minus the place field (`_old_perceiver`, `--strip-place`): `--om cases|outcomes|places` were broken by section 12's prompt change until now. `--om truth` replays decide recordings by option (matched by tool and label head). New `--om branch --run R --from-step N --pick text[,text]`: steps from a run_agent checkpoint picking options by label.
+
+**Checks (0 requests, ledger unchanged):**
+- `--om branch --run m1_decide2 --from-step 100 --pick stairs`: option 1 is now `go_to office`; truth (37,7,1) -> (38,7,1), crossed (the run walked into the wall 16 times here).
+- `--om truth --run m1_decide2`: 48 steps until the cache runs out (press divergence 43), 0 mixed places, 1 id per map (0, 37, 38). At step 41 (outside) the options now read `walk to an unexplored part of this place (10 spots lead somewhere unseen)` and the exit back in has no dead-end note.
+- `--om truth --run m1_decide --strip-place`: 0 mixed, 1 id per map. `--om cases` dry: right 8/8, exit truth 8/8 (fully walked 2F still a dead end), size 8/8. `--om places`: PASS. Suite 343 passed; w0 golden regenerated (`seen.jsonl` gains `open`).
+- Not verified: what the model picks outside now (needs requests); travel's position folding has no unit test (the replay caught it).

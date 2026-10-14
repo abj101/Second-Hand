@@ -44,6 +44,18 @@ def unseen_edges(mem, pid):  # untried edges of pid whose target cell is not in 
     seen = set((mem.get("seen", pid) or {}).get("cells", []))
     return [(t, d) for t, d in frontier(mem, pid) if f"{t[0] + DIRS[d][0]},{t[1] + DIRS[d][1]}" not in seen]
 
+def open_cells(mem, pid):  # cells just past a screen edge that showed something (not uniform void), not seen since: the place may go on there
+    row = mem.get("seen", pid) or {}
+    return set(row.get("open", [])) - set(row.get("cells", []))
+
+def _open_edge(frame, t):
+    """{side: [i, ...]}: the edge tiles (i-th along that side) that show something, not uniform void, so the place may continue past them.
+    ponytail: <=2 grey levels in a tile = void (Game Boy black/white borders); a game with textured void needs a better test"""
+    g = frame.convert("L"); w, h = g.size; cols, rows = w // t, h // t
+    drawn = lambda x, y: len(set(g.crop((x * t, y * t, x * t + t, y * t + t)).getdata())) > 2
+    return {"LEFT": [y for y in range(rows) if drawn(0, y)], "RIGHT": [y for y in range(rows) if drawn(cols - 1, y)],
+            "UP": [x for x in range(cols) if drawn(x, 0)], "DOWN": [x for x in range(cols) if drawn(x, rows - 1)]}
+
 class World:
     _travel_open = False
     def __init__(self, mem, tile_px):
@@ -188,7 +200,10 @@ class World:
             x0, y0, x1, y1 = rect
             seen = self.mem.get("seen", place) or {"id": place, "cells": [], "step": step}
             cells = set(seen.get("cells", [])); added = {f"{x},{y}" for x in range(x0, x1 + 1) for y in range(y0, y1 + 1)} - cells
-            if added: self.mem.upsert("seen", {"id": place, "cells": sorted(cells | added), "step": step})
+            past = {"LEFT": lambda i: (x0 - 1, y0 + i), "RIGHT": lambda i: (x1 + 1, y0 + i), "UP": lambda i: (x0 + i, y0 - 1), "DOWN": lambda i: (x0 + i, y1 + 1)}
+            edge = _open_edge(frame, self.tile_px) if frame is not None and not modal else {}
+            was = set(seen.get("open", [])); opened = {"%d,%d" % past[d](i) for d, idx in edge.items() for i in idx} - was
+            if added or opened: self.mem.upsert("seen", {"id": place, "cells": sorted(cells | added), "open": sorted(was | opened), "step": step})
         distinct = False
         if rect and world_screen and not modal and not reused:
             digest = hashlib.sha256(frame.tobytes()).hexdigest()
@@ -425,7 +440,7 @@ class World:
         (unverified) exits and unexplored edges (untried edges into unseen cells), counted per place then summed. dead_end: place has no unexplored edge or unverified exit and
         exactly one verified exit leads to anything unexplored (through: that exit's tile). Pure: writes nothing, asks no model."""
         live = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged"}
-        def here(pid, exits): return sum(x["status"] == "unverified" for x in exits), (len(unseen_edges(self.mem, pid)) if self.tile_px else 0)
+        def here(pid, exits): return sum(x["status"] == "unverified" for x in exits), (len(unseen_edges(self.mem, pid)) + len(open_cells(self.mem, pid)) if self.tile_px else 0)
         own = self._exits(place, live, screen)
         own_unused, own_unexplored = here(place, own)
         exits = {}
@@ -558,9 +573,9 @@ class World:
         seen = self.mem.get("seen", place) or {"cells": []}
         seen_cells = set(seen.get("cells", []))
         edges = frontier(self.mem, place)
-        unseen = len(unseen_edges(self.mem, place))
+        unseen, past = len(unseen_edges(self.mem, place)), len(open_cells(self.mem, place))
         walked = sum(r.get("floor") is True for r in tiles)
-        lines = [f"Here: {label} ({self.pos[0]},{self.pos[1]})  map: {walked} walked, {len(seen_cells)} seen, {len(edges)} untried edges ({unseen} into unseen)"]
+        lines = [f"Here: {label} ({self.pos[0]},{self.pos[1]})  map: {walked} walked, {len(seen_cells)} seen, {len(edges)} untried edges ({unseen} into unseen)" + (f", {past} unseen cells past open screen edges" if past else "")]
 
         x0, y0 = self.pos[0] - MAP_W // 2, self.pos[1] - MAP_H // 2
         x1, y1 = x0 + MAP_W - 1, y0 + MAP_H - 1
@@ -676,7 +691,7 @@ class World:
             header.extend(f"  Exit {exit_text(e)}" for e in self._exits(pid, live))
             place_headers[pid] = header
             other_edges = frontier(self.mem, pid)
-            other_unseen = len(unseen_edges(self.mem, pid))
+            other_unseen = len(unseen_edges(self.mem, pid)) + len(open_cells(self.mem, pid))
             groups = {}
             for e in self.mem.rows("entities"):
                 if e.get("place") == pid and tier(e) == "interest" and eligible(e):
@@ -765,6 +780,7 @@ class World:
                 dest = x["dest"]
                 if dest: dests.add(dest)
                 if x["idx"] is not None: action, tool, target = {"thing": x["idx"], "verb": "approach"}, "approach", x["name"]
+                elif dest: action, tool, target = {"go_to": self.place_label(dest)}, "go_to", x["name"] or self.place_label(dest)  # the verified tile + push
                 elif x["name"]: action, tool, target = {"go_to": x["name"]}, "go_to", x["name"]
                 else: action, tool, target = {"go_to": self.place_label(dest)}, "go_to", self.place_label(dest)
                 rows.append(option("exit", tool, x["label"] + _beyond_suffix(beyond["exits"].get(x["tile"])), action, x["ident"], "approach", target))
@@ -792,7 +808,7 @@ class World:
             rows += [row for _, row in sorted(remembered, key=lambda kv: kv[0])]
             if self.tile_px:
                 untried = [(t, d) for t, d in frontier(self.mem, place) if ((self.mem.get("tiles", f"{place}@{t[0]},{t[1]}") or {}).get("exit") or {}).get("dir") != d]
-                n = len(set(untried) & set(unseen_edges(self.mem, place)))
+                n = len(set(untried) & set(unseen_edges(self.mem, place))) + len(open_cells(self.mem, place))
                 spots = "0 spots lead anywhere unseen" if not n else "1 spot leads somewhere unseen" if n == 1 else f"{n} spots lead somewhere unseen"
                 if untried: rows.append(option("explore", "explore", f"walk to an unexplored part of this place ({spots})", {"go_to": "unexplored"}, None, "approach", "unexplored"))
             places = []
@@ -845,7 +861,8 @@ class World:
             result = approach(replace(ctx, max_inputs=min(ctx.max_inputs, TRAVEL_MAX_INPUTS-inputs)), self.pa, self.pa,
                               exit_target="exit" if leg.get("expect") else None, route={"dirs": leg["dirs"], "push": leg.get("push")})
             results.append(result); inputs += result.inputs
-            is_cut = result.reason == "scene cut" or cut(result.before, result.after, result.blank_seen); self._travel_cut |= is_cut; self.pos = fold(self.mem, place, self.pos, result.moves[:-1] if is_cut and result.moves else result.moves, self.tile_px, step, actors=self.actor_tiles)
+            # the skill checks every press for a cut; first vs last frame of a long walk is a scroll, not a cut (m1_decide2 replay step 42)
+            is_cut = result.reason == "scene cut" or result.blank_seen; self._travel_cut |= is_cut; self.pos = fold(self.mem, place, self.pos, result.moves[:-1] if is_cut and result.moves else result.moves, self.tile_px, step, actors=self.actor_tiles)
             if leg.get("expect"):
                 arrival = self._arrival(result.after, trace) if trace else None
                 edge = exit_to(self.mem, place, tuple(leg["exit_tile"]), leg["push"])

@@ -756,7 +756,7 @@ def test_model_screen_type_or_reference_is_never_a_name_or_alias(tmp_path):
     row = mem.get("places", arrived)
     assert "name" not in row and not row.get("aliases") and world.place_label(arrived) == "place 1"
     assert world.name(arrived, "Hall", 8) == arrived and world.name(arrived, "Lake", 9) == arrived
-    assert mem.get("places", arrived)["name"] == "Lake" and mem.get("places", arrived)["aliases"] == ["Hall", "Lake"]  # a real name still becomes an alias
+    assert mem.get("places", arrived)["name"] == "Hall" and mem.get("places", arrived)["aliases"] == ["Hall", "Lake"]  # the first real name sticks; later ones are aliases
 
 
 def test_legacy_screen_type_alias_does_not_match_or_gain_a_new_alias(tmp_path):
@@ -857,3 +857,15 @@ def test_here_flag_lists_failed_button_combos_and_drops_them_from_untried(tmp_pa
     assert world.here_flag({}) == base
     flag = world.here_flag(fails)
     assert "untried DOWN, LEFT, RIGHT;" in flag and "failed here: UP A x4; self unlocked" in flag
+
+
+def test_open_screen_edges_count_unseen_cells_past_them_until_seen(tmp_path):
+    from PIL import Image, ImageDraw
+    from agent.world import _open_edge, open_cells
+    frame = Image.new("L", (160, 144), 0); d = ImageDraw.Draw(frame)
+    for x in range(0, 160, 4): d.line([(x, 0), (x, 143)], fill=80 + x % 3 * 40)  # textured ground everywhere
+    d.rectangle([0, 0, 15, 143], fill=0)  # the left strip is void
+    edge = _open_edge(frame, 16)  # 10 x 9 tiles
+    assert edge["LEFT"] == [] and edge["RIGHT"] == list(range(9)) and edge["UP"] == edge["DOWN"] == list(range(1, 10))
+    mem = Memory(tmp_path); mem.upsert("seen", {"id": "p", "cells": ["5,0"], "open": ["5,0", "5,1"]})
+    assert open_cells(mem, "p") == {"5,1"}

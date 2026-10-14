@@ -236,7 +236,7 @@ def test_name_place_merges_new_arrival_retargets_refs_and_keeps_established_plac
     mem.upsert("places", {"id": "other", "name": "Lake", "screen": "world", "state": "place", "first": 5, "landmarks": [], "edges": []})
     assert mem.name_place("other", "cave", 6) == "other" and mem.get("places", "other")["state"] == "place"
     assert mem.name_place("other", "Lakeside", 6) == "other"
-    assert mem.get("places", "other")["name"] == "Lakeside" and mem.get("places", "other")["aliases"] == ["Lakeside"]
+    assert mem.get("places", "other")["name"] == "Lake" and mem.get("places", "other")["aliases"] == ["Lakeside"]  # the first name sticks
 def test_base_removes_repeated_numeric_suffixes():
     from agent.memory import _base
 
@@ -347,3 +347,10 @@ def test_cut_arrival_uses_a_known_exit_within_one_tile_when_they_agree(tmp_path)
     mark_exit(mem, "down", (1, 1), "DOWN", "yard", (0, 0), 6)  # two different exits within one tile: no guess
     assert mem.match_place(per, 7, prev="down", cut=True, exit=(0, 1, "UP")) not in ("up", "yard")
     assert mem.match_place(per, 8, prev="down", cut=True, exit=(1, 1, "DOWN")) == "yard"  # the exact exit still wins
+
+
+def test_first_place_name_sticks_and_later_names_become_aliases(tmp_path):
+    mem = Memory(tmp_path); mem.upsert("places", {"id": "p", "screen": "world", "state": "place", "first": 1})
+    for step, name in ((2, "tiled room"), (3, "library"), (4, "dining room")): mem.name_place("p", name, step)
+    row = mem.get("places", "p")
+    assert row["name"] == "tiled room" and row["aliases"] == ["tiled room", "library", "dining room"]

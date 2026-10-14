@@ -324,3 +324,10 @@ def test_grouped_label_resolves_like_its_name(tmp_path):
     mem = Memory(tmp_path); room(mem)
     world, per = setup(mem, [{"name": "vent", "kind": "furniture", "at": at(*SPOTS[0])}])
     assert world.resolve("vent", per, "room") is not None and world.resolve("vent ×3", per, "room") == world.resolve("vent", per, "room")
+
+
+def test_off_screen_exit_to_a_known_place_travels_through_its_verified_tile(tmp_path):
+    mem, world, per = scene(tmp_path)
+    off = {**per, "entities": [player()]}; world.before(off, "room", "room", (160, 144), 2)
+    row = next(o for o in world.options(off, "room", {}, 2, inputs=INPUTS) if "Hall" in o["label"])
+    assert row["action"] == {"go_to": "Hall"}  # not the door sprite's projected tile (m1_decide2: stairs walked into 16x)
