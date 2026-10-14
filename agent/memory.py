@@ -32,6 +32,28 @@ def _base(value: str) -> str:
 def _via(value) -> str: return _key(value or "").removeprefix("exit:").strip()
 
 
+# The perceiver's screen enum (agent/perceive.py): a place is never named or aliased with one of these.
+SCREEN_NAMES = frozenset({"world", "dialogue", "menu", "keyboard", "battle", "title", "other"})
+_REFERENCE = re.compile(r"\s\[[^\[\]]+\]$")  # "<label> [<place id>]": our own disambiguated label, a pointer and never a name
+
+
+def _nameable(name: str, screen=None) -> bool:
+    key = name.casefold()
+    return bool(name) and key not in SCREEN_NAMES and key != str(screen or "").casefold() and not _REFERENCE.search(name)
+
+
+def place_name(row: dict | None) -> str:
+    """A place's model-given name; a screen type stored as a name by older runs does not count."""
+    row = row or {}
+    name = str(row.get("name") or "").strip()
+    return name if _nameable(name, row.get("screen")) else ""
+
+
+def place_aliases(row: dict | None) -> list[str]:
+    """Stored aliases that still count as names when matching (older rows may hold a screen type or a reference)."""
+    return [a for a in (row or {}).get("aliases", []) if _nameable(str(a).strip())]
+
+
 # ponytail: calibrated on Red's house 1F/2F (same floor >=.958 within 4 tiles, other floor <=.789);
 # pixel-identical interiors in different towns (Poke Centers) will match: add a graph-consistency check then.
 VIEW_MATCH, VIEW_REACH = .9, 4
@@ -68,6 +90,7 @@ def _distance(a: str, b: str) -> int:
 
 class Memory:
     arrival = None  # (place, tile) when the last match_place recognised a stored view
+    excursion = None  # the place a dialogue/menu/battle screen was last seen in, until a navigable screen follows
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
@@ -113,10 +136,19 @@ class Memory:
                     exit: tuple[int, int, str] | None = None, via_id: str | None = None,
                     frame=None, tile_px: int | None = None) -> str:
         self.arrival = None
-        if not cut and prev is not None:
-            return prev
         screen = str(perception.get("screen", "unknown"))
-        if cut and frame is not None and (hit := self.seen_view(frame, screen, prev, tile_px)):
+        if screen != "world":  # dialogue, menu, title, battle: a state of the current place, never a place
+            if prev is not None:
+                self.excursion = prev
+                return prev
+            # ponytail: before the first navigable screen one unnamed run-start place stands in; it is never matched or named
+            return self.upsert("places", {"id": self._id("places", "place"), "state": "candidate", "visits": 1, "landmarks": [], "edges": [], "blocked": [], "first": step, "last": step})["id"]
+        back = prev is not None and self.excursion == prev  # back from a dialogue/menu/battle to the place it left: that place may match again
+        self.excursion = None
+        if not cut and prev is not None and (self.get("places", prev) or {}).get("screen") == "world":
+            return prev
+        exclude = None if back else prev
+        if cut and frame is not None and (hit := self.seen_view(frame, screen, exclude, tile_px)):
             self.arrival = hit  # (place, tile you arrived on)
             row = self.get("places", hit[0])
             return self.upsert("places", {**row, "visits": row.get("visits", 0) + 1, "last": step})["id"]
@@ -137,7 +169,7 @@ class Memory:
                             for e in perception.get("entities", []) if e.get("name") and normalize_kind(e.get("kind")) not in TRANSIENT})
         best, score = None, 0.0
         current = set(landmarks)
-        for place in (p for p in self.rows("places") if p.get("state") != "merged" and (not cut or p.get("id") != prev)):
+        for place in (p for p in self.rows("places") if p.get("state") != "merged" and (not cut or p.get("id") != exclude)):
             known = {tuple(l) for l in place.get("landmarks", []) if normalize_kind(l[1]) not in TRANSIENT}  # rows saved before TRANSIENT
             union = current | known
             overlap = len(current & known) / len(union) if union else 1  # both empty (only transients seen): same screen
@@ -147,8 +179,8 @@ class Memory:
             best["visits"] = best.get("visits", 0) + 1
             best["last"] = step
             return self.upsert("places", best)["id"]
-        pid = self._id("places", screen)
-        self.upsert("places", {"id": pid, "name": screen, "screen": screen,
+        pid = self._id("places", "place")
+        self.upsert("places", {"id": pid, "screen": "world",
                                "state": "candidate", "visits": 1,
                                "landmarks": [list(x) for x in landmarks], "edges": [], "blocked": [],
                                "first": step, "last": step})
@@ -202,10 +234,10 @@ class Memory:
 
     def name_place(self, place: str, name: str, step: int) -> str:
         name, row = str(name or "").strip(), self.get("places", place)
-        if not name or not row: return place
+        if not row or not _nameable(name): return place  # a screen type or our own "name [p_x]" reference is never a name or alias
         key = name.casefold()
         target = next((r for r in self.rows("places") if r.get("state") != "merged" and r["id"] != place
-                       and any(str(v).casefold() == key for v in [r.get("name"), *r.get("aliases", [])])), None)
+                       and any(str(v).casefold() == key for v in [place_name(r), *place_aliases(r)])), None)
         if target and row.get("first") == step:
             self.upsert("places", {**row, "state": "merged", "into": target["id"]})
             for other in self.rows("places"):

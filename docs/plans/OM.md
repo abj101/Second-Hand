@@ -1,6 +1,6 @@
 # OM: Options from memory — truthful memory, and the map offered as the action menu
 
-Status: not started · Branch: feat/lean-agent · Follows: [GP.md](GP.md) §9e, `m1_gp5` · User decision 2026-10-13: build fixes 1 + 2 (truthful memory + options menu); movement fixes (3) and hard gates (4) are out.
+Status: built; gate FAILED on decision points (3/8 vs >= 6); live run not recommended yet · Branch: feat/lean-agent · Follows: [GP.md](GP.md) §9e, `m1_gp5` · User decision 2026-10-13: build fixes 1 + 2 (truthful memory + options menu); movement fixes (3) and hard gates (4) are out.
 
 ## Paste block (for GPT-6.1 Sol; every subagent gpt-6-luna HIGH)
 
@@ -168,11 +168,42 @@ Status: not started · Branch: feat/lean-agent · Follows: [GP.md](GP.md) §9e, 
 - Any per-game code, brief edits, or RAM reads in `agent/`.
 
 ## 9. Result (filled in by the orchestrator)
-- **Gate:**
-- **Decision taken:**
+- **Gate** (built 2026-10-13; all numbers from the commands shown; replay of `runs/m1_gp5`, copy in `.tmp/om/m1_gp5`):
+  | Metric | Result | Pass? | Command |
+  |---|---|---|---|
+  | Unit suite | 285 passed | yes | `.venv-agent/Scripts/python.exe -m pytest tests/agent -q -p no:cacheprovider` (254 at entry) |
+  | Generality | 0 hits (exit 1) | yes | `git grep -niP ...` as in section 2 |
+  | Places | 3 places (run-start `place 1`, `bedroom`, `place 3`); dialogue/menu/title places 0; names or aliases equal to a screen type 0 | yes | `scripts/eval_act.py --om places` (exit 0, 0 requests, 0 perceiver misses, 150/150 presses and frames identical to the recording) |
+  | Fake-exit refutation | 2F `exit: doorway#2` refuted at step 105 after 2 failed attempts; view shows "Don't believe: exit: doorway#2 (not working: walked into 20x, steps 104-135)" | yes | same command |
+  | Options contain a right option | 8/8 cases | yes | `scripts/eval_act.py --om cases` (dry, 0 requests) |
+  | Decision points, old arm (recorded) | 0/8 right | yes (<= 3) | `--om cases --live` |
+  | Decision points, options arm | **3/8 right (gate >= 6)** | **NO** | `scripts/eval_act.py --om cases --live` (exit 1) |
+  | Requests | 8 (cap 30); ledger total 2104 -> 2112, M1 2056 -> 2064 (61 M1 left) | yes | `runs/e3_budget.json` |
+- **Per case, options arm** (step; model pick; model `why`; right = judged by RAM truth):
+  - 82 (1F): free `buttons LEFT`, not an option (wrong). 102 (1F): option 3 `exit rug` (right). 103 (2F): option 2 `exit doorway#2: never used` (wrong; the fake exit is refuted only from step 105, so this one cannot be seen from memory).
+  - 110, 113, 137 (2F): free `buttons LEFT/RIGHT/DOWN`, "exploring for other exits", although the stairs exit was option 4 each time (wrong). 115, 122 (1F): `go_to rug` / option 4 `exit rug` (right).
+  - Pattern: on 1F (steps 102, 115, 122) the model takes the unused exit; at the 3 steps on 2F and at 82 it answers with free buttons instead of an option. In 7 of 8 answers `why`/`expect` sit inside the `action` object, so the trace `why` is empty (the action itself still parses).
+- **Decision taken:** per the packet's failure rule: no live clean-boot run, no further requests. The user decides at STOP 8 between (a) a prompt/label change then re-measure (about 8 requests per measure), (b) the movement packet, (c) a live run anyway (needs a cap raise).
 - **Deviations from the packet:**
-- **Contract text to merge (§4 additions as built):**
+  - Cases: all 8 are `m1_gp5` (82, 102, 103, 110, 113, 115, 122, 137). `m1_gp2` cannot be replayed (4 perceiver cache misses, last at step 116: it was recorded with an older brief); the limit of 3 was not raised. Step 91 was not used (the recorded choice there was right by truth).
+  - OM.6 replays the whole recorded run from the boot state with the new code, answering `act` and `plan` from the recording (so the new memory sees the recorded actions); the live `act` call runs on the side at each case step and its pick is not executed. One replay per run (about 6 min).
+  - Changes to `agent/` beyond the cards (all tested): `Memory.excursion` (a dialogue closing with a scene cut returns to the place it left), `SCREEN_NAMES`/`place_aliases`/`_nameable` (screen types and our own `label [id]` form never become names or aliases), `fail_key` module function in `world.py` (`Loop._fail_key` delegates; output unchanged), `Loop.step` guards so a cut onto a non-navigable screen is no place change and no edge, `World.view` thing-only exits in the exit table, `Act.option`.
+  - OM.2: "one success clears it" resets the failure relation to live (con 0) instead of adding sup accounting (that would flip `predict`'s reading of `does_nothing`). `text_appears` relations now store the new text as object.
+  - Golden data (`tests/agent/data/w0_golden`): OM.1 renamed place ids `p_world`->`p_place`, removed the name "world", and the plan trigger text became `arrived somewhere new: place 2`; OM.4 added `"option": null` to the 8 trace rows. Nothing else changed.
+  - Added `tests/agent/test_om_eval.py` (OM.6 listed only the scripts).
+  - Not applied (the user merges): contract text below.
+- **Contract text to merge (as built):**
+  - `memory`: `match_place` returns `prev` for any screen other than `world`; before the first navigable screen one unnamed run-start place (no `screen`) stands in; navigable places mint as `place`, `place_2`, ...; `Memory.excursion`; `place_name(row)`, `place_aliases(row)`, `SCREEN_NAMES`. A name equal to a screen type, or of the form `<label> [<id>]`, is never stored as a name or alias.
+  - `memory` (relations): a failed action aimed at a remembered thing (or the remembered thing on the tile a button press faces) writes `(thing, does_nothing, "")` with `hit=False`; refuted at the existing rule; a later non-failed use of that thing resets it to live (con 0, ev empty). `says` rows get `why = "says the same as before (step N)"` on a repeat.
+  - `world`: `World.place_label` = model name else `place <n>`; `fail_key(place, verb, target, inputs=())` module function (the key `Loop._fail_key` returns); `World.options(per, place, fails, step, inputs=()) -> list[{"n","tool","label","action","notes"}]` (pure; rule order: modal choices then free input; else exits, on-screen things, remembered things, explore, other places, free input; soft cap 12 summarised by one `info` row; the `buttons` and `info` rows have `action: None` and take button failures of this place as notes); `World.view`: exit table per place (`Exit DIR -> place used N x | never used`), `Don't believe:` line (max 2 refuted things), only `screen == "world"` places.
+  - `notebook and act`: `act(..., options=None)`; with options the prompt lists `Options:` (replaces `Things on screen:`), the reply `{"i": n}` returns that option's `action` (a copy) and sets `Act.option`; anything else parses as before. Trace rows carry `"option": {"n","tool","label","notes"} | null`. The `failed here before` flag is gone (its content is in option notes).
 - **Open issues for the next phase:**
+  1. The model answers with free `buttons` at 4 of 8 decision points although the right option is listed; options are advice, so this is the model, not a gate. Candidates: stronger prompt wording ("a button press cannot be checked against memory"), numbering the exit options first with their outcome, or dropping the free-input option when an unused exit is listed (a gate: needs the user's approval).
+  2. The model echoes our label back as its place name (`place 3`); `_nameable` accepts it. A name matching `place <n>` should probably not become a name.
+  3. Option labels for furniture are noise (4 x "approach stool" in one list); the cap keeps all on-screen things by design.
+  4. `why`/`expect` nested inside `action`: `act()` could read them from there.
+  5. Used-N counts per destination are computed twice (`World.options`, `World._exit_rows`); share one helper.
+  6. `World.view` prints stored aliases of legacy rows (e.g. "aliases: world") for runs made before OM.1.
 
 ## 10. Handoff notes
 Rewrite `docs/plans/handoff-notes.md` per [_template.md](_template.md) §10 (under 80 lines, fixed headings). Next phase after STOP 8: the user picks between a live clean-boot run (cap raise) and the movement packet.

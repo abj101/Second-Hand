@@ -14,19 +14,20 @@ def test_upsert_restart_replay_and_unknown_store(tmp_path):
 
 def test_places_continuity_edge_landmark_candidate_and_promotion(tmp_path):
     mem = Memory(tmp_path)
-    a = mem.match_place({"screen": "overworld", "entities": [{"name": "Oak", "kind": "npc"}]}, 1,
+    a = mem.match_place({"screen": "world", "entities": [{"name": "Oak", "kind": "npc"}]}, 1,
                         prev=None, cut=True)
     assert mem.get("places", a)["state"] == "candidate"
     assert mem.match_place({}, 2, prev=a, cut=False) == a
-    b = mem.match_place({"screen": "overworld", "entities": []}, 3, prev=a, cut=True)
+    b = mem.match_place({"screen": "world", "entities": []}, 3, prev=a, cut=True)
     mem.add_edge(a, "approach", "door", b, True)
-    assert mem.match_place({"screen": "battle", "entities": []}, 4, prev=a, cut=True, via="door") == b
-    same = mem.match_place({"screen": "overworld", "entities": [{"name": "Oak", "kind": "npc"}]}, 5,
+    assert mem.match_place({"screen": "world", "entities": []}, 4, prev=a, cut=True, via="door") == b
+    same = mem.match_place({"screen": "world", "entities": [{"name": "Oak", "kind": "npc"}]}, 5,
                            prev=b, cut=True)
     assert same == a
-    battle = mem.match_place({"screen": "battle", "entities": [{"name": "Rival", "kind": "npc"}]}, 6,
-                             prev=a, cut=True)
-    assert mem.get("places", battle)["state"] == "candidate"
+    # a battle is a state of the current place, not a place: no new place, no state change
+    assert mem.match_place({"screen": "battle", "entities": [{"name": "Rival", "kind": "npc"}]}, 6,
+                           prev=a, cut=True) == a
+    assert len(mem.rows("places")) == 2
     entity = mem.observe({"entities": [{"name": "Oak", "kind": "npc"}]}, a, 7)[0]
     mem.relate(entity, "moves_view", "", src="pixel", step=8, hit=True)
     assert mem.get("places", a)["state"] == "place"
@@ -64,13 +65,13 @@ def test_tile_identity_survives_scrolling_and_separates_same_name(tmp_path):
 
 def test_known_exit_precedes_via_edge_and_no_cut_keeps_previous_place(tmp_path):
     mem = Memory(tmp_path)
-    a = mem.match_place({"screen": "start", "entities": []}, 1, prev=None, cut=True)
-    b = mem.match_place({"screen": "exit", "entities": []}, 2, prev=a, cut=True)
-    c = mem.match_place({"screen": "other", "entities": []}, 3, prev=b, cut=True)
+    a = mem.match_place({"screen": "world", "entities": []}, 1, prev=None, cut=True)
+    b = mem.match_place({"screen": "world", "entities": []}, 2, prev=a, cut=True)
+    c = mem.match_place({"screen": "world", "entities": [{"name": "Sign", "kind": "object"}]}, 3, prev=b, cut=True)
     mem.add_edge(a, "approach", "door", c, True)
     mem.upsert("tiles", {"id": f"{a}@4,2", "place": a, "x": 4, "y": 2,
                           "exit": {"dir": "RIGHT", "to": b, "arrive": [0, 0], "src": "observed"}})
-    drifted = {"screen": "new screen", "entities": [{"name": "different landmark", "kind": "npc"}]}
+    drifted = {"screen": "world", "entities": [{"name": "different landmark", "kind": "npc"}]}
     assert mem.match_place(drifted, 4, prev=a, cut=True, via="door", exit=(4, 2, "RIGHT")) == b
     assert mem.match_place(drifted, 5, prev=a, cut=False, via="door", exit=(4, 2, "RIGHT")) == a
 
@@ -86,8 +87,9 @@ def test_cut_with_identical_landmarks_does_not_return_previous_place(tmp_path):
 def test_cut_ignores_self_loop_exit_edges_and_relations(tmp_path):
     mem = Memory(tmp_path)
     for suffix, path in (("tile", "exit"), ("via", "edge"), ("relation", "relation")):
+        mem = Memory(tmp_path / suffix)
         prev = f"p_{suffix}"
-        mem.upsert("places", {"id": prev, "name": suffix, "screen": suffix, "state": "place", "edges": []})
+        mem.upsert("places", {"id": prev, "name": suffix, "screen": "world", "state": "place", "edges": []})
         if path == "exit":
             mem.upsert("tiles", {"id": f"{prev}@1,2", "place": prev, "x": 1, "y": 2,
                                   "exit": {"dir": "RIGHT", "to": prev, "arrive": [0, 0]}})
@@ -96,7 +98,7 @@ def test_cut_ignores_self_loop_exit_edges_and_relations(tmp_path):
                                   "edges": [{"verb": "approach", "via": "door", "to": prev}]})
         else:
             mem.upsert("relations", {"id": "r_self", "s": "e_door", "p": "leads_to", "o": prev, "state": "live"})
-        matched = mem.match_place({"screen": suffix}, 2, prev=prev, cut=True, via="door",
+        matched = mem.match_place({"screen": "world"}, 2, prev=prev, cut=True, via="door",
                                   exit=(1, 2, "RIGHT"), via_id="e_door")
         assert matched != prev
 
@@ -122,7 +124,7 @@ def test_relations_confidence_provenance_and_expiry(tmp_path):
 
 def test_view_budget_ids_and_recent_failed_affordances(tmp_path):
     mem = Memory(tmp_path)
-    place = mem.match_place({"screen": "town", "entities": []}, 1, prev=None, cut=True)
+    place = mem.match_place({"screen": "world", "entities": []}, 1, prev=None, cut=True)
     entity = mem.observe({"entities": [{"name": "door", "kind": "door", "at": [.2, .3]}]}, place, 2)[0]
     mem.relate(entity, "leads_to", "p_other", src="model", step=3)
     recent = [{"step": 2, "place": place, "choice": {"verb": "interact", "target": "door"},
@@ -155,7 +157,7 @@ def test_unresolved_exit_gets_place_identity_and_failed_view(tmp_path):
 
 def test_refuted_view_cap_and_chooser_history_survives_crowded_memory(tmp_path):
     mem = Memory(tmp_path)
-    place = mem.match_place({"screen": "town", "entities": []}, 1, prev=None, cut=True)
+    place = mem.match_place({"screen": "world", "entities": []}, 1, prev=None, cut=True)
     for i in range(3):
         mem.relate(f"e_{i}", "leads_to", f"p_{i}", src="pixel", step=2, hit=False)
         mem.relate(f"e_{i}", "leads_to", f"p_{i}", src="pixel", step=3, hit=False)
@@ -220,18 +222,18 @@ def test_border_exit_pools_across_kind_strings_resolves_and_places_ignore_transi
 
 def test_name_place_merges_new_arrival_retargets_refs_and_keeps_established_places(tmp_path):
     mem = Memory(tmp_path)
-    mem.upsert("places", {"id": "new", "name": "screen", "screen": "room", "state": "candidate", "first": 3, "landmarks": [["oak", "npc"]], "edges": []})
-    mem.upsert("places", {"id": "hall", "name": "Hall", "screen": "room", "state": "place", "first": 1, "landmarks": [["oak", "npc"]], "edges": []})
-    mem.upsert("places", {"id": "start", "name": "start", "screen": "room", "state": "place", "first": 1, "landmarks": [], "edges": [{"verb": "approach", "via": "door", "to": "new", "n": 1, "ok": 1}]})
+    mem.upsert("places", {"id": "new", "screen": "world", "state": "candidate", "first": 3, "landmarks": [["oak", "npc"]], "edges": []})
+    mem.upsert("places", {"id": "hall", "name": "Hall", "screen": "world", "state": "place", "first": 1, "landmarks": [["oak", "npc"]], "edges": []})
+    mem.upsert("places", {"id": "start", "name": "start", "screen": "world", "state": "place", "first": 1, "landmarks": [], "edges": [{"verb": "approach", "via": "door", "to": "new", "n": 1, "ok": 1}]})
     mem.upsert("tiles", {"id": "t1", "place": "start", "x": 1, "y": 2, "exit": {"to": "new"}})
     mem.upsert("relations", {"id": "r1", "s": "e1", "p": "leads_to", "o": "new", "state": "live"})
     assert mem.name_place("new", "hall", 3) == "hall"
     assert mem.get("places", "new")["state"] == "merged" and mem.get("places", "new")["into"] == "hall"
     assert mem.get("places", "start")["edges"][0]["to"] == "hall"
     assert mem.get("tiles", "t1")["exit"]["to"] == "hall" and mem.get("relations", "r1")["o"] == "hall"
-    assert mem.match_place({"screen": "room", "entities": [{"name": "Oak", "kind": "npc"}]}, 4, prev=None, cut=True) == "hall"
-    mem.upsert("places", {"id": "old", "name": "Cave", "screen": "room", "state": "place", "first": 1, "landmarks": [], "edges": []})
-    mem.upsert("places", {"id": "other", "name": "Lake", "screen": "room", "state": "place", "first": 5, "landmarks": [], "edges": []})
+    assert mem.match_place({"screen": "world", "entities": [{"name": "Oak", "kind": "npc"}]}, 4, prev=None, cut=True) == "hall"
+    mem.upsert("places", {"id": "old", "name": "Cave", "screen": "world", "state": "place", "first": 1, "landmarks": [], "edges": []})
+    mem.upsert("places", {"id": "other", "name": "Lake", "screen": "world", "state": "place", "first": 5, "landmarks": [], "edges": []})
     assert mem.name_place("other", "cave", 6) == "other" and mem.get("places", "other")["state"] == "place"
     assert mem.name_place("other", "Lakeside", 6) == "other"
     assert mem.get("places", "other")["name"] == "Lakeside" and mem.get("places", "other")["aliases"] == ["Lakeside"]
@@ -285,3 +287,41 @@ def test_seen_view_only_locates_within_one_place(tmp_path):
     mem.remember_view("bed", (0, 0), view(0, 0))
     assert mem.seen_view(view(1, 0), "world", None, 16) == ("bed", (1, 0))  # recognised despite its "dialogue" screen type
     assert mem.seen_view(view(1, 0), None, None, 16, only="bed") == ("bed", (1, 0))
+
+
+def test_world_dialogue_menu_world_sequence_on_gridenv_is_one_place(tmp_path):
+    from tests.agent.fakes import GridEnv
+    env, mem = GridEnv(hud=True), Memory(tmp_path)
+    world = {"screen": "world", "entities": [{"name": "npc", "kind": "npc"}]}
+    place = mem.match_place(world, 1, prev=None, cut=True, frame=env.screenshot(), tile_px=16)
+    mem.remember_view(place, (0, 0), env.screenshot())
+    env.text_box = True
+    dialogue = mem.match_place({"screen": "dialogue", "text": ["Hello!"], "entities": []}, 2, prev=place, cut=True, frame=env.screenshot(), tile_px=16)
+    env.text_box = False; env.set_hud_value(3)
+    menu = mem.match_place({"screen": "menu", "entities": [{"name": "Start", "kind": "menu_item"}]}, 3, prev=dialogue, cut=True, frame=env.screenshot(), tile_px=16)
+    env.set_hud_value(0)
+    back = mem.match_place(world, 4, prev=menu, cut=True, frame=env.screenshot(), tile_px=16)
+    assert dialogue == menu == back == place
+    assert [p["id"] for p in mem.rows("places") if p.get("screen") == "world"] == [place]
+
+
+def test_cut_back_from_dialogue_matches_the_place_left_not_a_new_one(tmp_path):
+    from tests.agent.fakes import GridEnv
+    env, mem = GridEnv(), Memory(tmp_path)
+    world = {"screen": "world", "entities": [{"name": "npc", "kind": "npc"}]}
+    place = mem.match_place(world, 1, prev=None, cut=True, frame=env.screenshot(), tile_px=16)
+    mem.remember_view(place, (0, 0), env.screenshot())
+    mem.match_place({"screen": "dialogue", "entities": []}, 2, prev=place, cut=True)
+    assert mem.match_place(world, 3, prev=place, cut=True, frame=env.screenshot(), tile_px=16) == place
+    mem.match_place({"screen": "dialogue", "entities": []}, 4, prev=place, cut=True)
+    room = {"screen": "world", "entities": [{"name": "Sign", "kind": "object"}]}  # another room behind the dialogue
+    assert mem.match_place(room, 5, prev=place, cut=True) != place
+    assert mem.match_place(room, 6, prev=place, cut=True) != place  # a real move between navigable screens still excludes prev
+
+
+def test_name_place_refuses_screen_types_and_references(tmp_path):
+    mem = Memory(tmp_path)
+    mem.upsert("places", {"id": "p", "screen": "world", "state": "candidate", "first": 1, "landmarks": [], "edges": []})
+    assert mem.name_place("p", "world", 2) == "p" and mem.name_place("p", "Town [p_x]", 2) == "p"
+    assert mem.get("places", "p").get("aliases") is None and "name" not in mem.get("places", "p")
+    assert mem.name_place("p", "Hall", 3) == "p" and mem.get("places", "p")["aliases"] == ["Hall"]

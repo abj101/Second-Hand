@@ -7,7 +7,7 @@ from tests.agent.fakes import GridEnv
 
 
 def place(mem, id, name, first=1):
-    mem.upsert("places", {"id": id, "name": name, "screen": "room", "state": "place", "first": first, "last": first, "edges": []})
+    mem.upsert("places", {"id": id, "name": name, "screen": "world", "state": "place", "first": first, "last": first, "edges": [], "visits": 1})  # memory always sets visits
 
 
 def entity(mem, id, name, place, tile, seen=2):
@@ -363,15 +363,15 @@ def test_actor_observation_radius_and_status_reset(tmp_path):
 
 
 def test_resolve_place_labels_precede_entity_names_and_gone_targets_remain_executable(tmp_path):
-    mem = Memory(tmp_path); place(mem, "p_world", "world"); place(mem, "p_other", "WORLD"); place(mem, "p_2f", "2F")
+    mem = Memory(tmp_path); place(mem, "p_world", "Town"); place(mem, "p_other", "TOWN"); place(mem, "p_2f", "2F")
     entity(mem, "world-thing", "world", "p_2f", [1, 0])
     entity(mem, "gone-chest", "Chest", "p_2f", [2, 0])
     mem.upsert("entities", {**mem.get("entities", "gone-chest"), "status": "gone", "tier": "landmark"})
     world = World(mem, 16); world.current_place = "p_2f"
     screen = {"entities": [{"name": "world", "kind": "object"}]}
 
-    assert world.place_label("p_world") == "world [p_world]"
-    assert world.resolve("world [p_world]", screen, "p_2f")["id"] == "p_world"
+    assert world.place_label("p_world") == "Town [p_world]"
+    assert world.resolve("Town [p_world]", screen, "p_2f")["id"] == "p_world"
     assert world.resolve("p_world", screen, "p_2f")["id"] == "p_world"
     assert world.resolve("Chest", {"entities": []}, "p_2f") == {
         "kind": "memory", "place": "p_2f", "tile": (2, 0), "id": "gone-chest", "stale": False}
@@ -410,7 +410,7 @@ def test_world_view_is_bounded_deterministic_promotes_goal_and_caps_landmark_map
 
 
 def test_world_view_place_ranking_prefers_goal_overlap_and_keeps_duplicate_labels_unique(tmp_path):
-    mem = Memory(tmp_path); place(mem, "here", "world"); place(mem, "p_world", "world"); place(mem, "goal", "Forest")
+    mem = Memory(tmp_path); place(mem, "here", "Town"); place(mem, "p_world", "Town"); place(mem, "goal", "Forest")
     place(mem, "recent", "Cave", first=9)
     for src, dst, ident in (("here", "goal", "a"), ("here", "recent", "b")):
         mem.upsert("tiles", {"id": f"{src}@{ident}", "place": src, "x": 0 if ident == "a" else 1, "y": 0,
@@ -420,7 +420,7 @@ def test_world_view_place_ranking_prefers_goal_overlap_and_keeps_duplicate_label
 
     view = world.view("reach forest", "here")
 
-    assert len(labels) == len(set(labels)) and "world [here]" in labels and "world [p_world]" in labels
+    assert len(labels) == len(set(labels)) and "Town [here]" in labels and "Town [p_world]" in labels
     assert view.index("Place: Forest") < view.index("Place: Cave")
 
 
@@ -463,7 +463,7 @@ def test_world_view_lists_all_place_exits_before_any_other_place_things(tmp_path
     view = world.view("", "here")
 
     headings = [view.index(f"Place: {name}") for name in ("North", "South", "West")]
-    exit_rows = [line for line in view.splitlines() if line == "  Exit DOWN -> Atrium"]
+    exit_rows = [line for line in view.splitlines() if line == "  Exit DOWN -> Atrium never used"]
     exits = [view.index(line) for line in exit_rows]
     first_thing = min(i for i in (view.find("Thing "), view.find("Thing:"), view.find("Landmark ")) if i >= 0)
     assert len(set(headings)) == 3 and len(exits) == 3 and max(headings + exits) < first_thing and len(view) <= 2000
@@ -481,7 +481,7 @@ def test_world_view_labels_other_place_detail_bundle(tmp_path):
     view = world.view("", "here")
 
     lines = view.splitlines()
-    assert lines.index("Place: Hall") < lines.index("  Exit LEFT -> Atrium") < lines.index("Things: Hall")
+    assert lines.index("Place: Hall") < lines.index("  Exit LEFT -> Atrium never used") < lines.index("Things: Hall")
     assert lines[lines.index("Things: Hall") + 1] == "  Thing: Chest remembered"
 
 
@@ -491,7 +491,7 @@ def test_loop_act_uses_world_facts_active_goals_and_labels(tmp_path, monkeypatch
     from agent import loop as loop_module
     from tests.agent.fakes import GridEnv, StubModel
 
-    mem = Memory(tmp_path / "act"); place(mem, "home", "Home"); place(mem, "p_world", "world"); place(mem, "p_world2", "world")
+    mem = Memory(tmp_path / "act"); place(mem, "home", "Home"); place(mem, "p_world", "Town"); place(mem, "p_world2", "Town")
     mem.upsert("tiles", {"id": "home@0,0", "place": "home", "x": 0, "y": 0, "floor": True, "blocked": [], "pushed": [], "exit": {"dir": "RIGHT", "to": "p_world", "arrive": [1, 0]}, "step": 1})
     entity(mem, "chest", "Chest", "home", [1, 0]); mem.upsert("entities", {**mem.get("entities", "chest"), "tier": "landmark"})
     entity(mem, "oak", "Oak", "home", [2, 0]); mem.upsert("entities", {**mem.get("entities", "oak"), "tier": "landmark"})
@@ -510,7 +510,7 @@ def test_loop_act_uses_world_facts_active_goals_and_labels(tmp_path, monkeypatch
     loop.step()
 
     assert "Here: Home" in seen["view"] and "Thing" in seen["view"] and "chest" in seen["view"].casefold()
-    assert "world [p_world]" in seen["places"] and "world [p_world2]" in seen["places"]
+    assert "Town [p_world]" in seen["places"] and "Town [p_world2]" in seen["places"]
     assert mem.get("entities", "chest")["tier"] == "interest" and mem.get("entities", "oak")["tier"] == "landmark"
 
 
@@ -679,3 +679,74 @@ def test_before_reuses_ids_after_observe_after_cached_perception(tmp_path, monke
     world.before(second, "p", "p", (160, 144), 3)
 
     assert calls == 2
+
+
+def test_boot_title_and_dialogues_leave_one_navigable_place_with_no_screen_label(tmp_path):
+    mem = Memory(tmp_path); world = World(mem, 16)
+    run_start = mem.match_place({"screen": "title", "text": ["PRESS START"], "entities": []}, 1, prev=None, cut=True)
+    place = run_start
+    for step in range(2, 7):
+        place = mem.match_place({"screen": "dialogue", "text": [f"line {step}"], "entities": []}, step, prev=place, cut=True)
+    arrived = mem.match_place({"screen": "world", "entities": [{"name": "npc", "kind": "npc"}]}, 7, prev=place, cut=True)
+    assert place == run_start and arrived != run_start
+    assert [p["id"] for p in mem.rows("places") if p.get("screen") == "world"] == [arrived]
+    assert not {world.place_label(p["id"]) for p in mem.rows("places")} & {"title", "dialogue", "menu", "world"}
+    assert world.name(run_start, "Hall", 2) == run_start and "name" not in mem.get("places", run_start)  # a run-start place is never named
+    assert world.name(arrived, "Hall", 8) == arrived and world.place_label(arrived) == "Hall"
+
+
+def test_model_screen_type_or_reference_is_never_a_name_or_alias(tmp_path):
+    mem = Memory(tmp_path); world = World(mem, 16)
+    arrived = mem.match_place({"screen": "world", "entities": [{"name": "npc", "kind": "npc"}]}, 1, prev=None, cut=True)
+    for step, bad in enumerate(("world", "dialogue", "Menu", "Town [p_place]", "world [p_world]"), 2):
+        assert world.name(arrived, bad, step) == arrived
+    row = mem.get("places", arrived)
+    assert "name" not in row and not row.get("aliases") and world.place_label(arrived) == "place 1"
+    assert world.name(arrived, "Hall", 8) == arrived and world.name(arrived, "Lake", 9) == arrived
+    assert mem.get("places", arrived)["name"] == "Lake" and mem.get("places", arrived)["aliases"] == ["Hall", "Lake"]  # a real name still becomes an alias
+
+
+def test_legacy_screen_type_alias_does_not_match_or_gain_a_new_alias(tmp_path):
+    mem = Memory(tmp_path); world = World(mem, 16)
+    mem.upsert("places", {"id": "p_old", "name": "Hall", "screen": "world", "state": "place", "first": 1, "last": 1, "edges": [], "aliases": ["world", "world [p_old]"]})
+    arrived = mem.match_place({"screen": "world", "entities": [{"name": "sign", "kind": "object"}]}, 2, prev=None, cut=True)
+    assert world.name(arrived, "world", 3) == arrived and world.name(arrived, "world [p_old]", 3) == arrived
+    assert mem.get("places", "p_old")["aliases"] == ["world", "world [p_old]"] and "name" not in mem.get("places", arrived)
+
+
+def test_refuted_thing_renders_evidence_and_is_never_deleted(tmp_path):
+    mem = Memory(tmp_path); place(mem, "here", "Atrium")
+    entity(mem, "door", "doorway", "here", [0, -1], 2)
+    mem.upsert("entities", {**mem.get("entities", "door"), "kind": "exit", "tier": "interest"})
+    mem.upsert("relations", {"id": "dn", "s": "door", "p": "does_nothing", "o": "", "src": "observed", "sup": 0, "con": 3, "ev": [104, 105, 107], "state": "refuted", "verb": "buttons", "step": 107})
+    mem.upsert("relations", {"id": "say", "s": "door", "p": "says", "o": "Hi", "src": "model", "sup": 0, "con": 0, "ev": [], "state": "live", "why": "says the same as before (step 90)", "step": 91})
+    world = World(mem, 16); world.current_place, world.pos = "here", (0, 0)
+    view = world.view("", "here")
+    assert "doorway" in view and "not working: walked into 3×, steps 104–107; says the same as before (step 90)" in view
+    assert any(r["id"] == "door" for r in mem.rows("entities"))
+    mem.upsert("relations", {"id": "dn", "s": "door", "p": "does_nothing", "o": "", "src": "observed", "sup": 0, "con": 1, "ev": [104], "state": "live", "verb": "buttons", "step": 104})
+    assert "not working" not in world.view("", "here")
+
+
+def test_view_exit_table_refuted_thing_and_run_start_place(tmp_path):
+    from agent.world import VIEW_TOKENS
+    mem = Memory(tmp_path); place(mem, "here", "Atrium"); place(mem, "hall", "Hall"); place(mem, "garden", "Garden"); place(mem, "shop", "Shop")
+    mem.upsert("places", {"id": "run_start", "state": "place", "first": 1, "last": 1, "visits": 1, "edges": []})  # no screen: the unnamed run-start place
+    mem.upsert("places", {**mem.get("places", "here"), "edges": [{"verb": "approach", "via": "door", "to": "hall", "n": 2, "ok": 2}]})
+    for src, dst, direction, at in (("here", "hall", "RIGHT", [2, 0]), ("here", "garden", "UP", [0, -1]), ("hall", "here", "LEFT", [0, 0])):
+        mem.upsert("tiles", {"id": f"{src}@{at[0]},{at[1]}", "place": src, "x": at[0], "y": at[1], "floor": True, "blocked": [], "pushed": [],
+                              "exit": {"dir": direction, "to": dst, "arrive": [0, 0]}, "step": 1})
+    entity(mem, "side", "exit: side door", "here", [-1, 0])
+    mem.upsert("entities", {**mem.get("entities", "side"), "kind": "exit"})
+    mem.upsert("relations", {"id": "lead", "s": "side", "p": "leads_to", "o": "shop", "src": "observed", "sup": 1, "con": 0, "ev": [], "state": "live", "step": 5})
+    entity(mem, "sign", "sign", "here", [1, 0])
+    mem.upsert("relations", {"id": "dn", "s": "sign", "p": "does_nothing", "o": "", "src": "observed", "sup": 0, "con": 3, "ev": [104, 105, 107], "state": "refuted", "verb": "buttons", "step": 107})
+    world = World(mem, 16); world.current_place, world.pos = "here", (0, 0)
+
+    view = world.view("", "here")
+
+    assert "E at (2,0) push RIGHT -> Hall used 2×" in view and "E at (0,-1) push UP -> Garden never used" in view
+    assert "E at (-1,0) side door -> Shop used 1×" in view and "  Exit LEFT -> Atrium never used" in view
+    assert "Don't believe: sign (not working: walked into 3×, steps 104–107)" in view
+    assert "Place: Hall" in view and "run_start" not in view and "Place: place" not in view and "place 1" not in view
+    assert len(view) <= VIEW_TOKENS * 4

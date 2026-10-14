@@ -13,7 +13,7 @@ from agent.skills import Ctx, press_seq, run_affordance, wait_until
 from agent.tasks import Stuck
 from agent.trace import Trace
 from agent.space import DIRS, frontier, outward, route
-from agent.world import World
+from agent.world import World, fail_key
 CAPTION = 'The sprite inside the red box is the player\'s own character (you); list it with kind "player".'
 class Loop:
     def __init__(self, env, model, mem, game, act_text=False):
@@ -122,9 +122,9 @@ class Loop:
                 summaries.pop(1 if self.stuck.n else 0); recent_flag = "recent: " + "; ".join(summaries)
             act_flags.append(recent_flag[:197] + "..." if len(recent_flag) > 200 else recent_flag)
         act_flags.append(self.world.here_flag())
-        failed_here = sorted(((f.get("act") or k.split("|", 1)[1], f) for k, f in self.fails.items() if k.split("|", 1)[0] == place), key=lambda kv: -kv[1]["n"])[:4]
-        if failed_here: act_flags.append("failed here before: " + "; ".join(f"{a} x{f['n']} ({f['why']})" for a, f in failed_here))
-        a = act(self.model, None if self.act_text else model_frame, per, self.notebook.render_focus(), view, act_flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]])
+        options = self.world.options(per, place, self.fails, self.step_no + 1, inputs=list(self.env.inputs()))  # failure history is in the option notes
+        a = act(self.model, None if self.act_text else model_frame, per, self.notebook.render_focus(), view, act_flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged" and p.get("screen") == "world"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]], options=options)
+        picked = next((o for o in options if o["n"] == getattr(a, "option", None)), None)
         applied = self.notebook.apply(a.ops, self.step_no + 1, structure=False)
         closed = self.notebook.data["goals"].get(self.notebook.focus or "", {})
         if closed.get("status") in FINISHED: self.focus_closed, self.moves = f"focus {self.notebook.focus} {closed['status']}: {closed.get('evidence', '')}", []  # progress: the place-move history starts over
@@ -161,7 +161,7 @@ class Loop:
         unknown = bool(choice and affs[choice.i].get("verb") in ("approach", "interact") and not self.env.pointer and
                        not any(e.get("kind", "").casefold() == "player" for e in per.get("entities", [])))
         self._live(before, place, per, choice and {**affs[choice.i], "why": choice.why, "text": choice.text}, a)
-        skillctx = Ctx(self.env, self.model, self.tile_px, self.move_frames)
+        skillctx = Ctx(self.env, self.model, self.tile_px, self.move_frames); pressed_from = tuple(self.world.pos)
         try:
             skill = self.world.travel(skillctx, travel_legs, self.step_no + 1, self.trace) if travel_legs is not None and choice else wait_until(skillctx) if not affs or choice is None else press_seq(skillctx, affs[choice.i]["target"].split()) if affs[choice.i].get("verb") == "buttons" else run_affordance(skillctx, affs[choice.i], per, text=choice.text, exit=False, **({"route": act_route} if act_route else {}))
         except BaseException: self.pending_cut, self.pending_via = cut(before, self.env.screenshot()), affs[choice.i].get("target") if choice else None; self.cached = self.cached_hash = None; raise
@@ -179,22 +179,26 @@ class Loop:
         next_place = self.world.current_place if travel_legs is not None else place if modal else self.mem.match_place(after_per, self.step_no + 1, prev=place, cut=scene_cut, via=(affs[choice.i].get("target") if choice else None), exit=exit_key, via_id=targets[choice.i] if choice else None, frame=after, tile_px=self.tile_px)
         spatial = self.world.after(skill, place, next_place, scene_cut, self.step_no + 1); known_exit = spatial["known_exit"]
         if next_place != place: self._moved(place, next_place, affs[choice.i].get("target") if choice else None, self.step_no + 1)
-        if skill.scroll != (0, 0) and next_place == place and self.mem.get("places", place).get("state") == "candidate":
+        if skill.scroll != (0, 0) and next_place == place and self.mem.get("places", place).get("state") == "candidate" and self.mem.get("places", place).get("screen") == "world":
             source = self.mem.get("places", place); source["state"] = "place"; self.mem.upsert("places", source)
         world_exit = bool(scene_cut and next_place != place and cut_dir and per.get("screen") == after_per.get("screen") == "world")
-        outcome = effects(per, after_per, skill, place, next_place, place_after_candidate=not world_exit and self.mem.get("places", next_place).get("state") == "candidate", scene_cut=scene_cut)
+        outcome = effects(per, after_per, skill, place, next_place, place_after_candidate=not world_exit and self.mem.get("places", next_place).get("state") == "candidate", scene_cut=scene_cut and next_place != place)
         blocked = skill.reason == "route blocked" and act_route and len(moves) < len(act_route["dirs"])
         pred = (preds[choice.i] or {"effect": choice.effect, "detail": choice.detail, "basis": "guess"}) if choice else None
         if choice and str(affs[choice.i].get("target", "")).startswith("exit"):
             pred = {**pred, "effect": "place_changes", "detail": pred.get("detail") if pred.get("effect") == "place_changes" else None}
         v = "unobservable" if not affs or not choice else verdict(pred, outcome, blocked=skill.status == "blocked", inputs=skill.inputs)
         if choice and targets[choice.i]:
+            new_text = next((t for t in after_per.get("text", []) if t not in per.get("text", [])), "")
             for effect in outcome["effects"]:
-                detail = outcome.get("to") if effect == "place_changes" else choice.detail or effect
-                self.mem.relate(targets[choice.i], PRED[effect], str(detail or ""),
+                detail = outcome.get("to") if effect == "place_changes" else new_text if effect == "text_appears" else choice.detail or effect
+                said = next((r for r in self.mem.rows("relations") if (r.get("s"), r.get("p"), r.get("o")) == (targets[choice.i], PRED[effect], detail)), None) if effect == "text_appears" else None
+                said_step = said["step"] if said else None  # relate() updates the stored row in place
+                rel = self.mem.relate(targets[choice.i], PRED[effect], str(detail or ""),
                     src=outcome["basis"].get(effect, "model"), step=self.step_no + 1,
                     hit=True if outcome["basis"].get(effect) == "pixel" else None,
                     verb=affs[choice.i]["verb"], pattern_id=pred.get("id") if pred and pred.get("basis") == "pattern" and effect == pred.get("effect") else None)
+                if said_step is not None: self.mem.upsert("relations", {**rel, "why": f"says the same as before (step {said_step})"})  # ponytail: a note on the says row, not a new relation kind
             # A route stopped by a newly learned wall before the target says nothing about the target; replan next step.
             if pred and pred["effect"] not in outcome["effects"] and not blocked:
                 self.mem.relate(targets[choice.i], PRED[pred["effect"]], str(pred.get("detail") or ""),
@@ -203,7 +207,7 @@ class Loop:
         edge_rows = self.mem.get("places", place).get("edges", [])
         verified_edge = bool(choice and scene_cut and next_place != place and any(outcome["basis"].get(e) == "pixel" for e in ("place_changes", "screen_changes")) and
             not any((e.get("verb"), e.get("via"), e.get("to")) == (affs[choice.i]["verb"], affs[choice.i].get("target", ""), next_place) and e.get("ok") for e in edge_rows))
-        if choice and scene_cut:
+        if choice and scene_cut and next_place != place:  # a cut to a non-navigable screen is no edge
             self.mem.add_edge(place, affs[choice.i]["verb"], affs[choice.i].get("target", ""), next_place, True)
             if world_exit: self.world.mark_exit(place, cut_dir, next_place, self.world.pos, self.step_no+1)
         row = {"step": self.step_no + 1, "t": time.time(), "place": place, "screen": per.get("screen"),
@@ -213,7 +217,8 @@ class Loop:
             "outcome": outcome, "verdict": v, "calls": self.model.calls-calls, "ms": int((time.perf_counter()-start)*1000), "shortcut": None,
             "ranker": None, "perception_reused": reused, "frame_hash": frame_hash, "marked": marked,
             "scene_cut": scene_cut, "next_place": next_place, "verified_edge": verified_edge, "view_ids": [], "tile": self.world.pos if self.tile_px else None, "drift_fix": list(drift_fix) if drift_fix else None, "player_fix": player_fix, "entities": self.world.entities, "scroll": spatial["scroll"], **({"exit": list(exit_key)} if scene_cut and not modal and next_place != place and exit_key else {}),
-            "act": {"place": a.place, "ops": applied, "why": a.why, "action": a.action, "flags": act_flags}, **({"flags": [f"merge_pending: {self.world.merge_pending}"]} if self.world.merge_pending else {})}
+            "act": {"place": a.place, "ops": applied, "why": a.why, "action": a.action, "flags": act_flags},
+            "option": {k: picked[k] for k in ("n", "tool", "label", "notes")} if picked else None, **({"flags": [f"merge_pending: {self.world.merge_pending}"]} if self.world.merge_pending else {})}
         row["plan"] = self._plan_row
         row["probe"] = {"presses": probe["presses"], "locked": probe["locked"]} if probe is not None else None
         self.step_no += 1
@@ -229,9 +234,15 @@ class Loop:
         if choice is not None:
             verb, target = affs[choice.i].get("verb"), affs[choice.i].get("target") or ""; key = self._fail_key(place, verb, target)
             failed = skill.status in ("blocked", "failed") or v == "miss" or "no_change" in outcome.get("effects", [])
+            d = next((x.upper() for x in target.split() if x.upper() in DIRS), None) if verb == "buttons" else None  # a press aims at the tile it faces
+            ahead = (pressed_from[0] + DIRS[d][0], pressed_from[1] + DIRS[d][1]) if d else None
+            thing = targets[choice.i] or next((r["id"] for r in self.mem.rows("entities") if r.get("place") == place and r.get("tile") and tuple(r["tile"]) == ahead), None)
             if failed:
                 f = self.fails.setdefault(key, {"n": 0}); f.update(n=f["n"] + 1, why=(skill.reason or f"verdict {v}")[:40], step=self.step_no, act=f"{verb} {target}".strip())
                 if f["n"] == 2: self.urgent = self.urgent or f"the same action failed twice here: {f['act']} ({f['why']})"
+                if thing: self.mem.relate(thing, PRED["no_change"], "", src="observed", step=self.step_no, hit=False, verb=verb)  # the thing itself is contradicted; never deleted
+            elif thing and (failure := next((r for r in self.mem.rows("relations") if (r.get("s"), r.get("p"), r.get("o")) == (thing, PRED["no_change"], "")), None)):
+                self.mem.upsert("relations", {**failure, "con": 0, "ev": [], "state": "live"})  # ponytail: a success clears the failure row in place (no sup accounting: predict reads it)
         if a.action and "go_to" in a.action and choice is None: reason = f'go_to "{a.action["go_to"]}": not in memory'
         if not a.action and not reason: reason = "your last reply had no valid action, so nothing happened: use one of the action shapes"
         self.flags = [x for x in (reason, f"last action {skill.status}: {skill.reason}" if skill.status != "done" else None, f"verdict {v}" if v in ("miss", "surprise") else None, f"merge_pending: {self.world.merge_pending}" if self.world.merge_pending else None) if x]; self.world.merge_pending = None; self.world.new_arrival = False
@@ -265,9 +276,7 @@ class Loop:
         except OSError: pass  # a reader holding live.json on Windows; the trace row still lands
     def _fail_key(self, place, verb, target):
         """One key per place and intent: button presses collapse to their direction keys (else the first button), targets ignore the verb."""
-        t, keys = str(target).split(), set(self.env.inputs())
-        if t and all(x.upper() in keys for x in t): u = list(dict.fromkeys(x.upper() for x in t)); t = [x for x in u if x in DIRS] or u[:1]
-        return f"{place}|{' '.join(t).casefold() or verb}"
+        return fail_key(place, verb, target, self.env.inputs())
     def _moved(self, src, dst, via, step):
         label = self.world.place_label
         self.notebook.note(step, f"went from {label(src)} to {label(dst)}" + (f" via {via}" if via else ""))

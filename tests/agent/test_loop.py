@@ -385,7 +385,7 @@ def test_modal_overlay_at_step_start_keeps_place(tmp_path, monkeypatch):
     second = loop.step()
     assert second["place"] == first["next_place"]  # modal overlay keeps the post-cut place
 
-def test_explicit_transition_into_dialogue_creates_place(tmp_path, monkeypatch):
+def test_explicit_transition_into_dialogue_keeps_place(tmp_path, monkeypatch):  # was ..._creates_place: dialogue is a state, not a place
     from agent import loop as loop_module
     env = GridEnv()
     world = perception(); world["screen"] = "world"
@@ -399,7 +399,7 @@ def test_explicit_transition_into_dialogue_creates_place(tmp_path, monkeypatch):
                                before=before, after=after, scroll=(0, 0), blank_seen=False)
     monkeypatch.setattr(loop_module, "run_affordance", transition)
     row = loop.step()
-    assert row["scene_cut"] and row["next_place"] != row["place"]
+    assert row["scene_cut"] and row["next_place"] == row["place"] and "place_changes" not in row["outcome"]["effects"]
 
 @pytest.mark.parametrize(("screen", "moves", "expect"), [("world", [("DOWN", 1)], True), ("world", [], False), ("dialogue", [("DOWN", 1)], False)])
 def test_directional_world_exit_into_new_place_is_place_changes(tmp_path, monkeypatch, screen, moves, expect):
@@ -416,7 +416,7 @@ def test_directional_world_exit_into_new_place_is_place_changes(tmp_path, monkey
                                before=before, after=after, scroll=(0, 0), blank_seen=False)
     monkeypatch.setattr(loop_module, "run_affordance", transition)
     row = loop.step()
-    assert row["scene_cut"] and row["next_place"] != row["place"]
+    assert row["scene_cut"] and (row["next_place"] != row["place"]) == (screen == "world")  # only a navigable screen is a new place
     assert ("place_changes" in row["outcome"]["effects"]) == expect
     if expect: assert row["outcome"]["to"] == row["next_place"]
 
@@ -523,13 +523,14 @@ def test_tracked_approach_scroll_does_not_split_but_real_cuts_do(tmp_path, monke
 
     def run_case(root, verb="approach", reason="", blank=False):
         env = GridEnv(); before = env.screenshot()
-        start = perception(two=True)
+        start = perception(two=True); start["screen"] = "world"
         for aff in start["affordances"]: aff["verb"] = verb
-        destination = perception(); destination["screen"] = "other room"
+        destination = perception(); destination["screen"] = "world"
         destination["entities"] += [{"kind":"object", "name":"new landmark", "at":[.2,.2]}, {"kind":"exit", "name":"exit: door", "at":[500,500]}]
         if verb == "interact": destination["text"] = ["Visible dialogue"]
         model = StubModel([reply(start), act_reply(0, "place_changes", verb), reply(destination)])
         mem = Memory(root/"memory"); loop = Loop(env, model, mem, "grid")
+        loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True  # no self-locating probe presses
 
         def move(ctx, aff, per, text=None, exit=False):
             env.scene = 1; after = env.screenshot()
@@ -761,8 +762,10 @@ def test_planner_owns_goals_and_act_closes_the_focus(tmp_path):
     act_reply = reply({"place": "Hall", "notebook": [{"op": "set", "section": "goals", "key": "sneaky", "value": {"text": "x"}},
                                                     {"op": "focus", "status": "done", "evidence": "door crossed"}],
                        "action": {"thing": 0, "verb": "approach"}, "text": None, "expect": "screen_changes", "why": "try"})
-    model = Roles([reply(perception()), plan_reply, act_reply, reply(perception()), reply(perception())])
+    world = perception(); world["screen"] = "world"  # a place is named only on a navigable screen
+    model = Roles([reply(world), plan_reply, act_reply, reply(world), reply(world)])
     loop = Loop(GridEnv(), model, Memory(tmp_path / "memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True  # no self-locating probe presses
 
     row = loop.step()
 
@@ -870,6 +873,23 @@ def test_act_invalid_action_waits_and_is_unobservable(tmp_path):
 
     assert row["choice"] is None and row["act"]["action"] is None and row["verdict"] == "unobservable"
 
+
+def test_option_pick_drives_grid_through_its_exit(tmp_path, monkeypatch):
+    from agent import loop as module
+    env = GridEnv()
+    def perceive(*_):
+        per = env.perception(); return per, reply(per)
+    monkeypatch.setattr(module, "perceive", perceive)
+    pick = reply({"place": "", "notebook": [], "action": {"i": 1}, "text": None, "expect": "place_changes", "why": "the door"})
+    loop = Loop(env, StubModel([pick]), Memory(tmp_path / "memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+
+    row = loop.step()
+
+    assert row["option"] == {"n": 1, "tool": "approach", "label": "exit door: never used", "notes": []}
+    assert row["act"]["action"] == {"thing": 2, "verb": "approach"} and row["choice"]["verb"] == "approach" and row["choice"]["target"] == "exit: door"
+    assert env.scene == 1
+
 def test_go_to_unexplored_walks_to_nearest_frontier(tmp_path):
     from agent.space import fold
     loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
@@ -903,8 +923,8 @@ def test_second_failure_of_same_action_flags_act_and_replans(tmp_path, monkeypat
     def perceive(*_):
         return {"screen": "world", "text": [], "entities": [{"name": "player", "kind": "player", "at": [.5, .5]}, {"name": "door", "kind": "exit", "at": [.6, .5]}]}, reply({})
     monkeypatch.setattr(module, "perceive", perceive)
-    seen_flags = []
-    def act(*a, **k): seen_flags.append(a[5]); return SimpleNamespace(place="", ops=[], action={"thing": 1, "verb": "approach"}, expect="place_changes", why="t", text=None)
+    seen_flags, seen_options = [], []
+    def act(*a, **k): seen_flags.append(a[5]); seen_options.append(k["options"]); return SimpleNamespace(place="", ops=[], action={"thing": 1, "verb": "approach"}, expect="place_changes", why="t", text=None)
     monkeypatch.setattr(module, "act", act)
     def blocked(ctx, aff, per, **k):
         frame = env.screenshot(); return SimpleNamespace(status="blocked", reason="wall", inputs=1, calls=0, before=frame, after=frame, scroll=(0, 0), blank_seen=False, moves=[])
@@ -914,8 +934,26 @@ def test_second_failure_of_same_action_flags_act_and_replans(tmp_path, monkeypat
     loop.step(); assert loop.urgent is None
     loop.step(); assert loop.urgent == "the same action failed twice here: approach door (wall)"
     row = loop.step()
-    assert any(f.startswith("failed here before: approach door x2 (wall)") for f in seen_flags[-1])
+    assert not any(f.startswith("failed here before") for f in seen_flags[-1])  # its content is in the option notes now
+    assert [o["notes"][0] for o in seen_options[-1] if o["label"] == "exit door: never used"] == ["tried here 2×, last: wall"]
     assert row["plan"]["trigger"] == "the same action failed twice here: approach door (wall)"
+
+
+def test_act_known_places_are_navigable_named_places_only(tmp_path, monkeypatch):
+    from agent import loop as loop_module
+    seen = {}
+    def recording_act(model, image, per, focus, view, flags, controls, defaults, inputs, places=None, options=None):
+        seen["places"] = places
+        return SimpleNamespace(place="", ops=[], action=None, expect="", why="", text=None)
+    monkeypatch.setattr(loop_module, "act", recording_act)
+    mem = Memory(tmp_path / "memory")
+    mem.upsert("places", {"id": "p_hall", "name": "Hall", "screen": "world", "state": "place", "last": 2, "edges": []})
+    mem.upsert("places", {"id": "p_menu", "screen": "menu", "state": "candidate", "last": 3, "edges": []})
+    world = perception(); world["screen"] = "world"
+    loop = Loop(GridEnv(), StubModel([reply(world), reply(world)]), mem, "grid")  # before and after perception
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    loop.step()
+    assert seen["places"] == ["Hall"]
 
 
 def test_fail_key_merges_rewordings_and_cycle_marks(tmp_path):
@@ -934,3 +972,76 @@ def test_slow_cycle_fires_and_progress_resets_history(tmp_path):
     for step, (s, d) in zip((1, 3, 21, 33), (("a", "b"), ("b", "a"), ("a", "b"), ("b", "a"))): loop._moved(s, d, "door", step)
     assert loop.urgent.startswith("cycle: went back and forth between b and a 4 times in 32 steps") and loop.moves == []
     loop.urgent = None; loop._moved("a", "b", "door", 40); loop._moved("b", "a", "door", 41); assert loop.urgent is None  # a full alternation is needed again
+
+
+def test_three_presses_into_a_wall_thing_refute_it_but_keep_it(tmp_path, monkeypatch):
+    from agent import loop as module
+    env = GridEnv(); env.walls.add((8, 7))  # the fake exit is drawn on a wall one tile north
+    monkeypatch.setattr(module, "perceive", lambda *_: ({"screen": "world", "text": [], "entities": [
+        {"name": "player", "kind": "player", "at": [.5, .5]}, {"name": "exit: doorway", "kind": "exit", "at": [.5, .444]}]}, reply({})))
+    monkeypatch.setattr(module, "act", lambda *a, **k: SimpleNamespace(place="", ops=[], action={"buttons": ["UP"]}, expect="screen_changes", why="t", text=None))
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    rows = [loop.step() for _ in range(3)]
+    exit_id = next(r["id"] for r in loop.mem.rows("entities") if r["name"] == "exit: doorway")
+    dn = [r for r in loop.mem.rows("relations") if r["s"] == exit_id and r["p"] == "does_nothing" and r["o"] == ""]
+    assert [r["outcome"]["effects"] for r in rows] == [["no_change"]] * 3
+    assert len(dn) == 1 and dn[0]["state"] == "refuted" and dn[0]["con"] == 3 and dn[0]["ev"] == [1, 2, 3]
+    assert "not working: walked into 3×, steps 1–3" in loop.world.view("", loop.place)
+    assert any(r["id"] == exit_id for r in loop.mem.rows("entities"))  # refuted, never deleted
+
+
+def test_real_exit_used_once_is_not_refuted(tmp_path, monkeypatch):
+    from agent import loop as module
+    env = GridEnv(); env.door = (8, 7)  # a real exit one tile north: walking onto it changes the scene
+    monkeypatch.setattr(module, "perceive", lambda *_: ({"screen": "world", "text": [], "entities": [
+        {"name": "player", "kind": "player", "at": [.5, .5]}, {"name": "exit: door", "kind": "exit", "at": [.5, .444]}]}, reply({})))
+    monkeypatch.setattr(module, "act", lambda *a, **k: SimpleNamespace(place="", ops=[], action={"buttons": ["UP"]}, expect="place_changes", why="t", text=None))
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    row = loop.step()
+    assert "place_changes" in row["outcome"]["effects"]
+    assert not [r for r in loop.mem.rows("relations") if r["p"] == "does_nothing" and r["state"] == "refuted"]
+    assert "not working" not in loop.world.view("", loop.place)
+
+
+def test_same_text_from_the_same_thing_is_noted_as_said_before(tmp_path, monkeypatch):
+    from agent import loop as module
+    env, state = GridEnv(), {"text": []}
+    monkeypatch.setattr(module, "perceive", lambda *_: ({"screen": "world", "text": list(state["text"]), "entities": [
+        {"name": "player", "kind": "player", "at": [.5, .5]}, {"name": "sign", "kind": "object", "at": [.6, .5]}]}, reply({})))
+    monkeypatch.setattr(module, "act", lambda *a, **k: SimpleNamespace(place="", ops=[], action={"thing": 1, "verb": "interact"}, expect="text_appears", why="t", text=None))
+    def read(ctx, aff, per, text=None, exit=False, **kwargs):  # the sign's box opens with the same line each time
+        before = env.screenshot(); env.text_box = True; state["text"] = ["Hi"]; after = env.screenshot()
+        return SimpleNamespace(status="done", reason="", inputs=1, calls=0, before=before, after=after, scroll=(0, 0), blank_seen=False, moves=[])
+    monkeypatch.setattr(module, "run_affordance", read)
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    loop.step()
+    env.text_box, state["text"] = False, []
+    loop.step()
+    says = [r for r in loop.mem.rows("relations") if r["p"] == "says" and r["o"] == "Hi"]
+    assert len(says) == 1 and says[0]["why"] == "says the same as before (step 1)"
+
+
+def test_successful_use_clears_a_refuted_thing_in_place(tmp_path, monkeypatch):
+    from agent import loop as module
+    env = GridEnv(); env.walls.add((8, 7))  # the fake exit: three presses into a wall, then one real use
+    monkeypatch.setattr(module, "perceive", lambda *_: ({"screen": "world", "text": [], "entities": [
+        {"name": "player", "kind": "player", "at": [.5, .5]}, {"name": "exit: doorway", "kind": "exit", "at": [.5, .444]}]}, reply({})))
+    actions = iter([{"buttons": ["UP"]}] * 3 + [{"thing": 1, "verb": "approach"}])
+    monkeypatch.setattr(module, "act", lambda *a, **k: SimpleNamespace(place="", ops=[], action=next(actions), expect="screen_changes", why="t", text=None))
+    def use(ctx, aff, per, text=None, exit=False, **kwargs):  # the thing works this time: the screen changes
+        before = env.screenshot(); env.text_box = True; after = env.screenshot()
+        return SimpleNamespace(status="done", reason="", inputs=1, calls=0, before=before, after=after, scroll=(0, 0), blank_seen=False, moves=[])
+    monkeypatch.setattr(module, "run_affordance", use)
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    for _ in range(3): loop.step()
+    exit_id = next(r["id"] for r in loop.mem.rows("entities") if r["name"] == "exit: doorway")
+    assert "not working: walked into 3×, steps 1–3" in loop.world.view("", loop.place)
+    row = loop.step()
+    assert row["choice"]["verb"] == "approach" and row["outcome"]["effects"] != ["no_change"]
+    dn = [r for r in loop.mem.rows("relations") if r["s"] == exit_id and r["p"] == "does_nothing" and r["o"] == ""]
+    assert len(dn) == 1 and dn[0]["state"] == "live" and dn[0]["con"] == 0 and dn[0]["ev"] == []  # reset in place, not deleted
+    assert "not working" not in loop.world.view("", loop.place) and any(r["id"] == exit_id for r in loop.mem.rows("entities"))

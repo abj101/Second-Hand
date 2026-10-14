@@ -61,3 +61,60 @@ def test_type_shapes_the_model_actually_sends():
     for raw, top in (({"type": "RED"}, None), ({"verb": "type", "text": "RED"}, None), ({"verb": "type"}, "RED")):
         out, _ = run({"action": raw, "text": top, "notebook": [], "expect": "screen_changes"})
         assert out.action == {"verb": "type"} and out.text == "RED"
+
+
+OPTIONS = [
+    {"n": 1, "tool": "approach", "label": "approach door", "action": {"thing": 0, "verb": "approach"}, "notes": []},
+    {"n": 2, "tool": "go_to", "label": "go to Hall", "action": {"go_to": "Hall"}, "notes": ["leads to Hall (used 2×, last step 5)", "refuted: wall"]},
+    {"n": 3, "tool": "buttons", "label": "free input (any of: UP, A)", "action": None, "notes": []},
+]
+
+
+def run_with(data, options=OPTIONS):
+    model = Capture(data)
+    return act(model, None, PERCEPTION, "", "none", [], "A: press", {}, BUTTONS, options=options), model
+
+
+def test_option_number_maps_to_its_action_and_sets_option():
+    out, _ = run_with({"action": {"i": 2}, "notebook": [], "expect": "place_changes"})
+    assert (out.action, out.option) == ({"go_to": "Hall"}, 2)
+    out, _ = run_with({"action": {"i": 1}, "notebook": []})
+    assert (out.action, out.option) == ({"thing": 0, "verb": "approach"}, 1)
+    out.action["thing"] = 9  # a copy: the option list is not changed
+    assert OPTIONS[0]["action"] == {"thing": 0, "verb": "approach"}
+
+
+def test_out_of_range_and_bool_option_numbers_are_none():
+    for raw in ({"i": 0}, {"i": 4}, {"i": True}, {"i": "2"}):
+        out, _ = run_with({"action": raw, "notebook": []})
+        assert (out.action, out.option) == (None, None), raw
+
+
+def test_option_without_action_falls_through_to_free_shapes():
+    out, _ = run_with({"action": {"i": 3, "buttons": ["up", "a"]}, "notebook": []})
+    assert (out.action, out.option) == ({"buttons": ["UP", "A"]}, None)
+    out, _ = run_with({"action": {"i": 3}, "notebook": []})
+    assert (out.action, out.option) == (None, None)
+
+
+def test_free_shapes_still_parse_with_options_present():
+    assert run_with({"action": {"go_to": "door"}, "notebook": []})[0].action == {"go_to": "door"}
+    assert run_with({"action": {"thing": 0, "verb": "approach"}, "notebook": []})[0].action == {"thing": 0, "verb": "approach"}
+    assert run_with({"action": {"buttons": ["UP"]}, "notebook": []})[0].action == {"buttons": ["UP"]}
+    assert run_with({"action": {"verb": "advance"}, "notebook": []})[0].action == {"verb": "advance"}
+
+
+def test_prompt_lists_options_with_notes_and_no_things_list():
+    out, model = run_with({"action": {"i": 1}, "notebook": []})
+    user, system = model.args[0][1], model.args[0][0]
+    assert "Options:\n1. approach approach door\n2. go_to go to Hall — leads to Hall (used 2×, last step 5); refuted: wall\n3. buttons free input (any of: UP, A)" in user
+    assert "Things on screen:" not in user and "0: door (exit)" not in user
+    assert '"action": {"i": n} to pick one option by number (preferred)' in user and "any 'info' line" in user
+    assert "The option notes are what already happened here" in system and "The option notes" not in SYSTEM
+
+
+def test_prompt_without_options_is_unchanged():
+    _, model = run({"action": {"i": 1}, "notebook": []})
+    user, system = model.args[0][1], model.args[0][0]
+    assert "Things on screen:\n0: door (exit) at [0.5, 0.2]" in user and "Options:" not in user
+    assert system == SYSTEM and "pick one option" not in user and "Reply JSON" in user and '"action": {"thing": n,' in user
