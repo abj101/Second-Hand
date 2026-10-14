@@ -126,3 +126,12 @@ def test_dry_run_never_calls_live(monkeypatch):
     monkeypatch.setattr(eval_act, "dry_report", lambda cases, counter: (rows, 0))
     monkeypatch.setattr(eval_act, "live_cases", lambda *a: (_ for _ in ()).throw(AssertionError("dry must not call live")))
     assert eval_act.om_cases(False) == 0
+
+def test_classify_outcomes():
+    b, tiles = {"map": 38, "x": 6, "y": 1}, {(7, 1)}
+    at = lambda m, x, y: {"map": m, "x": x, "y": y}
+    assert eval_act.classify(b, at(37, 7, 1), 37, tiles) == "crossed_right"
+    assert eval_act.classify(b, at(40, 0, 0), 37, tiles) == "crossed_other"
+    assert eval_act.classify(at(38, 3, 1), at(38, 4, 1), 37, tiles) == "closer"
+    assert eval_act.classify(b, at(38, 5, 1), 37, tiles) == "other"
+    assert eval_act.classify(b, at(38, 6, 1), 37, tiles) == "no_move"

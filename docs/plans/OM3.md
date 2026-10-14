@@ -79,3 +79,31 @@ Diagnosis of the OM3 live replies (0 requests): (1) the compact view had dropped
 - Dry (0 requests): right 3/3, exit truth 3/3, size 3/3 (1,362 / 1,415 / 1,454).
 - Does `approach exit stairs` cross at case 137? Probably yes, not executed. Evidence: option 1 is `{"thing": 4, "verb": "approach"}`; the perceived stairs sit about one tile right of the player (dx 15.5 px, dy 5.6 px on a 160x144 frame, so delta rounds to (1 tile, 0)); `skills.approach` steps RIGHT onto it and `run_affordance` treats a target starting with `exit` as an exit target (extra push and side steps follow). The observed exit tile (3,-5) has dir RIGHT and crossed at step 114 by a RIGHT press. If the perceived exit had coincided with the player tile it would return `blocked: target is the player` with 0 inputs. Movement was not changed.
 - Live, 3 requests (ledger 2120 -> 2123, M1 2072 -> 2075 of 2125): options arm right 0/3; all three picks were free buttons `LEFT` (82: "move left to explore the area and look for a door"; 103: "need to move towards the st[airs]"; 137: "blocked from moving UP; moving LEFT is the next logical step to explore"). No further live run.
+
+## 10. OM4-A: outcome scoring (0 requests)
+`scripts/eval_act.py --om outcomes [--steps ...]`: each action is run from the replayed state at the case step (cached perception, scripted act reply from `.cache/model`, no model call), RAM truth is read when the presses are done, before any perceiver call on the new frame. Classes: crossed_right (map == the right exit's map: 1F -> outside 0, 2F -> 1F 37), crossed_other, closer (Manhattan distance to the tiles where the recorded runs' truth crosses to the right map decreased), no_move, other. Ledger unchanged (2123 / m1 2075). Raw output: `.tmp/om/om4a_outcomes.txt`.
+
+| case | action (source) | outcome | before -> after (map,x,y) |
+|---|---|---|---|
+| 82 | OM3 `RIGHT` | other | (37,5,3) -> (37,6,3) |
+| 82 | OM3.2 `LEFT` | closer | (37,5,3) -> (37,4,3) |
+| 82 | right option 2 (rug) | crossed_right | (37,5,3) -> (0,5,6) |
+| 102 | OM3 option 3 (approach NPC) | closer | (37,6,2) -> (37,5,3) |
+| 102 | right option 2 (door mat) | closer | (37,6,2) -> (37,3,7) |
+| 103 | OM3 `DOWN` | other | (38,7,1) -> (38,7,2) |
+| 103 | OM3.2 `LEFT` | closer | (38,7,1) -> (38,6,1) |
+| 103 | right option 1 (stairs) | closer | (38,7,1) -> (38,6,1) |
+| 110 | OM3 `UP A` | no_move | (38,7,1) -> (38,7,1) |
+| 110 | right option 1 (stairs) | closer | (38,7,1) -> (38,6,1) |
+| 113 | OM3 option 1 (stairs) | crossed_right | (38,6,1) -> (37,7,1) |
+| 113 | right option 1 | crossed_right | (38,6,1) -> (37,7,1) |
+| 115 | OM3 option 4 (interact character) | closer | (37,7,1) -> (37,5,3) |
+| 115 | right option 2 (door mat) | closer | (37,7,1) -> (37,3,7) |
+| 122 | OM3 `UP A` | no_move | (37,6,1) -> (37,6,1) |
+| 122 | right option 2 (door mat) | closer | (37,6,1) -> (37,3,7) |
+| 137 | OM3 `DOWN` | other | (38,6,1) -> (38,6,2) |
+| 137 | OM3.2 `LEFT` | other | (38,6,1) -> (38,5,1) |
+| 137 | right option 1 (stairs) | crossed_right | (38,6,1) -> (37,7,1) |
+
+- Right options cross at 82, 113, 137. At 103/110 the player stands on the arrival (stairs) tile and the option only steps one tile LEFT (no crossing in that one step); the door-mat options at 102/115/122 walk to (3,7) and stop short of the crossing in one step.
+- "closer" for a model pick is mostly incidental (the distance tiles are few); only 113 (OM3) actually crossed.

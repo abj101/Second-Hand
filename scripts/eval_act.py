@@ -16,6 +16,7 @@ from agent.observer import for_model, wait_settled
 from agent.perceive import perceive
 from agent.world import _is_exit
 from scripts import run_agent
+from scripts.truth_pokered import read as truth_read
 
 FRAMES = (6,12,44,46,48,51,53,56,62,67,68,70,76,85,94)
 OUT, FRAME_DIR, TRUTH = Path(".tmp/p2"), Path("runs/m1/frames"), Path("runs/m1/truth.jsonl")
@@ -60,7 +61,7 @@ def report(summary, rows, steps, status, out):
 
 def main(argv=None):
     ap=argparse.ArgumentParser(); ap.add_argument("--frames",default=",".join(map(str,FRAMES))); ap.add_argument("--max-calls",type=int); ap.add_argument("--out",type=Path,default=OUT)
-    ap.add_argument("--om",choices=("places","cases"),help="OM replay eval (no --max-calls needed)"); ap.add_argument("--live",action="store_true",help="--om cases: spend the requests"); ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)"); ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)")
+    ap.add_argument("--om",choices=("places","cases","outcomes"),help="OM replay eval (no --max-calls needed)"); ap.add_argument("--live",action="store_true",help="--om cases: spend the requests"); ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)"); ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)")
     a=ap.parse_args(argv)
     if a.om: return om_main(a, ap)
     if a.max_calls is None: ap.error("the following arguments are required: --max-calls")
@@ -108,6 +109,7 @@ FLOOR_OF_MAP = {37: "1F", 38: "2F"}  # truth.map of the m1_gp5 house (evaluation
 EXIT_ROWS = ("exit ", "possible exit ", "not an exit")  # option labels of exit records: verified, unverified, refuted
 
 class OmAbort(RuntimeError): pass  # the replay cannot continue: exit 2
+class OmStop(Exception): pass  # outcome mode: the scripted action's presses are done; stop before any perceiver call on the new frame
 
 def _jsonl(path):
     return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -167,6 +169,7 @@ class Replay:
         self.found, self.rows, self.refuted = {}, {}, {}
         self.drift = {"presses": None, "frames": None, "trace": [], "place": []}
         self.miss_steps = []
+        self.script, self.armed, self.env, self.before, self.after = None, False, None, None, None  # outcome mode: (step, act reply data)
     def _post(self, payload):
         if self.live_step is None: raise OmAbort("a network call outside the live case step")
         if self.counter["requests"] >= OM_CAP: raise run_agent.CallCap("OM request cap")
@@ -174,6 +177,7 @@ class Replay:
         self.counter["requests"] += 1
         return self._post_orig(payload)
     def ask(self, system, user, images=(), schema=None, *, role=""):
+        if self.armed and role == "perceiver": raise OmStop()  # the new frame's perception is not cached: never ask
         if role in ("perceiver", "skill"):  # skill: menu/keyboard reads, cached like the perceiver's
             if (MODEL_CACHE / f"{self.real._key(system, user, images, schema)}.json").is_file(): return self.real.ask(system, user, images, schema, role=role)
             if role == "perceiver":
@@ -188,6 +192,7 @@ class Replay:
                 self.found[self.step]["prompt"] = system + "\n" + user
                 d = Path(".tmp/om/prompts_om3_1"); d.mkdir(parents=True, exist_ok=True)
                 (d / f"{self.step}_system.txt").write_text(system, encoding="utf-8"); (d / f"{self.step}_user.txt").write_text(user, encoding="utf-8")
+            if self.script and self.script[0] == self.step: self.armed = True; self.before = truth_read(self.env); return Reply("", self.script[1], 0.0, None, None)
             if self.live_step == self.step: return self.real.ask(system, user, images, schema, role=role)
             rec = self.rec.trace.get(self.step, {}); recorded = rec.get("act") or {}; pred = rec.get("pred") or {}
             return Reply("", {"place": recorded.get("place") or "", "notebook": self.rec.act_ops.get(self.step, []), "action": recorded.get("action"),
@@ -217,13 +222,15 @@ class Replay:
         press, keys = env.press, []
         def logged_press(*args, **kwargs):
             keys.append(args[0] if args else kwargs.get("key")); return press(*args, **kwargs)
-        env.press = logged_press
+        env.press = logged_press; self.env = env
         mem = Memory(self.out / "memory"); self.loop = loop = Loop(env, self, mem, "pokemon_red")
         real_act, loop_mod.act = loop_mod.act, self._act
         try:
             for s in range(1, last + 1):
                 wait_settled(env); self.step = loop.step_no + 1; keys.clear()  # run_agent settles before reading truth; step() settles again
-                row = loop.step()
+                try: row = loop.step()
+                except OmStop: self.after = truth_read(env); return
+                if self.armed: self.after = truth_read(env); return  # the new frame equalled the old one: perception reused, no stop raised
                 self._check(s, row, keys, mem)
         finally:
             loop_mod.act = real_act; env.close()
@@ -379,11 +386,51 @@ def om_cases(live, steps=None):
         return 1
     return live_cases(cases, counter, before, old_right)
 
+# ---- outcome scoring: run an action from the replayed state at a case step, read RAM truth when its presses are done (0 requests)
+RIGHT_MAP = {37: 0, 38: 37}  # the map a "right" exit leads to, per map (1F -> outside, 2F -> 1F)
+LIVE_REPLIES = {  # cached act replies (.cache/model file prefixes) of the live runs, by case step
+    "OM3 live": {82: "ef82b2", 102: "eedd62", 103: "6551ae", 110: "f187b1", 113: "4e942e", 115: "e23e98", 122: "dd4f14", 137: "5c021c"},
+    "OM3.2 live": {82: "35fb04", 103: "44185e", 137: "c201e6"}}
+
+def classify(before, after, goal_map, goal_tiles):
+    """crossed_right | crossed_other | closer | no_move | other, from RAM truth {map,x,y} before and after one action."""
+    if after["map"] != before["map"]: return "crossed_right" if after["map"] == goal_map else "crossed_other"
+    if (after["x"], after["y"]) == (before["x"], before["y"]): return "no_move"
+    dist = lambda t: min((abs(t["x"] - x) + abs(t["y"] - y) for x, y in goal_tiles), default=None)
+    return "closer" if goal_tiles and dist(after) < dist(before) else "other"
+
+def goal_tiles(run_names, from_map, to_map):
+    """Tiles of from_map where the recorded runs' RAM truth is followed by to_map (the row before each crossing)."""
+    out = set()
+    for run in run_names:
+        rows = _jsonl(Path(".tmp/om") / run / "truth.jsonl")
+        out |= {(a["x"], a["y"]) for a, b in zip(rows, rows[1:]) if a["map"] == from_map and b["map"] == to_map}
+    return out
+
+def om_outcomes(steps=None):
+    cases = [c for c in json.loads(OM_CASES.read_text(encoding="utf-8")) if not steps or str(c["step"]) in steps.split(",")]
+    counter, before = {"requests": 0}, _budget(); runs = sorted({c["run"] for c in cases} | {"m1_gp2", "m1_gp5"}); [stage(r) for r in runs]
+    print("case | action (source) | outcome | before (map,x,y) -> after (map,x,y)")
+    for c in cases:
+        s, rec = c["step"], stage(c["run"])
+        _, rep0 = replay_cases([c], False, counter)[0]; opts = rep0.found[s]["options"]  # dry replay: the options this step offers
+        right = next((o["n"] for o in opts if is_right(c, o["tool"], o["label"])), None)
+        todo = [(src, json.loads((next(MODEL_CACHE.glob(f"{p[s]}*.json"))).read_text(encoding="utf-8"))["data"]) for src, p in LIVE_REPLIES.items() if s in p]
+        todo.append((f"right option {right}", {"action": {"i": right}, "why": "", "expect": "screen_changes"}))
+        for src, data in todo:
+            rep = Replay(rec, rec.copy / "om_outcomes", cases=[s], counter=counter); rep.script = (s, data); rep.run(s)
+            b, a = rep.before, rep.after
+            if b is None or a is None: print(f"{s} | {src} | NO RESULT (armed={rep.armed}) |"); continue
+            act_txt = json.dumps(data["action"]); tiles = goal_tiles(runs, b["map"], RIGHT_MAP.get(b["map"]))
+            print(f"{s} | {src} {act_txt} | {classify(b, a, RIGHT_MAP.get(b['map']), tiles)} | ({b['map']},{b['x']},{b['y']}) -> ({a['map']},{a['x']},{a['y']})", flush=True)
+    print(f"requests={counter['requests']}; ledger before={before}; after={_budget()}; unchanged={before == _budget()}")
+    return 0
+
 def om_main(a, ap):
     sys.stdout.reconfigure(encoding="utf-8")  # option labels carry arrows; a redirected cp1252 stdout cannot print them
     if a.live and a.dry: ap.error("--live and --dry are exclusive")
     if a.om == "places" and a.live: ap.error("--live applies to --om cases")
-    try: return om_places() if a.om == "places" else om_cases(a.live, a.steps)
+    try: return om_places() if a.om == "places" else om_outcomes(a.steps) if a.om == "outcomes" else om_cases(a.live, a.steps)
     except OmAbort as e: print(f"ABORT: {e}", flush=True); return 2
     except run_agent.CallCap as e: print(f"CallCap: {e}", flush=True); return 3
     except ModelUnavailable as e: print(f"model_unavailable={e}", flush=True); return 4
