@@ -325,6 +325,12 @@ def conf(rel: dict) -> float     # (sup + 1) / (sup + con + 2)
   - Model claims render with "(unverified)". At most two refuted items render, under "don't believe".
   - Selection order: on screen or in this place, then tied to the task, then recent, then important.
 
+**OM, OM2, OM3 additions (2026-10-13; OM3 is the final behaviour):**
+- `match_place` returns `prev` for any screen other than `world`; before the first navigable screen one unnamed run-start place (no `screen`) stands in; navigable places mint as `place`, `place_2`, ...; `Memory.excursion` (a dialogue closing with a scene cut returns to the place it left); `place_name(row)`, `place_aliases(row)`, `SCREEN_NAMES`.
+- `_nameable`: a name equal to a screen type, of the form `<label> [<id>]`, or of the form `place <n>` is never stored as a name or alias.
+- A failed action aimed at a remembered thing (or at the remembered thing on the tile a button press faces) writes `(thing, does_nothing, "")` with `hit=False`; it is refuted by the existing rule. A later non-failed use of that thing resets it to live (con 0, ev empty). `says` rows get `why = "says the same as before (step N)"` on a repeat.
+- Store `crossings`: `{"id": "<place>@x,y><other>", "n", "last"}`, one row per exit crossing, counted on both sides by `World` (see world).
+
 ## space
 
 E3R4 (approved 2026-10-11). `agent/space.py`, pure functions over `Memory`'s `tiles` store. No model calls. Design and rationale: [spatial-memory.md](spatial-memory.md).
@@ -482,6 +488,13 @@ def act(model, image, perception: dict, notebook: str, facts: str, flags: list[s
 - The reply's `place` becomes an alias on a code-owned place via `World.name` (W1).
 - `flags` carries code observations as text, never commands: loop/stall detectors, `merge_pending: <name>`, `go_to "<name>": not in memory`, `travel: <reason>`.
 
+**OM, OM2, OM3 additions (2026-10-13; OM3 is the final behaviour):**
+- `act(..., options=None)`: with options the prompt lists `Options:` (replaces `Things on screen:`). Each option is printed as `<n>. <text>`, where text is the label alone when its first three words already hold the tool word (spaced or raw), else `<tool> <label>` (`_option_text`); the tool word is printed once.
+- Reply `{"i": n}` returns that option's `action` (a copy) and sets `Act.option`; anything else parses as before. `why`/`expect` are read from inside `action` when absent at the top level. Rows with `action: None` are answered with `{"go_to": "<name>"}` or `{"buttons": [...]}`.
+- Trace rows carry `"option": {"n","tool","label","notes"} | null`. The `failed here before` flag is gone; its content is in option notes.
+- `Loop` passes the compact `World.view` as the act facts and the default view to the planner (see world).
+- Reply-format text (`REPLY`, `REPLY_OPTIONS`, `OPTION_NOTE`, `SYSTEM`) was shortened without removing any field or action shape. Limit for the whole act prompt: 1,600 tokens (len/4, dry gate).
+
 ## world
 
 World Memory, approved 2026-10-12. Design: [world-memory.md](world-memory.md); packets W0–W4. `agent/world.py`. No model calls; never reads RAM; never picks goals or filters options.
@@ -521,3 +534,18 @@ class World:
 - **Misses** count only on distinct frames, on `screen == "world"`, with no modal open, inside the view rectangle shrunk by 1 tile.
 - **View order:** Here line + cropped map, things here, screen/HUD, other places (hops, goal-word overlap, recency), flags. Gone things never render.
 - **Removed in P4 (after the user's STOP 3 decision):** the `tasks` and `chooser and orchestrator` sections, `space.describe`, the space exit filter, `--act`.
+
+**OM, OM2, OM3 additions (2026-10-13; OM3 is the final behaviour):**
+- `World.place_label(place)` = the model name, else `place <n>`. `fail_key(place, verb, target, inputs=())` is a module function (the key `Loop._fail_key` returns).
+- `World.options(per, place, fails, step, inputs=()) -> list[{"n","tool","label","action","notes"}]` is pure. Modal choices come first when a modal is open, then free input. Otherwise the order is: exits; characters and things with history; explore; known places (one row, or one `go to another known place:` row when over `OPTION_CAP = 10`); `look at or go to a thing here: <names>` (action None); free buttons. The `buttons` and things rows have `action: None` and take button failures of this place as notes. The old `info` row is gone.
+- Exits: `World._exits(pid, live, screen=()) -> list[{"tile","dir","dest","name","head","idx","ident","pushed","uses","last","status","label"}]` is the one source of exit records for `options` and `view`. `status` is `verified` (a crossing counted in either direction, a confirmed `leads_to`, or an observed exit), `refuted` (existing rule; only when never crossed) or `unverified`. Records with the same destination within Chebyshev 1 are one exit.
+- `_exits` merge rule: a record with no verified evidence (no crossing, no `leads_to` support, not arrived on, not observed) and no destination, whose tile is within Chebyshev 1 of a verified exit, is that exit (kept: the verified record's name, tile and counts). An unverified record with a different known destination stays its own exit. Two verified exits with distinct destinations are never merged.
+- One name per exit: the record's `head` is the only name printed for it in option labels, view exit lines (`E at (x,y) <head> -> <place> used N×`) and the map legend (an exit-kind thing owned by a record prints the record's head, once per record). `_exit_rows` is removed.
+- Exit labels: `exit <head> → <place> (used N×[, last step S])`, `possible exit <head> (unverified, never crossed)`, `not an exit: <head> (walked into N×[, steps a–b])`; each verified one is followed by `_beyond_suffix`.
+- `World.beyond(place, screen=()) -> {"exits": {tile: {"unused_exits","unexplored","places"}}, "dead_end", "through"}`. Its counts and `dead_end` use `unseen_edges` (below).
+- `unseen_edges(mem, pid) -> [((x, y), dir)]`: the untried frontier edges of place pid whose target cell is not in its `seen` store. "Unexplored" means exactly these edges everywhere: the explore option count, `World.beyond` counts and `dead_end`, and the view's `N untried edges (M into unseen)`. Explore label: `walk to an unexplored part of this place (N spots lead somewhere unseen)` / `(1 spot leads somewhere unseen)` / `(0 spots lead anywhere unseen)`. The option is offered whenever the place has untried edges.
+- Use counts are symmetric. `World._cross(src, tile, dst, arrive, step)` counts one crossing on both sides, `(src, tile, dst)` and `(dst, arrive, src)` (rows in store `crossings`, id `"<place>@x,y><other>"`), recovering a missing tile from the tiles store (`_partner`). For the first crossing (the reverse exit tile is written later in the same step) it remembers `_lone = (step, dst, src)`; `World.mark_exit(place, direction, to, arrive, step)` then counts the arrival side (`_count`).
+- `World.unseen_cross(src, dst, step)`: `Loop.step` calls it when the place changed between steps (seen only at the next observation). It counts the crossing under the single exit tile of src leading to dst within Chebyshev 1 of `world.pos`, else counts nothing.
+- Things row: `look at or go to a thing here: <names>` lists only things of this place (on screen now or remembered in this place; not exits, not TRANSIENT kinds, not status `gone`, not anchor `screen`/`self`). Names are grouped by base name (trailing `#<n>` or ` <n>` stripped, case-insensitive); a group of 2+ prints `<base> ×<n>`. Order: smallest position key, then label. `World.resolve` strips a trailing ` ×<n>` from the requested name.
+- `World.view` exit table: per place, `Exit DIR -> place used N x | never used` with a status per exit; `Don't believe:` line (max 2 refuted things); only `screen == "world"` places; `Everything unexplored from here is through: <exit>`. The beyond suffix is on the current place's view lines only, and a refuted exit's view line is its option label.
+- `World.view(goal_text, place, compact=False)`: the default output is the planner's view. `compact=True` is the ACT prompt's facts: no legend (`Thing`/`Landmark`) lines, no map letters (only `@ E . , #`), no `E at` lines, no dead-end line, no `Things` bundles, no `Edges` lines, no `Don't believe`, no `Flag:` lines, map rows right-stripped, alias text only when it differs from the place name. The `Here:` header, the map and key, and other places' `Place:` + `  Exit` lines stay.
