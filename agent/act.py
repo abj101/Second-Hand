@@ -20,8 +20,9 @@ REPLY = ('Reply JSON: {"place": short descriptive name for where you are, from w
   'On a text field with an on-screen keyboard, use {"verb": "type"} with the text in "text". Never pick letter buttons one by one. '
   'Hint values: {"text","source","checked"}. Lesson values: {"text"}. '
   'Only edit the notebook when something changed.')
-OPTION_NOTE = " The option notes are what already happened here; prefer options that have not failed."
-REPLY_OPTIONS = REPLY.replace('"action": {"thing": n,', '"action": {"i": n} to pick one option by number (preferred); use the free shapes only if no option fits (the buttons option and any \'info\' line are answered with the free shapes, e.g. {"buttons": [...]}): {"thing": n,', 1)
+OPTION_NOTE = (" The option notes are what already happened here; prefer options that have not failed. "
+  "The free buttons option and the options that list names (look at or go to a thing here, go to another known place) are answered with the free shapes: {\"buttons\": [...]} or {\"go_to\": \"<name>\"}.")
+REPLY_OPTIONS = REPLY.replace('"action": {"thing": n,', '"action": {"i": n} to pick one option by number (preferred); use the free shapes only if no option fits (the free buttons option and the options that list names are answered with the free shapes, e.g. {"buttons": [...]} or {"go_to": "<name>"}): {"thing": n,', 1)
 SCHEMA = {"type": "object", "properties": {"place": {"type": "string"}, "notebook": {"type": "array", "items": {"type": "object"}},
   "action": {"type": "object"}, "text": {"type": ["string", "null"]}, "expect": {"type": "string"}, "why": {"type": "string"}},
   "required": ["place", "notebook", "action", "expect", "why"]}
@@ -30,7 +31,7 @@ SCHEMA = {"type": "object", "properties": {"place": {"type": "string"}, "noteboo
 class Act:
     place: str; ops: list; action: dict | None; text: str | None; expect: str; why: str; option: int | None = None
 
-def _pick(raw, options) -> dict | None:  # {"i": n} -> option n, when it has an action (the buttons and info rows do not)
+def _pick(raw, options) -> dict | None:  # {"i": n} -> option n, when it has an action (the free buttons row and the name-list rows have no action)
     n = raw.get("i")
     return options[n - 1] if options and type(n) is int and 1 <= n <= len(options) and options[n - 1]["action"] is not None else None
 
@@ -55,7 +56,7 @@ def act(model, image, perception: dict, notebook: str, facts: str, flags: list[s
              *([f"Preferences: {prefs}"] if prefs else []), f"Known places: {', '.join(places[:12]) or 'none'}", f"Screen: {perception.get('screen', '')}", f"Text on screen: {'; '.join(str(t) for t in perception.get('text') or [])}"]
     if options:
         lines.append("Options:")
-        lines += [f"{o['n']}. {o['tool']} {o['label']}" + (f" — {'; '.join(o['notes'])}" if o["notes"] else "") for o in options]
+        lines += [f"{o['n']}. {o['label'] if o['label'].split(' ')[0] == o['tool'] else o['tool'] + ' ' + o['label']}" + (f" — {'; '.join(o['notes'])}" if o["notes"] else "") for o in options]
     else:
         lines.append("Things on screen:")
         lines += [f"{i}: {e.get('name', '')} ({e.get('kind', '')}) at {e.get('at', '')}" + (" ← you" if e.get("kind", "").casefold() == "player" else "") for i, e in enumerate(things)]
@@ -67,9 +68,10 @@ def act(model, image, perception: dict, notebook: str, facts: str, flags: list[s
     if not (isinstance(text, str) and text.strip()):  # the text often comes inside the action: {"verb":"type","text":..} or {"type":..}
         text = next((v for v in (raw.get("text"), raw.get("type")) if isinstance(v, str) and v.strip() and v != "type"), None)
     pick = _pick(raw, options)
+    why = next((v for v in (data.get("why"), raw.get("why")) if isinstance(v, str) and v.strip()), "")  # the model often nests why/expect in action
+    expect = next((v for v in (data.get("expect"), raw.get("expect")) if v in EFFECTS), "screen_changes")
     return Act(place=place.strip()[:40] if isinstance(place, str) else "",
                ops=[o for o in ops if isinstance(o, dict)] if isinstance(ops, list) else [],
                action=dict(pick["action"]) if pick else _action(data.get("action"), things, buttons),
                text=text if isinstance(text, str) else None,
-               expect=data["expect"] if data.get("expect") in EFFECTS else "screen_changes",
-               why=str(data.get("why") or ""), option=pick["n"] if pick else None)
+               expect=expect, why=why, option=pick["n"] if pick else None)

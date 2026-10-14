@@ -1,13 +1,13 @@
 # Handoff notes
 
-Last written: 2026-10-13, after OM (STOP 8 reached). Branch `feat/lean-agent`. Packet: [OM.md](OM.md) (results in §9).
+Last written: 2026-10-13, after OM2 (STOP 9 reached, no live measure). Branch `feat/lean-agent`. Packet: [OM2.md](OM2.md) (results in §9); before it [OM.md](OM.md).
 
 ## State of the code
-- Memory tells the truth: only `screen == "world"` screens are places (`Memory.match_place`, `agent/memory.py`); labels are the model's name or `place <n>` (`World.place_label`); screen types and `label [id]` are never names/aliases (`_nameable`, `SCREEN_NAMES`).
-- Failed actions against a remembered thing write `(thing, does_nothing, "")`; refuted at `con>=2 and con>sup`, shown under `Don't believe:` in `World.view` and as `refuted:` on its option; a later success resets it (`Loop.step` failure block).
-- `World.options(per, place, fails, step, inputs)` (`agent/world.py`) builds the numbered menu; `act(..., options=)` shows `Options:` and takes `{"i": n}` (`agent/act.py`). Buttons and the `info` overflow row have `action: None`.
-- `fail_key` is a module function in `agent/world.py`; `Loop._fail_key` delegates. Slow-cycle detection (`Loop._moved`) and the 46920f2 fixes are intact.
-- Replay eval: `scripts/eval_act.py --om places|cases [--live]`, cases in `scripts/om_cases.json` (8, all `m1_gp5`), tests in `tests/agent/test_om_eval.py`.
+- Exits have a truth status: `World._exits` (`agent/world.py`) is the one source for `options` and `view`: `verified` (crossed either way, counted in the new `crossings` store by `World._cross`, or observed), `unverified` (`possible exit ... (unverified, never crossed)`), `refuted` (`not an exit: ...`). Same-destination records within 1 tile are one exit.
+- `World.beyond(place, screen=())` says what lies through each verified exit; labels end `(1 unexplored exit, 11 unexplored spots beyond)`; a dead-end place gets a first note and a `view` line `Everything unexplored from here is through: <exit>`.
+- `World.options` (cap 10, free row excluded): exits, characters and things with history, explore (`walk to an unexplored part of this place (N spots)`), known places, one `look at or go to a thing here: <names>` row (action None), `free buttons (not checked against memory): <inputs>`. The `info` row is gone. `act()` prints the tool word once.
+- `act()` reads `why`/`expect` nested in `action`; `_nameable` rejects `place <n>`; `plan.SYSTEM` says an unverified exit is a guess.
+- Eval: `scripts/eval_act.py --om places|cases [--live]`; `cases` evaluates the dry gates (`dry_gates`) and `--live` refuses unless they pass (it then replays a second time). Act prompts at case steps are dumped to `.tmp/om/om2_prompts/` (scratch).
 
 ## Decisions in force
 - No new mechanical gates: information and prompts only; options are never removed or reordered by history.
@@ -15,38 +15,34 @@ Last written: 2026-10-13, after OM (STOP 8 reached). Branch `feat/lean-agent`. P
 - Subagents: Sonnet orchestrator -> Haiku; Sol -> gpt-6-luna high; never Opus.
 - No game-specific code in `agent/`; no preferred names. Present options before a new approach.
 - Commit at gates with explicit paths; never `git add -A`; never push; ledger caps raised only on explicit approval.
+- 2026-10-13 (user, at the size gate): no live measure for OM2; the size question goes to STOP 9.
 
 ## Measured numbers
-- Unit suite: 285 passed (254 at entry), `pytest tests/agent -q -p no:cacheprovider` (~5 min).
-- Places gate: PASS, `--om places`: 3 places, 0 modal places, 0 screen-type names; replay of `m1_gp5` identical to the recording (150/150 presses and frames), 0 perceiver misses, 0 requests.
-- Fake exit `exit: doorway#2` refuted at step 105 (2 failed attempts), 20 attempts in total by step 135.
-- Options contain a right option: 8/8 (dry). Old arm right: 0/8.
-- **Options arm right: 3/8 (gate >= 6): FAIL** (`--om cases --live`, 8 requests). Misses: free `buttons` at 82, 110, 113, 137; the unrefuted fake exit at 103.
-- Act prompt: +91 tokens (747 -> 838) on a 9-entity synthetic room.
-- Ledger `runs/e3_budget.json`: total 2112/2175, M1 2064/2125, so **61 M1 left**. Cost: about 1.6 requests per live step.
+- Unit suite: 310 passed (285 at entry), `pytest tests/agent -q -p no:cacheprovider` (~5 min).
+- `--om places`: PASS (3 places, fake exit refuted at step 105, 0 drift, 0 misses, 0 requests).
+- `--om cases` (dry, 0 requests): right option present 8/8; exit truth 8/8; options 5-9 per case.
+- **Size gate FAIL 0/8**: act prompt 1,861 / 1,966 / 1,982 / 2,045 / 2,065 / 2,012 / 2,140 / 2,052 tokens (limit 1,600). Parts (chars): system 1,159, notebook ~2,000, facts ~2,000, options 570-1,030, reply text 1,638.
+- Live decision points: not run. Last measured (OM, old menu): 3/8.
+- Ledger `runs/e3_budget.json`: total 2112/2175, M1 2064/2125 (**61 M1 left**), unchanged by OM2.
 
 ## Environment and gotchas
-- Golden data `tests/agent/data/w0_golden` is gitignored but tracked: regenerate with `W0_REGEN=1`, then `git add -f`.
-- `.tmp/om/m1_gp5` is the replay copy (about 6 min per 150-step replay); `runs/m1_gp5` and `runs/m1_gp2` are untouched.
-- `m1_gp2` cannot be replayed: 4 perceiver cache misses (older brief). Do not raise the miss limit (3) in `scripts/eval_act.py`.
+- Golden data `tests/agent/data/w0_golden` is gitignored but tracked: regenerate with `W0_REGEN=1`, then `git add -f` (OM2 added `act/memory/crossings.jsonl`).
+- `.tmp/om/m1_gp5` is the replay copy (a dry `--om cases` takes ~6 min); `runs/m1_gp5` and `runs/m1_gp2` are untouched. `m1_gp2` cannot be replayed (4 perceiver cache misses); do not raise the limit (3).
 - `.claude/` stays untracked on purpose. Live viewer: `scripts/watch_run.py` on 127.0.0.1:8765 (see CLAUDE.md).
 - README, `system.md` and older docs still mention the removed `loop/` stack.
 
 ## Deviations from plan and contracts
-- Contract text for memory, world, notebook-and-act is in OM.md §9 for the user to merge; `contracts.md` is unedited.
-- OM.2's "one success clears it" resets the failure row instead of counting sup (keeps `predict` unchanged).
-- Extra `agent/` changes beyond the cards are listed in OM.md §9 (Memory.excursion, `_nameable`, Loop cut guards, thing-only exits in the view table).
+- Contract text for OM2 (`_exits`, `beyond`, option order, `crossings`, `act` parsing) is in OM2.md §9 for the user to merge; `contracts.md` is unedited (OM's text is still unmerged too).
+- OM2.5 stopped at the dry size gate; no `--live` call was made.
 
 ## Do not retry
-- Replaying `m1_gp2` for cases (cache misses).
-- Per-case replays in `--live` (now one replay per run; 8 requests in total).
-- A second measure without changing the prompt/labels: the model already ignores listed right options at 4 of 8 steps.
+- Replaying `m1_gp2` for cases.
+- A live measure while the size gate fails (`--live` refuses on purpose).
+- Shrinking the options block further: it is no longer the big part.
 
-## Open issues for the next phase (user decides at STOP 8)
-0. **Decided 2026-10-13: next phase is [OM2.md](OM2.md)** (verified exits, beyond-summaries, less noise, parsing; dry gates then one live measure; paste block inside). Diagnosis in OM2 §0.
-1. Model picks free `buttons` over a listed exit (4/8). Options: stronger prompt wording; exit options with their outcome first; dropping the free-input option when an unused exit exists (a gate: needs approval); or move on to the movement packet.
-2. The model echoes `place 3` as its place name; `_nameable` should reject `place <n>`.
-3. `why`/`expect` are nested inside `action` in 7 of 8 replies; `act()` could read them there.
-4. Furniture noise in the menu (4 x "approach stool"); used-N counts duplicated in `World.options` and `World._exit_rows`.
-5. Still open from before: modal screens as places is fixed, but Act prefers raw `buttons` (84/150), "next door" is ambiguous, and planner micro-goals remain.
-6. Next live run (clean boot) needs a cap raise; about 250 requests per 150 steps; 61 M1 left.
+## Open issues for the next phase (user decides at STOP 9)
+1. Size gate: either compact the act prompt (drop the facts' `Thing`/`Landmark`/`E at` lines, which the options repeat; shorten the reply-format text and the notebook log; that alone gives 1,691-1,872) or relax the 1,600 limit (all 8 cases are <= 2,140). Then run the one live measure (<= 10 requests, 61 M1 left).
+2. A clean-boot live run needs a cap raise (about 250 requests per 150 steps).
+3. The `look at or go to a thing here` row can hold ~50 names on 2F (perceiver noise such as `vent 1`, `vent 2`); shorten duplicates.
+4. Crossings seen only by the next observation (no exit tile) are not counted; `Loop._moved` could pass the tile.
+5. Still open from before: movement fixes (walking around NPCs, walk-onto-then-push exits), and the perceiver prompt asking to list every passage as `exit:` (changing it invalidates the replay cache).

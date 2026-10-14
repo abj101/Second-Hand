@@ -886,7 +886,7 @@ def test_option_pick_drives_grid_through_its_exit(tmp_path, monkeypatch):
 
     row = loop.step()
 
-    assert row["option"] == {"n": 1, "tool": "approach", "label": "exit door: never used", "notes": []}
+    assert row["option"] == {"n": 1, "tool": "approach", "label": "possible exit door (unverified, never crossed)", "notes": []}
     assert row["act"]["action"] == {"thing": 2, "verb": "approach"} and row["choice"]["verb"] == "approach" and row["choice"]["target"] == "exit: door"
     assert env.scene == 1
 
@@ -935,7 +935,7 @@ def test_second_failure_of_same_action_flags_act_and_replans(tmp_path, monkeypat
     loop.step(); assert loop.urgent == "the same action failed twice here: approach door (wall)"
     row = loop.step()
     assert not any(f.startswith("failed here before") for f in seen_flags[-1])  # its content is in the option notes now
-    assert [o["notes"][0] for o in seen_options[-1] if o["label"] == "exit door: never used"] == ["tried here 2×, last: wall"]
+    assert [o["notes"][0] for o in seen_options[-1] if o["label"] == "possible exit door (unverified, never crossed)"] == ["tried here 2×, last: wall"]
     assert row["plan"]["trigger"] == "the same action failed twice here: approach door (wall)"
 
 

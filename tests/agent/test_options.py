@@ -1,12 +1,14 @@
 import json
+from types import SimpleNamespace
 
 from agent.loop import Loop
 from agent.memory import Memory
-from agent.world import World, fail_key
+from agent.space import mark_exit
+from agent.world import OPTION_CAP, World, fail_key
 from tests.agent.fakes import GridEnv, StubModel
 
 INPUTS = GridEnv().inputs()
-BUTTONS = f"free input (any of: {', '.join(INPUTS)})"
+BUTTONS = f"free buttons (not checked against memory): {', '.join(INPUTS)}"
 
 
 def at(dx, dy):  # GridEnv(wander=True) geometry: the player's centre is (88, 72), tiles are 16 px
@@ -41,7 +43,7 @@ def scene(tmp_path):
     """Room with a used exit (door, to Hall), an unused tile exit (UP, to Cave), an NPC and a refuted fake exit."""
     mem = Memory(tmp_path); room(mem)
     tile(mem, 2, 0, {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "observed"})
-    tile(mem, 0, -2, {"dir": "UP", "to": "cave", "arrive": [0, 0], "src": "observed"})
+    tile(mem, 0, -2, {"dir": "UP", "to": "cave", "arrive": [0, 0], "src": "inferred"})
     world, per = setup(mem, [{"name": "exit: door", "kind": "exit", "at": at(2, 0)}, {"name": "npc", "kind": "npc", "at": at(-1, 0)},
                              {"name": "exit: fake", "kind": "exit", "at": at(1, 2)}])
     i = ids(world, per)
@@ -69,15 +71,15 @@ def test_room_lists_exits_things_explore_and_free_input_in_rule_order_with_notes
     mem, world, per = scene(tmp_path)
     opts = world.options(per, "room", {}, 120, inputs=INPUTS)
     assert [(o["n"], o["tool"], o["label"]) for o in opts] == [
-        (1, "go_to", "exit UP: leads to Cave (never used)"),
-        (2, "approach", "exit door: leads to Hall (used 2×, last step 40)"),
-        (3, "approach", "exit fake: never used"),
+        (1, "go_to", "possible exit UP (unverified, never crossed)"),
+        (2, "approach", "exit door → Hall (used 2×, last step 40)"),
+        (3, "approach", "not an exit: fake (walked into 3×, steps 104–107)"),
         (4, "approach", "approach npc"),
         (5, "interact", "interact with npc"),
         (6, "explore", opts[5]["label"]),
         (7, "buttons", BUTTONS)]
     assert opts[0]["action"] == {"go_to": "Cave"} and opts[1]["action"] == {"thing": 1, "verb": "approach"} and opts[6]["action"] is None
-    assert opts[5]["label"].startswith("explore the nearest untried edge (") and "untried" in opts[5]["label"] and opts[5]["action"] == {"go_to": "unexplored"}
+    assert opts[5]["label"].startswith("walk to an unexplored part of this place (") and opts[5]["action"] == {"go_to": "unexplored"}
     assert opts[2]["notes"] == ["refuted: not working: walked into 3×, steps 104–107"]  # refuted, still offered
     assert opts[4]["notes"] == ["talked; same text as before (step 90)"]
     assert opts[0]["notes"] == [] and opts[1]["notes"] == []
@@ -90,22 +92,78 @@ def test_on_screen_exit_that_is_also_a_tile_exit_appears_once(tmp_path):
     assert sum("door" in o["label"] for o in opts) == 1 and sum("Hall" in o["label"] for o in opts) == 1
 
 
-def test_overflow_keeps_exits_and_things_and_summarises_the_rest(tmp_path):
+SPOTS = [(x, y) for y in (-1, 1, 2) for x in (-2, -1, 0, 1, 2)] + [(-2, -2)]  # room tiles clear of the exits (2,0), (0,-2) and the npc (-1,0)
+
+
+def names_in(opt): return opt["label"].split(": ", 1)[1].split(", ")
+
+
+def test_fifteen_remembered_things_share_one_row_and_stay_reachable(tmp_path):
     mem = Memory(tmp_path); room(mem)
     tile(mem, 2, 0, {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "observed"})
     tile(mem, 0, -2, {"dir": "UP", "to": "cave", "arrive": [0, 0], "src": "observed"})
     for n in range(15): mem.upsert("entities", {"id": f"crate{n}", "name": f"crate {n}", "kind": "object", "place": "room", "tile": [-2, n % 5 - 2], "status": "remembered", "last": 1, "seen": 1})
     world, per = setup(mem, [{"name": "npc", "kind": "npc", "at": at(-1, 0)}])
     opts = world.options(per, "room", {}, 9, inputs=INPUTS)
-    info = opts[-1]
-    assert len(opts) == 13 and info["tool"] == "info" and info["action"] is None and info["notes"] == []
-    dropped = info["label"].split(": ", 1)[1].split(", ")
-    assert len(dropped) == 9 and all(name.startswith("crate ") for name in dropped)
-    assert not any(o["label"].startswith(f"go to {name} ") for o in opts for name in dropped)
-    assert sum(o["label"].startswith("go to crate") for o in opts) == 6
     labels = [o["label"] for o in opts]
-    assert "approach npc" in labels and "interact with npc" in labels and "exit UP: leads to Cave (never used)" in labels and "exit RIGHT: leads to Hall (never used)" in labels
-    assert opts[-2]["tool"] == "buttons"
+    assert len(opts) - 1 <= OPTION_CAP and opts[-1]["label"] == BUTTONS
+    assert set(labels[:2]) == {"exit UP → Cave (used 1×)", "exit RIGHT → Hall (used 1×)"}  # exits first
+    assert "approach npc" in labels and "interact with npc" in labels
+    thing = opts[-2]
+    assert thing["tool"] == "go_to" and thing["action"] is None and thing["notes"] == []
+    assert thing["label"].startswith("look at or go to a thing here: ") and sorted(names_in(thing)) == sorted(f"crate {n}" for n in range(15))
+    assert not any(label.startswith("go to crate") for label in labels)
+
+
+def test_twelve_plain_things_one_character_two_exits(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    tile(mem, 2, 0, {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "observed"})
+    tile(mem, 0, -2, {"dir": "UP", "to": "cave", "arrive": [0, 0], "src": "observed"})
+    lamps = [{"name": f"lamp {n}", "kind": "furniture", "at": at(*SPOTS[n])} for n in range(12)]
+    world, per = setup(mem, [{"name": "npc", "kind": "npc", "at": at(-1, 0)}, *lamps])
+    opts = world.options(per, "room", {}, 9, inputs=INPUTS)
+    labels = [o["label"] for o in opts]
+    assert len(opts) <= OPTION_CAP + 1 and opts[-1]["label"] == BUTTONS  # free buttons last
+    assert set(labels[:2]) == {"exit UP → Cave (used 1×)", "exit RIGHT → Hall (used 1×)"}
+    assert "approach npc" in labels and "interact with npc" in labels
+    things = [o for o in opts if o["label"].startswith("look at or go to a thing here: ")]
+    assert len(things) == 1 and things[0]["tool"] == "go_to" and things[0]["action"] is None
+    assert sorted(names_in(things[0])) == sorted(f"lamp {n}" for n in range(12))
+    assert not any("lamp" in label for label in labels if label != things[0]["label"])
+
+
+def test_a_thing_with_history_keeps_its_own_option(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    lamps = [{"name": f"lamp {n}", "kind": "furniture", "at": at(*SPOTS[n])} for n in range(12)]
+    world, per = setup(mem, [*lamps, {"name": "sign", "kind": "furniture", "at": at(*SPOTS[12])}, {"name": "vase", "kind": "furniture", "at": at(*SPOTS[13])}])
+    i = ids(world, per)
+    mem.upsert("relations", {"id": "dn", "s": i["sign"], "p": "does_nothing", "o": "", "src": "observed", "sup": 0, "con": 0, "ev": [], "state": "live", "verb": "approach", "step": 5})  # talked-to or walked-into history, any state
+    fails = {fail_key("room", "approach", "vase", INPUTS): {"n": 1, "why": "wall", "step": 4, "act": "approach vase"}}
+    opts = world.options(per, "room", fails, 9, inputs=INPUTS)
+    by = {o["label"]: o for o in opts}
+    assert by["approach sign"]["action"] == {"thing": 13, "verb": "approach"}  # index 0 is the player
+    assert by["approach vase"]["notes"] == ["tried here 1×, last: wall"]
+    things = [o for o in opts if o["label"].startswith("look at or go to a thing here: ")]
+    assert sorted(names_in(things[0])) == sorted(f"lamp {n}" for n in range(12))  # the sign and the vase are not in the shared row
+    assert "sign" not in names_in(things[0]) and "vase" not in names_in(things[0])
+    assert len(opts) - 1 <= OPTION_CAP
+
+
+def test_known_places_over_the_cap_share_one_row_and_none_is_lost(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
+    for n in range(10):
+        mem.upsert("places", {"id": f"t{n}", "name": f"Town {n}", "screen": "world", "state": "place", "first": 1, "last": 1, "edges": []})
+        mem.upsert("tiles", {"id": f"t{n}@0,0", "place": f"t{n}", "x": 0, "y": 0, "floor": True, "blocked": [], "pushed": [], "exit": None, "step": 1})
+        mark_exit(mem, "hall", (n, 0), "DOWN", f"t{n}", (0, 0), 1)
+    world, per = setup(mem, [])
+    opts = world.options(per, "room", {}, 3, inputs=INPUTS)
+    labels = [o["label"] for o in opts]
+    shared = [o for o in opts if o["label"].startswith("go to another known place: ")]
+    assert len(shared) == 1 and shared[0]["tool"] == "go_to" and shared[0]["action"] is None
+    assert sorted(names_in(shared[0])) == sorted(f"Town {n}" for n in range(10))
+    assert not any(label.startswith("go to Town") for label in labels)
+    assert len(opts) - 1 <= OPTION_CAP and opts[-1]["label"] == BUTTONS
 
 
 def test_options_are_deterministic_and_write_nothing(tmp_path):
@@ -136,5 +194,80 @@ def test_fail_notes_use_the_loop_failure_key_and_mark_cycles(tmp_path):
     by = {o["label"]: o for o in world.options(per, "room", fails, 120, inputs=INPUTS)}
     assert by["approach npc"]["notes"] == ["tried here 2×, last: wall", "talked; same text as before (step 90)"]
     assert by["interact with npc"]["notes"][0] == "tried here 2×, last: wall"  # same key: the loop's targets ignore the verb
-    assert by["exit UP: leads to Cave (never used)"]["notes"] == ["part of a back-and-forth cycle (step 60)"]
-    assert by["exit fake: never used"]["notes"][0].startswith("refuted: not working")
+    assert by["possible exit UP (unverified, never crossed)"]["notes"] == ["part of a back-and-forth cycle (step 60)"]
+    assert by["not an exit: fake (walked into 3×, steps 104–107)"]["notes"][0].startswith("refuted: not working")
+
+
+def walk(world, src, dst, direction, step):  # one crossing as the loop reports it: a scene cut after a single press
+    skill = SimpleNamespace(moves=[{"dir": direction}], scroll=None)
+    world.current_place = src; world.prepare(skill, src, True, step); world.after(skill, src, dst, True, step); world.current_place = dst
+
+
+def test_two_room_exit_is_verified_on_both_sides_and_counts_every_crossing(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)  # the first crossing writes both exits, as Loop does
+    world, per = setup(mem, []); world.pos = (2, 0)  # standing on the exit tile
+    walk(world, "room", "hall", "RIGHT", 1); walk(world, "hall", "room", "LEFT", 2); walk(world, "room", "hall", "RIGHT", 3)
+    room_labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["tool"] != "buttons"]
+    hall_labels = [o["label"] for o in world.options(per, "hall", {}, 3, inputs=INPUTS) if o["tool"] != "buttons"]
+    assert "exit RIGHT → Hall (used 3×, last step 3) (4 unexplored spots beyond)" in room_labels and "exit LEFT → Room (used 3×, last step 3) (19 unexplored spots beyond)" in hall_labels
+
+
+def test_perceived_exit_never_crossed_is_unverified_then_refuted_after_two_failed_tries(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, [{"name": "exit: wall", "kind": "exit", "at": at(1, -2)}])  # a floor tile the agent never crossed
+    assert "possible exit wall (unverified, never crossed)" in [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS)]
+    mem.add_edge("room", "approach", "exit: wall", "room", False); mem.add_edge("room", "approach", "exit: wall", "room", False)
+    assert "not an exit: wall (walked into 2×)" in [o["label"] for o in world.options(per, "room", {}, 4, inputs=INPUTS)]
+
+
+def test_inferred_exit_next_to_a_verified_one_is_listed_once(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    tile(mem, 2, 0, {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "observed"})
+    tile(mem, 2, 1, {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "inferred"})
+    world, per = setup(mem, [])
+    assert [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if "Hall" in o["label"]] == ["exit RIGHT → Hall (used 1×)"]
+
+
+def chain(mem):
+    """Rooms A - B - C in a line. Every floor edge is blocked or an exit, so no place has untried edges of its own. C has an unused exit (north)."""
+    for pid, name in (("a", "Room A"), ("b", "Room B"), ("c", "Room C")):
+        mem.upsert("places", {"id": pid, "name": name, "screen": "world", "state": "place", "first": 1, "last": 1, "edges": []})
+    def cell(place, x, y, blocked, exit=None): mem.upsert("tiles", {"id": f"{place}@{x},{y}", "place": place, "x": x, "y": y, "floor": True, "blocked": blocked, "pushed": [], "exit": exit, "step": 1})
+    cell("a", 0, 0, ["UP", "DOWN", "LEFT"], {"dir": "RIGHT", "to": "b", "arrive": [0, 0], "src": "observed"})
+    cell("b", 0, 0, ["UP", "DOWN"], {"dir": "LEFT", "to": "a", "arrive": [0, 0], "src": "observed"})
+    cell("b", 1, 0, ["UP", "DOWN"], {"dir": "RIGHT", "to": "c", "arrive": [0, 0], "src": "observed"})
+    cell("c", 0, 0, ["UP", "DOWN", "RIGHT"], {"dir": "LEFT", "to": "b", "arrive": [1, 0], "src": "observed"})
+    mem.upsert("entities", {"id": "north", "name": "exit: north", "kind": "exit", "place": "c", "tile": [0, -1], "status": "remembered", "last": 1, "seen": 1})
+
+
+def test_beyond_counts_what_lies_through_each_exit_and_finds_the_dead_end(tmp_path):
+    mem = Memory(tmp_path); chain(mem)
+    world = World(mem, 16)
+    assert world.beyond("a") == {"exits": {(0, 0): {"unused_exits": 1, "unexplored": 0, "places": ["Room B", "Room C"]}}, "dead_end": True, "through": (0, 0)}
+    b = world.beyond("b")  # both directions: back to A is fully explored, forward to C holds the unused exit
+    assert b["exits"] == {(0, 0): {"unused_exits": 0, "unexplored": 0, "places": ["Room A"]}, (1, 0): {"unused_exits": 1, "unexplored": 0, "places": ["Room C"]}}
+    assert b["dead_end"] and b["through"] == (1, 0)
+    assert world.beyond("c")["dead_end"] is False  # its own unused exit is unexplored ground here
+
+
+def test_exit_labels_say_what_lies_beyond_and_the_dead_end_note_comes_first(tmp_path):
+    mem = Memory(tmp_path); chain(mem)
+    world = World(mem, 16); per = {"screen": "world", "text": [], "entities": [player()]}
+    world.current_place = "a"; a = world.options(per, "a", {}, 3, inputs=INPUTS)
+    right_a = next(o for o in a if o["label"].startswith("exit RIGHT"))
+    assert right_a["label"] == "exit RIGHT → Room B (used 1×) (1 unexplored exit beyond)"
+    assert right_a["notes"] == ["everything unexplored from here is through this exit"] and right_a["action"] == {"go_to": "Room B"}
+    world.current_place = "b"; b = world.options(per, "b", {}, 3, inputs=INPUTS)
+    left_b = next(o for o in b if o["label"].startswith("exit LEFT"))
+    right_b = next(o for o in b if o["label"].startswith("exit RIGHT"))
+    assert left_b["label"] == "exit LEFT → Room A (used 1×)" and left_b["notes"] == []  # nothing unexplored that way: no suffix, no note
+    assert right_b["label"] == "exit RIGHT → Room C (used 1×) (1 unexplored exit beyond)" and right_b["notes"] == ["everything unexplored from here is through this exit"]
+
+
+def test_view_says_when_everything_unexplored_is_through_one_exit(tmp_path):
+    mem = Memory(tmp_path); chain(mem)
+    world = World(mem, 16); world.current_place = "a"
+    assert "Everything unexplored from here is through: RIGHT" in world.view("", "a")
+    world.current_place = "c"
+    assert "Everything unexplored from here is through:" not in world.view("", "c")

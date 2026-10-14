@@ -222,6 +222,7 @@ def test_travel_corrects_wrong_arrival_from_exact_trace_frame(tmp_path, monkeypa
     result = world.travel(Ctx(env, model, 16), [{"place": "source", "dirs": ["RIGHT"], "push": "RIGHT", "expect": "expected", "exit_tile": (1, 0)}], 3, trace)
     assert model.calls == 0 and result.reason == "travel: leg 1 arrival mismatch"
     assert world.current_place == "actual" and world.pos == (3, 4)
+    assert mem.get("crossings", "source@1,0>actual")["n"] == 1 and mem.get("crossings", "actual@3,4>source")["n"] == 1  # travel crossings count too
     assert {k: mem.get("tiles", row["id"])["exit"][k] for k in ("to", "arrive")} == {"to": "actual", "arrive": [3, 4]}
     modal = Trace(tmp_path / "modal.jsonl"); modal.write({"place": "source", "next_place": "actual", "tile": [3, 4]}); modal.write({"place": "actual", "screen": "dialogue", "frame_hash": digest})
     world2 = World(mem, 16); world2.current_place = "source"
@@ -463,7 +464,7 @@ def test_world_view_lists_all_place_exits_before_any_other_place_things(tmp_path
     view = world.view("", "here")
 
     headings = [view.index(f"Place: {name}") for name in ("North", "South", "West")]
-    exit_rows = [line for line in view.splitlines() if line == "  Exit DOWN -> Atrium never used"]
+    exit_rows = [line for line in view.splitlines() if line == "  Exit DOWN -> Atrium: possible exit, unverified (never crossed)"]
     exits = [view.index(line) for line in exit_rows]
     first_thing = min(i for i in (view.find("Thing "), view.find("Thing:"), view.find("Landmark ")) if i >= 0)
     assert len(set(headings)) == 3 and len(exits) == 3 and max(headings + exits) < first_thing and len(view) <= 2000
@@ -481,7 +482,7 @@ def test_world_view_labels_other_place_detail_bundle(tmp_path):
     view = world.view("", "here")
 
     lines = view.splitlines()
-    assert lines.index("Place: Hall") < lines.index("  Exit LEFT -> Atrium never used") < lines.index("Things: Hall")
+    assert lines.index("Place: Hall") < lines.index("  Exit LEFT -> Atrium: possible exit, unverified (never crossed)") < lines.index("Things: Hall")
     assert lines[lines.index("Things: Hall") + 1] == "  Thing: Chest remembered"
 
 
@@ -745,8 +746,50 @@ def test_view_exit_table_refuted_thing_and_run_start_place(tmp_path):
 
     view = world.view("", "here")
 
-    assert "E at (2,0) push RIGHT -> Hall used 2×" in view and "E at (0,-1) push UP -> Garden never used" in view
-    assert "E at (-1,0) side door -> Shop used 1×" in view and "  Exit LEFT -> Atrium never used" in view
+    assert "E at (2,0) push RIGHT -> Hall: possible exit, unverified (never crossed)" in view and "E at (0,-1) push UP -> Garden: possible exit, unverified (never crossed)" in view  # edge counts per destination no longer count
+    assert "E at (-1,0) side door -> Shop used 1×" in view and "  Exit LEFT -> Atrium: possible exit, unverified (never crossed)" in view
     assert "Don't believe: sign (not working: walked into 3×, steps 104–107)" in view
     assert "Place: Hall" in view and "run_start" not in view and "Place: place" not in view and "place 1" not in view
     assert len(view) <= VIEW_TOKENS * 4
+
+
+def test_travel_leg_through_a_matching_exit_counts_the_crossing_both_ways(tmp_path, monkeypatch):
+    from PIL import Image; from agent.skills import Ctx, SkillResult; from agent import world as world_module; from tests.agent.fakes import GridEnv, StubModel
+
+    mem = Memory(tmp_path); place(mem, "source", "Source"); place(mem, "expected", "Expected")
+    mem.upsert("tiles", {"id": "source@1,0", "place": "source", "x": 1, "y": 0, "floor": True, "blocked": [], "pushed": [], "exit": {"dir": "RIGHT", "to": "expected", "arrive": [0, 0]}, "step": 1})
+    frame = Image.new("RGB", (8, 8), "red")
+    monkeypatch.setattr(world_module, "approach", lambda ctx, *_a, **_k: SkillResult("done", "scene cut", 1, 0, frame, frame, (0, 0), False, [("RIGHT", (0, 0))]))
+    world = World(mem, 16); world.current_place = "source"
+    result = world.travel(Ctx(GridEnv(), StubModel([]), 16), [{"place": "source", "dirs": ["RIGHT"], "push": "RIGHT", "expect": "expected", "exit_tile": (1, 0)}], 5)
+
+    assert result.status == "done" and world.current_place == "expected"
+    assert mem.get("crossings", "source@1,0>expected")["n"] == 1 and mem.get("crossings", "expected@0,0>source")["n"] == 1
+
+
+def test_beyond_suffix_counts_in_words_and_drops_zero_parts():
+    from agent.world import _beyond_suffix
+    assert _beyond_suffix(None) == "" and _beyond_suffix({"unused_exits": 0, "unexplored": 0}) == ""
+    assert _beyond_suffix({"unused_exits": 1, "unexplored": 10}) == " (1 unexplored exit, 10 unexplored spots beyond)"
+    assert _beyond_suffix({"unused_exits": 0, "unexplored": 1}) == " (1 unexplored spot beyond)"
+    assert _beyond_suffix({"unused_exits": 2, "unexplored": 0}) == " (2 unexplored exits beyond)"
+
+
+def test_view_exit_lines_say_status_and_the_dead_end_line_names_the_through_exit(tmp_path):
+    from tests.agent.test_options import chain  # rooms A - B - C; C has an unverified north exit
+    mem = Memory(tmp_path); chain(mem)
+    mem.upsert("tiles", {"id": "c@1,1", "place": "c", "x": 1, "y": 1, "floor": True, "blocked": ["UP", "DOWN", "LEFT", "RIGHT"], "pushed": [], "exit": None, "step": 1})
+    entity(mem, "hatch", "exit: hatch", "c", [1, 1])
+    mem.upsert("entities", {**mem.get("entities", "hatch"), "kind": "exit"})
+    mem.upsert("relations", {"id": "dn", "s": "hatch", "p": "does_nothing", "o": "", "src": "observed", "sup": 0, "con": 3, "ev": [104, 107], "state": "refuted", "verb": "approach", "step": 107})
+    world = World(mem, 16); world.current_place = "b"
+
+    b = world.view("", "b")
+    assert "E at (0,0) push LEFT -> Room A used 1×\n" in b and "E at (1,0) push RIGHT -> Room C used 1× (1 unexplored exit beyond)" in b
+    assert "Everything unexplored from here is through: RIGHT" in b
+
+    world.current_place = "c"
+    c = world.view("", "c")
+    assert "E at (0,-1) north: possible exit, unverified (never crossed)" in c  # no destination known: no arrow
+    assert "E at (1,1) not an exit: hatch (walked into 3×, steps 104–107)" in c and "E at (0,0) push LEFT -> Room B used 1×" in c
+    assert "Everything unexplored from here is through" not in c  # its own unverified exit is unexplored ground

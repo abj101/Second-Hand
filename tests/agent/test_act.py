@@ -107,10 +107,37 @@ def test_free_shapes_still_parse_with_options_present():
 def test_prompt_lists_options_with_notes_and_no_things_list():
     out, model = run_with({"action": {"i": 1}, "notebook": []})
     user, system = model.args[0][1], model.args[0][0]
-    assert "Options:\n1. approach approach door\n2. go_to go to Hall — leads to Hall (used 2×, last step 5); refuted: wall\n3. buttons free input (any of: UP, A)" in user
+    assert "Options:\n1. approach door\n2. go_to go to Hall — leads to Hall (used 2×, last step 5); refuted: wall\n3. buttons free input (any of: UP, A)" in user
     assert "Things on screen:" not in user and "0: door (exit)" not in user
-    assert '"action": {"i": n} to pick one option by number (preferred)' in user and "any 'info' line" in user
+    assert '"action": {"i": n} to pick one option by number (preferred)' in user and "free buttons option" in user and "'info'" not in user
     assert "The option notes are what already happened here" in system and "The option notes" not in SYSTEM
+
+
+def test_nineteen_thing_room_prompt_fits_the_budget(tmp_path):
+    from agent.memory import Memory
+    from agent.world import OPTION_CAP, World
+    mem = Memory(tmp_path)
+    mem.upsert("places", {"id": "room", "name": "Room", "screen": "world", "state": "place", "first": 1, "last": 1, "edges": []})
+    for x in range(-2, 3):
+        for y in range(-2, 3): mem.upsert("tiles", {"id": f"room@{x},{y}", "place": "room", "x": x, "y": y, "floor": True, "blocked": [], "pushed": [], "exit": None, "step": 1})
+    pos = lambda x, y: [(88 + 16 * x) / 160, (72 + 16 * y) / 144]  # GridEnv geometry: player centre (88, 72), tiles 16 px
+    spots = [(x, y) for y in range(-2, 3) for x in range(-2, 3) if (x, y) not in ((0, 0), (2, 0), (-1, 0))]
+    things = [{"name": f"lamp {n}", "kind": "furniture", "at": pos(*spots[n])} for n in range(17)] + [{"name": "npc", "kind": "npc", "at": pos(-1, 0)}, {"name": "exit: door", "kind": "exit", "at": pos(2, 0)}]
+    per = {"screen": "world", "text": [], "entities": [{"name": "player", "kind": "player", "at": pos(0, 0)}, *things]}
+    world = World(mem, 16); world.current_place = "room"; world.before(per, "room", None, (160, 144), 1)
+    options = world.options(per, "room", {}, 1, inputs=tuple(BUTTONS))
+    assert len(options) - 1 <= OPTION_CAP
+    _, model = run_with({"action": {"i": 1}, "notebook": []}, options=options)
+    system, user = model.args[0][0], model.args[0][1]
+    assert len(system + user) / 4 <= 1600  # ponytail: chars/4 estimate, not the tokenizer
+
+
+def test_option_line_prints_the_tool_word_once():
+    options = [{"n": 1, "tool": "approach", "label": "approach npc", "action": {"thing": 0, "verb": "approach"}, "notes": []},
+               {"n": 2, "tool": "go_to", "label": "go to Hall", "action": {"go_to": "Hall"}, "notes": []}]
+    _, model = run_with({"action": {"i": 1}, "notebook": []}, options=options)
+    user = model.args[0][1]
+    assert "1. approach npc\n2. go_to go to Hall" in user and "approach approach" not in user
 
 
 def test_prompt_without_options_is_unchanged():
@@ -118,3 +145,14 @@ def test_prompt_without_options_is_unchanged():
     user, system = model.args[0][1], model.args[0][0]
     assert "Things on screen:\n0: door (exit) at [0.5, 0.2]" in user and "Options:" not in user
     assert system == SYSTEM and "pick one option" not in user and "Reply JSON" in user and '"action": {"thing": n,' in user
+
+
+def test_why_and_expect_nested_in_action_are_read_and_top_level_wins():
+    out, _ = run_with({"action": {"i": 2, "why": "the hall is through the door", "expect": "place_changes"}, "notebook": []})
+    assert (out.action, out.option, out.why, out.expect) == ({"go_to": "Hall"}, 2, "the hall is through the door", "place_changes")
+    out, _ = run_with({"why": "top", "expect": "text_appears", "action": {"i": 1, "why": "nested", "expect": "place_changes"}, "notebook": []})
+    assert (out.why, out.expect, out.option) == ("top", "text_appears", 1)
+    out, _ = run_with({"why": "", "expect": "bogus", "action": {"i": 1, "why": "nested", "expect": "place_changes"}, "notebook": []})
+    assert (out.why, out.expect) == ("nested", "place_changes")
+    out, _ = run({"action": {"thing": 0, "verb": "approach", "why": "x", "expect": "bogus"}, "notebook": []})
+    assert (out.why, out.expect, out.action) == ("x", "screen_changes", {"thing": 0, "verb": "approach"})

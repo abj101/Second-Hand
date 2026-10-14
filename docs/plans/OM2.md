@@ -1,6 +1,6 @@
 # OM2: Options that tell the truth — verified exits, what lies beyond, less noise
 
-Status: not started · Branch: feat/lean-agent · Follows: [OM.md](OM.md) §9 (STOP 8: decision points 3/8, gate 6) · User decision 2026-10-13: build fixes 1–6 of the STOP 8 diagnosis, then re-measure once.
+Status: built, STOPPED at the size gate (no live measure) 2026-10-13 · Branch: feat/lean-agent · Follows: [OM.md](OM.md) §9 (STOP 8: decision points 3/8, gate 6) · User decision 2026-10-13: build fixes 1–6 of the STOP 8 diagnosis, then re-measure once.
 
 ## Paste block (for GPT-6.1 Sol; every subagent gpt-6-luna HIGH)
 
@@ -158,12 +158,40 @@ The model now follows the options when they are clear (old arm 0/8 → 3/8; on 1
 - A different act model.
 
 ## 9. Result (filled in by the orchestrator)
-- **Gate:**
-- **Per case (pick, why, right/wrong):**
-- **Decision taken:**
+- **Gate** (built 2026-10-13; replay of `runs/m1_gp5`, copy in `.tmp/om/m1_gp5`; Sonnet orchestrator, Haiku subagents; every command below made 0 requests):
+  | Metric | Result | Pass? | Command |
+  |---|---|---|---|
+  | Unit suite | 310 passed (285 at entry) | yes | `.venv-agent/Scripts/python.exe -m pytest tests/agent -q -p no:cacheprovider` (`310 passed, 1 warning in 299.11s`) |
+  | Generality | 0 hits (exit 1) | yes | `git grep -niP ...` as in section 2 |
+  | Places + refutation | PASS: 3 places, 0 modal places, 0 screen-type names; `exit: doorway` refuted at step 105 after 2 failed attempts; 0 press/frame drift, 0 perceiver misses | yes | `scripts/eval_act.py --om places` (exit 0) |
+  | Dry: right option present | 8/8 | yes | `scripts/eval_act.py --om cases` |
+  | Dry: exit truth | 8/8: on all four 2F cases the stairs are the only verified exit and read e.g. `exit stairs → place 3 (used 4×, last step 102) (1 unexplored exit, 11 unexplored spots beyond)`; the fake `doorway#2` reads `possible exit` (and `refuted:` in its notes from step 110); on 1F the rug / door mat is `possible exit ... (unverified, never crossed)`; no duplicate (destination, tile) exit records | yes | same |
+  | Dry: size, options | every case 5-9 options excluding the free row (limit 10) | yes | same |
+  | **Dry: size, act prompt** | **0/8: 1,861 / 1,966 / 1,982 / 2,045 / 2,065 / 2,012 / 2,140 / 2,052 tokens (len/4; limit 1,600)** | **NO** | same (exit 1) |
+  | Live: decision points | not run | n/a | `--live` refuses when a dry gate fails |
+  | Requests | 0 (ledger `runs/e3_budget.json` unchanged: total 2112/2175, M1 2064/2125, 61 M1 left) | yes | `runs/e3_budget.json` before/after |
+- **Prompt composition** (chars at steps 82-137, from `.tmp/om/om2_prompts/`): system 1,159; notebook 1,800-2,300; known facts (`World.view`) ~2,000; options 570-1,030; reply-format text 1,638; the rest ~500. Removing the facts' `Thing`/`Landmark`/`E at` lines (which the options now repeat) would give 1,691-1,872 tokens, still over; the reply text and notebook log would also have to shrink.
+- **Per case (pick, why, right/wrong):** none: the live measure was not run. Option lists per case are in `.tmp/om/om2_dry.txt` (right option present in all 8; old arm 0/8 right).
+- **Decision taken:** the user (asked at the size gate, 2026-10-13) chose "Stop, no live measure". No second pass was tried. The size gate is for the user to decide at STOP 9 (compact the act facts and reply text, or relax the limit).
 - **Deviations from the packet:**
+  - OM2.1 and OM2.2 ran one after the other (OM2.2 needs OM2.1's status); OM2.3 and OM2.4 ran in parallel.
+  - OM2.1: new memory store `crossings` (`World._cross`, row `{id: "<place>@x,y><other>", n, last}`, counted on both sides of a crossing in `World.after` and `World.travel`); `loop.py` was not touched. A place change seen only by the next observation (no tile) is not counted. `golden`: only the new file `tests/agent/data/w0_golden/act/memory/crossings.jsonl` (the trace rows did not change).
+  - OM2.1 test (b) uses a floor tile: `_failed_exit` needs `floor is True`, so an entity on a wall can never be refuted. Two failed tries are two failing edges.
+  - OM2.2: `World.beyond(place, screen=())` takes the on-screen exit things (as `options` does); `World._paths(start, avoid=())`.
+  - OM2.3: the modal free row uses the same label as the navigable one; `act()` prints the tool word once (`approach npc`, not `approach approach npc`); the collapse of known places also fires for a single place over the cap.
+  - OM2.4: the beyond suffix is on the current place's view lines only; a refuted exit's view line is its option label.
+  - OM2.5: `om_cases` always runs the dry replay first and `--live` runs a second replay only if the dry gates pass; `OM_CAP` lowered 30 -> 10; stdout set to UTF-8 (labels hold arrows); the prompts at case steps are written to `.tmp/om/om2_prompts/` (scratch). `tests/agent/test_loop.py` label strings were updated (3 expectations).
+  - Line counts: `agent/` +172/-94 across world.py, act.py, memory.py, plan.py; `scripts/eval_act.py` +123 net.
 - **Contract text to merge (§4 additions as built):**
+  - `world`: `World._exits(pid, live, screen=()) -> list[{"tile","dir","dest","name","head","idx","ident","pushed","uses","last","status","label"}]` (the one source of exit records for `options` and `view`); `status` is `verified` (a crossing counted in either direction, a confirmed `leads_to`, or an observed exit), `refuted` (existing rule; only when never crossed) or `unverified`; records with the same destination within Chebyshev distance 1 are one exit. Labels: `exit <head> → <place> (used N×[, last step S])`, `possible exit <head> (unverified, never crossed)`, `not an exit: <head> (walked into N×[, steps a–b])`, each verified one followed by `_beyond_suffix`. `World.beyond(place, screen=()) -> {"exits": {tile: {"unused_exits","unexplored","places"}}, "dead_end", "through"}`. `World.options` order: exits, characters and things with history, explore, known places (one row, or one `go to another known place:` row when over `OPTION_CAP = 10`), `look at or go to a thing here: <names>` (action None), free buttons; the `info` row is gone. `World.view` prints a status per exit and `Everything unexplored from here is through: <exit>`.
+  - `memory`: store `crossings`; `_nameable` rejects `place <n>`.
+  - `notebook and act`: `act()` reads `why`/`expect` from `action` when absent at the top level; option lines print the tool word once; rows with `action: None` are answered with `{"go_to": "<name>"}` or `{"buttons": [...]}`.
 - **Open issues for the next phase:**
+  1. The size gate (act prompt 1,861-2,140 vs 1,600 tokens) is open. The options block is no longer the large part; the facts (`World.view`, ~2,000 chars, with an ASCII map and repeated thing lists), the reply-format text and the notebook log are.
+  2. The live decision-point measure was never run on the new menu; 10 requests are still available (M1 61 left) but a clean-boot run needs a cap raise.
+  3. The collapsed `look at or go to a thing here` row lists up to ~50 names on 2F (perceiver noise: `vent 1`, `vent 2`, `cabinet#7`); duplicated names could be shortened.
+  4. Exit crossings seen only by the next observation (no exit tile) are not counted; `Loop._moved` could pass the tile.
+  5. Counts beyond two exits that share a downstream place overlap (`beyond`).
 
 ## 10. Handoff notes
 Rewrite `docs/plans/handoff-notes.md` per [_template.md](_template.md) §10 (under 80 lines, fixed headings). Next after STOP 9: the user picks between a live clean-boot run (cap raise), the movement packet, and a perceiver-prompt pass.

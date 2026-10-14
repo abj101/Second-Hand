@@ -35,11 +35,12 @@ def _via(value) -> str: return _key(value or "").removeprefix("exit:").strip()
 # The perceiver's screen enum (agent/perceive.py): a place is never named or aliased with one of these.
 SCREEN_NAMES = frozenset({"world", "dialogue", "menu", "keyboard", "battle", "title", "other"})
 _REFERENCE = re.compile(r"\s\[[^\[\]]+\]$")  # "<label> [<place id>]": our own disambiguated label, a pointer and never a name
+_PLACE_LABEL = re.compile(r"place\s*\d+", re.IGNORECASE)  # "place <n>": our own unnamed label (World.place_label), echoed back by the model
 
 
 def _nameable(name: str, screen=None) -> bool:
     key = name.casefold()
-    return bool(name) and key not in SCREEN_NAMES and key != str(screen or "").casefold() and not _REFERENCE.search(name)
+    return bool(name) and key not in SCREEN_NAMES and key != str(screen or "").casefold() and not _REFERENCE.search(name) and not _PLACE_LABEL.fullmatch(name.strip())
 
 
 def place_name(row: dict | None) -> str:

@@ -325,3 +325,12 @@ def test_name_place_refuses_screen_types_and_references(tmp_path):
     assert mem.name_place("p", "world", 2) == "p" and mem.name_place("p", "Town [p_x]", 2) == "p"
     assert mem.get("places", "p").get("aliases") is None and "name" not in mem.get("places", "p")
     assert mem.name_place("p", "Hall", 3) == "p" and mem.get("places", "p")["aliases"] == ["Hall"]
+
+
+def test_place_label_echo_is_never_a_name_but_place_words_are(tmp_path):
+    from agent.memory import _nameable, place_name
+    assert not _nameable("place 3") and not _nameable("Place  12") and not _nameable("PLACE7") and _nameable("place of rest") and _nameable("Placeholder 2")
+    assert place_name({"name": "place 3", "screen": "world"}) == ""
+    mem = Memory(tmp_path)
+    mem.upsert("places", {"id": "p", "screen": "world", "state": "candidate", "first": 1, "landmarks": [], "edges": []})
+    assert mem.name_place("p", "place 3", 2) == "p" and "name" not in mem.get("places", "p") and mem.get("places", "p").get("aliases") is None

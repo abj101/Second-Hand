@@ -14,6 +14,7 @@ from agent.model import ModelUnavailable, Ollama, Reply
 from agent.notebook import Notebook
 from agent.observer import for_model, wait_settled
 from agent.perceive import perceive
+from agent.world import _is_exit
 from scripts import run_agent
 
 FRAMES = (6,12,44,46,48,51,53,56,62,67,68,70,76,85,94)
@@ -96,12 +97,15 @@ def main(argv=None):
 # ---- OM.6 replay eval: replays runs/m1_gp5 and runs/m1_gp2 with the current agent code, from boot (memory must be rebuilt
 # by the new code, so the recorded checkpoint memory is not used). Recorded plan and act replies keep the emulator on the
 # recorded path; perceiver replies come from .cache/model only. RAM truth (truth.jsonl) is read here, never by agent/.
-OM_CASES, OM_CAP, OM_MODEL = Path("scripts/om_cases.json"), 30, "gemma4:31b-cloud"
+OM_CASES, OM_CAP, OM_MODEL = Path("scripts/om_cases.json"), 10, "gemma4:31b-cloud"  # OM2 section 7: one live measure, at most 10 requests
 MODEL_CACHE, BUDGET = Path(".cache/model"), Path("runs/e3_budget.json")
 SCREEN_TYPES = ("world", "dialogue", "menu", "keyboard", "battle", "title", "other")
 PERCEIVER_MISSES = 3  # more cache misses than this and the replay no longer matches the recording
 FAKE_EXIT = "exit: doorway"  # m1_gp5's 2F doorway: walking into it changes nothing (RAM truth: map 38 stays put)
 DECISION_GATE, OLD_GATE = 6, 3  # of 8 cases
+MAX_OPTIONS, MAX_PROMPT_TOKENS = 10, 1600  # OM2 section 2 size gate: options excluding the free-buttons row; act prompt tokens = len/4
+FLOOR_OF_MAP = {37: "1F", 38: "2F"}  # truth.map of the m1_gp5 house (evaluation only; agent/ never reads truth)
+EXIT_ROWS = ("exit ", "possible exit ", "not an exit")  # option labels of exit records: verified, unverified, refuted
 
 class OmAbort(RuntimeError): pass  # the replay cannot continue: exit 2
 
@@ -180,6 +184,10 @@ class Replay:
         if role == "plan":
             return Reply("", {"goals": self.rec.goal_ops.get(self.step, []), "focus": self.rec.focus.get(self.step) or "", "why": "", "lesson": None}, 0.0, None, None)
         if role == "act":
+            if self.step in self.found:  # the act prompt at a case step; the raw text also goes to scratch files for analysis
+                self.found[self.step]["prompt"] = system + "\n" + user
+                d = Path(".tmp/om/om2_prompts"); d.mkdir(parents=True, exist_ok=True)
+                (d / f"{self.step}_system.txt").write_text(system, encoding="utf-8"); (d / f"{self.step}_user.txt").write_text(user, encoding="utf-8")
             if self.live_step == self.step: return self.real.ask(system, user, images, schema, role=role)
             rec = self.rec.trace.get(self.step, {}); recorded = rec.get("act") or {}; pred = rec.get("pred") or {}
             return Reply("", {"place": recorded.get("place") or "", "notebook": self.rec.act_ops.get(self.step, []), "action": recorded.get("action"),
@@ -192,12 +200,17 @@ class Replay:
         act() writes nothing, so the extra call leaves memory as the recording has it."""
         args = (model, image, perception, notebook, facts, flags, controls, prefs, buttons)
         if self.step in self.cases:
-            found = self.found[self.step] = {"options": options, "perception": perception, "act": None}
+            found = self.found[self.step] = {"options": options, "perception": perception, "act": None, "prompt": "", "exits": self._exits_now(perception)}
             if self.step in self.live_steps:
                 self.live_step = self.step
                 try: found["act"] = act(*args, places=places, options=options)
                 finally: self.live_step = None
         return act(*args, places=places, options=options)
+    def _exits_now(self, perception):
+        """Exit records of the current place from the inputs World.options gives _exits (for the dry exit-truth gate)."""
+        world, live = self.loop.world, {p["id"] for p in self.loop.mem.rows("places") if p.get("state") != "merged"}
+        things = [(i, e, world.entity_ids.get(i)) for i, e in enumerate(perception.get("entities") or []) if e.get("name") and _is_exit(e)]
+        return world._exits(self.loop.place, live, things)
     def run(self, last):
         if self.out.exists(): shutil.rmtree(self.out)
         env = PyBoyEnv(find_rom(), state=str(self.rec.copy / "checkpoint" / "000000" / "pyboy.state")); env.tile_px = 16  # the boot state run_agent saved
@@ -265,47 +278,107 @@ def om_places():
     print(f"PLACES GATE: {'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
 
-def om_cases(live):
-    cases = json.loads(OM_CASES.read_text(encoding="utf-8")); counter = {"requests": 0}; before = _budget()
+def dry_gates(d):
+    """OM2 section 2 dry gates for one case, from recorded data, no requests. d: {"case": its om_cases.json entry, "options": the
+    option list at its step, "prompt": the act system+user text, "exits": World._exits records of its place}.
+    Returns (gate, ok, detail) rows: right present, exit truth, size."""
+    c, opts, exits = d["case"], d.get("options") or [], d.get("exits") or []
+    tag, label_re = f"step {c['step']}", c["right"][0]["label_re"]  # 2F cases: the stairs; 1F cases: the door mat / rug
+    present = any(is_right(c, o["tool"], o["label"]) for o in opts)
+    exit_opts = [o for o in opts if o["label"].startswith(EXIT_ROWS)]
+    why, floor = [], FLOOR_OF_MAP.get(c["truth"]["map"])
+    if floor == "2F":  # the stairs are the one verified exit; the other exit rows are possible exit / not an exit by construction
+        verified = [o for o in exit_opts if o["label"].startswith("exit ")]
+        if len(verified) != 1: why.append(f"{len(verified)} verified exits (need the stairs only)")
+        elif not re.search(label_re, verified[0]["label"], re.IGNORECASE): why.append(f"the verified exit is not the stairs: {verified[0]['label']!r}")
+        elif " beyond)" not in verified[0]["label"]: why.append("the stairs label has no beyond-summary")
+    elif floor == "1F":  # the door mat / rug is an unused (unverified) exit
+        rug = [o for o in exit_opts if re.search(label_re, o["label"], re.IGNORECASE)]
+        if not rug: why.append("no exit row for the door mat / rug")
+        elif any(not o["label"].startswith("possible exit ") for o in rug): why.append(f"the door mat / rug is not an unused exit: {rug[0]['label']!r}")
+    else: why.append(f"no floor for truth map {c['truth']['map']}")
+    dups = [k for k, v in Counter((x["dest"], tuple(x["tile"])) for x in exits if x.get("tile") is not None).items() if v > 1]
+    if dups: why.append(f"two exit records with the same destination and tile: {dups}")
+    non_free = [o for o in opts if not (o["tool"] == "buttons" and o.get("action") is None)]  # the free-buttons row is not counted
+    tokens, size = len(d.get("prompt") or "") / 4, []
+    if len(non_free) > MAX_OPTIONS: size.append(f"options over {MAX_OPTIONS}")
+    if tokens > MAX_PROMPT_TOKENS: size.append(f"prompt over {MAX_PROMPT_TOKENS} tokens")
+    return [("right present", present, f"{tag}: " + ("a right option is listed" if present else "no right option is listed")),
+            ("exit truth", not why, f"{tag}: " + ("; ".join(why) or "ok")),
+            ("size", not size, f"{tag}: {len(non_free)} options, prompt {tokens:.0f} tokens" + (f" ({'; '.join(size)})" if size else ""))]
+
+def dry_summary(rows, n):
+    """Prints the DRY GATES line for the (gate, ok, detail) rows of n cases; True when every gate passes on every case."""
+    got = {g: sum(ok for name, ok, _ in rows if name == g) for g in ("right present", "exit truth", "size")}
+    ok = all(v == n for v in got.values())
+    print(f"\nDRY GATES: right present {got['right present']}/{n}, exit truth {got['exit truth']}/{n}, size {got['size']}/{n}: {'PASS' if ok else 'FAIL'}")
+    return ok
+
+def replay_cases(cases, live, counter):
+    """One replay per run; returns (case, replay) pairs. live: each case step makes its one real act call, the replay goes on."""
     results = []
     for run in dict.fromkeys(c["run"] for c in cases):
         rec = stage(run)
         mine = [c for c in cases if c["run"] == run]
-        steps = {c["step"] for c in mine}  # one replay per run; live steps make one real act call each, the replay goes on
+        steps = {c["step"] for c in mine}  # one replay per run
         rep = Replay(rec, rec.copy / "om_cases", cases=steps, live=steps if live else (), counter=counter); rep.run(max(steps))
         results += [(c, rep) for c in mine]
-    new_right = old_right = present = 0
-    for c, rep in results:
+    return results
+
+def dry_report(cases, counter):
+    """The dry replay (no live step, so no request): prints each case's options, prompt size and gate rows.
+    Returns (gate rows, right count of the recorded arm)."""
+    rows, old_right = [], 0
+    for c, rep in replay_cases(cases, False, counter):
         s, f, old = c["step"], rep.found.get(c["step"]) or {}, rep.rec.trace.get(c["step"], {})
         old_tool, old_label = action_option((old.get("act") or {}).get("action"), target=(old.get("choice") or {}).get("target") or "")
         old_ok = is_right(c, old_tool, old_label); old_right += old_ok
         opts = f.get("options") or []
-        present += any(is_right(c, o["tool"], o["label"]) for o in opts)
         print(f"\ncase {c['run']} step {s}  truth map={c['truth']['map']} ({c['truth']['x']},{c['truth']['y']})  {c['situation']}")
         print(f"  old arm: {old_tool} {old_label!r} -> {'right' if old_ok else 'wrong'}  (recorded why: {str((old.get('act') or {}).get('why'))[:100]})")
-        for o in opts: print(f"  option {o['n']:>2}: {o['tool']} {o['label']!r}{'  [right]' if is_right(c, o['tool'], o['label']) else ''}")
+        for o in opts: print(f"  option {o['n']:>2}: {o['tool']} {o['label']!r}{'  [right]' if is_right(c, o['tool'], o['label']) else ''}" + (f" — {'; '.join(o['notes'])}" if o.get("notes") else ""))
         if not opts: print("  no options recorded at this step")
-        if live:
-            res = f.get("act")
-            if res is None: print("  new arm: no act reply"); continue
-            if res.option is not None and 1 <= res.option <= len(opts): tool, label = opts[res.option - 1]["tool"], opts[res.option - 1]["label"]
-            else: tool, label = action_option(res.action, entities=(f.get("perception") or {}).get("entities", []))
-            new_ok = is_right(c, tool, label); new_right += new_ok
-            print(f"  new arm: option {res.option} {tool} {label!r} -> {'right' if new_ok else 'wrong'}  why: {res.why[:120]}")
+        gates = dry_gates({"case": c, "options": opts, "prompt": f.get("prompt") or "", "exits": f.get("exits") or []})
+        print(f"  act prompt: {len(f.get('prompt') or '') / 4:.0f} tokens (len/4)")
+        for g, ok, detail in gates: print(f"  gate {g}: {'PASS' if ok else 'FAIL'}  {detail}")
+        rows += gates
+    return rows, old_right
+
+def live_cases(cases, counter, before, old_right):
+    """The live replay: one real act call per case step (at most OM_CAP requests), then the decision-point gates."""
+    new_right = 0
+    for c, rep in replay_cases(cases, True, counter):
+        s, f = c["step"], rep.found.get(c["step"]) or {}; opts, res = f.get("options") or [], f.get("act")
+        if res is None: print(f"\ncase {c['run']} step {s} new arm: no act reply"); continue
+        if res.option is not None and 1 <= res.option <= len(opts): tool, label = opts[res.option - 1]["tool"], opts[res.option - 1]["label"]
+        else: tool, label = action_option(res.action, entities=(f.get("perception") or {}).get("entities", []))
+        new_ok = is_right(c, tool, label); new_right += new_ok
+        print(f"\ncase {c['run']} step {s} new arm: option {res.option} {tool} {label!r} -> {'right' if new_ok else 'wrong'}  why: {res.why[:120]}")
     n = len(cases)
-    if live:
-        print(f"\nDECISION POINTS: options arm right {new_right}/{n} (gate >= {DECISION_GATE})")
-        print(f"OLD ARM right {old_right}/{n} (gate <= {OLD_GATE})")
-        ok = new_right >= DECISION_GATE and old_right <= OLD_GATE and counter["requests"] <= OM_CAP
-    else:
-        print(f"\nDRY: cases whose options contain at least one right option: {present}/{n} (options arm n/a; no requests)")
-        print(f"DRY: old arm right (recorded actions) {old_right}/{n}")
-        ok = present == n
+    print(f"\nDECISION POINTS: options arm right {new_right}/{n} (gate >= {DECISION_GATE})")
+    print(f"OLD ARM right {old_right}/{n} (gate <= {OLD_GATE})")
     print(f"requests={counter['requests']} (cap {OM_CAP}); ledger before total={before.get('total')} m1={before.get('m1')} after total={_budget().get('total')} m1={_budget().get('m1')}")
-    print(f"CASES GATE: {'PASS' if ok else 'FAIL'}" + ("" if live else " (dry: right options present)"))
+    ok = new_right >= DECISION_GATE and old_right <= OLD_GATE and counter["requests"] <= OM_CAP
+    print(f"CASES GATE: {'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
 
+def om_cases(live):
+    """Dry first always (0 requests). --live runs the live replay only when every dry gate passes."""
+    cases = json.loads(OM_CASES.read_text(encoding="utf-8")); counter = {"requests": 0}; before = _budget()
+    rows, old_right = dry_report(cases, counter)
+    dry_ok = dry_summary(rows, len(cases))
+    if not live:
+        print(f"DRY: old arm right (recorded actions) {old_right}/{len(cases)}")
+        print(f"requests={counter['requests']} (cap {OM_CAP}); ledger before total={before.get('total')} m1={before.get('m1')} after total={_budget().get('total')} m1={_budget().get('m1')}")
+        print(f"CASES GATE: {'PASS' if dry_ok else 'FAIL'} (dry)")
+        return 0 if dry_ok else 1
+    if not dry_ok:
+        print("DRY GATES FAILED: live measure not run")
+        return 1
+    return live_cases(cases, counter, before, old_right)
+
 def om_main(a, ap):
+    sys.stdout.reconfigure(encoding="utf-8")  # option labels carry arrows; a redirected cp1252 stdout cannot print them
     if a.live and a.dry: ap.error("--live and --dry are exclusive")
     if a.om == "places" and a.live: ap.error("--live applies to --om cases")
     try: return om_places() if a.om == "places" else om_cases(a.live)
