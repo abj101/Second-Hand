@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 from agent.loop import Loop
 from agent.memory import Memory
+from agent.notebook import Notebook
 from agent.space import mark_exit
 from tests.agent.fakes import GridEnv, StubModel
 from tests.agent.test_options import INPUTS, room
@@ -519,6 +520,49 @@ def test_resume_preserves_cut_if_post_perception_fails(tmp_path):
     resumed=Loop(env,StubModel([reply(town), act_reply(None)]),mem,"grid"); resumed.restore(loop.state())
     assert mem.get("places",resumed.step()["place"])["state"] == "candidate"
 
+def test_dialogue_fragments_flush_as_one_log_entry_and_survive_restore(tmp_path):
+    env = GridEnv(); memory = Memory(tmp_path / "memory")
+    loop = Loop(env, StubModel([]), memory, "grid")
+    fragments = [
+        (42, ["MOM: Right.", "All boys leave"]),
+        (43, ["All boys leave home some day."]),
+        (44, ["home some day.", "It said so on TV."]),
+        (45, ["PROF. OAK, next", "door, is looking"]),
+        (46, ["door, is looking for you."]),
+    ]
+    step, texts = fragments[0]
+    loop._learn(texts, [], step, "tiled room", "dialogue")
+    checkpoint = loop.state()
+    resumed = Loop(env, loop.model, memory, "grid"); resumed.restore(checkpoint)
+    assert resumed.state()["planner"]["conversation"] == checkpoint["planner"]["conversation"]
+
+    for step, texts in fragments[1:]: resumed._learn(texts, [], step, "tiled room", "dialogue")
+    assert resumed.notebook.log == []
+    resumed._learn([], [], 47, "tiled room", "world")
+    assert len(resumed.notebook.log) == 1
+    entry = resumed.notebook.log[0]["text"]
+    assert entry.startswith("MOM at tiled room:")
+    assert "PROF. OAK, next door, is looking for you." in entry
+    assert {"MOM: Right.", "All boys leave", "All boys leave home some day.", "home some day.",
+            "It said so on TV.", "PROF. OAK, next", "door, is looking", "door, is looking for you."} <= {
+                row["text"] for row in resumed.mem.rows("knowledge")}
+    assert resumed.text_pending
+    assert resumed.text_for_trigger == "Right. All boys leave home some day. It said so on TV. PROF. OAK, next door, is looking for you."
+
+    resumed.text_pending = False
+    for step, texts in fragments: resumed._learn(texts, [], step + 10, "tiled room", "dialogue")
+    resumed._learn([], [], 57, "tiled room", "world")
+    assert len(resumed.notebook.log) == 1
+    assert not resumed.text_pending and not resumed.conversation["lines"]
+
+    resumed._learn(["A sign says KEEP OUT."], [], 58, "tiled room", "world")
+    assert len(resumed.notebook.log) == 2
+    assert "A sign says KEEP OUT." in resumed.notebook.log[-1]["text"]
+    resumed._learn(["A continuation ▼"], [], 59, "tiled room", "dialogue")
+    resumed._learn(["A continuation is complete."], [], 60, "tiled room", "dialogue")
+    resumed._learn([], [], 61, "tiled room", "world")
+    assert resumed.notebook.log[-1]["text"].endswith('"A continuation is complete."')
+
 def test_tracked_approach_scroll_does_not_split_but_real_cuts_do(tmp_path, monkeypatch):
     from agent import loop as loop_module
     from agent.observer import cut as observer_cut
@@ -760,6 +804,7 @@ def test_planner_owns_goals_and_act_closes_the_focus(tmp_path):
         def ask(self, *args, **kwargs): self.roles.append(kwargs.get("role")); return super().ask(*args, **kwargs)
     plan_reply = reply({"goals": [{"op": "set", "key": "top", "value": {"text": "finish", "parent": None, "status": "active"}},
                                   {"op": "set", "key": "g1", "value": {"text": "leave", "parent": "top", "done_when": "new place", "source": "assumed"}}],
+                        "facts": [{"key": "find_person", "text": "A person next door is looking for you.", "from": "MOM", "source": "heard"}],
                         "focus": "g1", "lesson": None, "why": "start"})
     act_reply = reply({"place": "Hall", "notebook": [{"op": "set", "section": "goals", "key": "sneaky", "value": {"text": "x"}},
                                                     {"op": "focus", "status": "done", "evidence": "door crossed"}],
@@ -777,7 +822,70 @@ def test_planner_owns_goals_and_act_closes_the_focus(tmp_path):
     assert any("goal g1 done: door crossed" in e["text"] for e in saved["log"])
     assert loop.focus_closed and loop._plan_trigger({}) == loop.focus_closed  # closing the focus replans next step
     assert loop.mem.get("places", row["place"])["name"] == "Hall"
+    assert saved["hints"]["find_person"] == {"text": "A person next door is looking for you.", "from": "MOM", "source": "heard", "step": 1}
+    assert "facts (what the game told or showed):" in loop.notebook.render()
+    assert "facts (what the game told or showed):" in loop.notebook.render_focus()
     assert model.roles[:3] == ["perceiver", "plan", "act"] and "chooser" not in model.roles
+
+
+def test_plan_without_facts_still_parses(tmp_path):
+    from agent.plan import plan
+    notebook = Notebook(tmp_path)
+    parsed = plan(StubModel([reply({"goals": [], "focus": "", "why": "new information",
+                                    "facts": [{"key": "ok", "text": "A person needs help.", "from": "MOM", "source": "heard"},
+                                              {"key": "empty", "text": " "}, {"key": "x" * 41, "text": "too long"}, "junk"]})]),
+                  "text", notebook, "", [], [])
+    assert parsed.facts == [{"key": "ok", "text": "A person needs help.", "from": "MOM", "source": "heard"}]
+    missing = plan(StubModel([reply({"goals": [], "focus": "", "why": "nothing new"})]), "cycle", notebook, "", [], [])
+    assert missing.facts == []
+
+
+def test_planner_prioritizes_game_text_and_checks_it_before_throttle(tmp_path):
+    from agent.plan import SYSTEM
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.notebook.data["goals"]["g"] = {"text": "explore", "status": "active"}
+    loop.notebook.focus = "g"
+    loop.step_no = loop.last_plan = 10
+    loop.text_pending = True
+    loop.text_for_trigger = "Someone is looking for you. " + "x" * 220
+
+    assert "What the game tells you comes first." in SYSTEM
+    assert "Explore only as a child of a goal" in SYSTEM
+    assert "it may be a goal before it is on the map (source heard)" in SYSTEM
+    assert "first record what it tells you as facts" in SYSTEM
+    assert "Facts are what the game told or showed; trust them over guesses." in SYSTEM
+    assert loop._plan_trigger({"screen": "dialogue"}) is None
+    assert loop._plan_trigger({"screen": "world"}) == "new game text: " + loop.text_for_trigger[:200]
+
+
+def test_actor_speaker_name_attaches_after_new_text(tmp_path, monkeypatch):
+    from agent import loop as module
+    from types import SimpleNamespace
+
+    before = {"screen": "world", "text": [], "entities": [
+        {"kind": "player", "name": "player", "at": [.5, .5]},
+        {"kind": "npc", "name": "person", "at": [.6, .5]}], "affordances": []}
+    after = {**before, "text": ["MOM: Hello there."]}
+    perceptions, calls = [before, after], [0]
+    def perceive(*_):
+        data = perceptions[min(calls[0], 1)]; calls[0] += 1
+        return data, reply(data)
+    monkeypatch.setattr(module, "perceive", perceive)
+    monkeypatch.setattr(module, "act", lambda *a, **k: SimpleNamespace(
+        place="", ops=[], action={"thing": 1, "verb": "interact"}, expect="text_appears", why="talk", text=None))
+    def interact(ctx, *_a, **_kw):
+        frame = ctx.env.screenshot()
+        return SimpleNamespace(status="done", reason="", inputs=1, calls=0, before=frame, after=frame,
+                               scroll=(0, 0), blank_seen=False, moves=[])
+    monkeypatch.setattr(module, "run_affordance", interact)
+    monkeypatch.setattr(module, "effects", lambda *_a, **_kw: {"effects": ["text_appears"], "basis": {"text_appears": "pixel"}})
+
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    loop.step()
+
+    actor = next(row for row in loop.mem.rows("entities") if row.get("name") == "person")
+    assert actor["called"] == "MOM"
 
 
 def test_act_prompt_summarizes_recent_repeated_blocked_action(tmp_path, monkeypatch):

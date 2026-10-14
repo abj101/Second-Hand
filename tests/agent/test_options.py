@@ -326,6 +326,21 @@ def test_grouped_label_resolves_like_its_name(tmp_path):
     assert world.resolve("vent", per, "room") is not None and world.resolve("vent ×3", per, "room") == world.resolve("vent", per, "room")
 
 
+def test_called_actor_option_uses_called_label_and_resolves_case_insensitively(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, [{"name": "person", "kind": "npc", "at": at(*SPOTS[0])}])
+    ident = world.entity_ids[1]
+    mem.call(ident, "MOM", 41)
+
+    fail = {fail_key("room", "interact", "person", INPUTS): {"n": 1, "why": "blocked"}}
+    options = world.options(per, "room", fail, 42, inputs=INPUTS)
+    interact = next(option for option in options if option["tool"] == "interact")
+    assert interact["label"] == "interact with MOM"
+    assert interact["action"] == {"thing": 1, "verb": "interact"}
+    assert interact["notes"] == ["tried here 1×, last: blocked"]
+    assert world.resolve("mom", per, "room")["id"] == ident
+
+
 def test_off_screen_exit_to_a_known_place_travels_through_its_verified_tile(tmp_path):
     mem, world, per = scene(tmp_path)
     off = {**per, "entities": [player()]}; world.before(off, "room", "room", (160, 144), 2)

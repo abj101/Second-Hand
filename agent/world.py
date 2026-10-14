@@ -456,6 +456,10 @@ class World:
     def resolve(self, name, per, place):
         requested = re.sub(r"\s*×\d+$", "", str(name or "").strip())  # a grouped label ("vent ×3") resolves like its name
         if not requested: return None
+        def matches(entity):
+            return _distance(entity.get("name", ""), name) <= 1 or str(entity.get("called", "")).casefold() == name.casefold()
+        def match_distance(entity):
+            return min(_distance(entity.get("name", ""), name), _distance(entity.get("called", ""), name))
         places = [p for p in self.mem.rows("places") if p.get("state") != "merged"]
         live = {p["id"] for p in places}
         exact = next((p for p in places if requested == p["id"] or requested.casefold() == self.place_label(p["id"]).casefold()), None)
@@ -466,10 +470,10 @@ class World:
             return {"kind": "place", "place": exact["id"], "tile": tuple(tile) if tile else None, "id": exact["id"], "stale": False}
         name = requested.removeprefix("exit:").strip()
         dist = {p: len(path) for p, path in self._paths(place).items()}
-        screen = [(i, e) for i, e in enumerate(per.get("entities", [])) if e.get("name") and _distance(e["name"], name) <= 1]
-        if screen: i, e = min(screen, key=lambda pair: (_distance(pair[1]["name"], name), -(self.mem.get("entities", self.entity_ids.get(pair[0], "")) or {}).get("seen", 0))); ident = self.entity_ids.get(i); return {"kind": "screen", "place": place, "tile": self.entity_tiles.get(ident), "id": ident, "stale": False}
-        rows = [e for e in self.mem.rows("entities") if e.get("place") in live and e.get("tile") and _distance(e.get("name", ""), name) <= 1]
-        if rows: e = min(rows, key=lambda e: (e["place"] != place, dist.get(e["place"], 10**9), -e.get("seen", 0))); return {"kind": "memory", "place": e["place"], "tile": tuple(e["tile"]), "id": e["id"], "stale": e.get("status") == "stale"}
+        screen = [(i, e) for i, e in enumerate(per.get("entities", [])) if e.get("name") and matches({**e, "called": (self.mem.get("entities", self.entity_ids.get(i, "")) or {}).get("called", "")})]
+        if screen: i, e = min(screen, key=lambda pair: (match_distance({**pair[1], "called": (self.mem.get("entities", self.entity_ids.get(pair[0], "")) or {}).get("called", "")}), -(self.mem.get("entities", self.entity_ids.get(pair[0], "")) or {}).get("seen", 0))); ident = self.entity_ids.get(i); return {"kind": "screen", "place": place, "tile": self.entity_tiles.get(ident), "id": ident, "stale": False}
+        rows = [e for e in self.mem.rows("entities") if e.get("place") in live and e.get("tile") and matches(e)]
+        if rows: e = min(rows, key=lambda e: (str(e.get("called", "")).casefold() != name.casefold(), e["place"] != place, dist.get(e["place"], 10**9), -e.get("seen", 0))); return {"kind": "memory", "place": e["place"], "tile": tuple(e["tile"]), "id": e["id"], "stale": e.get("status") == "stale"}
         rows = [p for p in self.mem.rows("places") if p.get("id") in live and any(_distance(v, name) <= 1 for v in [p.get("name", ""), *p.get("aliases", [])])]
         if not rows: return None
         p = min(rows, key=lambda p: (p["id"] != place, dist.get(p["id"], 10**9), -p.get("visits", 0))); incoming = [r for r in self.mem.rows("tiles") if r.get("place") in live and (r.get("exit") or {}).get("to") == p["id"]]
@@ -623,7 +627,8 @@ class World:
             status = e.get("status", "remembered")
             last = f"last seen {tuple(e['tile'])} step {e.get('last', 0)}; may have moved" if status == "stale" else f"{status} step {e.get('last', 0)}"
             count = len(e["_members"])
-            name = rec["head"] if rec else f"{e['name']} ×{count}" if count > 1 else e.get("name", e["id"])
+            called = next((member.get("called") for member in e["_members"] if member.get("called")), None)
+            name = rec["head"] if rec else f"{called or e['name']} ×{count}" if count > 1 else called or e.get("name", e["id"])
             nearest = f" (nearest {tuple(e['tile'])})" if count > 1 else ""
             legend.append(f"{'Thing' if tier(e) == 'interest' else 'Landmark'} {symbol} {name} {tuple(e['tile'])} {normalize_kind(e.get('kind'))} {last}{nearest}{self._notes(e['id'])}")
         for y in range(y0, y1 + 1):
@@ -669,10 +674,10 @@ class World:
             tile = tuple(nearest["tile"]) if nearest else "?"
             status = best.get("status", "remembered")
             if len(group) > 1:
-                current_detail.append(f"Thing: {base} ×{len(group)} {status} (nearest {tile})")
+                current_detail.append(f"Thing: {best.get('called') or base} ×{len(group)} {status} (nearest {tile})")
             else:
                 last = f"last seen {tile} step {best.get('last', 0)}; may have moved" if status == "stale" else f"{status} step {best.get('last', 0)}"
-                current_detail.append(f"Thing: {best.get('name', best['id'])} {tile} {normalize_kind(best.get('kind'))} {last}{self._notes(best['id'])}")
+                current_detail.append(f"Thing: {best.get('called') or best.get('name', best['id'])} {tile} {normalize_kind(best.get('kind'))} {last}{self._notes(best['id'])}")
 
         paths = self._paths(place)
         words = {w.strip(".,!?;:()[]{}\"'") for w in goal.split() if w.strip(".,!?;:()[]{}\"'")}
@@ -701,12 +706,13 @@ class World:
                 best = max(group, key=lambda e: (status_rank.get(e.get("status", "remembered"), 0), e.get("last", 0), e["id"]))
                 tile_rows = [e for e in group if e.get("tile")]
                 nearest = min(tile_rows, key=lambda e: (sum(abs(e["tile"][i] - self.pos[i]) for i in (0, 1)), e["id"])) if tile_rows else None
+                called = next((e.get("called") for e in group if e.get("called")), None)
                 if len(group) > 1:
-                    rendered.append(f"  Thing: {base} ×{len(group)} {best.get('status', 'remembered')} (nearest {tuple(nearest['tile']) if nearest else '?'})")
+                    rendered.append(f"  Thing: {called or base} ×{len(group)} {best.get('status', 'remembered')} (nearest {tuple(nearest['tile']) if nearest else '?'})")
                 else:
                     status = best.get("status", "remembered")
                     fact = f"last seen {tuple(best['tile']) if best.get('tile') else '?'} step {best.get('last', 0)}; may have moved" if status == "stale" else status
-                    rendered.append(f"  Thing: {best.get('name', best['id'])} {fact}{self._notes(best['id'])}")
+                    rendered.append(f"  Thing: {best.get('called') or best.get('name', best['id'])} {fact}{self._notes(best['id'])}")
             place_things[pid] = [*rendered, f"  Edges: {len(other_edges)} untried ({other_unseen} into unseen)"]
 
         # ponytail: place summaries fit before entity detail; raise VIEW_TOKENS only if real maps outgrow it.
@@ -790,19 +796,21 @@ class World:
             for i, e in enumerate(ents):
                 kind, name, ident = normalize_kind(e.get("kind")), e.get("name"), self.entity_ids.get(i)
                 if not name or kind in TRANSIENT or _is_exit(e): continue
+                shown = (self.mem.get("entities", ident) or {}).get("called") or name
                 key = _yx(self._tile(ident) or e.get("at"), name)
-                row = option("thing", "approach", f"approach {name}", {"thing": i, "verb": "approach"}, ident, "approach", name)
-                if kind not in ACTOR_KINDS and not row[1]["notes"] and ident not in hist: quiet.append((key, name)); continue
+                row = option("thing", "approach", f"approach {shown}", {"thing": i, "verb": "approach"}, ident, "approach", name)
+                if kind not in ACTOR_KINDS and not row[1]["notes"] and ident not in hist: quiet.append((key, shown)); continue
                 things.append((key, row))
-                if kind in ACTOR_KINDS: things.append((key, option("thing", "interact", f"interact with {name}", {"thing": i, "verb": "interact"}, ident, "interact", name)))
+                if kind in ACTOR_KINDS: things.append((key, option("thing", "interact", f"interact with {shown}", {"thing": i, "verb": "interact"}, ident, "interact", name)))
             rows += [row for _, row in sorted(things, key=lambda kv: kv[0])]
             remembered = []
             for r in self.mem.rows("entities"):
                 if r.get("place") != place or not r.get("tile") or not r.get("name") or r["id"] in on or normalize_kind(r.get("kind")) in TRANSIENT or _is_exit(r): continue
                 tile, name = tuple(r["tile"]), r["name"]
-                row = option("remembered", "go_to", f"go to {name} ({r.get('status', 'remembered')}, seen {step - r.get('last', step)} steps ago)", {"go_to": name}, r["id"], "approach", name, goto=name)
+                shown = r.get("called") or name
+                row = option("remembered", "go_to", f"go to {shown} ({r.get('status', 'remembered')}, seen {step - r.get('last', step)} steps ago)", {"go_to": name}, r["id"], "approach", name, goto=name)
                 if normalize_kind(r.get("kind")) not in ACTOR_KINDS and not row[1]["notes"] and r["id"] not in hist:
-                    if r.get("status") != "gone" and r.get("anchor") not in ("screen", "self"): quiet.append((_yx(tile, name), name))  # gone things and HUD/self things are not in this place's row
+                    if r.get("status") != "gone" and r.get("anchor") not in ("screen", "self"): quiet.append((_yx(tile, shown), shown))  # gone things and HUD/self things are not in this place's row
                     continue
                 remembered.append((_yx(tile, name), row))
             rows += [row for _, row in sorted(remembered, key=lambda kv: kv[0])]

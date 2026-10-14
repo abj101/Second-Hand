@@ -32,13 +32,18 @@ def test_lessons_cap_render_order_and_limit(tmp_path):
         nb.apply([{"op": "set", "section": "lessons", "key": f"l{i}", "value": {"text": "x" * 50}}], i)
     nb.apply([{"op": "set", "section": "goals", "key": "done_one", "value": {"text": "d", "status": "done"}},
               {"op": "set", "section": "goals", "key": "active_one", "value": {"text": "a", "status": "active"}},
-              {"op": "set", "section": "places", "key": "Town", "value": {"text": "t"}}], 20)
+              {"op": "set", "section": "hints", "key": "fact_one", "value": {"text": "A person is looking for you.", "source": "heard"}}], 20)
     text = nb.render()
     assert "- l1:" not in text and "- l11:" in text
     assert text.index("- active_one") < text.index("- done_one")
+    assert "facts (what the game told or showed):" in text
+    assert "- fact_one:" in text
     assert Notebook(tmp_path).render() == text
+    trimmed = nb.render(limit=180)
+    assert "- fact_one:" in trimmed and "- done_one:" not in trimmed
     short = nb.render(limit=80)
     assert len(short) <= 80 and "- active_one" in short and "- done_one" not in short
+    assert "facts (what the game told or showed):" in nb.render_focus()
 
 
 def test_goal_tree_focus_path_log_and_orphan_safe_trim(tmp_path):
@@ -56,3 +61,14 @@ def test_goal_tree_focus_path_log_and_orphan_safe_trim(tmp_path):
     reloaded = Notebook(tmp_path)
     assert reloaded.focus == "out" and "goal out blocked: stairs go up" in reloaded.render_log()
     assert "Goal path (top -> focus):" in reloaded.render_focus() and "stairs go up" in reloaded.render_focus()
+
+
+def test_focus_shows_recent_log_keeps_full_log_and_facts(tmp_path):
+    nb = Notebook(tmp_path)
+    nb.apply([{"op": "set", "section": "hints", "key": "fact", "value": {"text": "A person is looking for you.", "source": "heard"}}], 0)
+    for step in range(1, 13): nb.note(step, f"event {step}")
+
+    focus = nb.render_focus()
+    assert "step 1: event 1" not in focus and "step 3: event 3" in focus and "step 12: event 12" in focus
+    assert "facts (what the game told or showed):" in focus and "- fact:" in focus
+    assert len(nb.log) == 12 and "step 1: event 1" in nb.render_log(40)

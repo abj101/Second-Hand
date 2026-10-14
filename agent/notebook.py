@@ -67,7 +67,7 @@ class Notebook:
         self.log = self.log[-200:]
         with self.history.open("a", encoding="utf-8") as f: f.write("".join(line + "\n" for line in lines))
         tmp = self.file.with_suffix(".tmp"); tmp.write_text(json.dumps({**self.data, "focus": self.focus, "log": self.log}, ensure_ascii=False, indent=1), encoding="utf-8")
-        for wait in (0, .05, .1, .2, .4, .8):  # Windows: a scanner can hold the fresh temp file for a moment
+        for wait in (0, .05, .1, .2, .4, .8):  # Windows: a scanner can hold the fresh temp file briefly
             time.sleep(wait)
             try: tmp.replace(self.file); break
             except PermissionError:
@@ -75,23 +75,26 @@ class Notebook:
     def render_log(self, n: int = LOG_SHOWN) -> str:
         return "\n".join(f"- step {e.get('step')}: {e.get('text')}" for e in self.log[-n:]) or "(nothing yet)"
     def render_focus(self, limit: int = 4000) -> str:
-        """What the act call sees: the root-to-focus path, the log, hints and lessons."""
+        """What the act call sees: the root-to-focus path, the log, facts and lessons."""
         goals = self.data["goals"]; path = self.path()
         lines = ["Goal path (top -> focus):"] + [f"{'  ' * i}- {k}: " + json.dumps({f: v for f, v in goals[k].items() if f in ("text", "done_when", "status", "tried", "evidence")}, ensure_ascii=False, separators=(",", ":")) for i, k in enumerate(path)] if path else ["Goal path: (no focus yet)"]
-        lines += ["Already happened (log):", self.render_log()]
-        for s in ("hints", "lessons"): lines += [f"{s}:"] + [f"- {k}: " + json.dumps({f: v for f, v in d.items() if f != "step"}, ensure_ascii=False, separators=(",", ":")) for k, d in self.data[s].items()]
+        lines += ["Already happened (log):", self.render_log(10)]
+        for s in ("hints", "lessons"):
+            heading = "facts (what the game told or showed):" if s == "hints" else "lessons:"
+            lines += [heading] + [f"- {k}: " + json.dumps({f: v for f, v in d.items() if f != "step"}, ensure_ascii=False, separators=(",", ":")) for k, d in self.data[s].items()]
         return "\n".join(lines)[:limit]
     def render(self, limit: int = 6000) -> str:
         d = self.data
         if not any(d.values()): return "(empty)"
         shown = {(s, k) for s in SECTIONS for k in d[s]}
         finished = [k for k in d["goals"] if d["goals"][k].get("status") in ("done", "dropped")]
-        drop = [(s, k) for s, keys in (("lessons", d["lessons"]), ("hints", d["hints"]), ("goals", finished)) for k in sorted(keys, key=lambda k: d[s][k].get("step", 0))]
+        drop = [(s, k) for s, keys in (("lessons", d["lessons"]), ("goals", finished), ("hints", d["hints"])) for k in sorted(keys, key=lambda k: d[s][k].get("step", 0))]
         while True:
             lines = []
             for s in SECTIONS:
                 keys = sorted(d[s], key=lambda k: d[s][k].get("status") not in (None, "active")) if s == "goals" else list(d[s])
-                lines.append(f"{s}:"); lines += [f"- {k}: " + json.dumps({f: v for f, v in d[s][k].items() if f != "step"}, ensure_ascii=False, separators=(",", ":")) for k in keys if (s, k) in shown]
+                heading = "facts (what the game told or showed):" if s == "hints" else f"{s}:"
+                lines.append(heading); lines += [f"- {k}: " + json.dumps({f: v for f, v in d[s][k].items() if f != "step"}, ensure_ascii=False, separators=(",", ":")) for k in keys if (s, k) in shown]
             text = "\n".join(lines)
             if len(text) <= limit or not drop: return text[:limit]
             shown.discard(drop.pop(0))

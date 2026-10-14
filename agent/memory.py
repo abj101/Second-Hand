@@ -124,6 +124,12 @@ class Memory:
             stream.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
         return row
 
+    def call(self, entity_id: str, name: str, step: int) -> dict | None:
+        row, name = self.get("entities", entity_id), str(name or "").strip()
+        if not row or not name or row.get("called"):
+            return row
+        return self.upsert("entities", {**row, "called": name})
+
     def _id(self, store: str, prefix: str) -> str:
         used = self._data.get(store, {})
         base = re.sub(r"[^a-z0-9]+", "_", prefix.casefold()).strip("_") or "unnamed"

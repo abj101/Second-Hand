@@ -90,6 +90,89 @@ def test_exit_truth_2F_needs_the_dead_end_note_and_a_zero_unseen_explore_label()
     detail = next(d for g, ok_, d in rows if g == "exit truth")
     assert _status(rows)["exit truth"] is False and "explore label reports unseen spots" in detail and "26 spots" in detail
 
+def test_replay_maps_renamed_recorded_entity_by_its_cached_index():
+    rep = object.__new__(eval_act.Replay)
+    rep.step = 7; rep.by_option = True; rep.armed = False; rep.found = {}; rep.script = None; rep.live_step = None
+    rep.rec = type("Rec", (), {"trace": {7: {"option": {"tool": "approach", "label": "approach person"},
+                                                   "act": {"action": {"thing": 2, "verb": "approach"}}}},
+                                    "act_ops": {}, "goal_ops": {}, "focus": {}})()
+    rep.options_now = [{"n": 1, "tool": "approach", "label": "approach stranger", "action": {"thing": 4}},
+                       {"n": 2, "tool": "approach", "label": "approach MOM", "action": {"thing": 2}}]
+    reply = rep.ask("", "", role="act")
+    assert reply.data["action"]["i"] == 2
+
+def test_om_talk_reports_conversation_called_entity_and_interact_options(monkeypatch, capsys, tmp_path):
+    nb = type("Notebook", (), {"log": [{"step": 2, "text": 'MOM at tiled room: "PROF. OAK, next door, is looking for you."'}]})()
+    mem = type("Memory", (), {"rows": lambda self, section: [{"id": "e1", "name": "person", "called": "MOM", "place": "p1"}]})()
+    loop = type("Loop", (), {"notebook": nb, "mem": mem})()
+    class FakeReplay:
+        def __init__(self, rec, out, *, cases, counter):
+            self.loop, self.counter = loop, counter
+            self.by_option = False
+            self.found = {3: {"options": [{"n": 1, "tool": "interact", "label": "interact with MOM", "action": {"thing": 0}}]}}
+            self.rows = {3: {"place": "p1"}}
+        def run(self, last): assert last == 3
+    monkeypatch.setattr(eval_act, "stage", lambda run: type("Rec", (), {"trace": {1: {}, 2: {}, 3: {}}, "copy": tmp_path})())
+    monkeypatch.setattr(eval_act, "Replay", FakeReplay)
+    assert eval_act.om_talk("m1_decide3") == 0
+    output = capsys.readouterr().out
+    assert "PROF. OAK, next door, is looking for you." in output
+    assert "called names" in output and "interact with MOM" in output and "requests=0" in output
+
+class StubModel:
+    def __init__(self, replies, posts_per_ask=1):
+        self.replies, self.posts_per_ask = list(replies), posts_per_ask
+        self.prompts, self.asks, self.posts = [], 0, 0
+    def _post(self, payload): self.posts += 1
+    def ask(self, system, user, images=(), schema=None, *, role=""):
+        self.asks += 1; self.prompts.append((system, user, schema))
+        for _ in range(self.posts_per_ask): self._post({})
+        return eval_act.Reply("stub", self.replies.pop(0), 0, 0, 0)
+
+def _fake_plan_checkpoint(tmp_path):
+    nb = eval_act.Notebook(tmp_path / "memory")
+    nb.apply([{"op": "set", "section": "goals", "key": "finish", "value": {"text": "Finish", "done_when": "game over", "status": "active"}}], 1)
+    nb.set_focus("finish", 1)
+    nb.note(49, 'MOM at tiled room: "PROF. OAK, next door, is looking for you."')
+    per = {"text": ["dialogue text"]}
+    world = type("World", (), {"view": lambda self, goal, place: "memory view", "place_label": lambda self, place: "outside"})()
+    loop = type("Loop", (), {"prev": per, "notebook": nb, "world": world, "place": "p1",
+                              "_goal_text": lambda self: "finish Finish"})()
+    env = type("Env", (), {"closed": False, "close": lambda self: setattr(self, "closed", True)})()
+    return loop, env
+
+def test_om_plan_dry_prints_exact_planner_prompt_without_model_or_ledger(monkeypatch, tmp_path, capsys):
+    loop, env = _fake_plan_checkpoint(tmp_path)
+    monkeypatch.setattr(eval_act, "_plan_checkpoint", lambda run, step: (loop, env))
+    monkeypatch.setattr(eval_act, "_plan_recent", lambda run, step: ["approach person -> same"])
+    monkeypatch.setattr(eval_act, "Ollama", lambda *args, **kwargs: pytest.fail("dry mode created a model"))
+    monkeypatch.setattr(eval_act.run_agent, "_ledger", lambda *args: pytest.fail("dry mode touched ledger"))
+    assert eval_act.om_plan("fixture", 50, 3, live=False) == 0
+    output = capsys.readouterr().out
+    assert "Trigger: new game text: MOM at tiled room" in output
+    assert "Map and memory:\nmemory view" in output and "dialogue text" in output
+    assert "Recent actions: approach person -> same" in output and env.closed
+
+def test_om_plan_live_uses_independent_notebooks_and_caps_retry_posts(monkeypatch, tmp_path, capsys):
+    loop, env = _fake_plan_checkpoint(tmp_path)
+    replies = [
+        {"facts": [{"key": "oak", "text": "Prof. Oak next door is looking for you.", "source": "heard"}],
+         "goals": [{"op": "set", "key": "oak", "value": {"text": "Find Oak", "source": "heard", "status": "active"}}], "focus": "oak", "why": "heard"},
+        {"facts": [], "goals": [], "focus": "finish", "why": "baseline"},
+        {"facts": [], "goals": [], "focus": "finish", "why": "baseline"},
+    ]
+    stub = StubModel(replies, posts_per_ask=2)
+    ledger = []
+    monkeypatch.setattr(eval_act, "_plan_checkpoint", lambda run, step: (loop, env))
+    monkeypatch.setattr(eval_act, "_plan_recent", lambda run, step: [])
+    monkeypatch.setattr(eval_act, "Ollama", lambda model, *, cache_dir: (pytest.fail("cache enabled") if cache_dir is not None else stub))
+    monkeypatch.setattr(eval_act, "_budget", lambda: {"total": len(ledger)})
+    monkeypatch.setattr(eval_act.run_agent, "_ledger", lambda *args: ledger.append(args))
+    assert eval_act.om_plan("fixture", 50, 3, live=True) == 1  # only one try earns both criteria
+    assert len(ledger) == stub.posts == 3 and stub.asks == 3
+    assert all("oak" not in prompt[1] for prompt in stub.prompts[1:])
+    assert "successes=1/3; requests=3" in capsys.readouterr().out and env.closed
+
 def test_exit_truth_1F_fails_when_the_rug_is_verified():
     options = [_opt(1, "approach", "exit door mat → outside (used 3×, last step 40)"), FREE]
     assert _status(eval_act.dry_gates(_case_1f(options=options)))["exit truth"] is False

@@ -1,6 +1,6 @@
 # IP: Does the planner keep what the game told it ("PROF. OAK, next door, is looking for you") and plan toward it?
 
-Status: not started   ·   Branch: feat/lean-agent
+Status: complete — gate PASS (354 tests; OM 8/8; planner 3/3 + 3/3; 6 requests)   ·   Branch: feat/lean-agent
 
 ## Paste block
 
@@ -141,11 +141,33 @@ Status: not started   ·   Branch: feat/lean-agent
 - Any game-specific text in agent/; any change to act/decide output shape; option filtering by history.
 
 ## 9. Result (filled in by the orchestrator)
-- **Gate:** each metric with its number and command output path (`.tmp/ip/`).
-- **Decision taken:** live run recommended or not.
-- **Deviations from the packet:** ...
-- **Contract changes needed:** the section 4 additions as merged-ready text.
-- **Open issues for the next phase:** ...
+- **Gate: PASS**, measured 2026-10-14. Commands below use `.venv-agent/Scripts/python.exe`.
+  - Unit suite: **354 passed**, exit 0, `-m pytest tests/agent -q -p no:cacheprovider -n auto`; `.tmp/ip/gate-suite.txt`.
+  - OM dry: **right present 8/8, exit truth 8/8, size 8/8**, exit 0, `scripts/eval_act.py --om cases`; `.tmp/ip/gate-cases.txt`. Prompts 1,374–1,601 tokens (len/4); the existing evaluator limit is 1,700, unchanged. Zero requests.
+  - Conversation and speaker: **PASS**, exit 0, `scripts/eval_act.py --om talk --run m1_decide3`; `.tmp/ip/gate-talk.txt`. Step 47 has exactly one first-conversation entry: `MOM at tiled room: "Right. All boys leave home some day. It said so on TV. PROF. OAK, next door, is looking for you."`. The step-41 target `e_person_2` has `called: "MOM"`; `e_npc_2` also acquires that name. Step 56 option 4 is `interact with MOM`. Zero requests.
+  - Planner keeps what it heard: **3/3**, exit 0, `scripts/eval_act.py --om plan --run m1_decide3 --from-step 50 --tries 3 --live`; `.tmp/ip/gate-plan50.txt`. Every try returns an Oak/next-door fact from MOM, a `source: heard` goal to find Oak, and a focus to go next door under that goal.
+  - Planner acts on it: **3/3**, exit 0, `scripts/eval_act.py --om plan --run m1_decide3 --from-step 75 --tries 3 --live`; `.tmp/ip/gate-plan75.txt`. Every path is `finish the game > find Professor Oak > explore outside a house`; exploration serves the heard goal.
+  - Requests: **6/8**, three per command, no retries or cache hits. Ledger **total 2858 → 2864 / 2925**, **M1 2810 → 2816 / 2875**; no cap changes. Before/after are printed in both live outputs. Prompt-only checks: `.tmp/ip/plan50-dry.txt`, `.tmp/ip/plan75-dry.txt` (zero requests, unchanged ledger).
+- **WP acceptance:** IP.1 71 passed (`.tmp/ip/ip1.txt`); IP.2 71 passed (`.tmp/ip/ip2.txt`); IP.3 76 passed (`.tmp/ip/ip3.txt`); IP.4 full suite 349 passed before integration fixes (`.tmp/ip/ip4-suite.txt`), final full suite 354; IP.5 19 passed (`.tmp/ip/ip5.txt`). Each orchestrator command exited 0. The initial parallel batch passed 346 (`.tmp/ip/batch1-suite.txt`). Literal `oak|mom|pallet` scan of `agent/` has no matches (`.tmp/ip/ip4-names.txt`).
+- **Decision taken:** recommend funding a clean-boot live run. These checks establish intent retention and a relevant goal path, not successful navigation to the destination. The user decides the run and cap raise; no live run was started and nothing was pushed.
+- **Deviations from the packet:**
+  - Used explicitly configured Luna high workers for every WP, as requested by the user, overriding the packet's older tier names.
+  - Bounded `render_focus` to 10 recent log entries instead of 15: conversation-sized entries kept old boot/menu text visible longer, causing dry size failures. The complete stored log and planner's `render_log(40)` are unchanged. Initial dry results were 6/8 size, then 7/8 after correcting IP.1 to append only fresh lines; evidence is `.tmp/ip/gate-cases-before-fresh-fix.txt` and `.tmp/ip/gate-cases-before-log-bound.txt`. No size limits were raised and no options removed.
+  - Changed the existing notebook comment's word `moment` to `briefly` so the literal name scan passes.
+  - The talk replay stops after the first qualifying later named interaction (step 56). Old pickled snapshots get defaults for the new conversation fields; replay option matching falls back to the recorded target index when a called label replaces a generic label.
+  - Report-only line changes: agent/ **+67 net**, evaluator **+136 net**, tests **+235 net**. No contracts.md edits.
+- **Contract changes needed (merge-ready additions; user applies):**
+
+  Under **notebook and act**:
+  - `agent.plan.Plan` adds optional `facts: list[dict] = []` (per-instance default). Planner JSON adds optional `"facts": [{"key": "short id, at most 40 characters", "text": "one sentence of relevant game information", "from": "speaker or null", "source": "heard|saw"}]`. Missing facts parse as an empty list; entries need a non-empty string key and text.
+  - The loop stores facts with notebook `set` ops in `hints`, retaining non-empty `text`, `from`, and `source`; existing keys overwrite. `SECTIONS` and the 20-fact cap are unchanged. `render()` and `render_focus()` label this section `facts (what the game told or showed):`. `render()` drops oldest lessons, then finished goals, then facts. `render_focus()` shows 10 recent log entries; the planner still sees 40 and storage retains its existing log cap.
+  - Fresh dialogue/menu lines form one buffered conversation, with prefix/overlap extensions joined and continuation marks removed. On return to world or place change, its log entry is `<speaker or text> at <place>: "<joined sentence(s)>"`. World-screen text still logs immediately; knowledge rows remain per line. The planner checkpoint persists `conversation: {place, lines}` and `text_for_trigger`.
+  - A pending text trigger is `new game text: <joined text, up to 200 characters>` on a world screen and is checked before the three-step floor. Heard goals outrank exploration, and a heard place can be a goal before it is mapped.
+
+  Under **world** (and the entity-row portion of **memory**):
+  - Entity rows may carry `called: <speaker name>`. `Memory.call(entity_id, name, step) -> dict | None` attaches the first name and keeps it. When an actor target produces text beginning with a speaker prefix, the loop invokes this helper.
+  - World option/view labels prefer `called` when present; `World.resolve` also matches it case-insensitively. Perceived names remain the targets for option failure keys and existing actions; history never removes or reorders options.
+- **Open issues for the next phase:** moving actors still acquire multiple ids (including two ids called MOM in this replay); outside explore routes can be blocked; outdoor perception/re-looks cost about 2.4 requests/step. Planner replies can remove exploration parents without cleaning their children, and the step-75 leaf still uses a broad exploration completion condition. Check these during the next user-funded run, without re-measuring these same six planner tries.
 
 ## 10. Handoff notes
 Rewrite `docs/plans/handoff-notes.md` (≤ 80 lines, the template's fixed headings). Must include: the facts store and where it renders; `called` names; the conversation log format; the new `--om talk` / `--om plan` commands; ledger numbers after IP.5; the m1_decide3 findings still open (moving-NPC ids, explore route blocks, request rate).

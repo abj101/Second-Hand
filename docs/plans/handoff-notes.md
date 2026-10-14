@@ -1,41 +1,48 @@
 # Handoff notes
 
-Last written: 2026-10-13, after OM3 (dry gates 8/8, live 1/8, one measure spent). Branch `feat/lean-agent`. Packet: [OM3.md](OM3.md); before it [OM2.md](OM2.md), [OM.md](OM.md).
+Last written: 2026-10-14, after IP (gate PASS; planner 3/3 + 3/3; six requests). Branch `feat/lean-agent`. Packet: [IP.md](IP.md); previous: [OM3.md](OM3.md), sections 11–13.
 
 ## State of the code
-- "Unexplored" = untried edges into unseen tiles (`unseen_edges` in `agent/world.py`): explore label (`(N spots lead somewhere unseen)` / `(0 spots lead anywhere unseen)`), `World.beyond`, `dead_end`. The dead-end note is on the exit option.
-- `World._exits` is the one source for exits: a destination-less unverified exit within Chebyshev 1 of a verified one merges into it; the record's `head` is the only name in options, view lines and legend. Crossings count on both sides (`_cross`, `_partner`, `_lone` + `mark_exit`, `unseen_cross` at loop.py:62).
-- `World.view(goal, place, compact=False)`: default for the planner; `compact=True` is the act facts (no legend, letters, `E at`, `Things`, `Edges`, `Don't believe`, `Flag:`).
-- Options: exits, characters/things with history, explore, known places, one things row of THIS place (`vent ×3`), free buttons. `act._option_text` prints the tool word once. Reply text shortened (-474 chars).
-- Eval: `scripts/eval_act.py --om places|cases [--live]`; dry gates include the 2F dead-end note and 2F explore label. Prompts at case steps dump to `.tmp/om/om2_prompts/`.
+- Planner `Plan.facts` stores relevant heard/seen information in notebook `hints` (20 entries, keys overwrite). `Notebook.render()` and `render_focus()` label it `facts (what the game told or showed):`; planner and decide see it. Render trimming drops lessons, finished goals, then facts.
+- `Loop._learn` buffers fresh off-world dialogue/menu lines, joins prefix/overlap extensions, strips continuation marks, and flushes once on return to world or place change: `<speaker or text> at <place>: "<joined sentence(s)>"`. World-screen text still logs immediately; knowledge stays per line. Fully known conversations do not log again.
+- Planner checkpoint fields `conversation: {place, lines}` and `text_for_trigger` keep an unfinished conversation across restore. The world-screen text trigger includes up to 200 characters and bypasses the three-step floor.
+- `Memory.call(entity_id, name, step)` attaches the first `called` speaker name to an actor. World option/view labels prefer it; resolve matches it case-insensitively. Failure keys and actions retain perceived names.
+- Planner rules prefer heard goals, allow heard places before mapping, and put exploration under the purpose it serves. `render_focus` shows 10 recent log entries; persisted history and planner `render_log(40)` are unchanged.
+- `eval_act.py --om talk --run R` uses recorded decisions/cached perception and stops after the first later named interaction. `--om plan --run R --from-step N --tries K` prints the checkpoint planner prompt; `--live` makes independent, uncached planner tries. Each POST, including retries, counts against K (at most 8).
+- Earlier world fixes remain: first place name sticks; open cells beyond screen edges count as unexplored; off-screen verified exits travel through their recorded tile; long travel uses per-press cuts. Moving-actor identity is still unsolved.
 
 ## Decisions in force
-- No new mechanical gates: information and prompts only; options never removed or reordered by history.
-- Ponytail, CodeGraph, Headroom on every task; python via `.venv-agent/Scripts/python.exe`.
-- Subagents: Sonnet orchestrator -> Haiku, foreground; never Opus. No game-specific code in `agent/`.
-- Commit at gates with explicit paths; never `git add -A`; never push; ledger caps raised only on explicit approval. No re-measure of the same live cases.
+- Ponytail full, CodeGraph first, Headroom on every coding task. Python: `.venv-agent/Scripts/python.exe`.
+- This phase used Luna high workers with explicit model/effort, per user instruction overriding old packet tier names.
+- No game-specific code/prompts in `agent/`; no mechanical option filtering or history-based removal/reordering.
+- Commit at passed gates using explicit paths; never `git add -A`, never push. Only the user merges contract proposals and approves budget cap raises/live runs.
 
 ## Measured numbers
-- Unit suite: 335 passed (`pytest tests/agent -q -p no:cacheprovider -n auto`, ~30 s with pytest-xdist; serial ~2-3 min). OM evals branch from cached replay snapshots (`.tmp/om/snapshots/`, `--fresh` rebuilds): `--om cases` dry ~6 s, `--om outcomes` ~26 s.
-- `--om places`: PASS. `--om cases` dry: right 8/8, exit truth 8/8, size 8/8 (1,345-1,583 tokens, limit 1,600).
-- **Live decision points: options arm 1/8 (gate >= 6), old arm 0/8.** 5/8 picks were free buttons.
-- Ledger `runs/e3_budget.json`: total 2120/2175, M1 2072/2125 (53 M1 left); OM3 spent 8.
+- Final suite: **354 passed**, `-m pytest tests/agent -q -p no:cacheprovider -n auto` (~35 s). All WP acceptance commands exited 0.
+- `scripts/eval_act.py --om cases`: right present 8/8, exit truth 8/8, size 8/8; 1,374–1,601 tokens. Existing evaluator cap 1,700 unchanged. Zero requests.
+- `scripts/eval_act.py --om talk --run m1_decide3`: one first-conversation log at step 47 includes the full Oak/next-door sentence and starts `MOM at tiled room`; `e_person_2` and `e_npc_2` have `called: MOM`; step 56 offers `interact with MOM`. Zero requests.
+- `scripts/eval_act.py --om plan --run m1_decide3 --from-step 50 --tries 3 --live`: facts plus heard Oak goal 3/3; focus goes next door beneath finding Oak.
+- Same command with `--from-step 75`: relevant focus path 3/3, `finish the game > find Professor Oak > explore outside a house`.
+- Ledger `runs/e3_budget.json`: total **2864/2925**, M1 **2816/2875**; IP spent **6/8**, no retries/cap changes. Remaining total 61, M1 59. Evidence: `.tmp/ip/gate-{suite,cases,talk,plan50,plan75}.txt`; dry prompts `.tmp/ip/plan{50,75}-dry.txt`.
+- Recommend funding a clean-boot run; checkpoint intent checks passed, but destination navigation has not been measured. No live run started.
 
 ## Environment and gotchas
-- Golden `tests/agent/data/w0_golden` is gitignored but tracked: `W0_REGEN=1`, then `git add -f` (OM3 added the first-crossing arrival row).
-- `.tmp/om/m1_gp5` is the replay copy (dry `--om cases` ~6 min); `runs/m1_gp5`, `runs/m1_gp2` untouched.
-- `.claude/` stays untracked. Live viewer: `scripts/watch_run.py` on 127.0.0.1:8765.
-- README, `system.md` and older docs still mention the removed `loop/` stack.
+- Original `runs/m1_decide3`, checkpoints 000050/000075 and model cache are untouched; replays use `.tmp/om/` copies.
+- Changing agent code/evaluator rebuilds OM snapshots (hash includes both). Older pickle snapshots receive defaults for the new conversation fields. Recorded option matching tolerates called-label changes via the cached target index.
+- `.claude/` remains untracked. Live viewer: `scripts/watch_run.py` on 127.0.0.1:8765; check it before a future live run.
+- Golden `tests/agent/data/w0_golden` is ignored but tracked; regenerate with `W0_REGEN=1` only for a justified world change, then stage explicit paths with `-f`.
 
 ## Deviations from plan and contracts
-- D2 merges only destination-less records (see OM3 section 5). Contract text is merged into contracts.md.
+- IP's merge-ready contract additions are in [IP.md section 9](IP.md#9-result-filled-in-by-the-orchestrator); **contracts.md was not edited**. User must merge them.
+- Act log view was bounded from 15 to 10 entries because conversation-sized entries retained old boot/menu text and failed the dry size gate; full history/planner history remain. Initial dry size 6/8, fresh-line correction 7/8, final 8/8. Limits unchanged.
+- Notebook comment `moment` became `briefly` to pass the literal game-name substring scan. Talk replay stops once its evidence is complete (step 56).
 
 ## Do not retry
-- Replaying `m1_gp2` for cases; re-measuring the same 8 live cases.
-- Shrinking the options or facts further: sizes are no longer the problem.
+- Do not re-measure these six live planner tries or the old eight live option cases. Do not iterate prompt wording with live spend.
+- Do not raise caps or launch a clean-boot run autonomously. Existing requests cannot fund the proposed ~250-request run.
 
 ## Open issues for the next phase (user decides)
-1. Why the model uses free buttons in 5/8 cases despite a correct option list: wording/order of the prompt, or give free input the same map truth. Pick before any new live spend.
-2. `unseen_cross` can miscount after an uncut place change (stale `world.pos`); mirror-case backfill missing.
-3. A clean-boot live run needs a cap raise (~250 requests per 150 steps).
-4. Movement fixes and the perceiver prompt pass (invalidates the replay cache).
+1. Moving-NPC identity: m1_decide3 has 39 actor ids; this replay attaches MOM to two ids. Match nearby known actors so names/history follow them.
+2. Outside explore routes were blocked twice at step 80; investigate separately from intent planning.
+3. Outdoor perception/re-looks cost about 2.4 requests/step; a clean-boot run needs a user-approved cap raise.
+4. Planner edits can leave children of removed exploration parents; the outside leaf's completion condition remains broad. Check sustained pursuit and observable completion in the next funded run.
