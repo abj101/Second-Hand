@@ -1,4 +1,4 @@
-import argparse, json, re, shutil
+import argparse, hashlib, io, json, pickle, re, shutil, subprocess
 from collections import Counter, defaultdict
 from pathlib import Path
 import sys
@@ -61,7 +61,7 @@ def report(summary, rows, steps, status, out):
 
 def main(argv=None):
     ap=argparse.ArgumentParser(); ap.add_argument("--frames",default=",".join(map(str,FRAMES))); ap.add_argument("--max-calls",type=int); ap.add_argument("--out",type=Path,default=OUT)
-    ap.add_argument("--om",choices=("places","cases","outcomes"),help="OM replay eval (no --max-calls needed)"); ap.add_argument("--live",action="store_true",help="--om cases: spend the requests"); ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)"); ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)")
+    ap.add_argument("--om",choices=("places","cases","outcomes"),help="OM replay eval (no --max-calls needed)"); ap.add_argument("--live",action="store_true",help="--om cases: spend the requests"); ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)"); ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)"); ap.add_argument("--fresh",action="store_true",help="--om cases/outcomes: rebuild the replay snapshots")
     a=ap.parse_args(argv)
     if a.om: return om_main(a, ap)
     if a.max_calls is None: ap.error("the following arguments are required: --max-calls")
@@ -170,6 +170,7 @@ class Replay:
         self.drift = {"presses": None, "frames": None, "trace": [], "place": []}
         self.miss_steps = []
         self.script, self.armed, self.env, self.before, self.after = None, False, None, None, None  # outcome mode: (step, act reply data)
+        self.snap_dir, self.snap_steps = None, ()  # run(): save a snapshot before each of these steps under snap_dir
     def _post(self, payload):
         if self.live_step is None: raise OmAbort("a network call outside the live case step")
         if self.counter["requests"] >= OM_CAP: raise run_agent.CallCap("OM request cap")
@@ -216,9 +217,30 @@ class Replay:
         world, live = self.loop.world, {p["id"] for p in self.loop.mem.rows("places") if p.get("state") != "merged"}
         things = [(i, e, world.entity_ids.get(i)) for i, e in enumerate(perception.get("entities") or []) if e.get("name") and _is_exit(e)]
         return world._exits(self.loop.place, live, things)
+    def _env(self):
+        env = PyBoyEnv(find_rom(), state=str(self.rec.copy / "checkpoint" / "000000" / "pyboy.state")); env.tile_px = 16  # the boot state run_agent saved
+        return env
+    def snapshot(self, d):
+        """Emulator state + the whole Loop object graph (env and this Replay stand in as persistent ids) + the out dir (memory, trace)."""
+        d.mkdir(parents=True); self.env.save(str(d / "emu.state")); buf = io.BytesIO(); pk = pickle.Pickler(buf)
+        pk.persistent_id = lambda o: "env" if o is self.env else "rep" if o is self else None
+        pk.dump(self.loop); (d / "loop.pkl").write_bytes(buf.getvalue()); shutil.copytree(self.out, d / "out")
+    def restore(self, d):
+        shutil.rmtree(self.out, ignore_errors=True); shutil.copytree(d / "out", self.out); self.env.load(str(d / "emu.state"))
+        un = pickle.Unpickler(io.BytesIO((d / "loop.pkl").read_bytes())); un.persistent_load = lambda pid: self.env if pid == "env" else self
+        self.loop = un.load()
+    def branch(self, d, s, script=None):
+        """Run step s alone from the snapshot d. script (step, act reply data): execute that reply, stop when its presses are done."""
+        self.restore(d); self.step, self.script, self.armed, self.before, self.after, self.misses = s, script, False, None, None, 0; self.found.pop(s, None)
+        real, loop_mod.act = loop_mod.act, self._act
+        try:
+            try: self.loop.step()
+            except OmStop: pass
+            if self.armed: self.after = truth_read(self.env)
+        finally: loop_mod.act = real
     def run(self, last):
         if self.out.exists(): shutil.rmtree(self.out)
-        env = PyBoyEnv(find_rom(), state=str(self.rec.copy / "checkpoint" / "000000" / "pyboy.state")); env.tile_px = 16  # the boot state run_agent saved
+        env = self._env()
         press, keys = env.press, []
         def logged_press(*args, **kwargs):
             keys.append(args[0] if args else kwargs.get("key")); return press(*args, **kwargs)
@@ -228,9 +250,8 @@ class Replay:
         try:
             for s in range(1, last + 1):
                 wait_settled(env); self.step = loop.step_no + 1; keys.clear()  # run_agent settles before reading truth; step() settles again
-                try: row = loop.step()
-                except OmStop: self.after = truth_read(env); return
-                if self.armed: self.after = truth_read(env); return  # the new frame equalled the old one: perception reused, no stop raised
+                if self.step in self.snap_steps: self.snapshot(self.snap_dir / str(self.step))
+                row = loop.step()
                 self._check(s, row, keys, mem)
         finally:
             loop_mod.act = real_act; env.close()
@@ -323,22 +344,38 @@ def dry_summary(rows, n):
     print(f"\nDRY GATES: right present {got['right present']}/{n}, exit truth {got['exit truth']}/{n}, size {got['size']}/{n}: {'PASS' if ok else 'FAIL'}")
     return ok
 
-def replay_cases(cases, live, counter):
-    """One replay per run; returns (case, replay) pairs. live: each case step makes its one real act call, the replay goes on."""
+def snap_base(run):
+    """.tmp/om/snapshots/<run>/<key>: the key hashes what determines a snapshot (recording, agent/ code, this script, perceiver cache)."""
+    h, git = hashlib.sha256(), lambda *a: subprocess.run(["git", *a], capture_output=True).stdout
+    for f in ("trace.jsonl", "presses.jsonl"): h.update((Path(".tmp/om") / run / f).read_bytes())
+    for part in (git("rev-parse", "HEAD:agent"), git("diff", "HEAD", "--", "agent"), Path(__file__).read_bytes(), "".join(sorted(p.name for p in MODEL_CACHE.iterdir())).encode()): h.update(part)
+    return Path(".tmp/om/snapshots") / run / h.hexdigest()[:12]
+
+def ready(run, cases, live, counter, fresh=False):
+    """A Replay for the run with its emulator open and every snapshot of the run's case steps present (replayed from boot once, if not)."""
+    rec, base = stage(run), snap_base(run); every = {c["step"] for c in json.loads(OM_CASES.read_text(encoding="utf-8")) if c["run"] == run} | {c["step"] for c in cases}
+    if fresh or not all((base / str(s) / "loop.pkl").exists() for s in every):
+        shutil.rmtree(base.parent, ignore_errors=True); builder = Replay(rec, rec.copy / "om_branch", cases=(), counter=counter); builder.snap_dir, builder.snap_steps = base, every; builder.run(max(every))
+    rep = Replay(rec, rec.copy / "om_branch", cases={c["step"] for c in cases}, live={c["step"] for c in cases} if live else (), counter=counter)
+    rep.env, rep.base = rep._env(), base
+    return rep
+
+def replay_cases(cases, live, counter, fresh=False):
+    """(case, replay) pairs; each case step is run alone from its snapshot. live: the step makes its one real act call."""
     results = []
     for run in dict.fromkeys(c["run"] for c in cases):
-        rec = stage(run)
-        mine = [c for c in cases if c["run"] == run]
-        steps = {c["step"] for c in mine}  # one replay per run
-        rep = Replay(rec, rec.copy / "om_cases", cases=steps, live=steps if live else (), counter=counter); rep.run(max(steps))
+        mine = [c for c in cases if c["run"] == run]; rep = ready(run, mine, live, counter, fresh)
+        try:
+            for c in mine: rep.branch(rep.base / str(c["step"]), c["step"])
+        finally: rep.env.close()
         results += [(c, rep) for c in mine]
     return results
 
-def dry_report(cases, counter):
+def dry_report(cases, counter, fresh=False):
     """The dry replay (no live step, so no request): prints each case's options, prompt size and gate rows.
     Returns (gate rows, right count of the recorded arm)."""
     rows, old_right = [], 0
-    for c, rep in replay_cases(cases, False, counter):
+    for c, rep in replay_cases(cases, False, counter, fresh):
         s, f, old = c["step"], rep.found.get(c["step"]) or {}, rep.rec.trace.get(c["step"], {})
         old_tool, old_label = action_option((old.get("act") or {}).get("action"), target=(old.get("choice") or {}).get("target") or "")
         old_ok = is_right(c, old_tool, old_label); old_right += old_ok
@@ -353,10 +390,10 @@ def dry_report(cases, counter):
         rows += gates
     return rows, old_right
 
-def live_cases(cases, counter, before, old_right):
+def live_cases(cases, counter, before, old_right, fresh=False):
     """The live replay: one real act call per case step (at most OM_CAP requests), then the decision-point gates."""
     new_right = 0
-    for c, rep in replay_cases(cases, True, counter):
+    for c, rep in replay_cases(cases, True, counter, fresh):
         s, f = c["step"], rep.found.get(c["step"]) or {}; opts, res = f.get("options") or [], f.get("act")
         if res is None: print(f"\ncase {c['run']} step {s} new arm: no act reply"); continue
         if res.option is not None and 1 <= res.option <= len(opts): tool, label = opts[res.option - 1]["tool"], opts[res.option - 1]["label"]
@@ -371,10 +408,10 @@ def live_cases(cases, counter, before, old_right):
     print(f"CASES GATE: {'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
 
-def om_cases(live, steps=None):
+def om_cases(live, steps=None, fresh=False):
     """Dry first always (0 requests). --live runs the live replay only when every dry gate passes."""
     cases = json.loads(OM_CASES.read_text(encoding="utf-8")); cases = [c for c in cases if not steps or str(c["step"]) in steps.split(",")]; counter = {"requests": 0}; before = _budget()
-    rows, old_right = dry_report(cases, counter)
+    rows, old_right = dry_report(cases, counter, fresh)
     dry_ok = dry_summary(rows, len(cases))
     if not live:
         print(f"DRY: old arm right (recorded actions) {old_right}/{len(cases)}")
@@ -384,7 +421,7 @@ def om_cases(live, steps=None):
     if not dry_ok:
         print("DRY GATES FAILED: live measure not run")
         return 1
-    return live_cases(cases, counter, before, old_right)
+    return live_cases(cases, counter, before, old_right)  # snapshots exist after the dry pass
 
 # ---- outcome scoring: run an action from the replayed state at a case step, read RAM truth when its presses are done (0 requests)
 RIGHT_MAP = {37: 0, 38: 37}  # the map a "right" exit leads to, per map (1F -> outside, 2F -> 1F)
@@ -407,22 +444,24 @@ def goal_tiles(run_names, from_map, to_map):
         out |= {(a["x"], a["y"]) for a, b in zip(rows, rows[1:]) if a["map"] == from_map and b["map"] == to_map}
     return out
 
-def om_outcomes(steps=None):
+def om_outcomes(steps=None, fresh=False):
     cases = [c for c in json.loads(OM_CASES.read_text(encoding="utf-8")) if not steps or str(c["step"]) in steps.split(",")]
     counter, before = {"requests": 0}, _budget(); runs = sorted({c["run"] for c in cases} | {"m1_gp2", "m1_gp5"}); [stage(r) for r in runs]
+    reps = {r: ready(r, [c for c in cases if c["run"] == r], False, counter, fresh) for r in dict.fromkeys(c["run"] for c in cases)}
     print("case | action (source) | outcome | before (map,x,y) -> after (map,x,y)")
     for c in cases:
-        s, rec = c["step"], stage(c["run"])
-        _, rep0 = replay_cases([c], False, counter)[0]; opts = rep0.found[s]["options"]  # dry replay: the options this step offers
+        s, rep = c["step"], reps[c["run"]]
+        rep.branch(rep.base / str(s), s); opts = rep.found[s]["options"]  # the options this step offers
         right = next((o["n"] for o in opts if is_right(c, o["tool"], o["label"])), None)
         todo = [(src, json.loads((next(MODEL_CACHE.glob(f"{p[s]}*.json"))).read_text(encoding="utf-8"))["data"]) for src, p in LIVE_REPLIES.items() if s in p]
         todo.append((f"right option {right}", {"action": {"i": right}, "why": "", "expect": "screen_changes"}))
         for src, data in todo:
-            rep = Replay(rec, rec.copy / "om_outcomes", cases=[s], counter=counter); rep.script = (s, data); rep.run(s)
+            rep.branch(rep.base / str(s), s, (s, data))
             b, a = rep.before, rep.after
             if b is None or a is None: print(f"{s} | {src} | NO RESULT (armed={rep.armed}) |"); continue
             act_txt = json.dumps(data["action"]); tiles = goal_tiles(runs, b["map"], RIGHT_MAP.get(b["map"]))
             print(f"{s} | {src} {act_txt} | {classify(b, a, RIGHT_MAP.get(b['map']), tiles)} | ({b['map']},{b['x']},{b['y']}) -> ({a['map']},{a['x']},{a['y']})", flush=True)
+    for r in reps.values(): r.env.close()
     print(f"requests={counter['requests']}; ledger before={before}; after={_budget()}; unchanged={before == _budget()}")
     return 0
 
@@ -430,7 +469,7 @@ def om_main(a, ap):
     sys.stdout.reconfigure(encoding="utf-8")  # option labels carry arrows; a redirected cp1252 stdout cannot print them
     if a.live and a.dry: ap.error("--live and --dry are exclusive")
     if a.om == "places" and a.live: ap.error("--live applies to --om cases")
-    try: return om_places() if a.om == "places" else om_outcomes(a.steps) if a.om == "outcomes" else om_cases(a.live, a.steps)
+    try: return om_places() if a.om == "places" else om_outcomes(a.steps, a.fresh) if a.om == "outcomes" else om_cases(a.live, a.steps, a.fresh)
     except OmAbort as e: print(f"ABORT: {e}", flush=True); return 2
     except run_agent.CallCap as e: print(f"CallCap: {e}", flush=True); return 3
     except ModelUnavailable as e: print(f"model_unavailable={e}", flush=True); return 4

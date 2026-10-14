@@ -107,3 +107,6 @@ Diagnosis of the OM3 live replies (0 requests): (1) the compact view had dropped
 
 - Right options cross at 82, 113, 137. At 103/110 the player stands on the arrival (stairs) tile and the option only steps one tile LEFT (no crossing in that one step); the door-mat options at 102/115/122 walk to (3,7) and stop short of the crossing in one step.
 - "closer" for a model pick is mostly incidental (the distance tiles are few); only 113 (OM3) actually crossed.
+
+### Replay snapshots (eval speed)
+`--om cases|outcomes` replay a run once from boot, saving per case step the emulator state, the pickled Loop graph and the out dir to `.tmp/om/snapshots/<run>/<key>/<step>/`; each case (and each scored action) then runs from its snapshot. Key = hash of the recording, the agent/ tree (git + diff), `scripts/eval_act.py` and the perceiver cache file list; a mismatch rebuilds; `--fresh` forces it. Output identical to the continuous replay. Wall clock: `--om cases` dry 43 s -> 5.5 s (50 s for the one-time build); `--om outcomes` (19 actions) about 25 min -> 26 s.

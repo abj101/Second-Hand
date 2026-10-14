@@ -107,7 +107,7 @@ def test_size_counts_options_without_the_free_row_and_the_prompt_tokens():
 
 def test_live_is_refused_when_a_dry_gate_fails(monkeypatch, capsys):
     rows = [("right present", False, "step 82: no right option is listed"), ("exit truth", True, ""), ("size", True, "")] * 8
-    monkeypatch.setattr(eval_act, "dry_report", lambda cases, counter: (rows, 0))
+    monkeypatch.setattr(eval_act, "dry_report", lambda cases, counter, fresh=False: (rows, 0))
     monkeypatch.setattr(eval_act, "Replay", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no replay may be built")))
     monkeypatch.setattr(eval_act, "live_cases", lambda *a: (_ for _ in ()).throw(AssertionError("live must not run")))
     assert eval_act.om_cases(True) == 1
@@ -116,14 +116,14 @@ def test_live_is_refused_when_a_dry_gate_fails(monkeypatch, capsys):
 def test_live_runs_after_all_dry_gates_pass(monkeypatch):
     rows = [(g, True, "") for g in ("right present", "exit truth", "size")] * 8
     calls = []
-    monkeypatch.setattr(eval_act, "dry_report", lambda cases, counter: (rows, 0))
+    monkeypatch.setattr(eval_act, "dry_report", lambda cases, counter, fresh=False: (rows, 0))
     monkeypatch.setattr(eval_act, "live_cases", lambda cases, counter, before, old_right: calls.append((len(cases), old_right)) or 0)
     assert eval_act.om_cases(True) == 0
     assert calls == [(8, 0)]
 
 def test_dry_run_never_calls_live(monkeypatch):
     rows = [(g, True, "") for g in ("right present", "exit truth", "size")] * 8
-    monkeypatch.setattr(eval_act, "dry_report", lambda cases, counter: (rows, 0))
+    monkeypatch.setattr(eval_act, "dry_report", lambda cases, counter, fresh=False: (rows, 0))
     monkeypatch.setattr(eval_act, "live_cases", lambda *a: (_ for _ in ()).throw(AssertionError("dry must not call live")))
     assert eval_act.om_cases(False) == 0
 
