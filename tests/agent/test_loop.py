@@ -854,6 +854,39 @@ def test_act_recent_groups_by_action_and_caps_mixed_outcomes(tmp_path, monkeypat
     assert len(flag) <= 200 and flag in model.prompts[0]
 
 
+
+
+def test_act_recent_says_no_effect_when_every_run_left_the_screen_unchanged(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from agent import loop as module
+
+    class Captures(StubModel):
+        def __init__(self, replies): super().__init__(replies); self.prompts = []
+        def ask(self, *args, **kwargs):
+            if kwargs.get("role") == "act": self.prompts.append(args[1])
+            return super().ask(*args, **kwargs)
+
+    data = {"screen": "world", "text": [], "entities": [{"kind": "player", "name": "player", "at": [.5, .5]}],
+            "affordances": [{"verb": "approach", "target": "npc", "at": [.6, .5]}]}
+    monkeypatch.setattr(module, "perceive", lambda *args: (data, reply(data)))
+    def blocked(ctx, *args, **kwargs):
+        frame = ctx.env.screenshot()
+        return SimpleNamespace(status="blocked", reason="both axes blocked", inputs=1, calls=0,
+                               before=frame, after=frame, scroll=(0, 0), blank_seen=False, moves=[])
+    monkeypatch.setattr(module, "run_affordance", blocked)
+    response = {"place": "Room", "notebook": [], "action": {"thing": 1, "verb": "approach"}, "text": None,
+                "expect": "screen_changes", "why": "try"}
+    model = Captures([reply(response)])
+    loop = Loop(GridEnv(), model, Memory(tmp_path / "memory"), "grid")
+    loop.recent = [{"step": 77 + i, "choice": {"verb": "approach", "target": "npc", "id": "detector-id-123"},
+                    "skill": {"status": "done", "reason": ""},
+                    "outcome": {"effects": ["no_change"]}}
+                   for i in range(5)]
+
+    row = loop.step()
+
+    flag = next(flag for flag in row["act"]["flags"] if flag.startswith("recent:"))
+    assert "approach npc -> no effect x5 since step 77" in flag and "-> done" not in flag
 def test_act_buttons_are_pressed_in_order(tmp_path):
     class Recording(GridEnv):
         def __init__(self): super().__init__(); self.keys = []

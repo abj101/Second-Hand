@@ -60,7 +60,7 @@ def report(summary, rows, steps, status, out):
 
 def main(argv=None):
     ap=argparse.ArgumentParser(); ap.add_argument("--frames",default=",".join(map(str,FRAMES))); ap.add_argument("--max-calls",type=int); ap.add_argument("--out",type=Path,default=OUT)
-    ap.add_argument("--om",choices=("places","cases"),help="OM replay eval (no --max-calls needed)"); ap.add_argument("--live",action="store_true",help="--om cases: spend the requests"); ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)")
+    ap.add_argument("--om",choices=("places","cases"),help="OM replay eval (no --max-calls needed)"); ap.add_argument("--live",action="store_true",help="--om cases: spend the requests"); ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)"); ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)")
     a=ap.parse_args(argv)
     if a.om: return om_main(a, ap)
     if a.max_calls is None: ap.error("the following arguments are required: --max-calls")
@@ -364,9 +364,9 @@ def live_cases(cases, counter, before, old_right):
     print(f"CASES GATE: {'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
 
-def om_cases(live):
+def om_cases(live, steps=None):
     """Dry first always (0 requests). --live runs the live replay only when every dry gate passes."""
-    cases = json.loads(OM_CASES.read_text(encoding="utf-8")); counter = {"requests": 0}; before = _budget()
+    cases = json.loads(OM_CASES.read_text(encoding="utf-8")); cases = [c for c in cases if not steps or str(c["step"]) in steps.split(",")]; counter = {"requests": 0}; before = _budget()
     rows, old_right = dry_report(cases, counter)
     dry_ok = dry_summary(rows, len(cases))
     if not live:
@@ -383,7 +383,7 @@ def om_main(a, ap):
     sys.stdout.reconfigure(encoding="utf-8")  # option labels carry arrows; a redirected cp1252 stdout cannot print them
     if a.live and a.dry: ap.error("--live and --dry are exclusive")
     if a.om == "places" and a.live: ap.error("--live applies to --om cases")
-    try: return om_places() if a.om == "places" else om_cases(a.live)
+    try: return om_places() if a.om == "places" else om_cases(a.live, a.steps)
     except OmAbort as e: print(f"ABORT: {e}", flush=True); return 2
     except run_agent.CallCap as e: print(f"CallCap: {e}", flush=True); return 3
     except ModelUnavailable as e: print(f"model_unavailable={e}", flush=True); return 4

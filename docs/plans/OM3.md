@@ -72,3 +72,10 @@ Diagnosis of the OM3 live replies (0 requests): (1) the compact view had dropped
 - Size limit raised 1,600 -> 1,700 (user-approved); prompts `.tmp/om/prompts_om3_1/` (OM3 prompts kept in `.tmp/om/om3_prompts/`).
 - Gates (0 requests, ledger 2120/2175, M1 2072/2125 unchanged): dry right 8/8, exit truth 8/8, size 8/8 (1,362 / 1,448 / 1,415 / 1,460 / 1,478 / 1,492 / 1,610 / 1,458); `--om places` PASS; generality 0 hits; suite 333 passed.
 - No live re-measure; the user decides.
+
+## 9. OM3.2: recent-flag wording, `--steps`, three live samples
+- `recent:` flag: a run whose every result left the screen unchanged reads `<act> -> no effect xN` (was `-> done xN`); shared summary code in `Loop.step`, one test in test_loop.py.
+- `scripts/eval_act.py --om cases --steps 82,103,137` filters the cases (dry gates run over the selection).
+- Dry (0 requests): right 3/3, exit truth 3/3, size 3/3 (1,362 / 1,415 / 1,454).
+- Does `approach exit stairs` cross at case 137? Probably yes, not executed. Evidence: option 1 is `{"thing": 4, "verb": "approach"}`; the perceived stairs sit about one tile right of the player (dx 15.5 px, dy 5.6 px on a 160x144 frame, so delta rounds to (1 tile, 0)); `skills.approach` steps RIGHT onto it and `run_affordance` treats a target starting with `exit` as an exit target (extra push and side steps follow). The observed exit tile (3,-5) has dir RIGHT and crossed at step 114 by a RIGHT press. If the perceived exit had coincided with the player tile it would return `blocked: target is the player` with 0 inputs. Movement was not changed.
+- Live, 3 requests (ledger 2120 -> 2123, M1 2072 -> 2075 of 2125): options arm right 0/3; all three picks were free buttons `LEFT` (82: "move left to explore the area and look for a door"; 103: "need to move towards the st[airs]"; 137: "blocked from moving UP; moving LEFT is the next logical step to explore"). No further live run.

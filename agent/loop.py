@@ -112,6 +112,7 @@ class Loop:
             summaries = [f"no effect x{self.stuck.n}"] if self.stuck.n else []
             for (verb, target), step, count, mixed, (status, reason), unchanged in runs:
                 label = f"{verb[:16]} {target[:24]}".strip()
+                if status == "done" and unchanged == count: status, unchanged = "no effect", 0  # every run left the screen as it was
                 summary = (f"{label} x{count} since step {step}; last {status}" if mixed else
                            f"{label} -> {status}" + (f" ({reason})" if reason else "") + f" x{count} since step {step}")
                 if mixed and reason: summary += f" ({reason})"
