@@ -1,7 +1,7 @@
 """Persistent E3R3 limits retain requests across invocations and rewinds."""
 import json
 import pytest
-from scripts.run_agent import CallCap, _ledger
+from scripts.run_agent import CallCap, M1_CAP, TOTAL_CAP, _ledger
 
 
 @pytest.mark.parametrize("stage,spent,cap", [("q",59,60), ("c",545,546)])
@@ -17,7 +17,7 @@ def test_repair_stage_caps_preserve_prior_spend(tmp_path, monkeypatch, stage, sp
     assert json.loads(path.read_text()) == expected
 
 
-@pytest.mark.parametrize("key,limit,initial", [("total",3265,3264), ("m1",3215,3214)])
+@pytest.mark.parametrize("key,limit,initial", [("total",TOTAL_CAP,TOTAL_CAP - 1), ("m1",M1_CAP,M1_CAP - 1)])
 def test_phase_and_m1_caps_preserve_spend(tmp_path, monkeypatch, key, limit, initial):
     monkeypatch.chdir(tmp_path)
     path = tmp_path / "runs/e3_budget.json"; path.parent.mkdir()

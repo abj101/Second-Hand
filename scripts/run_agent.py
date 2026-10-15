@@ -12,7 +12,7 @@ from scripts.truth_pokered import read
 class CallCap(RuntimeError): pass
 MODEL = "gemma4:31b-cloud"
 MAX_HASHED_BYTES = 5 * 1024 * 1024
-TOTAL_CAP, M1_CAP = 3265, 3215  # persistent e3 ledger caps; raised only with user approval
+TOTAL_CAP, M1_CAP = 3665, 3615  # persistent e3 ledger caps; raised only with user approval
 def _flag(name, value):
     dashed = name.replace("_", "-"); return f"--{dashed}" if value else f"--no-{dashed}"
 def resolve_modes(saved: dict | None, decide: bool | None, act_text: bool | None, *, resume: bool = False) -> tuple[dict, list[str]]:
