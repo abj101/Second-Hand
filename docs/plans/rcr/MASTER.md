@@ -202,5 +202,5 @@ S0 builds S1-S3, S5, S6, S8, S11 and S14 into `eval_run.py`, reusing `_entity_du
 3. ~~Ledger caps for Phase D~~: **resolved 10-15.** The user raised the caps by 1,000 (TOTAL 4815, M1 4765; 3,756 had been used) and pre-approved all of Phase D: R3.7's 20-call replay with its fallbacks (+2, +20), the live run after R1 and the live run after R3. Each live run is a clean boot, `--steps 150 --max-calls 400`. No section needs to come back for budget unless the ledger runs out.
 4. **Go-ahead for implementation.** The coordinator recommends this order:
    - **S0:** the coordinator writes the scorecard in `eval_run.py` with a Haiku worker, and records the `m1_bedroom_live` baseline. 0 cloud calls.
-   - **Sections:** R1, then R4, then R2, then R3. Each runs in a fresh **Sonnet orchestrator** session with its packet's paste block and Haiku workers.
+   - **Sections:** R1, then R4, then R2, then R3. Each runs in a fresh **GPT-6.1 orchestrator** session using its packet's paste block, with **gpt-6-luna (reasoning high)** workers. The user changed the tier on 10-15, and it overrides the Haiku/Sonnet tiers written in the packets.
    - **Gates:** the coordinator reviews each gate against §4 and §5 before the next section starts. Any commit that touches a file with live-view hunks goes to the user first.
