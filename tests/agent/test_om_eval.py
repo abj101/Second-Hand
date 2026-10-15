@@ -159,7 +159,7 @@ def test_om_plan_dry_prints_migrated_state_prompt_and_token_count_without_model_
     assert eval_act.om_plan("fixture", 100, 3, live=False) == 0
     output = capsys.readouterr().out
     assert '"key": "oak"' in output and '"key": "lab"' in output
-    assert "Trigger: stall: no progress for 20 steps" in output
+    assert "Trigger: stuck: no_progress" in output
     assert "New evidence: heard: Oak and Grandpa's lab" in output
     assert "Map and memory: memory view" in output and "dialogue text" in output
     assert "Recent actions: approach person -> same" in output and "tokens~" in output
@@ -198,7 +198,7 @@ def test_om_plan_live_uses_independent_notebooks_and_caps_retry_posts(monkeypatc
     assert len(ledger) == stub.posts == 3 and stub.asks == 3
     assert all("Find Oak" in prompt[1] for prompt in stub.prompts)
     output = capsys.readouterr().out
-    assert "successes=1/3; requests=3" in output and "quests=[]" in output
+    assert 'successes=1/3; split={"revise_refute": 0, "reorder": 0}; requests=3' in output and "quests=[]" in output
     assert "omitted lab" in output and "reconcile flags=" in output and env.closed
 
 def test_om_plan_caps_each_retry_post(monkeypatch, tmp_path, capsys):
@@ -312,3 +312,22 @@ def test_classify_outcomes():
     assert eval_act.classify(at(38, 3, 1), at(38, 4, 1), 37, tiles) == "closer"
     assert eval_act.classify(b, at(38, 5, 1), 37, tiles) == "other"
     assert eval_act.classify(b, at(38, 6, 1), 37, tiles) == "no_move"
+
+
+def test_om_act_size_measures_the_decide_prompt_with_a_capturing_stub_and_no_requests(monkeypatch, tmp_path, capsys):
+    nb = eval_act.Notebook(tmp_path / "memory")
+    option = {"n": 1, "tool": "approach", "label": "approach door", "action": {"thing": 1}, "notes": []}
+    world = type("World", (), {"options": lambda self, per, place, fails, step, inputs: [option],
+                               "view": lambda self, goal, place, compact=False: "memory view", "here_flag": lambda self, fails: "here"})()
+    loop = type("Loop", (), {"prev": {"screen": "world", "text": ["hello"]}, "notebook": nb, "world": world, "place": "p1", "fails": {},
+                              "step_no": 100, "game": "pokemon_red", "_goal_text": lambda self: "goal"})()
+    env = type("Env", (), {"closed": False, "inputs": lambda self: eval_act._INPUTS, "close": lambda self: setattr(self, "closed", True)})()
+    monkeypatch.setattr(eval_act, "_plan_checkpoint", lambda run, step: (loop, env))
+    monkeypatch.setattr(eval_act, "Ollama", lambda *args, **kwargs: pytest.fail("act-size created a model"))
+    monkeypatch.setattr(eval_act.run_agent, "_ledger", lambda *args: pytest.fail("act-size touched the ledger"))
+    assert eval_act.main(["--om", "act-size", "--run", "fixture", "--from-step", "100"]) == 0
+    output = capsys.readouterr().out
+    assert "decide prompt chars=" in output and "tokens~" in output and "(len/4)" in output and "requests=0" in output and env.closed
+    loop.prev = None
+    assert eval_act.om_act_size("fixture", 100) == 2
+    assert "no cached perception" in capsys.readouterr().out

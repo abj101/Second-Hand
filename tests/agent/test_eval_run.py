@@ -574,9 +574,9 @@ def test_lifecycle_replays_stuck_and_reads_v2_history(tmp_path):
     result = _lifecycle(run)
 
     assert {row["trigger"] for row in result["trigger_replay"]["calls"]} == {
-        "T1 new game text", "T2 first world place", "T4 no progress", "T5 empty first step"}
+        "T1 new game text", "T3 quest closed", "T4 no progress", "T5 empty first step"}
     assert result["history_metrics"]["heard_leads"] == {
-        "opened": 1, "closed": 1, "parked": 0, "still_open": 0, "silently_lost": 0}
+        "opened": 1, "closed": 1, "parked": 0, "still_open": 0, "dropped": 0, "silently_lost": 0}
     assert len(result["history_metrics"]["belief_revisions"]) == 1
     assert result["history_metrics"]["belief_revisions"][0]["reason"] == "door was locked"
     assert result["history_metrics"]["rule4_quest_matches"] == ["tiny"]
@@ -597,8 +597,9 @@ def test_lifecycle_prioritizes_text_over_first_place_at_one_step(tmp_path):
 
     calls = _lifecycle(run)["trigger_replay"]["calls"]
 
-    assert [(row["step"], row["trigger"]) for row in calls] == [
-        (1, "T5 empty first step"), (4, "T1 new game text"), (7, "T2 first world place")]
+    assert [(row["step"], row["trigger"]) for row in calls] == [  # one call consumes the whole queue: text and the new place together
+        (1, "T5 empty first step"), (4, "T1 new game text")]
+    assert calls[1]["kinds"] == ["T1", "T2"]
 
 
 def test_lifecycle_reads_v1_notebook_log_and_goal_history_shapes(tmp_path):
@@ -627,15 +628,12 @@ def test_lifecycle_reads_v1_notebook_log_and_goal_history_shapes(tmp_path):
 
     result = _lifecycle(run)
 
-    assert result["trigger_replay"]["calls"] == [
-        {"step": 1, "trigger": "T5 empty first step"},
-        {"step": 4, "trigger": "T1 new game text"},
-        {"step": 8, "trigger": "T2 first world place"},
-    ]
+    assert [(c["step"], c["trigger"]) for c in result["trigger_replay"]["calls"]] == [
+        (1, "T5 empty first step"), (4, "T1 new game text"), (8, "T2 first world place")]
     assert result["trigger_replay"]["text_event_steps"] == [3]
     assert "notebook.history" in result["trigger_replay"]["text_event_source"]
     assert result["history_metrics"]["heard_leads"] == {
-        "opened": 1, "closed": 1, "parked": 0, "still_open": 0, "silently_lost": 0}
+        "opened": 1, "closed": 1, "parked": 0, "still_open": 0, "dropped": 0, "silently_lost": 0}
     assert result["history_metrics"]["rule4_quest_matches"] == ["tactical"]
 
 
@@ -673,7 +671,7 @@ def test_lifecycle_reads_v2_fact_references_quest_snapshots_and_revisions(tmp_pa
     metrics = _lifecycle(run)["history_metrics"]
 
     assert metrics["heard_leads"] == {
-        "opened": 2, "closed": 1, "parked": 0, "still_open": 0, "silently_lost": 1}
+        "opened": 2, "closed": 1, "parked": 0, "still_open": 0, "dropped": 1, "silently_lost": 0}  # dropped with a reference is not lost
     assert [row["reason"] for row in metrics["belief_revisions"]] == ["saw sign", "door blocked"]
     assert metrics["stall_calls_changed_nothing"] == 1
     assert metrics["plan_calls_per_step"]["7"] == 1
@@ -701,7 +699,7 @@ def test_lifecycle_counts_removed_heard_leads_as_lost_and_groups_planner_writes(
     metrics = _lifecycle(run)["history_metrics"]
 
     assert metrics["heard_leads"] == {
-        "opened": 1, "closed": 0, "parked": 0, "still_open": 0, "silently_lost": 1}
+        "opened": 1, "closed": 0, "parked": 0, "still_open": 0, "dropped": 0, "silently_lost": 1}
     assert metrics["plan_calls_per_step"]["1"] == 1
 
 
@@ -798,3 +796,27 @@ def test_execution_success_skips_pending_rows_and_counts_each_action_once(tmp_pa
 
     # actions 1 (done), 3 (blocked), 4 (zero-input select, failed though its verdict is a hit), 5 (done, resolved once at step 6)
     assert result["execution_success"] == {"done": 2, "failed": 2, "total": 4, "pending_rows": 2, "rate": 0.5}
+
+
+def test_lifecycle_truth_join_reports_place_purity_reach_closure_maps_and_quests_per_door(tmp_path):
+    from scripts.eval_run import _lifecycle
+
+    run = tmp_path / "truth-join"
+    write(run / "trace.jsonl", [
+        {"step": 1, "screen": "world", "place": "a", "next_place": "a"},
+        {"step": 2, "screen": "world", "place": "a", "next_place": "b"},
+        {"step": 3, "screen": "world", "place": "b", "next_place": "b"},
+        {"step": 4, "screen": "world", "place": "b", "next_place": "b"},
+    ])
+    # truth step S+1 is the state after trace step S: place b spans two RAM maps
+    write(run / "truth.jsonl", [{"step": 2, "map": 0x25}, {"step": 3, "map": 0x00}, {"step": 4, "map": 0x00}, {"step": 5, "map": 0x28}])
+    write(run / "memory" / "notebook.history", [
+        {"step": 1, "op": "quests", "value": [{"key": "door", "text": "Try door#4", "status": "open"}, {"key": "badge", "text": "Get Badge #1", "status": "open"}]},
+        {"step": 3, "op": "check", "key": "badge", "evidence": "check reach Town at step 3"},
+    ])
+
+    result = _lifecycle(run)
+
+    assert result["truth_join"]["place_purity"] == {"places": 2, "impure": 1, "purity": 0.5, "spanning": {"b": ["0x00", "0x28"]}}
+    assert result["truth_join"]["reach_closure_maps"] == [{"key": "badge", "step": 3, "map": "0x00", "check": "check reach Town at step 3"}]
+    assert result["history_metrics"]["quests_per_door"] == {"count": 1, "of": 2, "keys": ["door"]}

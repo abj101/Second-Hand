@@ -1,7 +1,7 @@
 import re
 from types import SimpleNamespace
 
-from agent.act import REPLY, SYSTEM, act
+from agent.act import REPLY, REPLY_OPTIONS, SCHEMA, SYSTEM, act
 
 BUTTONS = ["UP", "DOWN", "LEFT", "RIGHT", "A", "B", "START", "SELECT"]
 PERCEPTION = {"screen": "a room", "text": ["Go north"], "entities": [{"name": "door", "kind": "exit", "at": [0.5, 0.2]}]}
@@ -48,7 +48,7 @@ def test_prompt_has_numbered_things_screen_rules_and_no_game_words():
     assert "with the text in \"text\"" in REPLY and "suggested names" in REPLY and "Never pick letter buttons one by one" in REPLY
     assert not re.search(r"pok[eé]mon|\bred\b|\bblue\b|\brival\b", (SYSTEM + REPLY + user).casefold())
     assert "Known places: none" in user
-    assert '"op":"focus","status":"done"|"blocked"' in REPLY and '"section":"hints"|"lessons"' in REPLY and '"goals"' not in REPLY
+    assert '"goals"' not in REPLY
     assert "Place values" not in REPLY and '"places"' not in REPLY
 
 
@@ -132,7 +132,15 @@ def test_nineteen_thing_room_prompt_fits_the_budget(tmp_path):
     act(model, None, PERCEPTION, "Goals: reach the hall", facts, [], "A: press", {}, BUTTONS, options=options)
     system, user = model.args[0][0], model.args[0][1]
     assert len(system + user) / 4 <= 1700  # ponytail: chars/4 estimate, not the tokenizer
-    assert all(word in user for word in ("place", "notebook", "action", "text", "expect", "why", '"i"', '"thing"', '"go_to"', '"buttons"', "advance", "focus", "tried", "hints", "lessons"))
+    assert all(word in user for word in ("place", "action", "text", "expect", "why", '"i"', '"thing"', '"go_to"', '"buttons"', "advance"))
+
+
+def test_act_reply_no_longer_requests_notebook_edits():
+    assert '"notebook"' not in REPLY
+    assert '"notebook"' not in REPLY_OPTIONS
+    assert "notebook" not in SCHEMA["properties"]
+    assert "notebook" not in SCHEMA["required"]
+    assert "When you are stuck, write down what you learned." not in SYSTEM
 
 
 def test_option_line_prints_the_tool_word_once():

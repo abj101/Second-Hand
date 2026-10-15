@@ -27,7 +27,7 @@ def test_inv1_omitted_heard_quest_kept_and_flagged(tmp_path):
     nb.data["facts"]["heard_fact"] = fact()
     nb.data["quests"] = [quest()]
 
-    result = nb.apply_plan(plan([quest("new", why=[])]), 2)
+    result = nb.apply_plan(plan([quest("new", text="Find another lead", why=[])]), 2)
 
     assert [q["key"] for q in nb.data["quests"]] == ["new", "q"]
     assert "omitted q: keep, park or drop it with a reason" in result["flags"]
@@ -110,7 +110,7 @@ def test_inv8_nothing_deleted(tmp_path):
     nb.data["quests"] = [quest("q", why=[]), quest("heard", why=["heard_fact"])]
     nb.data["facts"]["heard_fact"] = fact()
 
-    nb.apply_plan(plan([quest("new", why=[])]), 2)
+    nb.apply_plan(plan([quest("new", text="Find another lead", why=[])]), 2)
 
     assert set(nb.data["facts"]) == {"f", "heard_fact"}
     assert set(nb.data["beliefs"]) == {"b"}
@@ -154,12 +154,12 @@ def test_chapter_guard_accepts_current_keys_and_clears_notes(tmp_path):
     assert any(row.get("op") == "planner_note" for row in history)
 
 
-def test_chapter_guard_rejects_malformed_live_key_and_keeps_notes(tmp_path):
+def test_chapter_with_invalid_summary_is_rejected(tmp_path):
     nb = notebook(tmp_path)
     nb.data["quests"] = [{"text": "Missing key", "status": "open"}]
     nb.data["notes"] = [{"step": 2, "trigger": "stall", "text": "Keep me"}]
 
-    assert not nb.apply_chapter({"summary": "Too early", "open_leads": []}, 3)
+    assert not nb.apply_chapter({"summary": None, "open_leads": []}, 3)
     assert nb.data["notes"][0]["text"] == "Keep me"
     assert not nb.data["chapters"]
 
@@ -280,7 +280,7 @@ def test_migration_rejects_tactical_heard_goals_and_summarizes_them(tmp_path):
 
     assert [q["key"] for q in nb.data["quests"]] == ["heard_plain"]
     assert nb.data["quests"][0]["source"] == "heard"
-    assert "Press SPACE" in nb.data["chapters"][0]["summary"]
+    assert not nb.data["chapters"]  # QR.3: the tactical goal is omitted from the summary, not summarized
 
 
 def test_mechanical_closure_appends_evidence_without_replacing_prior_evidence(tmp_path):
@@ -292,3 +292,189 @@ def test_mechanical_closure_appends_evidence_without_replacing_prior_evidence(tm
     q = nb.data["quests"][0]
     assert q["evidence"] == "Earlier evidence; check reach Town Square at step 4"
     assert q["check_history"][0] == {"step": 2, "result": "fail"}
+
+
+def test_planner_cannot_write_code_owned_fields(tmp_path):
+    nb = notebook(tmp_path)
+    result = nb.apply_plan(plan(
+        [quest("new", opened=99, closed=99, check_history=[{"result": "fake"}], extra="drop")],
+        beliefs=[{"key": "b", "text": "A belief", "status": "held", "history": [{"reason": "fake"}]}],
+        facts=[{**fact("f"), "step": 99, "extra": "drop"}],
+    ), 7)
+
+    assert not result["flags"]
+    assert nb.data["quests"][0]["opened"] == 7
+    assert "closed" not in nb.data["quests"][0] and "check_history" not in nb.data["quests"][0]
+    assert "extra" not in nb.data["quests"][0]
+    assert nb.data["beliefs"]["b"]["history"] == []
+    assert nb.data["facts"]["f"]["step"] == 7 and "extra" not in nb.data["facts"]["f"]
+
+
+def test_check_swap_with_done_is_refused(tmp_path):
+    nb = notebook(tmp_path, places=lambda: [(2, ["Harbor"])])
+    nb.data["quests"] = [quest(check={"kind": "reach", "arg": "Mountain"})]
+
+    result = nb.apply_plan(plan([quest(status="done", evidence="I went there.",
+                                       check={"kind": "reach", "arg": "Harbor"})]), 3)
+
+    assert nb.data["quests"][0]["check"] == {"kind": "reach", "arg": "Mountain"}
+    assert nb.data["quests"][0]["status"] == "open"
+    assert any("check can change" in flag for flag in result["flags"])
+
+
+def test_reach_needs_entry_after_opened_and_matches_aliases_without_id_suffix(tmp_path):
+    current = [(4, ["Town Square [p_2]", "World [p_2]"]) ]
+    nb = notebook(tmp_path, places=lambda: current)
+    nb.data["quests"] = [quest(opened=4, check={"kind": "reach", "arg": "World"})]
+
+    assert nb.run_checks(4) == []
+    current[:] = [(5, ["Town Square [p_2]", "World [p_2]"])]
+    assert nb.run_checks(5) == ["q"]
+
+
+def test_text_check_rejects_short_args_and_matches_words(tmp_path):
+    nb = notebook(tmp_path)
+    result = nb.apply_plan(plan([quest("short", check={"kind": "text", "arg": "the"}),
+                                 quest("good", check={"kind": "text", "arg": "welcome"})]), 2)
+    nb.log = [{"step": 3, "text": 'Guide at Town: "Welcome, friend!"'}]
+
+    assert "check" not in nb.data["quests"][0]
+    assert any("text check needs" in flag for flag in result["flags"])
+    assert nb.run_checks(3) == ["good"]
+
+
+def test_speak_check_ignores_lines_before_opened(tmp_path):
+    nb = notebook(tmp_path)
+    nb.data["quests"] = [quest(opened=4, check={"kind": "speak", "arg": "Guide"})]
+    nb.log = [{"step": 3, "text": 'Guide at Town: "Welcome."'}]
+
+    assert nb.run_checks(4) == []
+    nb.log.append({"step": 5, "text": 'Guide at Town: "Again."'})
+    assert nb.run_checks(5) == ["q"]
+
+
+def test_heard_is_transitive_through_beliefs(tmp_path):
+    nb = notebook(tmp_path)
+    nb.data["facts"]["heard_fact"] = fact()
+    nb.data["beliefs"]["b1"] = {"key": "b1", "because": ["b2"]}
+    nb.data["beliefs"]["b2"] = {"key": "b2", "because": ["heard_fact"]}
+
+    assert nb._heard_quest(quest(why=["b1"]))
+
+
+def test_heard_quest_without_check_is_flagged(tmp_path):
+    nb = notebook(tmp_path)
+    nb.data["facts"]["heard_fact"] = fact()
+
+    result = nb.apply_plan(plan([quest()]), 2)
+
+    assert "needs check q" in result["flags"]
+    assert nb.data["quests"][0]["status"] == "open"
+
+
+def test_rekeyed_quest_merges_into_existing_key(tmp_path):
+    nb = notebook(tmp_path)
+    nb.data["quests"] = [quest("old", text="Find the ancient key!")]
+
+    result = nb.apply_plan(plan([quest("new", text="find the ancient key")]), 2)
+
+    assert [q["key"] for q in nb.data["quests"]] == ["old"]
+    assert "merged new into old" in result["flags"]
+
+
+def test_parked_quest_promotes_when_slot_frees(tmp_path):
+    nb = notebook(tmp_path)
+    nb.data["quests"] = [quest(f"q{i}", why=[], opened=i) for i in range(5)]
+    nb.data["quests"].append(quest("parked", why=[], status="parked", opened=0))
+    incoming = [quest(f"q{i}", why=[], status="done" if i == 0 else "open",
+                      evidence="Finished." if i == 0 else "") for i in range(5)]
+
+    nb.apply_plan(plan(incoming), 6)
+
+    assert nb.data["quests"][-1]["status"] == "open"
+
+
+def test_rule4_compass_and_numbered_exit_but_not_badge_number(tmp_path):
+    nb = notebook(tmp_path, buttons=("A", "B", "START"))
+    good = [quest("badge", text="Get Badge #1", why=[]), quest("rival", text="Find a rival", why=[]),
+            quest("one_button", text="Use A", why=[])]
+    bad = [quest("compass", text="After that, go north", why=[]), quest("exit", text="Try door#4", why=[]),
+           quest("button", text="Press START", why=[])]
+
+    nb.apply_plan(plan([*good, *bad]), 2)
+
+    assert {q["key"] for q in nb.data["quests"]} == {"badge", "rival", "one_button"}
+
+
+def test_refuted_belief_cannot_relapse(tmp_path):
+    nb = notebook(tmp_path)
+    nb.data["beliefs"]["b"] = {"key": "b", "text": "The route is blocked", "status": "refuted", "history": []}
+
+    result = nb.apply_plan(plan([], beliefs=[{"key": "b", "status": "held", "reason": "Maybe."}]), 3)
+
+    assert nb.data["beliefs"]["b"]["status"] == "refuted"
+    assert "relapse b: refuted beliefs stay ruled out" in result["flags"]
+
+
+def test_chapter_with_summary_is_accepted(tmp_path):
+    nb = notebook(tmp_path)
+    nb.data["quests"] = [quest()]
+    nb.data["notes"] = [{"step": 1, "trigger": "start", "text": "Keep this until accepted."}]
+
+    assert nb.apply_chapter({"summary": "Progress."}, 2)
+    assert nb.data["chapters"][0]["summary"] == "Progress."
+    assert nb.data["notes"] == []
+
+
+# --- QR.3: render budgets and migration ---
+def test_render_bounds_facts_by_relevance_and_recency(tmp_path):
+    nb = notebook(tmp_path)
+    for i in range(30): nb.data["facts"][f"f{i}"] = fact(f"f{i}", f"Fact number {i}.", "saw")
+    nb.data["beliefs"]["b"] = {"key": "b", "text": "Belief", "status": "held", "because": ["f1"]}
+    nb.data["quests"] = [quest("q", why=["b", "f0"])]
+
+    rendered = nb.render()
+
+    assert "f0" in rendered and "f1" in rendered  # cited directly and through the belief
+    assert all(f"f{i}\"" in rendered or f"- f{i}:" in rendered for i in range(22, 30))
+    assert "- f10:" not in rendered and "(+20 older facts)" in rendered
+
+
+def test_render_keeps_newest_notes_and_one_ruled_out_heading(tmp_path):
+    nb = notebook(tmp_path)
+    nb.data["notes"] = [{"step": i, "trigger": "t", "text": f"note {i} " + "x" * 80} for i in range(10)]
+    nb.data["beliefs"] = {f"r{i}": {"key": f"r{i}", "text": "gone", "status": "refuted"} for i in range(3)}
+
+    rendered = nb.render(limit=900)
+
+    assert rendered.count("ruled out:") == 1 and "r0" in rendered and "r2" in rendered
+    assert "note 9 " in rendered and "note 5 " in rendered and "note 0 " not in rendered  # the last 5 stay, older notes go first
+    assert len(nb.render(limit=100).splitlines()) > 0 and nb.render(limit=100).count("ruled out:") == 0
+
+
+def test_render_focus_shows_beliefs_and_latest_note_within_limit(tmp_path):
+    nb = notebook(tmp_path)
+    nb.data["facts"].update({f"f{i}": fact(f"f{i}", f"Fact {i}.", "saw") for i in range(10)})
+    nb.data["beliefs"] = {f"b{i}": {"key": f"b{i}", "text": f"Belief {i}", "status": "held", "confidence": "mid", "because": []} for i in range(5)}
+    nb.data["beliefs"]["cited"] = {"key": "cited", "text": "Cited belief", "status": "held", "confidence": "high", "because": ["f0"]}
+    nb.data["quests"] = [quest("top", why=["cited"]), quest("other", why=[])]
+    nb.data["notes"] = [{"step": 1, "trigger": "t", "text": "old note"}, {"step": 2, "trigger": "t", "text": "latest " + "n" * 500}]
+    nb.log = [{"step": i, "text": "log line " + "z" * 300} for i in range(10)]
+
+    rendered = nb.render_focus()
+
+    assert "- cited: Cited belief (high)" in rendered and "b0" not in rendered
+    assert "Planner note: latest " + "n" * 393 in rendered and "n" * 394 not in rendered and "old note" not in rendered
+    assert "- f0:" in rendered and "- f9:" in rendered and "- f5:" not in rendered  # cited by the top quest through its belief, plus the 4 newest
+    assert len(rendered) <= 4000 and "step 9:" in rendered and "step 0:" not in rendered  # the log keeps its newest lines
+
+
+def test_migrated_chapter_omits_tactical_goals(tmp_path):
+    original = {"goals": {"try_house_door": {"text": "Check the house", "status": "active", "step": 1},
+                          "door": {"text": "Try house door#4", "status": "active", "step": 2},
+                          "plain": {"text": "Find the person", "status": "active", "step": 3}}, "hints": {}, "lessons": {}}
+    (tmp_path / "notebook.json").write_text(json.dumps(original), encoding="utf-8")
+
+    summary = notebook(tmp_path).data["chapters"][0]["summary"]
+
+    assert summary == "Find the person (active)"

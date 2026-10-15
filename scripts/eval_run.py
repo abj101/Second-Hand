@@ -631,13 +631,10 @@ def _lifecycle(run):
                 for q in records):
             if isinstance(r.get("step"), int): closed_steps.add(r["step"])
 
-    calls, marked_text, seen_world = [], set(), set()
-    pending_text = []
+    calls, marked_text, seen_world = [], set(), []
+    pending = {}  # kind -> True: the loop's event queue (T5 and T4 wait at most once); consumed whole by one call
     log_events = sorted(s for s in text_steps if isinstance(s, int))
     next_log = 0
-    pending_stall = False
-    pending_place = False
-    seen_call_steps = set()
     last_call_step = None
     stuck = Stuck()
     for row in trace:
@@ -650,60 +647,39 @@ def _lifecycle(run):
             next_log += 1
             if log_step not in marked_text:
                 marked_text.add(log_step)
-                pending_text.append(log_step)
-                stuck.progress()
+                pending["T1"] = True  # text is never progress (QR.1)
         if explicit_text and step not in marked_text:
             marked_text.add(step)
-            pending_text.append(step)
-            stuck.progress()
+            pending["T1"] = True
         if step in closed_steps or str(row.get("quest_event", "")).casefold() == "closed":
             stuck.progress()
+            pending["T3"] = True
 
         place = row.get("place")
-        first_place = screen == "world" and place and place not in seen_world
-        if first_place:
-            seen_world.add(place)
-            pending_place = True
+        if screen == "world" and place and place not in seen_world:
+            seen_world.append(place)
+            if len(seen_world) > 1: pending["T2"] = True  # the first place is where the run starts, not an arrival
         replay_row = dict(row)
         if not replay_row.get("verified_edge"):
             outcome, basis = row.get("outcome") or {}, (row.get("outcome") or {}).get("basis") or {}
             if "place_changes" in outcome.get("effects", []) and basis.get("place_changes") == "pixel":
                 replay_row["verified_edge"] = True
-        event = stuck.update(replay_row)
-        pending_stall = pending_stall or event == "no_progress"
+        if stuck.update(replay_row) == "no_progress": pending["T4"] = True
+        if step == 1: pending["T5"] = True
 
-        # T1 and T5 are urgent. T2/T4 obey the same three-step planning floor
-        # as the runtime loop; their pending events survive until eligible.
-        eligible_floor = last_call_step is None or not isinstance(step, int) or step - last_call_step >= 3
-        chosen = None
-        if isinstance(step, int) and step not in seen_call_steps:
-            if pending_text and screen == "world": chosen = "T1 new game text"
-            elif step == 1: chosen = "T5 empty first step"
-            elif pending_place and eligible_floor: chosen = "T2 first world place"
-            elif pending_stall and eligible_floor: chosen = "T4 no progress"
-        if chosen:
-            calls.append({"step": step, "trigger": chosen})
-            seen_call_steps.add(step)
+        floor_ok = last_call_step is None or not isinstance(step, int) or step - last_call_step >= 3
+        ready = [k for k in ("T3", "T1", "T2", "T5", "T4") if k in pending and (k != "T1" or screen == "world")]
+        if isinstance(step, int) and ready and floor_ok and step != last_call_step:
+            names = {"T3": "T3 quest closed", "T1": "T1 new game text", "T2": "T2 first world place", "T5": "T5 empty first step", "T4": "T4 no progress"}
+            calls.append({"step": step, "trigger": names[ready[0]], "kinds": [k for k in ("T3", "T1", "T2", "T5", "T4") if k in pending]})
             last_call_step = step
-            if chosen == "T1 new game text": pending_text.clear()
-            if chosen == "T2 first world place": pending_place = False
-            if chosen == "T4 no progress": pending_stall = False
+            pending.clear()
 
-    plan_ops = {"quests", "belief", "fact", "planner_note", "check", "chapter"}
-    plan_rows = [row for row in history if row.get("op") in plan_ops or
-                 row.get("op") == "set" and row.get("section") in {"goals", "facts"}]
     counts = Counter(str(row.get("step")) for row in trace
                      if isinstance(row.get("plan"), dict) and row.get("step") is not None)
-    history_calls = Counter(str(row.get("step")) for row in history
-                            if row.get("op") == "plan" and row.get("step") is not None)
-    writes_by_step = {str(row.get("step")) for row in plan_rows if row.get("step") is not None}
-    for step in writes_by_step:
-        history_calls[step] = max(history_calls[step], 1)
-    for step, n in history_calls.items():
-        counts[step] = max(counts[step], n)
     plan_calls = {step: n for step, n in sorted(counts.items(), key=lambda x: int(x[0]) if x[0].isdigit() else -1)}
 
-    opened, closed, parked = set(), set(), set()
+    opened, closed, parked, dropped_hist = set(), set(), set(), set()
     for r in history:
         op = r.get("op")
         value = r.get("quest") if op == "migrate_quest" else r.get("value")
@@ -718,6 +694,7 @@ def _lifecycle(run):
             status = str(q.get("status", "active")).casefold()
             if status in {"closed", "done", "completed"}: closed.add(key)
             elif status in {"parked", "paused", "suspended"}: parked.add(key)
+            elif status == "dropped": dropped_hist.add(key)
         if op == "check" and r.get("key"):
             key = str(r["key"])
             if key in opened: closed.add(key)
@@ -740,8 +717,10 @@ def _lifecycle(run):
     dropped = {k for k, status in final_quest_states.items() if status == "dropped"}
     closed |= {k for k, status in final_quest_states.items() if status in {"closed", "done", "completed"}}
     parked |= {k for k, status in final_quest_states.items() if status in {"parked", "paused", "suspended"}}
+    dropped |= dropped_hist
     still_open -= closed | parked | dropped
-    lost = opened - closed - parked - still_open
+    dropped -= closed
+    lost = opened - closed - parked - still_open - dropped  # a heard quest dropped with a reference is dropped, not lost
     parked -= closed
 
     tactical = re.compile(r"#\d|\(\s*-?\d+\s*,\s*-?\d+\s*\)|^(?:press|move|walk|go)\s+(?:up|down|left|right)\b", re.I)
@@ -752,6 +731,16 @@ def _lifecycle(run):
                                                                     if isinstance(v, dict)] if isinstance(notebook.get("goals"), dict) else []
     matches = sorted({quest_key(q) for q in quests if isinstance(q, dict) and quest_key(q) and
                       (tactical.search(str(q.get("text", ""))) or button_re and button_re.search(str(q.get("text", ""))))})
+
+    from agent.notebook import _TACTICAL
+    created = {}
+    for r in history:
+        value = r.get("quest") if r.get("op") == "migrate_quest" else r.get("value")
+        for q in value if isinstance(value, list) else [value]:
+            if isinstance(q, dict) and r.get("op") in {"quests", "migrate_quest"} and quest_key(q): created[quest_key(q)] = str(q.get("text", ""))
+    created.update({quest_key(q): str(q.get("text", "")) for q in quests if isinstance(q, dict) and quest_key(q)})
+    door = sorted(k for k, text in created.items() if _TACTICAL.search(text) or button_re and button_re.search(text))
+    per_door = {"count": len(door), "of": len(created), "keys": door}
 
     belief_revisions = []
     seen_revisions = set()
@@ -784,19 +773,34 @@ def _lifecycle(run):
     stall_no_change = 0
     for row in trace:
         p = row.get("plan")
-        if not isinstance(p, dict) or not re.search(r"stuck|no.progress|stall", str(p.get("trigger", "")), re.I): continue
+        if not isinstance(p, dict) or not (re.search(r"no.progress|\bT4\b", str(p.get("trigger", "")), re.I) or any(isinstance(e, dict) and e.get("kind") == "T4" for e in p.get("events") or [])): continue
         if "quests_changed" in p or "beliefs_changed" in p:
             unchanged = not p.get("quests_changed") and not p.get("beliefs_changed")
         else:
             unchanged = str(row.get("step")) not in changed_steps
         stall_no_change += bool(unchanged)
+    truth = {t.get("step"): t for t in read(run / "truth.jsonl")}
+    purity, closures = None, None
+    if truth:  # trace step S is the action; its after-state is truth step S+1
+        maps = defaultdict(set)
+        for row in trace:
+            place = row.get("next_place") or row.get("place")
+            actual = truth.get((row.get("step") or 0) + 1) or {}
+            if row.get("screen") == "world" and place and actual.get("map") is not None: maps[place].add(map_id(actual["map"]))
+        mixed = {place: sorted(ids) for place, ids in sorted(maps.items()) if len(ids) > 1}
+        purity = {"places": len(maps), "impure": len(mixed), "purity": rate(len(maps) - len(mixed), len(maps)), "spanning": mixed}
+        closures = [{"key": r.get("key"), "step": r.get("step"), "map": map_id(t["map"]), "check": str(r.get("evidence", ""))}
+                    for r in history if r.get("op") == "check" and str(r.get("evidence", "")).startswith("check reach")
+                    and isinstance(r.get("step"), int) and (t := truth.get(r["step"] + 1)) and t.get("map") is not None]
     text_source = "trace plan trigger metadata + notebook.history note() dialogue-log approximation"
     return {"trigger_replay": {"calls": calls, "count": len(calls), "text_event_steps": sorted(s for s in marked_text if isinstance(s, int)),
                                "text_event_source": text_source},
+            "truth_join": {"place_purity": purity, "reach_closure_maps": closures},
             "history_metrics": {"plan_calls_per_step": plan_calls,
                                 "heard_leads": {"opened": len(opened), "closed": len(closed),
                                                 "parked": len(parked), "still_open": len(still_open),
-                                                "silently_lost": len(lost)},
+                                                "dropped": len(dropped), "silently_lost": len(lost)},
+                                "quests_per_door": per_door,
                                 "rule4_quest_matches": matches, "belief_revisions": belief_revisions,
                                 "stall_calls_changed_nothing": stall_no_change}}
 

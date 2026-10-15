@@ -264,6 +264,7 @@ def test_grid_loop_reuses_two_spatial_exits_between_floors(tmp_path, monkeypatch
     loop=Loop(env,StubModel([]),Memory(tmp_path/"memory"),"grid"); ids=[]
     for _ in range(4): ids.append(loop.step()["next_place"])
     assert ids[0] == ids[2] and ids[1] == ids[3] and ids[0] != ids[1]
+    assert loop.stuck.progress_n == 2  # crossings 3 and 4 repeat known edges: a bounce is not progress
 
 def test_perceiver_guides_whole_name_entry(tmp_path):
     class CapturesPrompt(StubModel):
@@ -547,14 +548,14 @@ def test_dialogue_fragments_flush_as_one_log_entry_and_survive_restore(tmp_path)
     assert {"MOM: Right.", "All boys leave", "All boys leave home some day.", "home some day.",
             "It said so on TV.", "PROF. OAK, next", "door, is looking", "door, is looking for you."} <= {
                 row["text"] for row in resumed.mem.rows("knowledge")}
-    assert resumed.text_pending
+    assert [e["kind"] for e in resumed.events] == ["T1"]
     assert resumed.text_for_trigger == "Right. All boys leave home some day. It said so on TV. PROF. OAK, next door, is looking for you."
 
-    resumed.text_pending = False
+    resumed.events = []
     for step, texts in fragments: resumed._learn(texts, [], step + 10, "tiled room", "dialogue")
     resumed._learn([], [], 57, "tiled room", "world")
     assert len(resumed.notebook.log) == 1
-    assert not resumed.text_pending and not resumed.conversation["lines"]
+    assert not resumed.events and not resumed.conversation["lines"]
 
     resumed._learn(["A sign says KEEP OUT."], [], 58, "tiled room", "world")
     assert len(resumed.notebook.log) == 2
@@ -806,16 +807,17 @@ def test_failure_text_revisit_and_stall_planner_triggers(tmp_path):
     loop.cause, loop.reported = "approach door failed", ["door", "route", None]
     assert loop._plan_trigger({"screen": "world"}) is None
 
-    loop.text_pending, loop.text_for_trigger = True, "A sign gives a clue."
+    loop._event("T1", "new game text: A sign gives a clue.", 1)
     assert loop._plan_trigger({"screen": "world"}).startswith("new game text:")
-    loop.text_pending = False
+    loop.events = []
 
     loop.mem.upsert("places", {"id": "visited", "name": "Visited", "screen": "world", "state": "place", "visits": 3})
     loop._moved("source", "visited", "door", 4)
-    assert loop.arrived is None
+    assert not loop.events
     assert loop._plan_trigger({"screen": "world"}) is None
 
     loop.last_plan, loop.step_no, loop.flags = 3, 4, ["no_progress"]
+    loop._event("T4", "stuck: no_progress", 4)
     loop.recent = [{"step": 4, "place": "source", "choice": {"target": "north exit"}, "verdict": "miss"}]
     assert loop._plan_trigger({"screen": "world"}) is None  # three-step floor
     loop.step_no = 5
@@ -863,7 +865,7 @@ def test_heard_quest_closure_calls_chapter_once(tmp_path):
         {"key": "top", "text": "First", "status": "open"},
         {"key": "heard", "text": "Resolve the lead", "status": "done", "source": "heard", "closed": 2},
     ]
-    loop._planned_top, loop._planned_closed = "top", ["heard"]
+    loop._closed(["heard"], 2, "top")
 
     loop._after_outcome(2)
 
@@ -915,10 +917,11 @@ def test_planner_prioritizes_game_text_and_checks_it_before_throttle(tmp_path):
     loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
     loop.notebook.data["quests"] = [{"key": "g", "text": "explore", "status": "open"}]
     loop.step_no = loop.last_plan = 10
-    loop.text_pending = True
     loop.text_for_trigger = "Someone is looking for you. " + "x" * 220
+    loop._event("T1", "new game text: " + loop.text_for_trigger[:200], 10)
 
     assert loop._plan_trigger({"screen": "dialogue"}) is None
+    loop.step_no = 12
     assert loop._plan_trigger({"screen": "world"}) == "new game text: " + loop.text_for_trigger[:200]
 
 
@@ -1117,12 +1120,12 @@ def test_new_place_and_back_and_forth_cycle_trigger_replans_without_throttle(tmp
     for pid in ("house", "town"): loop.mem.upsert("places", {"id": pid, "name": pid, "screen": "world", "state": "place", "visits": 1})
     loop.last_plan = loop.step_no = 10  # a plan just ran: ordinary triggers are throttled
     loop._moved("house", "town", "door", 11)
-    assert loop.arrived == "arrived somewhere new: town" and loop._plan_trigger({}) is None
+    assert [e["text"] for e in loop.events] == ["arrived somewhere new: town"] and loop._plan_trigger({}) is None
     loop.step_no = 12
-    assert loop._plan_trigger({}) == loop.arrived
+    assert loop._plan_trigger({}) == "arrived somewhere new: town"
     for step, (a, b) in enumerate((("town", "house"), ("house", "town"), ("town", "house")), 12): loop._moved(a, b, "door", step)
     assert loop.cycle_flag.startswith("cycle: went back and forth between town and house 4 times")
-    assert loop._plan_trigger({}) is None
+    assert loop._plan_trigger({}).startswith("arrived somewhere new: town")  # the event waits; nothing dropped it
     assert loop.fails["town|approach|door"] == {"n": 2, "why": "leads back to house: cycle", "step": 14}
 
 
@@ -1141,10 +1144,10 @@ def test_repeated_failure_flags_act_and_replans_once_on_new_evidence(tmp_path, m
     loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     loop.notebook.data["quests"] = [{"key": "q", "text": "explore", "status": "open"}]
-    loop.step(); assert loop.urgent is None and loop.cause
+    loop.step(); assert loop.cause
     row = loop.step()  # ordinary failures remain visible to act and evidence, not triggers
-    assert row["plan"] is None and loop.urgent is None
-    row = loop.step(); assert row["plan"] is None and loop.urgent is None
+    assert row["plan"] is None
+    row = loop.step(); assert row["plan"] is None
     assert not any(f.startswith("failed here before") for f in seen_flags[-1])  # its content is in the option notes now
     assert [o["notes"][0] for o in seen_options[-1] if o["label"] == "possible exit door (unverified, never crossed)"] == ["tried here 2×, last: wall"]
 
@@ -1304,12 +1307,16 @@ def test_any_arrival_replans_after_the_floor_and_new_places_skip_it(tmp_path):
     loop.step_no, loop.last_plan = 10, 10
 
     loop._moved("a", "b", "door", 11)
-    assert loop.arrived is None and loop.urgent is None
+    assert not loop.events
     assert loop._plan_trigger({}) is None  # inside the 3-step floor
     loop.step_no = 12
     assert loop._plan_trigger({}) is None
+    loop.last_plan = 11
     loop._moved("b", "c", "door", 13)
-    assert loop.arrived == "arrived somewhere new: C"
+    assert [e["text"] for e in loop.events] == ["arrived somewhere new: C"]
+    assert loop._plan_trigger({}) is None  # still inside the floor: it waits
+    loop.step_no = 13
+    assert loop._plan_trigger({}) == "arrived somewhere new: C"
 
 
 def _room_with_open_east_edge(mem, place):  # 3x3 open room, walls around it, (1,0) untried to the RIGHT into unseen (2,0)
@@ -1539,7 +1546,7 @@ def test_repeated_identical_failure_plans_once_and_new_evidence_plans_once_more(
     loop.step(); assert len(model.plans) == 0; enclose(loop)  # no detour from here: the same failure repeats
     loop.step(); assert len(model.plans) == 0  # a failure alone never replans
     for _ in range(2): loop.step()  # the same failure again: no planner call
-    assert len(model.plans) == 0 and loop.urgent is None
+    assert len(model.plans) == 0
     assert "failed attempts:" in loop._evidence() and loop.fails
 
 
@@ -1547,17 +1554,17 @@ def test_replan_trigger_state_round_trips_and_older_checkpoints_restore(tmp_path
     loop, model, seen = crate_scene(monkeypatch, tmp_path)
     loop.step(); enclose(loop)
     state = json.loads(json.dumps(loop.state()))
-    assert state["planner"]["reported"] == loop.reported and state["planner"]["cause"] == loop.cause and loop.urgent is None
+    assert state["planner"]["reported"] == loop.reported and state["planner"]["cause"] == loop.cause
     resumed, resumed_model, _ = crate_scene(monkeypatch, tmp_path)
     resumed.restore(state)
-    assert (resumed.reported, resumed.cause, resumed.urgent) == (loop.reported, loop.cause, loop.urgent)
+    assert (resumed.reported, resumed.cause) == (loop.reported, loop.cause)
     resumed.step(); assert len(resumed_model.plans) == 0
     resumed.step(); assert len(resumed_model.plans) == 0
     old = json.loads(json.dumps(loop.state()))
     old["planner"].pop("cause"); old["planner"].pop("reported")
     fresh, _, _ = crate_scene(monkeypatch, tmp_path)
     fresh.restore(old)
-    assert fresh.cause is None and fresh.reported is None and fresh.urgent is None
+    assert fresh.cause is None and fresh.reported is None
 
 
 def test_repeated_destination_goes_around_a_known_blocker_when_a_detour_exists(tmp_path, monkeypatch):
@@ -1589,14 +1596,14 @@ def test_evidence_budget_preserves_required_fields_on_an_unchanged_stall(tmp_pat
     loop.recent = [{"step": 1, "place": "p", "choice": {"verb": "approach", "target": "door"}, "verdict": "blocked"}]
     loop.fails = {"p|approach|door": {"n": 2, "step": 1, "why": "blocked", "act": "approach door"}}
     loop.plan_flags = ["reconciliation detail " * 100]
-    loop.stall_pending, loop.stall_unchanged, loop.stuck.progress_n = True, 1, 0
+    loop.stall_unchanged, loop.stuck.progress_n = 1, 20
 
     packet = loop._evidence()
 
     assert len(packet) <= 600
     assert "new places: p" in packet and "tried by place:" in packet
-    assert "heard: text at p" in packet and "closed checks: q at 1" in packet
-    assert "steps since progress: 20" in packet
+    assert "new text since last plan: text at p" in packet and "closed checks: q at 1" in packet
+    assert "steps since last progress: 20 (stall at 20)" in packet
     assert "last stall changed nothing; revise a belief or reorder" in packet
 
 
@@ -2009,3 +2016,100 @@ def test_trace_skill_carries_failure_and_settled(tmp_path, monkeypatch):
     loop, model, seen = crate_scene(monkeypatch, tmp_path)
     row = loop.step()
     assert row["skill"]["failure"]["stage"] == "route" and "settled" in row["skill"]
+
+
+# --- QR.1: one persisted event queue, honest progress ---
+def _loop(tmp_path, model=None): return Loop(GridEnv(), model or StubModel([]), Memory(tmp_path / "memory"), "grid")
+
+
+def test_empty_quest_list_does_not_replan_every_step(tmp_path):
+    loop, plans = _loop(tmp_path), []
+    for step in range(1, 13):
+        loop.step_no = step - 1
+        if loop._plan_trigger({"screen": "world"}): plans.append(step); loop.events, loop.last_plan = [], step
+    assert plans == [1, 4, 7, 10]
+
+
+def test_events_wait_out_the_floor_and_are_never_lost(tmp_path):
+    loop = _loop(tmp_path)
+    loop.notebook.data["quests"] = [{"key": "q", "text": "explore", "status": "open"}]
+    loop.last_plan = loop.step_no = 10
+    for kind, text in (("T2", "arrived somewhere new: A"), ("T1", "new game text: hi"), ("T3", "quest x closed")): loop._event(kind, text, 10)
+    assert loop._plan_trigger({"screen": "world"}) is None and len(loop.events) == 3  # inside the floor: nothing consumed, nothing dropped
+    loop.step_no = 12
+    assert loop._plan_trigger({"screen": "world"}) == "quest x closed; new game text: hi; arrived somewhere new: A"  # T3, T1, T2
+    loop._event("T5", "no open quest", 12); loop._event("T5", "no open quest", 12)
+    assert [e["kind"] for e in loop.events].count("T5") == 1
+
+
+def test_revisit_does_not_drop_pending_new_place_event(tmp_path):
+    loop = _loop(tmp_path)
+    for pid, visits in (("a", 3), ("b", 1), ("c", 3)): loop.mem.upsert("places", {"id": pid, "name": pid.upper(), "screen": "world", "visits": visits})
+    loop._moved("a", "b", "door", 5)
+    loop._moved("b", "c", "door", 6)  # a revisit afterwards
+    assert [e["text"] for e in loop.events] == ["arrived somewhere new: B"] and loop.entered == {"b": 5, "c": 6}
+
+
+def test_events_round_trip_through_checkpoint(tmp_path):
+    loop = _loop(tmp_path)
+    loop._event("T3", "quest q closed", 4); loop._event("T4", "stuck: no_progress", 5); loop.entered, loop.chapter_after = {"p": 3}, 19
+    state = json.loads(json.dumps(loop.state()))
+    resumed = _loop(tmp_path / "r"); resumed.restore(state)
+    assert (resumed.events, resumed.entered, resumed.chapter_after) == (loop.events, {"p": 3}, 19)
+    old = json.loads(json.dumps(loop.state())); planner = old["planner"]
+    planner.pop("events"); planner.update(text_pending=True, text_for_trigger="a clue", focus_closed="quest z closed", arrived="arrived somewhere new: Q", stall_pending=True)
+    resumed.restore(old)
+    assert [e["kind"] for e in resumed.events] == ["T3", "T1", "T2", "T4"]
+
+
+def test_text_does_not_reset_stall_counter(tmp_path):
+    loop = _loop(tmp_path)
+    loop.stuck.progress_n = 7
+    loop._learn(["A sign says KEEP OUT."], [], 3, "p", "world")
+    loop._learn(["MOM: Hello there."], [], 4, "p", "dialogue"); loop._learn([], [], 5, "p", "world")
+    assert loop.stuck.progress_n == 7 and [e["kind"] for e in loop.events] == ["T1", "T1"]
+
+
+def test_menu_text_is_not_a_game_text_trigger(tmp_path):
+    loop = _loop(tmp_path)
+    loop._learn(["FIGHT BAG POKEMON"], [], 3, "p", "menu")
+    assert loop.events == [] and loop.conversation["lines"] == [] and any("FIGHT" in r["text"] for r in loop.mem.rows("knowledge"))
+
+
+def test_reach_check_uses_entry_step_and_all_names(tmp_path):
+    loop = _loop(tmp_path)
+    loop.mem.upsert("places", {"id": "lab", "name": "Lab", "aliases": ["Research Lab"], "screen": "world", "state": "place", "visits": 1})
+    loop.place, loop.entered = "lab", {"lab": 4}
+    loop.notebook.data["quests"] = [{"key": "early", "text": "reach the research lab", "status": "open", "opened": 6, "check": {"kind": "reach", "arg": "Research Lab"}},
+                                    {"key": "q", "text": "reach the research lab", "status": "open", "opened": 3, "check": {"kind": "reach", "arg": "Research Lab"}}]
+    assert loop.notebook.run_checks(7) == ["q"]  # entered at 4: after q opened (3), before early opened (6)
+
+
+def test_evidence_keeps_whole_newest_entries_within_budget(tmp_path):
+    loop = _loop(tmp_path)
+    for n in range(30): loop.notebook.note(n + 1, f'text at p: "entry {n} ' + "y" * 20 + '"')
+    loop.fails = {f"p|approach|t{n}": {"n": 2, "why": "blocked", "act": f"approach t{n}"} for n in range(12)}
+    packet = loop._evidence()
+    assert len(packet) <= 600 and '"entry 29 ' in packet and '"entry 0 ' not in packet
+    assert all(line.count('"') % 2 == 0 for line in packet.splitlines())  # no entry cut mid-quote
+    assert "approach t11 -> blocked x2" in packet and "steps since last progress:" in packet and "new text since last plan:" in packet
+
+
+def test_stall_fallback_is_added_once_without_reapplying_the_plan(tmp_path):
+    loop = _loop(tmp_path)
+    empty = lambda: SimpleNamespace(quests=[], beliefs=[], facts=[], note="n", why="same")
+    for step in (1, 2): loop._apply_plan(empty(), "stuck: no_progress", step)
+    assert [q["key"] for q in loop.notebook.data["quests"]] == ["explore_untried_exit"] and len(loop.notebook.data["notes"]) == 2  # the plan's note applied once per call
+    for step in (3, 4): loop._apply_plan(empty(), "stuck: no_progress", step)
+    assert [q["key"] for q in loop.notebook.data["quests"]] == ["explore_untried_exit"] and len(loop.notebook.data["notes"]) == 4
+
+
+def test_failed_chapter_backs_off(tmp_path):
+    model = Roles([reply({})] * 3)
+    loop = _loop(tmp_path, model)
+    loop.notebook.data["notes"] = [{"step": n, "trigger": "t", "text": f"n{n}"} for n in range(13)]
+    loop._after_outcome(14); loop._after_outcome(15)
+    assert model.roles == ["chapter"] and loop.chapter_after == 19
+    loop.notebook.data["notes"] += [{"step": 20 + n, "trigger": "t", "text": "m"} for n in range(6)]
+    loop._after_outcome(30)
+    assert model.roles == ["chapter", "chapter"]

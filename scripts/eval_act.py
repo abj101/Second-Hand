@@ -13,7 +13,7 @@ from agent.env_pyboy import PyBoyEnv, _INPUTS, find_rom
 from agent.loop import Loop
 from agent.memory import Memory
 from agent.model import ModelUnavailable, Ollama, Reply
-from agent.notebook import Notebook
+from agent.notebook import Notebook, _valid_check
 from agent import plan as plan_mod
 from agent.observer import for_model, wait_settled
 from agent.perceive import perceive
@@ -65,7 +65,7 @@ def report(summary, rows, steps, status, out):
 
 def main(argv=None):
     ap=argparse.ArgumentParser(); ap.add_argument("--frames",default=",".join(map(str,FRAMES))); ap.add_argument("--max-calls",type=int); ap.add_argument("--out",type=Path,default=OUT)
-    ap.add_argument("--run",default="m1_decide",help="--om truth/talk/plan: the recorded run"); ap.add_argument("--exact-exit",action="store_true",help="--om truth: ablate fix 2 (exact exit lookup)"); ap.add_argument("--strip-place",action="store_true",help="--om truth: a run recorded before the perceiver's place field"); ap.add_argument("--from-step",type=int,help="--om branch: checkpoint step; --om plan: planner checkpoint step"); ap.add_argument("--tries",type=int,help="--om plan: independent planner calls (1-8)"); ap.add_argument("--pick",help="--om branch: text of the option label to pick"); ap.add_argument("--om",choices=("places","cases","outcomes","truth","branch","talk","plan","reliability"),help="OM replay eval (no --max-calls needed); reliability: HF5 primitive + continuation check of --run at --from-step"); ap.add_argument("--live",action="store_true",help="--om cases: spend the requests; --om plan: spend up to --tries"); ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)"); ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)"); ap.add_argument("--fresh",action="store_true",help="--om cases/outcomes: rebuild the replay snapshots"); ap.add_argument("--arm",choices=("options","decide"),default="options",help="--om cases: decide = text-only act that answers {why, i}")
+    ap.add_argument("--run",default="m1_decide",help="--om truth/talk/plan: the recorded run"); ap.add_argument("--exact-exit",action="store_true",help="--om truth: ablate fix 2 (exact exit lookup)"); ap.add_argument("--strip-place",action="store_true",help="--om truth: a run recorded before the perceiver's place field"); ap.add_argument("--from-step",type=int,help="--om branch: checkpoint step; --om plan: planner checkpoint step"); ap.add_argument("--tries",type=int,help="--om plan: independent planner calls (1-8)"); ap.add_argument("--pick",help="--om branch: text of the option label to pick"); ap.add_argument("--om",choices=("places","cases","outcomes","truth","branch","talk","plan","reliability","act-size"),help="OM replay eval (no --max-calls needed); reliability: HF5 primitive + continuation check of --run at --from-step"); ap.add_argument("--live",action="store_true",help="--om cases: spend the requests; --om plan: spend up to --tries"); ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)"); ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)"); ap.add_argument("--fresh",action="store_true",help="--om cases/outcomes: rebuild the replay snapshots"); ap.add_argument("--arm",choices=("options","decide"),default="options",help="--om cases: decide = text-only act that answers {why, i}")
     a=ap.parse_args(argv)
     if a.om: return om_main(a, ap)
     if a.max_calls is None: ap.error("the following arguments are required: --max-calls")
@@ -630,6 +630,27 @@ def _independent_notebook(source, root):
     notebook.data, notebook.log = deepcopy(source.data), deepcopy(source.log)
     return notebook
 
+def om_act_size(run, step):
+    """The decide prompt act would send at a checkpoint (0 requests: a capturing stub, never HTTP): characters and len/4 tokens."""
+    loop, env = _plan_checkpoint(run, step)
+    try:
+        per, place = loop.prev, loop.place
+        if not per or not per.get("screen"):
+            print(f"checkpoint {run}/{step:06d} has no cached perception: nothing to measure"); return 2
+        options = loop.world.options(per, place, loop.fails, loop.step_no + 1, inputs=list(env.inputs()))
+        sent = []
+        class Capture:
+            def ask(self, system, user, images=(), schema=None, *, role=""):
+                sent.append((system, user)); return Reply("", {"why": "size", "i": options[0]["n"]}, 0.0, None, None)
+        before = _budget()
+        act(Capture(), None, per, loop.notebook.render_focus(), loop.world.view(loop._goal_text(), place, compact=True), [loop.world.here_flag(loop.fails)],
+            "\n".join(loop_mod._load(loop.game).get("controls", [])), defaults(loop.game), list(env.inputs()), places=[], options=options, decide=True)
+        system, user = sent[0]
+        print(f"decide prompt chars={len(system) + len(user)} (system {len(system)} + user {len(user)}); tokens~{(len(system) + len(user)) / 4:.1f} (len/4); options={len(options)}")
+        print(f"requests=0; ledger unchanged={before == _budget()}")
+        return 0
+    finally: env.close()
+
 def om_plan(run, step, tries, live=False):
     if not 1 <= tries <= 8: raise ValueError("--tries must be between 1 and 8")
     loop, env = _plan_checkpoint(run, step)
@@ -637,7 +658,7 @@ def om_plan(run, step, tries, live=False):
         per = loop.prev or {}
         recent = _plan_recent(run, step)
         view = loop.world.view(loop._goal_text(), loop.place)
-        trigger = "stall: no progress for 20 steps"
+        trigger = "stuck: no_progress"
         if step == 125: loop.stall_unchanged = 1
         evidence = loop._evidence()
         if not live:
@@ -665,7 +686,7 @@ def om_plan(run, step, tries, live=False):
             counter["requests"] += 1
             return post(payload)
         model._post = guarded
-        successes = 0
+        successes, split = 0, {"revise_refute": 0, "reorder": 0}
         print(f"ledger before={before}; tries={tries}; request cap={tries}")
         for n in range(1, tries + 1):
             trial = _independent_notebook(loop.notebook, _qs6_scratch(f"trials/{run}_{step}_{n}"))
@@ -675,11 +696,12 @@ def om_plan(run, step, tries, live=False):
                 quest_rows = [{k: q.get(k) for k in ("key", "text", "status", "why", "check")} for q in result.quests]
                 print(f"try {n}: quests={json.dumps(quest_rows, ensure_ascii=False)}; beliefs={json.dumps(result.beliefs, ensure_ascii=False)}; note={result.note!r}; why={result.why!r}; reconcile flags={json.dumps(reconciled['flags'], ensure_ascii=False)}")
                 if step == 100:
-                    facts = {f.get("key"): f for f in [*loop.notebook.data["facts"].values(), *result.facts] if isinstance(f, dict)}
-                    heard_refs = {key for key, fact in facts.items() if fact.get("source") == "heard"}
-                    heard_quests = [q for q in result.quests if q.get("status", "open") == "open" and bool(set([q.get("why")] if isinstance(q.get("why"), str) else q.get("why", [])) & heard_refs)]
-                    tactical = any(trial._bad_quest(q.get("text", ""), env.inputs()) for q in result.quests)
-                    successes += len(heard_quests) >= 2 and bool(result.note.strip()) and not tactical
+                    named = {q.get("key") for q in result.quests}  # the model's own reply, not the leads reconcile kept
+                    heard = [q for q in trial.data["quests"] if q.get("key") in named and q.get("status") == "open" and trial._heard_quest(q)]
+                    checks = {q["key"]: "valid" if _valid_check(q.get("check")) else "needs check" if f"needs check {q['key']}" in reconciled["flags"] else "MISSING" for q in heard}
+                    rejected = [f for f in reconciled["flags"] if f.startswith("rejected")]
+                    print(f"try {n}: heard open={len(heard)}; checks={json.dumps(checks)}; rejected={len(rejected)}")
+                    successes += len(heard) >= 2 and "MISSING" not in checks.values() and not rejected
                 elif step == 125:
                     changed_belief = any(b.get("status") in ("revised", "refuted") and str(b.get("reason", "")).strip() for b in result.beliefs)
                     beliefs = set(loop.notebook.data["beliefs"]) | {b.get("key") for b in result.beliefs}
@@ -690,9 +712,11 @@ def om_plan(run, step, tries, live=False):
                     new_retained = [key for key in order if key in retained]
                     reordered = len(retained) >= 2 and old_retained != new_retained
                     reordered_by_belief = reordered and any(beliefs & set([q.get("why")] if isinstance(q.get("why"), str) else q.get("why", [])) for q in result.quests)
+                    split["revise_refute"] += changed_belief; split["reorder"] += reordered_by_belief and not changed_belief
+                    print(f"try {n}: revise/refute={bool(changed_belief)}; reorder={bool(reordered_by_belief)}")
                     successes += changed_belief or reordered_by_belief
             except (run_agent.CallCap, ModelUnavailable) as e: print(f"try {n}: failed: {e}")
-        print(f"successes={successes}/{tries}; requests={counter['requests']}; ledger before={before}; after={_budget()}")
+        print(f"successes={successes}/{tries}; split={json.dumps(split)}; requests={counter['requests']}; ledger before={before}; after={_budget()}")
         return 0 if successes >= math.ceil(2 * tries / 3) else 1
     finally: env.close()
 
@@ -840,9 +864,10 @@ def om_main(a, ap):
     sys.stdout.reconfigure(encoding="utf-8")  # option labels carry arrows; a redirected cp1252 stdout cannot print them
     if a.arm == "decide": DECIDE, OM_CAP = True, 16
     if a.live and a.dry: ap.error("--live and --dry are exclusive")
-    if a.om in ("talk", "plan") and not re.fullmatch(r"[A-Za-z0-9_-]+", a.run): ap.error("--run must be a run name")
+    if a.om in ("talk", "plan", "act-size") and not re.fullmatch(r"[A-Za-z0-9_-]+", a.run): ap.error("--run must be a run name")
     if a.om == "talk":
         if a.live: ap.error("--om talk is a zero-request replay")
+    if a.om == "act-size" and (a.live or a.from_step is None): ap.error("--om act-size is a zero-request measure and requires --from-step")
     if a.om == "plan":
         if a.from_step is None: ap.error("--om plan requires --from-step")
         if a.tries is None:
@@ -857,6 +882,7 @@ def om_main(a, ap):
     try:
         if a.om == "talk": return om_talk(a.run)
         if a.om == "plan": return om_plan(a.run, a.from_step, a.tries, a.live)
+        if a.om == "act-size": return om_act_size(a.run, a.from_step)
         if a.om == "reliability": return om_reliability(a.run, a.from_step)
         return om_branch(a.run, a.from_step, a.pick) if a.om == "branch" else om_truth(a.run, no_names=a.strip_place, exact_exit=a.exact_exit) if a.om == "truth" else om_places() if a.om == "places" else om_outcomes(a.steps, a.fresh) if a.om == "outcomes" else om_cases(a.live, a.steps, a.fresh)
     except OmIncompatible as e: print(f"incompatible old replay / inconclusive: {e}", flush=True); return 2

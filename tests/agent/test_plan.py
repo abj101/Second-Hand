@@ -71,7 +71,27 @@ def test_accepted_chapter_and_current_log_span_reach_next_plan_prompt():
 def test_missing_fields_parse_to_empty_values():
     result = plan(StubModel({}), "cycle", notebook(), "", [], [])
 
-    assert result == Plan([], [], [], "", "")
+    assert result == Plan(None, [], [], "", "")
+
+
+def test_refutation_without_confidence_is_kept():
+    result = plan(StubModel({
+        "beliefs": [
+            {"key": "route", "status": "refuted", "reason": "The sign names another place."},
+            {"key": "new", "status": "held"},
+        ],
+    }), "new text", notebook(), "", [], [])
+
+    assert result.beliefs == [
+        {"key": "route", "status": "refuted", "reason": "The sign names another place."},
+        {"key": "new", "status": "held", "confidence": "low"},
+    ]
+
+
+def test_non_list_quests_parse_as_none():
+    result = plan(StubModel({"quests": {"key": "bad"}}), "cycle", notebook(), "", [], [])
+
+    assert result.quests is None
 
 
 def test_parser_drops_bad_keys_and_invalid_belief_confidence():
@@ -117,3 +137,11 @@ def test_prompt_contains_strategy_rules_and_omits_removed_tree_and_exit_rules():
         "first open quest now", "at most 400 characters", "what changed in your understanding", "what you expect next",
     ):
         assert required in prompt
+
+
+def test_system_asks_for_checks_and_stays_under_fifteen_sentences():
+    check_rule = "Give every quest that names a place, a person, or words to hear a check: reach <place name>, speak <speaker>, or text <words>."
+
+    assert SYSTEM.count(check_rule) == 1
+    assert SYSTEM.count(".") <= 14
+    assert "Reply JSON:" not in SYSTEM

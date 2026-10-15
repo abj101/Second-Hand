@@ -13,6 +13,7 @@ SYSTEM = (
     "Keep refuted ideas ruled out. "
     "What the game said is a fact and outranks beliefs. "
     "A place you were told about may be a quest before it is mapped. "
+    "Give every quest that names a place, a person, or words to hear a check: reach <place name>, speak <speaker>, or text <words>. "
     "On a stall, change something by revising a belief or reordering quests, and say why. "
     "Return the full ordered quest list with no more than five open quests; work on the first open quest now. "
     "Write a note of at most 400 characters explaining what changed in your understanding, why this order makes sense, and what you expect next. "
@@ -26,7 +27,6 @@ REPLY = (
     '"status":"held"|"revised"|"refuted", "reason":why it changed}, '
     '"facts": list of {"key":short id up to 40 characters, "text":what was heard or seen, "from":speaker, "source":"heard"|"saw", "place":where}, '
     '"note": a note up to 400 characters, "why": one sentence explaining the plan}. '
-    'A quest may have "check": {"kind":"reach"|"speak"|"text", "arg":string}; omit invalid checks.'
 )
 _RECORD = {"type": "object", "propertyNames": {"type": "string", "maxLength": 40},
            "properties": {"key": {"type": "string", "maxLength": 40}}}
@@ -68,7 +68,7 @@ CHAPTER_SCHEMA = {
 
 @dataclass
 class Plan:
-    quests: list[dict]
+    quests: list[dict] | None
     beliefs: list[dict]
     facts: list[dict]
     note: str
@@ -123,12 +123,23 @@ def plan(model, trigger: str, notebook, view: str, screen_text: list, recent: li
     ]
     data = model.ask(SYSTEM, "\n".join(lines), [], SCHEMA, role="plan").data
     data = data if isinstance(data, dict) else {}
-    quests = _records(data.get("quests"))
-    for quest in quests:
+    quests = _records(data.get("quests")) if isinstance(data.get("quests"), list) else None
+    for quest in quests or []:
         check = quest.get("check")
         if not (isinstance(check, dict) and check.get("kind") in ("reach", "speak", "text") and isinstance(check.get("arg"), str)):
             quest.pop("check", None)
-    beliefs = [belief for belief in _records(data.get("beliefs")) if belief.get("confidence") in ("low", "mid", "high")]
+    existing = state.get("beliefs", {})
+    existing = existing if isinstance(existing, dict) else {}
+    beliefs = []
+    for belief in _records(data.get("beliefs")):
+        confidence = belief.get("confidence")
+        if confidence not in ("low", "mid", "high"):
+            if "confidence" in belief and belief.get("status") not in ("revised", "refuted"):
+                continue
+            belief.pop("confidence", None)
+            if belief.get("key") not in existing:
+                belief["confidence"] = "low"
+        beliefs.append(belief)
     note = data.get("note")
     return Plan(quests, beliefs, _records(data.get("facts")), note[:400] if isinstance(note, str) else "",
                 data.get("why") if isinstance(data.get("why"), str) else "")

@@ -217,10 +217,10 @@ function lens(r){ // the perception layer over a small copy of the frame: detect
     ctx.fillStyle="#080808"; ctx.fillRect(lx,ly-12,w,12); ctx.strokeStyle="#303030"; ctx.strokeRect(lx,ly-12,w,12); ctx.fillStyle=me?"#f2f2f2":"#c8c8c8"; ctx.fillText(text,lx+3,ly);}
 }
 function goals(){
-  const nb=last.notebook||{}, focus=nb.focus, out=[]; $("gfocus").textContent=focus?"FOCUS "+focus:"";
+  const nb=last.notebook||{}, open1=Array.isArray(nb.quests)?nb.quests.find(q=>q.status==="open"):null, planned=[...rows].reverse().find(r=>r.plan&&r.plan.focus), focus=(open1&&open1.key)||nb.focus||(planned&&planned.plan.focus)||"", out=[]; $("gfocus").textContent=focus?"FOCUS "+focus:"";
   if(Array.isArray(nb.quests)){
     for(const q of nb.quests){const key=q.key||q.id||"quest", check=q.check?`${q.check.kind}: ${q.check.arg}`:"";
-      out.push(`<div class="${esc(q.status)}">${esc(key)}  <span>${esc(q.text)} / ${esc(q.status||"active")}${check?` / check ${esc(check)}`:""}</span></div>`);}
+      out.push(`<div class="${key===focus?"focus ":""}${esc(q.status)}">${esc(key)}  <span>${esc(q.text)} / ${esc(q.status||"active")}${check?` / check ${esc(check)}`:""}</span></div>`);}
     const beliefs=nb.beliefs||{};
     for(const [key,b] of Object.entries(beliefs)){const state=b.stance||b.status||"held";
       out.push(`<div>${esc(state==="ruled_out"||state==="ruled out"?"RULED OUT":"HELD")}  <span>${esc(key)} / ${esc(b.text||b.value||"")}${b.reason?` / ${esc(b.reason)}`:""}</span></div>`);}

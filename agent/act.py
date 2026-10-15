@@ -11,21 +11,18 @@ SYSTEM = ("You play a video game you have never seen, from screenshots only. You
   "The log lists what already happened, people's words included: do not repeat finished conversations or actions unless the focus needs them. "
   "Treat your notes as hypotheses: what you see now beats what you wrote. "
   "Flags list actions that already failed here: after one failure try something different and never repeat one that failed twice. "
-  "When you are stuck, write down what you learned. Return only JSON.")
+  "Return only JSON.")
 REPLY = ('Reply JSON: {"place": short name for where you are, from what you see (never a screen type like world, dialogue or menu; reuse a known place name only for the same place), '
-  '"notebook": list of edits: {"op":"focus","status":"done"|"blocked","evidence":"what you saw"}, {"op":"tried","text":"what you just tried for the focus"}, or {"op":"set"|"remove","section":"hints"|"lessons","key":short id,"value":{...}}, '
   '"action": {"thing": n, "verb": "approach"|"interact"|"select"|"click"}, {"verb": "advance"|"cancel"|"type"}, {"go_to": a thing on screen or remembered, a known place, or "unexplored" for the nearest unexplored part of this place}, or {"buttons": up to 8 of %s}; '
   '"text": text to type for verb type, else null, "expect": one of %s, "why": one sentence}. '
   'On a dialogue or menu screen, use advance, select or cancel; a ready-made choice (such as suggested names) beats typing. '
-  'On a text field with an on-screen keyboard, use {"verb": "type"} with the text in "text". Never pick letter buttons one by one. '
-  'Hint values: {"text","source","checked"}. Lesson values: {"text"}. '
-  'Only edit the notebook when something changed.')
+  'On a text field with an on-screen keyboard, use {"verb": "type"} with the text in "text". Never pick letter buttons one by one.')
 OPTION_NOTE = (" The option notes are what already happened here; prefer options that have not failed. "
   "The free buttons option and the options that list names are answered with {\"buttons\": [...]} or {\"go_to\": \"<name>\"}.")
 REPLY_OPTIONS = REPLY.replace('"action": {"thing": n,', '"action": {"i": n} to pick one option by number (preferred); the free shapes only if no option fits: {"thing": n,', 1)
-SCHEMA = {"type": "object", "properties": {"place": {"type": "string"}, "notebook": {"type": "array", "items": {"type": "object"}},
+SCHEMA = {"type": "object", "properties": {"place": {"type": "string"},
   "action": {"type": "object"}, "text": {"type": ["string", "null"]}, "expect": {"type": "string"}, "why": {"type": "string"}},
-  "required": ["place", "notebook", "action", "expect", "why"]}
+  "required": ["place", "action", "expect", "why"]}
 
 @dataclass
 class Act:
@@ -55,7 +52,7 @@ def _option_text(o: dict) -> str:  # the tool word once: the label alone when it
     return o["label"] if any(f" {t} " in f" {' '.join(head.split()[:3])} " for t in (w, o["tool"].casefold())) else f"{o['tool']} {o['label']}"
 
 DECIDE_SYSTEM = ("You choose the next action in a video game. You do not see the screen: the facts below come from the game's map memory "
-  "and a screen reader, and they are true. A planner keeps your quests; work on the top quest. Other open quests are listed; if an option would finish one of them now, you may take it. Pick exactly one of the numbered options. "
+  "and a screen reader, and they are true. The beliefs and planner note below are hypotheses; what you see now takes priority. A planner keeps your quests; work on the top quest. Other open quests are listed; if an option would finish one of them now, you may take it. Pick exactly one of the numbered options. "
   "An option whose notes say it failed or had no effect should not be picked again while another option could still work. "
   "Return only JSON.")
 
