@@ -401,3 +401,23 @@ def test_selected_exit_travels_through_its_own_door_not_another_to_the_same_plac
     row = next(o for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["label"].startswith("exit LEFT"))
     assert row["exit"] == {"tile": [-2, 0], "to": "hall"}
     assert world.plan(world.resolve("Hall", per, "room"), exit=row["exit"])[0]["exit_tile"] == (-2, 0)
+
+
+def test_exit_on_the_players_own_tile_is_crossed_by_its_verified_push_or_not_offered(tmp_path):
+    # m1_hf_checkpoint_1 steps 128-130, 136: a door mat under the player was offered as approach, which refuses "target is the player"
+    mat = [{"name": "exit: door mat", "kind": "exit", "at": at(0, 0)}]
+    mem = Memory(tmp_path / "unverified"); room(mem)
+    world, per = setup(mem, mat); world.pos = (0, 0)
+    assert not any(o["tool"] == "approach" and "door mat" in o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS))
+    mem = Memory(tmp_path / "verified"); room(mem); tile(mem, 0, 0, {"dir": "DOWN", "to": "hall", "arrive": [0, 0], "src": "observed"})
+    world, per = setup(mem, mat); world.pos = (0, 0)
+    row = next(o for o in world.options(per, "room", {}, 3, inputs=INPUTS) if "Hall" in o["label"])
+    assert row["action"] == {"go_to": "Hall"} and row["exit"] == {"tile": [0, 0], "to": "hall"}
+
+
+def test_exit_with_no_tile_perceived_on_the_player_is_not_offered_as_approach(tmp_path):
+    # m1_hf_checkpoint_2 steps 128-130: the door mat had no tile, so the tile test missed and approach refused "target is the player"
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, [{"name": "exit: door mat", "kind": "exit", "at": at(0, 0)}]); world.pos = (0, 0)
+    world.entity_tiles = {}; [mem.upsert("entities", {**e, "tile": None}) for e in mem.rows("entities")]  # perceived, never projected to a tile
+    assert not any(o["tool"] == "approach" and "door mat" in o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS))

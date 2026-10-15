@@ -17,7 +17,7 @@ def test_repair_stage_caps_preserve_prior_spend(tmp_path, monkeypatch, stage, sp
     assert json.loads(path.read_text()) == expected
 
 
-@pytest.mark.parametrize("key,limit,initial", [("total",3125,3124), ("m1",3075,3074)])
+@pytest.mark.parametrize("key,limit,initial", [("total",3265,3264), ("m1",3215,3214)])
 def test_phase_and_m1_caps_preserve_spend(tmp_path, monkeypatch, key, limit, initial):
     monkeypatch.chdir(tmp_path)
     path = tmp_path / "runs/e3_budget.json"; path.parent.mkdir()

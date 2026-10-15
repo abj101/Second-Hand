@@ -1045,3 +1045,15 @@ def test_plan_route_to_an_exit_tile_avoids_an_actor(tmp_path):
     legs = world.plan({"kind": "place", "place": "other", "tile": (0, 0), "id": "other", "stale": False})
 
     assert legs[0]["exit_tile"] == (1, 0) and (0, 0) not in _walk((-1, 0), legs[0]["dirs"])
+
+
+def test_travel_leg_that_cuts_into_another_place_is_done_and_left_open_for_reidentification(tmp_path, monkeypatch):
+    # m1_hf_checkpoint_1 step 127: a cut on a leg with no expected exit was reported blocked, a false failure for the planner
+    from PIL import Image; from agent.skills import Ctx, SkillResult; from agent import world as world_module; from tests.agent.fakes import GridEnv, StubModel
+
+    mem = Memory(tmp_path); place(mem, "out", "Out"); place(mem, "shop", "Shop")
+    frame = Image.new("RGB", (8, 8), "red")
+    monkeypatch.setattr(world_module, "approach", lambda ctx, *_a, **_k: SkillResult("done", "scene cut", 1, 0, frame, frame, (0, 0), False, [("UP", (0, 0))]))
+    world = World(mem, 16); world.current_place = "out"
+    result = world.travel(Ctx(GridEnv(), StubModel([]), 16), [{"place": "out", "dirs": ["UP", "RIGHT"], "push": None}], 3)
+    assert result.status == "done" and result.failure is None and world._travel_open and world._travel_cut

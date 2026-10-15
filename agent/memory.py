@@ -29,9 +29,6 @@ def _base(value: str) -> str:
     return re.sub(r"(#\d+)+$", "", _key(value)).removeprefix("exit:").strip()  # "exit: path south" == "path south"
 
 
-def _via(value) -> str: return _key(value or "").removeprefix("exit:").strip()
-
-
 # The perceiver's screen enum (agent/perceive.py): a place is never named or aliased with one of these.
 SCREEN_NAMES = frozenset({"world", "dialogue", "menu", "keyboard", "battle", "title", "other"})
 _REFERENCE = re.compile(r"\s\[[^\[\]]+\]$")  # "<label> [<place id>]": our own disambiguated label, a pointer and never a name
@@ -164,10 +161,6 @@ class Memory:
                     if r.get("place") == prev and (r.get("exit") or {}).get("to") not in (None, prev) and max(abs(r["x"] - exit[0]), abs(r["y"] - exit[1])) <= 1]
             if near and (min(near)[:2] == (0, False) or len({n[2] for n in near}) == 1):
                 return min(near)[2]
-        if cut and prev:
-            for edge in self.get("places", prev).get("edges", []) if self.get("places", prev) else ():
-                if via and _via(edge.get("via")) == _via(via) and edge.get("to") and edge["to"] != prev:
-                    return edge["to"]
         if cut and via_id:
             known = next((r["o"] for r in self.rows("relations") if r.get("s") == via_id and r.get("p") == "leads_to" and r.get("state") == "live" and r.get("o") != prev and self.get("places", r.get("o"))), None)
             if known: return known

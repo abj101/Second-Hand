@@ -1508,7 +1508,7 @@ def test_repeated_destination_without_a_detour_is_a_zero_input_failure_and_optio
     loop.step(); enclose(loop)
     row = loop.step(); again = loop.step()
     assert len(seen["routes"]) == 1  # no skill ran after the first: nothing was pressed
-    assert row["skill"] == {"status": "blocked", "reason": "no route avoids blocker", "inputs": 0, "calls": 0}
+    assert {k: row["skill"][k] for k in ("status", "reason", "inputs", "calls")} == {"status": "blocked", "reason": "no route avoids blocker", "inputs": 0, "calls": 0}
     assert again["skill"]["inputs"] == 0 and loop.world.pos == (0, 0)
     assert seen["options"][1] == seen["options"][2] and "approach sign" in seen["options"][1]  # the chooser's rows: same labels, same order
     assert loop.notebook.data["goals"] == {"g": {"text": "reach the sign", "status": "active"}}  # the harness adds no goal
@@ -1549,7 +1549,7 @@ def test_stale_select_of_unflagged_furniture_fails_without_menu_read_or_input(tm
     loop = Loop(env, model, Memory(tmp_path / "memory"), "grid")
     row = loop.step()
     assert env.keys == [] and "skill" not in model.roles  # no menu read, no press
-    assert row["skill"] == {"status": "failed", "reason": "not a selectable choice on this screen", "inputs": 0, "calls": 0}
+    assert {k: row["skill"][k] for k in ("status", "reason", "inputs", "calls")} == {"status": "failed", "reason": "not a selectable choice on this screen", "inputs": 0, "calls": 0}
     assert row["verdict"] != "hit"
     intent = row["choice"]["intent"]
     assert loop.fails[intent]["n"] == 1 and loop.fails[intent]["act"] == "select television"
@@ -1637,16 +1637,34 @@ def test_inputs_then_unsettled_after_frame_resolve_once_on_the_next_settled_fram
     assert env.keys == ["RIGHT"] and seen["act"] == 1 and loop.fails == {} and loop.pending is None
 
 
-def test_forever_animated_screen_gives_one_bounded_pending_row_per_step(tmp_path, monkeypatch):
+def test_forever_animated_screen_holds_once_then_acts_on_the_latest_frame_marked_timed_out(tmp_path, monkeypatch):
+    # m1_hf_checkpoint_2 steps 143-150: water and a wandering NPC never settle; HF contract 5 allows one observe-only retry, not an unbounded hold
     short_settle(monkeypatch)
-    env = Busy(busy=10 ** 9); seen = scripted_world(monkeypatch)
+    env = Busy(busy=10 ** 9); seen = scripted_world(monkeypatch, acts=[chosen({"buttons": ["RIGHT"]})])
     loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
 
-    rows = [loop.step() for _ in range(5)]
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True  # no probe press before the action
 
-    assert [r["observation_status"] for r in rows] == ["pending"] * 5 and [r["step"] for r in rows] == [1, 2, 3, 4, 5]
-    assert env.ticks == 5 * 6 and seen == {"perceive": 0, "act": 0} and env.keys == []
-    assert len(trace_rows(tmp_path)) == 5
+    hold, acted = loop.step(), loop.step()
+
+    assert hold["observation_status"] == "pending" and hold["choice"] is None and (tmp_path / hold["frame"]).exists()
+    assert acted["observation_status"] == "timed_out" and acted["execution"] == "done" and acted["choice"]["verb"] == "buttons"
+    assert seen["act"] == 1 and env.keys == ["RIGHT"] and loop.pending is None  # before- and after-frame are perceived on the latest frames
+    assert [r["observation_status"] for r in trace_rows(tmp_path)] == ["pending", "timed_out"]
+
+
+def test_pending_action_gets_one_retry_then_resolves_timed_out_and_each_hold_row_has_its_own_frame(tmp_path, monkeypatch):
+    short_settle(monkeypatch)
+    env = Busy(plan=[10 ** 9]); seen = scripted_world(monkeypatch, acts=[chosen({"buttons": ["RIGHT"]})])
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True  # no probe press before the action
+
+    first, retry, resolved = loop.step(), loop.step(), loop.step()
+
+    assert first["observation_status"] == "pending" and first["execution"] == "done" and env.keys == ["RIGHT"]
+    assert retry["observation_status"] == "pending" and retry["frame"] == f"frames/{retry['step']:06d}.png" and (tmp_path / retry["frame"]).exists()
+    assert resolved["observation_status"] == "timed_out" and resolved["action_step"] == first["step"] and resolved["execution"] == "done"
+    assert resolved["frame"] == first["frame"] and loop.pending is None and seen["act"] == 1 and env.keys == ["RIGHT"]
 
 
 def test_checkpoint_while_an_action_is_pending_resumes_without_input_and_counts_its_failure_once(tmp_path, monkeypatch):
@@ -1877,3 +1895,10 @@ def test_pending_checkpoint_through_the_runner_writer_resumes_with_one_press(tmp
     resolved = later[-1]
     assert all(n == 0 for n in presses_per_step)  # nothing is pressed before the resolution row, nor in it
     assert resolved["observation_status"] == "settled" and resolved["action_step"] == first["step"] and env.keys == ["RIGHT"]
+
+
+def test_trace_skill_carries_failure_and_settled(tmp_path, monkeypatch):
+    # m1_hf_checkpoint_1: the trace skill dict dropped failure/settled, so HF1/HF4 stage data never reached the trace
+    loop, model, seen = crate_scene(monkeypatch, tmp_path)
+    row = loop.step()
+    assert row["skill"]["failure"]["stage"] == "route" and "settled" in row["skill"]

@@ -191,7 +191,7 @@ def test_match_place_ignores_exit_prefix_and_follows_leads_to(tmp_path):
     mem.upsert("places", {"id": "p_2f", "name": "2f", "edges": []})
     mem.upsert("places", {"id": "p_out", "name": "out", "edges": []})
     cut = {"prev": "p_1f", "cut": True}
-    assert mem.match_place({"screen": "world"}, 5, via=" Exit: Stairs", **cut) == "p_2f"
+    assert mem.match_place({"screen": "world"}, 5, via=" Exit: Stairs", **cut) not in ("p_2f", "p_1f")  # a label is never arrival identity (HF contract 4)
     mem.relate("e_door", "leads_to", "p_2f", src="inferred", step=1)
     assert mem.match_place({"screen": "world"}, 5, prev="p_out", cut=True, via="exit: door", via_id="e_door") == "p_2f"
 
@@ -354,3 +354,14 @@ def test_first_place_name_sticks_and_later_names_become_aliases(tmp_path):
     for step, name in ((2, "tiled room"), (3, "library"), (4, "dining room")): mem.name_place("p", name, step)
     row = mem.get("places", "p")
     assert row["name"] == "tiled room" and row["aliases"] == ["tiled room", "library", "dining room"]
+
+
+def test_never_crossed_door_with_a_crossed_doors_label_is_a_new_place_not_its_destination(tmp_path):
+    # m1_hf_checkpoint_1 step 135: "house door" at another tile resolved by label to where "exit: house door" led; Oak's lab merged into the house
+    mem = Memory(tmp_path)
+    mem.upsert("places", {"id": "p_out", "screen": "world", "state": "place", "landmarks": [["sign", "object"]], "edges": []})
+    mem.upsert("places", {"id": "p_house", "screen": "world", "state": "place", "landmarks": [["bed", "furniture"], ["tv", "object"]], "edges": []})
+    mem.add_edge("p_out", "approach", "exit: house door", "p_house", True)
+    lab = {"screen": "world", "entities": [{"name": "machine", "kind": "object"}, {"name": "bookshelf", "kind": "furniture"}]}
+    pid = mem.match_place(lab, 9, prev="p_out", cut=True, via="house door", exit=(-1, 6, "UP"), via_id="e_house_door_2")
+    assert pid not in ("p_house", "p_out") and mem.get("places", pid)["state"] == "candidate"

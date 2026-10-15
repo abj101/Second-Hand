@@ -45,6 +45,7 @@ class Loop:
         self.conversation, self.text_for_trigger = {"place": None, "lines": []}, ""
         self.fails, self.moves, self.urgent, self.arrived = {}, [], None, None  # per-place failed actions, recent place moves, a replan reason that skips the throttle
         self.pending = None  # an action whose after-frame had not settled: its state for _resolve (None when none)
+        self.unsettled = 0  # outer-step waits in a row that never settled; HF contract 5: one observe-only retry, then act on the latest frame (ponytail: not checkpointed, a restore may hold once more)
         self.invocation = None  # the runner's manifest invocation number (set by scripts/run_agent.py)
         self.provenance_incomplete = False  # restored from a checkpoint with no recorded modes: earlier calls and modes are unknown
         self._seq0 = None  # model.seq when the current outer step began: its model calls are (_seq0, seq]
@@ -66,9 +67,9 @@ class Loop:
         return per, key, False, []
     def step(self):
         start, calls, self._seq0 = time.perf_counter(), self.model.calls, getattr(self.model, "seq", None)
-        before_set = wait_settled(self.env); before = before_set.frame; prior = self.place;
+        before_set = wait_settled(self.env); before = before_set.frame; prior = self.place; self.unsettled = 0 if before_set.settled else self.unsettled + 1
         if self.pending is not None: return self._resolve(before_set, start, calls)
-        if not before_set.settled: return self._pre_hold(before_set, start, calls)  # never settled: no perception, no input
+        if self.unsettled == 1: return self._pre_hold(before_set, start, calls)  # never settled: no perception, no input, once; after that act on the latest frame
         if self.stuck.n < 2: self.reperception_used = False
         relook = self.stuck.n >= 2 and not self.reperception_used
         before_mark = bool(self.prev and self.prev.get("screen") == "world" and self.prev_frame is not None and not cut(self.prev_frame, before, before_set.blank_seen))
@@ -204,7 +205,7 @@ class Loop:
             pred = {**pred, "effect": "place_changes", "detail": pred.get("detail") if pred.get("effect") == "place_changes" else None}
         row_choice = {"i": choice.i, **affs[choice.i], "id": targets[choice.i], "called": choice.called, "text": choice.text, "why": choice.why, "intent": intent} if choice else None
         # the action's state, JSON-safe: what a deferred resolution needs once the screen settles (see _resolve)
-        s = {"action_step": self.step_no + 1, "frame": f"frames/{self.step_no + 1:06d}.png", "place": place, "per": per, "reused": reused, "frame_hash": frame_hash, "marked": marked,
+        s = {"action_step": self.step_no + 1, "before_settled": before_set.settled, "frame": f"frames/{self.step_no + 1:06d}.png", "place": place, "per": per, "reused": reused, "frame_hash": frame_hash, "marked": marked,
              "player_fix": player_fix, "options": len(affs), "choice": row_choice, "aff": affs[choice.i] if choice else None, "tid": targets[choice.i] if choice else None,
              "pred": pred, "detail": choice.detail if choice else None, "used": choice.used if choice else [], "intent": intent, "unknown": unknown, "scene_cut": scene_cut,
              "exit_key": list(exit_key) if exit_key else None, "cut_dir": cut_dir, "travel": travel_legs is not None, "route_len": len(act_route["dirs"]) if act_route else None,
@@ -215,7 +216,7 @@ class Loop:
              "world": {"cut_dir": cut_dir, "pos": list(self.world.pos), "travelled": skill is self.world._travelled, "travel_open": self.world._travel_open, "current_place": self.world.current_place}}
         try: after_set = wait_settled(self.env)
         except BaseException: self.cached = self.cached_hash = None; raise
-        if after_set.settled and getattr(skill, "settled", None) is not False: return self._settle(s, skill, after_set, start, calls)
+        if after_set.settled and getattr(skill, "settled", None) is not False or self.unsettled: return self._settle(s, skill, after_set, start, calls)  # an unsettled streak already had its retry
         return self._hold_action(s, skill, start, calls, keep=bool(skill.inputs))  # inputs were sent: wait for the settled frame; none sent: no evidence
     def _settle(self, s, skill, after_set, start, calls, *, resolved=False):
         """Evidence and the row for an action whose after-frame settled: one tail for an immediate action and a resolved pending one."""
@@ -267,12 +268,12 @@ class Loop:
             if world_exit: self.world.mark_exit(place, cut_dir, next_place, self.world.pos, self.step_no+1)
         row = {"step": self.step_no + 1, "t": time.time(), "place": place, "screen": per.get("screen"),
             "task": None, "frame": s["frame"], "after": f"frames/{self.step_no+1:06d}_after.png", "options": s["options"],
-            "choice": choice, "pred": pred, "used": s["used"], "skill": {"status": skill.status, "reason": skill.reason, "inputs": skill.inputs, "calls": skill.calls},
+            "choice": choice, "pred": pred, "used": s["used"], "skill": {"status": skill.status, "reason": skill.reason, "inputs": skill.inputs, "calls": skill.calls, "failure": getattr(skill, "failure", None), "settled": getattr(skill, "settled", None)},
             "outcome": outcome, "verdict": v, "calls": self.model.calls-calls, "ms": int((time.perf_counter()-start)*1000), "shortcut": None,
             "ranker": None, "perception_reused": s["reused"], "frame_hash": s["frame_hash"], "marked": s["marked"],
             "scene_cut": scene_cut, "next_place": next_place, "verified_edge": verified_edge, "view_ids": [], "tile": self.world.pos if self.tile_px else None, "drift_fix": None, "player_fix": player_fix, "entities": self.world.entities, "scroll": spatial["scroll"], **({"exit": list(exit_key)} if scene_cut and not modal and next_place != place and exit_key else {}),
             "act": None if resolved else s["act"], "option": None if resolved else s["option"], "plan": None if resolved else s["plan"], "probe": None if resolved else s["probe"],
-            "observation_status": "settled", "execution": skill.status, "action_step": s["action_step"] if resolved else None, **self._provenance(),
+            "observation_status": "settled" if after_set.settled and s.get("before_settled", True) else "timed_out", "execution": skill.status, "action_step": s["action_step"] if resolved else None, **self._provenance(),
             **({"flags": [f"merge_pending: {self.world.merge_pending}"]} if self.world.merge_pending else {})}
         self.step_no += 1
         after.save(self.mem.root.parent / row["after"])
@@ -317,9 +318,9 @@ class Loop:
     def _resolve(self, wait, start, calls):
         """An outer step while an action waits for its settled frame: observe only, no input, resolved once the frame settles."""
         p = self.pending
-        if not wait.settled:
-            p["retries"] = p.get("retries", 0) + 1
-            return self._hold_row(p["frame"], p["place"], start, calls, action_step=p["action_step"], retries=p["retries"])
+        if not wait.settled and not p.get("retries"):
+            p["retries"] = p.get("retries", 0) + 1; name = f"frames/{self.step_no + 1:06d}.png"; (self.mem.root.parent / "frames").mkdir(parents=True, exist_ok=True); wait.frame.save(self.mem.root.parent / name)
+            return self._hold_row(name, p["place"], start, calls, action_step=p["action_step"], retries=p["retries"])
         path = self.mem.root.parent / p["frame"]
         if not path.exists(): return self._degraded(p, wait, start, calls)
         skill = self._skill_from(p["skill"], Image.open(path).convert("RGB"), wait.frame)

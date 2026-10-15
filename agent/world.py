@@ -7,7 +7,7 @@ from PIL import ImageDraw
 from agent.memory import TRANSIENT, _base, _distance, _nameable, normalize_kind, place_aliases, place_name
 from agent.observer import changed, cut
 from agent.space import DIRS, exit_to, fold, frontier, mark_exit, route, tile_of
-from agent.skills import SkillResult, approach, press
+from agent.skills import SkillResult, approach, on_player, press
 
 TRAVEL_MAX_INPUTS = 120
 MISS_TO_STALE, MISS_TO_GONE, ACTOR_STALE_STEPS = 2, 4, 20
@@ -67,6 +67,7 @@ def _open_edge(frame, t):
 
 class World:
     _travel_open = False
+    size = None
     def __init__(self, mem, tile_px):
         self.mem, self.tile_px = mem, tile_px
         self.pos, self.drift, self.drift_ref = (0, 0), None, None
@@ -120,7 +121,7 @@ class World:
         ImageDraw.Draw(image).rectangle([x - 9, y - 10, x + 9, y + 9], outline="red", width=1)
         return image, True
     def before(self, per, place, prior, size, step):
-        self.current_place = place
+        self.current_place, self.size = place, size
         if prior and place != prior:
             self.pos, self.drift, self.drift_ref = self._seen_at(place) or (0, 0), None, None
             self._observed_per = None
@@ -798,7 +799,9 @@ class World:
             for x in self._exits(place, live, exit_things):
                 dest = x["dest"]
                 if dest: dests.add(dest)
-                if x["idx"] is not None: action, tool, target = {"thing": x["idx"], "verb": "approach"}, "approach", x["name"]
+                under = x["idx"] is not None and self.size is not None and on_player(ents[x["idx"]].get("at"), next((e.get("at") for e in ents if e.get("kind", "").lower() == "player"), None), self.size, self.tile_px)  # approach's own refusal test: cross by the verified push, else nothing to offer
+                if under and not (dest and x["dir"]): continue
+                if x["idx"] is not None and not under: action, tool, target = {"thing": x["idx"], "verb": "approach"}, "approach", x["name"]
                 elif dest: action, tool, target = {"go_to": self.place_label(dest)}, "go_to", x["name"] or self.place_label(dest)  # the verified tile + push
                 elif x["name"]: action, tool, target = {"go_to": x["name"]}, "go_to", x["name"]
                 else: action, tool, target = {"go_to": self.place_label(dest)}, "go_to", self.place_label(dest)
@@ -934,7 +937,7 @@ class World:
                 self._land(place)
             elif result.status != "done" and not (result.reason == "route blocked" and self._facing_target(leg, result)):
                 return self._travel_result(results, result.status, f"leg {n} {result.reason or result.status}", ctx)
-            if result.reason == "scene cut" and not leg.get("expect"): self._travel_open = True; return self._travel_result(results, "blocked", f"leg {n} unexpected scene cut", ctx)
+            if result.reason == "scene cut" and not leg.get("expect"): self._travel_open = True; return self._travel_result(results, "done", f"leg {n} scene cut", ctx)  # a real cut, not a failure; the loop re-identifies the place
         self.current_place = place
         if inputs >= TRAVEL_MAX_INPUTS and len(results) < len(legs): return self._travel_result(results, "blocked", f"leg {len(results)+1} input limit", ctx)
         return self._travel_result(results, "done", "", ctx)
