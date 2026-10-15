@@ -37,6 +37,20 @@ def rate(n, d):
     return n / d if d else None
 
 
+def _execution(trace):
+    """Execution success per action, from the trace's skill status. A pending row (observation not settled yet) is neither a success
+    nor a failure; a settled row resolves to its action (action_step when it resolves an earlier pending action, else its own step);
+    each action counts once. Verdicts are not used: a hit verdict on a failed execution is a failure."""
+    actions, pending = {}, 0
+    for row in trace:
+        if row.get("observation_status") == "pending": pending += 1; continue
+        if "observation_status" in row: status = row.get("execution")  # settled
+        else: status = (row.get("skill") or {}).get("status") if isinstance(row.get("skill"), dict) else None  # legacy trace: no execution field
+        if status is None: continue
+        actions.setdefault(row.get("action_step") or row.get("step"), status)
+    done = sum(status == "done" for status in actions.values())
+    return {"done": done, "failed": len(actions) - done, "total": len(actions), "pending_rows": pending, "rate": rate(done, len(actions))}
+
 def _no_effect_streak(trace):
     longest = streak = 0
     for row in trace:
@@ -651,8 +665,6 @@ def evaluate(run, *, repredict=False, hide_memory=False, from_step=None):
     for row in verdict_rows:
         start = ((int(row.get("step", 1)) - 1) // 50) * 50 + 1
         buckets.setdefault(start, []).append(row)
-    skills = [r.get("skill") or {} for r in trace if isinstance(r.get("skill"), dict)]
-    done = sum(s.get("status") == "done" for s in skills)
     elapsed = [float(r["ms"]) for r in trace if isinstance(r.get("ms"), (int, float))]
     calls_path = run / "calls.jsonl"
     calls = read(calls_path)
@@ -727,7 +739,7 @@ def evaluate(run, *, repredict=False, hide_memory=False, from_step=None):
                            all(edges_found.values()) and game_text >= 10 and
                            m1["player_name_match"] and m1["rival_name_match"])
     result = {**m1,
-            "execution_success": {"done": done, "total": len(skills), "rate": rate(done, len(skills))},
+            "execution_success": _execution(trace),
             "prediction_accuracy": {"overall": accuracy(verdict_rows),
                                     "by_50_steps": {f"{k}-{k+49}": accuracy(v) for k, v in sorted(buckets.items())}},
             "coverage": {"confirmed_places": len(mapping), "affordance_types": sorted({

@@ -1,5 +1,7 @@
+import pytest
+
 from agent.memory import Memory
-from agent.space import exit_to, fold, frontier, mark_exit, outward, route, tile_of
+from agent.space import DIRS, exit_to, fold, frontier, mark_exit, outward, route, tile_of
 from agent.world import World
 
 
@@ -78,6 +80,16 @@ def test_mark_exit_records_observed_and_inferred_reverse(tmp_path):
     assert exit_to(mem, "west", (1, 2), "UP") is None
 
 
+def test_inferred_reverse_never_overwrites_an_observed_exit_and_recrossing_keeps_it(tmp_path):
+    mem = Memory(tmp_path)
+    mark_exit(mem, "west", (1, 2), "RIGHT", "east", (0, 2), 9)  # east@0,2 LEFT is only a guess
+    mark_exit(mem, "east", (0, 2), "LEFT", "west", (1, 2), 10)  # the way back is crossed: observed, and must not be replaced by the guess
+    assert exit_to(mem, "east", (0, 2), "LEFT")["src"] == "observed"
+    assert exit_to(mem, "west", (1, 2), "RIGHT")["src"] == "observed"
+    mark_exit(mem, "west", (1, 2), "RIGHT", "east", (0, 2), 11)  # re-crossing the first way does not downgrade the way back
+    assert exit_to(mem, "east", (0, 2), "LEFT")["src"] == "observed"
+
+
 def test_route_and_frontier_never_cross_known_exit(tmp_path):
     mem = Memory(tmp_path)
     mark_exit(mem, "town", (0, 0), "UP", "house", (0, 1), 1)
@@ -100,3 +112,64 @@ def test_inferred_exit_is_avoided_by_routes_unless_it_is_the_only_way_but_stays_
     mem.upsert("tiles", {**mem.get("tiles", "house@0,1"), "blocked": ["LEFT", "RIGHT", "UP"]})  # walled in: the guess is the only way
     assert route(mem, "house", (0, 1), (0, 2)) == ["DOWN"]
     assert ((0, 1), "DOWN") in frontier(mem, "house")
+
+
+def _walk(start, path):
+    cells = [start]
+    for d in path: cells.append((cells[-1][0] + DIRS[d][0], cells[-1][1] + DIRS[d][1]))
+    return cells
+
+
+def _band(mem, place, start, goal):
+    (x0, x1), (y0, y1) = sorted((start[0], goal[0])), sorted((start[1], goal[1]))
+    for x in range(x0 - 1, x1 + 2):
+        for y in range(y0 - 1, y1 + 2): tile(mem, place, (x, y))
+
+
+ROOM_CASES = [  # 3-wide open room around a straight line, each direction and offset
+    ((0, 1), (4, 1), (2, 1)),
+    ((4, 1), (0, 1), (2, 1)),
+    ((1, 0), (1, 4), (1, 2)),
+    ((1, 4), (1, 0), (1, 2)),
+    ((10, 7), (14, 7), (12, 7)),
+]
+
+
+@pytest.mark.parametrize("start, goal, actor", ROOM_CASES)
+def test_route_detours_around_actor_in_open_room(tmp_path, start, goal, actor):
+    mem = Memory(tmp_path)
+    _band(mem, "room", start, goal)
+    path = route(mem, "room", start, goal, occupied=frozenset({actor}))
+    assert path is not None and len(path) == 6  # straight is 4; one side step out and one back
+    cells = _walk(start, path)
+    assert actor not in cells and cells[-1] == goal
+
+
+def test_route_is_none_when_actor_fills_one_wide_corridor(tmp_path):
+    mem = Memory(tmp_path)
+    for x in range(-1, 6):
+        tile(mem, "hall", (x, -1), floor=False); tile(mem, "hall", (x, 1), floor=False)
+    tile(mem, "hall", (-1, 0), floor=False); tile(mem, "hall", (5, 0), floor=False)
+    for x in range(5): tile(mem, "hall", (x, 0))
+    assert route(mem, "hall", (0, 0), (4, 0)) == ["RIGHT"] * 4
+    assert route(mem, "hall", (0, 0), (4, 0), occupied=frozenset({(2, 0)})) is None  # strict fallback keeps the actor out too
+
+
+def test_route_is_none_when_goal_is_occupied(tmp_path):
+    mem = Memory(tmp_path)
+    _band(mem, "room", (0, 1), (4, 1))
+    assert route(mem, "room", (0, 1), (4, 1), occupied=frozenset({(4, 1)})) is None
+    assert route(mem, "room", (0, 1), (4, 1), False, occupied=frozenset({(4, 1)})) is None
+
+
+def test_route_goes_straight_again_once_actor_leaves(tmp_path):
+    mem = Memory(tmp_path)
+    _band(mem, "room", (0, 1), (4, 1))
+    assert route(mem, "room", (0, 1), (4, 1), occupied=frozenset({(2, 1)})) != ["RIGHT"] * 4
+    assert route(mem, "room", (0, 1), (4, 1), occupied=frozenset()) == ["RIGHT"] * 4
+
+
+def test_start_in_occupied_is_still_routable(tmp_path):
+    mem = Memory(tmp_path)
+    _band(mem, "room", (0, 1), (4, 1))
+    assert route(mem, "room", (0, 1), (4, 1), occupied=frozenset({(0, 1)})) == ["RIGHT"] * 4

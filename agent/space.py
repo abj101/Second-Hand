@@ -30,10 +30,13 @@ def fold(mem, place, pos, moves, tile_px, step, actors: frozenset[tuple[int, int
     return here
 def mark_exit(mem, place, tile, direction, to, arrive, step):
     for src, at, way, dst, dest, source in ((place, tile, direction, to, arrive, "observed"), (to, arrive, _OPPOSITE[direction], place, tile, "inferred")):
-        row = _get(mem, src, at) or _new(src, at, step); old = dict(row, blocked=list(row["blocked"]), pushed=list(row["pushed"]))
+        row = _get(mem, src, at) or _new(src, at, step)
+        if source == "inferred" and (row.get("exit") or {}).get("src") == "observed": continue  # a guessed way back never replaces a crossed exit
+        old = dict(row, blocked=list(row["blocked"]), pushed=list(row["pushed"]))
         row.update(exit={"dir": way, "to": dst, "arrive": list(dest), "src": source}, floor=True, step=step); _save(mem, row, old)
 def exit_to(mem, place, tile, direction): row = _get(mem, place, tile); edge = row.get("exit") if row else None; return edge if edge and edge.get("dir") == direction else None
-def route(mem, place, start, goal, strict=True):  # strict: an inferred exit (the guessed way back) is avoided too, unless no route avoids it
+def route(mem, place, start, goal, strict=True, *, occupied=frozenset()):  # strict: an inferred exit (the guessed way back) is avoided too, unless no route avoids it; occupied: tiles held by actors
+    if goal in occupied: return None
     rows = [r for r in mem.rows("tiles") if r.get("place") == place]; xs = [start[0], goal[0], *(r["x"] for r in rows)]; ys = [start[1], goal[1], *(r["y"] for r in rows)]
     bounds = (min(xs) - 1, max(xs) + 1, min(ys) - 1, max(ys) + 1); queue = deque([(start, [])]); seen = {start}
     while queue:
@@ -44,9 +47,9 @@ def route(mem, place, start, goal, strict=True):  # strict: an inferred exit (th
             nxt = (at[0] + dx, at[1] + dy)
             cell = _get(mem, place, nxt)
             edge = row.get("exit") or {}
-            if direction in row.get("blocked", []) or (strict or edge.get("src") != "inferred") and direction == edge.get("dir") or nxt in seen or cell and cell.get("floor") is False and nxt != goal or not (bounds[0] <= nxt[0] <= bounds[1] and bounds[2] <= nxt[1] <= bounds[3]): continue
+            if direction in row.get("blocked", []) or (strict or edge.get("src") != "inferred") and direction == edge.get("dir") or nxt in seen or nxt in occupied or cell and cell.get("floor") is False and nxt != goal or not (bounds[0] <= nxt[0] <= bounds[1] and bounds[2] <= nxt[1] <= bounds[3]): continue
             seen.add(nxt); queue.append((nxt, path + [direction]))
-    return route(mem, place, start, goal, False) if strict else None
+    return route(mem, place, start, goal, False, occupied=occupied) if strict else None
 def outward(mem, place, tile, placement=None):
     if placement in ("top wall", "bottom wall", "left wall", "right wall"): return {"top wall": "UP", "bottom wall": "DOWN", "left wall": "LEFT", "right wall": "RIGHT"}[placement]
     floors = [r for r in mem.rows("tiles") if r.get("place") == place and r.get("floor") is True]

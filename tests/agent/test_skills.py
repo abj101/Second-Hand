@@ -1,3 +1,6 @@
+import pytest
+from PIL import ImageDraw
+
 from agent.model import Reply
 from agent.skills import Ctx, approach, interact, press_seq, run_affordance, select
 from tests.agent.fakes import GridEnv, StubModel
@@ -135,6 +138,44 @@ def test_route_confident_zero_shift_is_blocked():
     assert result.status == "blocked" and result.reason == "route blocked"
 
 
+ROUTE_DIRS = [("RIGHT", 1, 0), ("LEFT", -1, 0), ("UP", 0, -1), ("DOWN", 0, 1)]
+
+
+@pytest.mark.parametrize("key, dx, dy", ROUTE_DIRS)
+def test_route_obstruction_mid_route_reports_route_failure(key, dx, dy):
+    env = RecordingEnv(); env.door, env.npc = (-5, -5), (-6, -6); env.walls.add((8 + 3 * dx, 8 + 3 * dy))
+    result = run_affordance(ctx(env), {"verb": "approach", "at": point(env, (10, 8))},
+                            {"entities": [{"kind": "player", "at": [.5, .5]}]}, route={"dirs": [key] * 4})
+    assert result.status == "blocked" and result.reason == "route blocked"
+    assert result.inputs == 3 and env.keys == [key] * 3
+    assert result.failure == {"stage": "route", "reason": "route blocked", "direction": key}
+
+
+@pytest.mark.parametrize("key, dx, dy", ROUTE_DIRS)
+def test_clean_route_has_no_failure(key, dx, dy):
+    env = RecordingEnv(); env.door, env.npc = (-5, -5), (-6, -6)
+    result = run_affordance(ctx(env), {"verb": "approach", "at": point(env, (10, 8))},
+                            {"entities": [{"kind": "player", "at": [.5, .5]}]}, route={"dirs": [key] * 2})
+    assert result.status == "done" and result.failure is None
+
+
+def test_skill_result_failure_is_optional_for_positional_construction():
+    from PIL import Image
+    from agent.skills import SkillResult
+
+    frame = Image.new("RGB", (8, 8))
+    assert SkillResult("done", "", 0, 0, frame, frame, (0, 0), False).failure is None
+    assert SkillResult("blocked", "x", 1, 0, frame, frame, (0, 0), False, [], None).failure is None
+
+
+def test_exit_not_crossed_reports_crossing_failure():
+    env = GridEnv(); env.door = (-5, -5); env.npc = (-6, -6)
+    result = run_affordance(ctx(env), {"verb": "approach", "target": "exit down", "at": point(env, (10, 8))},
+                            {"entities": [{"kind": "player", "at": [.5, .5]}]})
+    assert result.status == "blocked" and result.reason == "exit not crossed"
+    assert result.failure == {"stage": "crossing", "reason": "exit not crossed"}
+
+
 def test_exit_route_pushes_before_side_steps():
     env = RecordingEnv(); env.player = (9, 8); env.door = (10, 8); env.npc = (-5, -5)
     result = run_affordance(ctx(env), {"verb": "approach", "at": point(env, (10, 8))},
@@ -251,3 +292,110 @@ def test_type_text_accepts_cell_rows_without_done_key_and_never_erases_on_empty_
     assert type_text(Ctx(env, Model(), tile_px=16), "").reason == "no text given to type" and pressed == []
     result = type_text(Ctx(env, Model(), tile_px=16), "CAB")
     assert result.status == "done" and pressed[-1] == "A" and pressed.count("A") == 4  # C, A, B, then Ed found by name
+
+
+@pytest.mark.parametrize("pointer", [True, False])
+def test_select_on_dialogue_with_only_unflagged_furniture_is_refused_without_a_model_call_or_press(pointer):
+    env = MenuEnv(); env.pointer = pointer; presses = []
+    real_press = env.press
+    env.press = lambda key, frames=8, on_frame=None: presses.append(key) or real_press(key, frames, on_frame)
+    model = StubModel([])
+    perception = {"screen": "dialogue", "entities": [{"name": "television", "kind": "furniture", "at": [.2, .3]}, {"name": "dialogue_box", "kind": "dialogue_box", "at": [.5, .9]}]}
+    result = run_affordance(Ctx(env, model), {"verb": "select", "target": "television"}, perception)
+    assert result.status == "failed" and result.reason == "not a selectable choice on this screen"
+    assert result.failure == {"stage": "interaction", "reason": "not a selectable choice on this screen"}
+    assert model.calls == 0 and presses == [] and (result.inputs, result.calls) == (0, 0)
+
+
+@pytest.mark.parametrize("pointer", [True, False])
+def test_select_on_flagged_menu_item_reads_menu_once_and_presses_bounded(pointer):
+    env = MenuEnv(); env.pointer = pointer
+    model = StubModel([Reply("", {"items": env.items, "cursor": 0, "layout": "vertical"}, 0, None, None)])
+    perception = {"screen": "menu", "entities": [{"name": "OPTION", "kind": "menu_item", "at": [.3, .6], "selectable": True}]}
+    result = run_affordance(Ctx(env, model, max_inputs=5), {"verb": "select", "target": "option"}, perception)
+    assert result.status == "done" and result.inputs == 3
+    assert env.cursor == 2 and env.selected == "OPTION"
+    assert result.calls == model.calls == 1
+
+
+class Busy(GridEnv):
+    """A screen that keeps changing after a press: plan lists, per press, the ticks the screen keeps changing for (0 = still); busy=N starts it changing.
+    A changing screen never gives two equal frames in a row, so a settle times out there."""
+    def __init__(self, plan=(), *, busy: float = 0) -> None:
+        super().__init__(); self.plan, self.busy, self.serial, self.ticks, self.keys = iter(plan), busy, 0, 0, []
+    def press(self, key, frames=8, on_frame=None):
+        self.keys.append(key); super().press(key, frames, on_frame); self.busy = next(self.plan, 0)
+    def tick(self, frames=1):
+        for _ in range(frames):
+            super().tick(); self.ticks += 1
+            if self.busy > 0: self.busy -= 1; self.serial += 1
+    def screenshot(self):
+        image = super().screenshot()
+        if self.serial: ImageDraw.Draw(image).rectangle((0, 0, 3, 3), fill=(self.serial % 251, self.serial // 251 % 251, 1))
+        return image
+
+
+def short_settle(monkeypatch):
+    """A settle needs two still frames and gives up after six ticks, so a test can force either outcome cheaply."""
+    from agent import observer
+    monkeypatch.setitem(observer.wait_settled.__kwdefaults__, "quiet", 2)
+    monkeypatch.setitem(observer.wait_settled.__kwdefaults__, "max_frames", 6)
+
+
+def test_settled_flag_ands_every_settle_inside_a_skill_sequence(monkeypatch):
+    from agent.skills import Ctx, press, press_seq, wait_until
+    short_settle(monkeypatch)
+    for plan, expect in (([0, 0], True), ([0, 20], False), ([20, 0], False)):
+        assert press_seq(Ctx(Busy(plan), StubModel([]), 16), ["RIGHT", "RIGHT"]).settled is expect, plan
+    assert press(Ctx(Busy([20]), StubModel([]), 16), "RIGHT").settled is False
+    assert wait_until(Ctx(Busy(busy=20), StubModel([]), 16)).settled is False
+    assert wait_until(Ctx(Busy(), StubModel([]), 16)).settled is True
+
+
+def test_travel_settled_ands_its_legs_and_folds_each_move_once(tmp_path, monkeypatch):
+    from agent.memory import Memory
+    from agent.skills import Ctx
+    from agent.world import World
+    short_settle(monkeypatch)
+
+    def travel(name, plan):
+        mem = Memory(tmp_path / name)
+        mem.upsert("places", {"id": "room", "name": "room", "screen": "world", "state": "place", "first": 1, "last": 1, "edges": [], "visits": 1})
+        env, world = Busy(plan), World(mem, 16)
+        world.current_place, world.pa = "room", [.5, .5]
+        legs = [{"place": "room", "dirs": ["RIGHT"], "push": None}, {"place": "room", "dirs": ["RIGHT"], "push": None}]
+        return world.travel(Ctx(env, StubModel([]), 16), legs, 1), world, env
+
+    still, still_world, _ = travel("still", [0, 0])
+    first_late, first_world, _ = travel("first_late", [20, 0])
+    second_late, second_world, _ = travel("second_late", [0, 20])
+    assert still.settled is True and first_late.settled is False and second_late.settled is False
+    assert still.inputs == first_late.inputs == second_late.inputs == 2
+    assert still.reason == first_late.reason == second_late.reason
+    assert still_world.pos == first_world.pos == second_world.pos and len(still.moves) == len(second_late.moves) == 2
+
+
+def test_travel_across_a_scene_cut_counts_its_crossing_once_and_reports_unsettled(tmp_path, monkeypatch):
+    from agent.memory import Memory
+    from agent.skills import Ctx
+    from agent.world import World
+    short_settle(monkeypatch)
+
+    def travel(name, plan):
+        mem = Memory(tmp_path / name)
+        for id_, label in (('source', 'Source'), ('expected', 'Expected')):
+            mem.upsert('places', {'id': id_, 'name': label, 'screen': 'world', 'state': 'place', 'first': 1, 'last': 1, 'edges': [], 'visits': 1})
+        mem.upsert('tiles', {'id': 'source@2,0', 'place': 'source', 'x': 2, 'y': 0, 'floor': True, 'blocked': [], 'pushed': [], 'step': 1,
+                             'exit': {'dir': 'RIGHT', 'to': 'expected', 'arrive': [0, 0]}})
+        env = Busy(plan); env.door = (10, 8)  # the second step is onto the door: the screen cuts
+        world = World(mem, 16); world.current_place, world.pa = 'source', [.5, .5]
+        legs = [{'place': 'source', 'dirs': ['RIGHT', 'RIGHT'], 'push': 'RIGHT', 'expect': 'expected', 'exit_tile': (2, 0)}]
+        return world.travel(Ctx(env, StubModel([]), 16), legs, 1), world, mem
+
+    still, still_world, still_mem = travel('still', [0, 0])
+    late, late_world, late_mem = travel('late', [0, 20])
+    crossings = lambda mem: sorted((c['id'], c['n']) for c in mem.rows('crossings'))
+    assert still.settled is True and late.settled is False
+    assert still.reason == late.reason and still.inputs == late.inputs == 2
+    assert still_world.current_place == late_world.current_place == 'expected' and still_world.pos == late_world.pos
+    assert crossings(still_mem) == crossings(late_mem) and crossings(late_mem) and all(n == 1 for _, n in crossings(late_mem))

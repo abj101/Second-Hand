@@ -11,6 +11,7 @@ Each phase is one packet in `docs/plans/`, and each packet runs in its own orche
 
 | Phase | Packet | Status | Gate (summary) | WPs | Call cap |
 |---|---|---|---|---|---|
+| Harness reliability (HF) | [program](plans/program-harness-reliability.md); [HF1](plans/HF1.md) [HF2](plans/HF2.md) [HF3](plans/HF3.md) [HF4](plans/HF4.md) [HF5](plans/HF5.md) | **HF1-HF4 done 2026-10-14 (offline gates passed; old OM replays incompatible, see HF3); HF5 offline gate passed 2026-10-14 (loop.py first-attempt no-route fix; checkpoint continuation inconclusive; live validation not authorized), see HF5 Result** | Actor-aware execution, consistent exit/action identity, valid modal actions, pending-outcome attribution, reproducible validation | HF1–HF5 | **0 approved**; live proposals require a separate spend decision |
 | E1 | (this file, below) | done | Perceiver chosen: Gemma; recall 0.71, precision 0.73 | — | — |
 | E1b | [E1b.md](plans/E1b.md) | **deferred**: STS2 small icons; run before any mouse game | recall ≥ 0.80 at precision ≥ 0.75 | 2 | ~450 |
 | E2 | [E2.md](plans/E2.md) | **done** | 4/4 truth goals; verdict 3/3; registration 17/17; 18 uncached calls, 0 retries | 6 | **60** |

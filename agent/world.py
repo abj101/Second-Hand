@@ -18,11 +18,20 @@ ACTOR_KINDS = {"person", "npc", "character", "enemy", "monster", "animal"}
 TYPING = {"keyboard", "input_field"}  # a text field on a modal screen: type
 FURNITURE = {"player", "dialogue_box", "text", "logo", "cursor"}  # screen chrome: never a choice on a modal screen
 
-def fail_key(place, verb, target, inputs=()):
-    """One key per place and intent (Loop._fail_key delegates here): button presses collapse to their direction keys (else the first button), targets ignore the verb."""
-    t, keys = str(target).split(), set(inputs)
-    if t and all(x.upper() in keys for x in t): u = list(dict.fromkeys(x.upper() for x in t)); t = [x for x in u if x in DIRS] or u[:1]
-    return f"{place}|{' '.join(t).casefold() or verb}"
+def fail_key(place, verb, target, inputs=(), ref=None):
+    """Intent key "place|family|subject", the one key Loop.fails, the option notes and the trace share. Presses: family buttons, direction keys
+    collapse (else the first button). Other actions: family approach for walking (approach, go_to, explore), else the verb (interact, select,
+    advance, cancel, type). Subject: ref, the entity, exit or place the action resolved to (never a label), else the target's name."""
+    if verb == "buttons":
+        t, keys = str(target).split(), set(inputs)
+        if t and all(x.upper() in keys for x in t): u = list(dict.fromkeys(x.upper() for x in t)); t = [x for x in u if x in DIRS] or u[:1]
+        return f"{place}|buttons|{' '.join(t).casefold() or verb}"
+    family = "approach" if verb in ("approach", "go_to", "explore", "") else verb
+    return f"{place}|{family}|{ref or str(target).casefold() or verb}"
+def exit_ref(x):  # an exit record's reference: its entity when it has one, else its lowest door tile, never its label
+    tiles = sorted(tuple(d["tile"]) for d in x["doors"])
+    if x["ident"]: return f"thing:{x['ident']}"
+    return f"exit:{x['dest']}@{','.join(map(str, tiles[0])) if tiles else (x['dir'] or x['name'])}"
 
 def _tried(f):  # a failure row as a note: cycle marks, else repeated tries
     return f"part of a back-and-forth cycle (step {f.get('step', 0)})" if str(f.get("why", "")).endswith(": cycle") else f"tried here {f['n']}×, last: {f.get('why', '')}"
@@ -425,15 +434,12 @@ class World:
         self._self_contradictions = int(state.get("self_contradictions", 0))
         self._self_from_motion = bool(state.get("self_from_motion", False))
         self._hud = {k: {"crop": None, "changed": v} for k, v in state.get("hud_changed", {}).items()}
-    def _paths(self, start, avoid=()):
-        live = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged"}; links = {}
-        for r in self.mem.rows("tiles"):
-            edge = r.get("exit") or {}
-            if r.get("place") in live and edge.get("to") in live: links.setdefault(r["place"], []).append((r, edge))
+    def _paths(self, start, avoid=()):  # one path per destination, through _exits' representative door of each exit: the same door the options show
+        live = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged"}
         paths, queue = {start: []}, [start]
         for p in queue:
-            for row, edge in links.get(p, ()):
-                if edge["to"] not in paths and edge["to"] not in avoid: paths[edge["to"]] = [*paths[p], (p, row, edge)]; queue.append(edge["to"])
+            for rec in (self._exits(p, live) if p in live else ()):
+                if rec["doors"] and rec["to"] not in paths and rec["to"] not in avoid: paths[rec["to"]] = [*paths[p], (p, rec)]; queue.append(rec["to"])
         return paths
     def beyond(self, place, screen=()):
         """What lies beyond each verified exit of place: for every place reachable through it (never back through place), its unused
@@ -494,7 +500,7 @@ class World:
     def _exits(self, pid, live, screen=()):
         """Exit records of place pid: the one source for World.options and the view. A record is a tile exit to a live place, or a thing
         named as an exit (remembered, or on screen as (index, entity, id)). Records to the same destination with tiles within 1 are one exit, and so is
-        an unverified record with no destination within 1 of a verified one: the best record (crossed or observed, then a tile exit) gives its tile and name. Status: verified when crossed in either direction
+        an unverified record with no destination within 1 of a verified one: the best record (crossed or observed, then a tile exit) gives its name. The representative door (crossed or observed before a guess, then row order) gives tile, dir, arrive, src; doors lists every tile exit of the group. Status: verified when crossed in either direction
         (counted crossings, a confirmed leads_to, or an observed exit arriving on its tile), refuted by the _failed_exit rule, else unverified.
         uses/last count every crossing through the exit's tiles, both directions. Sorted by tile row and column."""
         things = {tuple(e["tile"]): e for e in self.mem.rows("entities") if e.get("place") == pid and e.get("tile") and e.get("name")
@@ -514,7 +520,8 @@ class World:
             edge = r.get("exit") or {}
             if r.get("place") == pid and edge.get("to") in live and edge["to"] != pid:
                 tile = (r["x"], r["y"])
-                recs.append({"tile": tile, "dir": edge.get("dir") or "", "dest": edge["to"], "pushed": True, "observed": edge.get("src") == "observed", "row": things.get(tile) or {}})
+                recs.append({"tile": tile, "dir": edge.get("dir") or "", "dest": edge["to"], "pushed": True, "observed": edge.get("src") == "observed", "row": things.get(tile) or {},
+                             "arrive": edge.get("arrive"), "src": edge.get("src")})
         covered = {rec["tile"] for rec in recs}
         for row in [*(e for t, e in things.items() if t not in covered), *loose]:
             known = leads(row.get("id"))
@@ -536,10 +543,12 @@ class World:
         out = []
         for g in groups:
             best, dest = g[0], g[0]["dest"]
+            doors = [m for m in g if m["pushed"]]  # tile exits of this exit, in preference order: crossed or observed before a guess, then row order
+            door = doors[0] if doors else best  # the representative door: what display, _paths and plan all use
             sup = [x for m in g for x in m["sup"]]
             steps = [m["last"] for m in g if m["n"] and m["last"] is not None] + [x["step"] for x in sup if x.get("step") is not None]
             uses = max(sum(m["n"] for m in g), sum(x.get("sup", 0) for x in sup), 1 if any(m["observed"] or m["arrived"] for m in g) else 0)
-            name = best["name"] or next((m["name"] for m in g if m["name"]), None); dir_ = next((m["dir"] for m in g if m["dir"]), "")
+            name = best["name"] or next((m["name"] for m in g if m["name"]), None); dir_ = door["dir"]
             head = (name[5:].strip() if name.casefold().startswith("exit:") else name) if name else dir_
             refuted = not uses and any(self._failed_exit(m["row"], pid) for m in g if m["row"].get("tile"))
             if uses: label = f"exit {head} → {self.place_label(dest)} (used {uses}×" + (f", last step {max(steps)}" if steps else "") + ")"
@@ -551,8 +560,10 @@ class World:
                 label = f"not an exit: {head} (walked into {count}×" + (f", steps {min(ev)}–{max(ev)}" if ev else "") + ")"
             else: label = f"possible exit {head} (unverified, never crossed)"
             status = "verified" if uses else "refuted" if refuted else "unverified"
-            out.append({"tile": best["tile"], "dir": dir_, "dest": dest, "name": name, "head": head, "idx": next((m["idx"] for m in g if m["idx"] is not None), None),
-                        "ident": next((m["ident"] for m in g if m["ident"]), None), "pushed": any(m["pushed"] for m in g), "uses": uses, "last": max(steps, default=None),
+            out.append({"tile": door["tile"], "dir": dir_, "dest": dest, "to": dest, "place": pid, "arrive": door.get("arrive"), "src": door.get("src"),
+                        "doors": [{"tile": m["tile"], "dir": m["dir"], "to": dest, "arrive": m.get("arrive"), "src": m.get("src")} for m in doors],
+                        "name": name, "head": head, "idx": next((m["idx"] for m in g if m["idx"] is not None), None),
+                        "ident": next((m["ident"] for m in g if m["ident"]), None), "pushed": bool(doors), "uses": uses, "last": max(steps, default=None),
                         "status": status, "label": label})
         return sorted(out, key=lambda x: _yx(x["tile"], x["name"] or x["dir"]))
 
@@ -757,13 +768,15 @@ class World:
         History only decides which row a thing is listed in, never whether it is offered."""
         ents, modal, fails = per.get("entities", []), per.get("screen") != "world", fails or {}
         live = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged"}
-        def option(group, tool, label, action, ident=None, verb="approach", target=None, goto=None):
+        def thing_ref(ident): return f"thing:{ident}" if ident else None
+        def option(group, tool, label, action, ident=None, verb="approach", target=None, goto=None, ref=None, door=None):
             notes = []
-            hit = fails.get(fail_key(place, verb, target, inputs)) if target is not None else None  # the loop's own failure key
+            key = fail_key(place, verb, target, inputs, ref) if target is not None else None  # the loop's own intent key
+            hit = fails.get(key) if key else None
             if hit: notes.append(_tried(hit))
             for n in (self._notes(ident) if ident else "").split("; "):
                 if n: notes.append(f"refuted: {n}" if n.startswith("not working") else n.replace("says the same as before", "talked; same text as before"))
-            return (group, {"tool": tool, "label": label, "action": action, "notes": notes}, goto)
+            return (group, {"tool": tool, "label": label, "action": action, "notes": notes, "intent_key": key, "exit": door}, goto)
         def free(label):  # free input has no single target; its one note names this place's failed button combos, newest first, at most 4
             hits = sorted(((f.get("step", 0), k, f) for k, f in fails.items() if k.startswith(f"{place}|") and str(f.get("act", "")).startswith("buttons ")), key=lambda t: (-t[0], t[1]))
             _, row, _ = option("free", "buttons", label, None)
@@ -771,8 +784,8 @@ class World:
             return "free", {**row, "notes": [f"failed here: {failed}"] if failed else []}, None
         free_label = "free buttons" + (f": {', '.join(inputs)}" if inputs else "")
         if modal:
-            choices = [(i, e) for i, e in enumerate(ents) if e.get("name") and normalize_kind(e.get("kind")) not in FURNITURE | TYPING]
-            rows = [option("choice", "select", f"select {e['name']}", {"thing": i, "verb": "select"}, self.entity_ids.get(i), "select", e["name"])
+            choices = [(i, e) for i, e in enumerate(ents) if e.get("name") and e.get("selectable") is True and normalize_kind(e.get("kind")) not in FURNITURE | TYPING]
+            rows = [option("choice", "select", f"select {e['name']}", {"thing": i, "verb": "select"}, self.entity_ids.get(i), "select", e["name"], ref=thing_ref(self.entity_ids.get(i)))
                     for i, e in sorted(choices, key=lambda ie: _yx(ie[1].get("at"), ie[1]["name"]))]
             rows += [option("choice", "advance", "advance", {"verb": "advance"}, None, "advance", ""), option("choice", "cancel", "cancel", {"verb": "cancel"}, None, "cancel", "")]
             if any(normalize_kind(e.get("kind")) in TYPING for e in ents): rows.append(option("choice", "type", "type text into the field", {"verb": "type"}, None, "type", ""))
@@ -789,7 +802,9 @@ class World:
                 elif dest: action, tool, target = {"go_to": self.place_label(dest)}, "go_to", x["name"] or self.place_label(dest)  # the verified tile + push
                 elif x["name"]: action, tool, target = {"go_to": x["name"]}, "go_to", x["name"]
                 else: action, tool, target = {"go_to": self.place_label(dest)}, "go_to", self.place_label(dest)
-                rows.append(option("exit", tool, x["label"] + _beyond_suffix(beyond["exits"].get(x["tile"])), action, x["ident"], "approach", target))
+                tiles = sorted(tuple(d["tile"]) for d in x["doors"])
+                rows.append(option("exit", tool, x["label"] + _beyond_suffix(beyond["exits"].get(x["tile"])), action, x["ident"], "approach", target,
+                                   ref=exit_ref(x), door={"tile": list(tiles[0]), "to": dest} if tiles else None))
                 if beyond["dead_end"] and x["tile"] == beyond["through"]: rows[-1][1]["notes"].insert(0, "everything unexplored from here is through this exit")
             hist = {r.get("s") for r in self.mem.rows("relations") if r.get("p") in ("says", "does_nothing") and r.get("s")}  # talked to or walked into, any state
             things, quiet = [], []  # quiet: (sort key, name) of things with no history and no actor kind; they share one row
@@ -798,17 +813,17 @@ class World:
                 if not name or kind in TRANSIENT or _is_exit(e): continue
                 shown = (self.mem.get("entities", ident) or {}).get("called") or name
                 key = _yx(self._tile(ident) or e.get("at"), name)
-                row = option("thing", "approach", f"approach {shown}", {"thing": i, "verb": "approach"}, ident, "approach", name)
+                row = option("thing", "approach", f"approach {shown}", {"thing": i, "verb": "approach"}, ident, "approach", name, ref=thing_ref(ident))
                 if kind not in ACTOR_KINDS and not row[1]["notes"] and ident not in hist: quiet.append((key, shown)); continue
                 things.append((key, row))
-                if kind in ACTOR_KINDS: things.append((key, option("thing", "interact", f"interact with {shown}", {"thing": i, "verb": "interact"}, ident, "interact", name)))
+                if kind in ACTOR_KINDS: things.append((key, option("thing", "interact", f"interact with {shown}", {"thing": i, "verb": "interact"}, ident, "interact", name, ref=thing_ref(ident))))
             rows += [row for _, row in sorted(things, key=lambda kv: kv[0])]
             remembered = []
             for r in self.mem.rows("entities"):
                 if r.get("place") != place or not r.get("tile") or not r.get("name") or r["id"] in on or normalize_kind(r.get("kind")) in TRANSIENT or _is_exit(r): continue
                 tile, name = tuple(r["tile"]), r["name"]
                 shown = r.get("called") or name
-                row = option("remembered", "go_to", f"go to {shown} ({r.get('status', 'remembered')}, seen {step - r.get('last', step)} steps ago)", {"go_to": name}, r["id"], "approach", name, goto=name)
+                row = option("remembered", "go_to", f"go to {shown} ({r.get('status', 'remembered')}, seen {step - r.get('last', step)} steps ago)", {"go_to": name}, r["id"], "approach", name, goto=name, ref=thing_ref(r["id"]))
                 if normalize_kind(r.get("kind")) not in ACTOR_KINDS and not row[1]["notes"] and r["id"] not in hist:
                     if r.get("status") != "gone" and r.get("anchor") not in ("screen", "self"): quiet.append((_yx(tile, shown), shown))  # gone things and HUD/self things are not in this place's row
                     continue
@@ -825,7 +840,7 @@ class World:
                 if pid == place or pid not in live or p.get("screen") != "world" or pid in dests: continue
                 label = self.place_label(pid); found = self.resolve(label, per, place)
                 if found and found["kind"] == "place" and found["tile"] and self.plan(found):
-                    places.append((_yx(found["tile"], label), option("place", "go_to", f"go to {label}", {"go_to": label}, None, "approach", label, goto=label)))
+                    places.append((_yx(found["tile"], label), option("place", "go_to", f"go to {label}", {"go_to": label}, None, "approach", label, goto=label, ref=f"place:{pid}")))
             places = [row for _, row in sorted(places, key=lambda kv: kv[0])]
             if places and len(rows) + len(places) + bool(quiet) > OPTION_CAP:  # ponytail: all known places share one row; exits and characters are never collapsed, so the cap is soft for them
                 places = [("place", {"tool": "go_to", "label": "go to another known place: " + ", ".join(row[2] for row in places), "action": None, "notes": []}, None)]
@@ -839,26 +854,54 @@ class World:
                 quiet =[("thing", {"tool": "go_to", "label": "look at or go to a thing here: " + ", ".join(names), "action": None, "notes": []}, None)]
             rows += places + quiet + [free(free_label)]
         return [{"n": n, **row[1]} for n, row in enumerate(rows, 1)]
-    def plan(self, target):
+    def occupied(self, place):  # actors hold tiles of the current place only; another place's actors are stale
+        return self.actor_tiles if place == self.current_place else frozenset()
+    def beside(self, place, pos, tile):  # nearest reachable free tile beside tile and the direction that faces it: (stand, facing, dirs)
+        rows = {(r["x"], r["y"]): r for r in self.mem.rows("tiles") if r.get("place") == place}; occupied = self.occupied(place); near = []
+        for d, (dx, dy) in DIRS.items():
+            t = tile[0]-dx, tile[1]-dy
+            if rows.get(t, {}).get("floor") is False: continue
+            if (dirs := route(self.mem, place, pos, t, occupied=occupied)) is not None: near.append((t, d, dirs))
+        return min(near, key=lambda q: (abs(q[0][0]-pos[0])+abs(q[0][1]-pos[1]), q[1])) if near else None
+    def _through(self, exit, place):  # path to place whose first leg is the chosen exit's own door ({"tile", "to"}); None if no such exit or no way on
+        live = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged"}
+        cur, tile = self.current_place, tuple(exit["tile"])
+        rec = next((r for r in self._exits(cur, live) if any(d["tile"] == tile for d in r["doors"])), None)
+        rest = self._paths(rec["to"]).get(place) if rec else None
+        return None if rest is None else [(cur, rec), *rest]
+    def canon_place(self, pid):  # a merged place's live place: its counters and identity follow it
+        seen = set()
+        while (row := self.mem.get("places", pid)) and row.get("state") == "merged" and row.get("into") and pid not in seen: seen.add(pid); pid = row["into"]
+        return pid
+    def named_intents(self, place, name):  # intent keys a name-keyed counter from an older checkpoint could mean here: one per entity, exit or place it names
+        keys, live, same = set(), {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged"}, lambda v: str(v or "").casefold() == name.casefold()
+        for r in self.mem.rows("entities"):
+            if r.get("place") == place and same(r.get("name")) and r.get("status") != "gone" and not _is_exit(r):
+                keys.add(fail_key(place, "approach", None, ref=f"thing:{r['id']}"))
+                if normalize_kind(r.get("kind")) in ACTOR_KINDS: keys.add(fail_key(place, "interact", None, ref=f"thing:{r['id']}"))
+        for x in self._exits(place, live):
+            if same(x["name"]): keys.add(fail_key(place, "approach", None, ref=exit_ref(x)))
+        for p in self.mem.rows("places"):
+            if p["id"] != place and p["id"] in live and same(self.place_label(p["id"])): keys.add(fail_key(place, "approach", None, ref=f"place:{p['id']}"))
+        return keys
+    def plan(self, target, exit=None):  # exit: the chosen exit ({"tile", "to"}) travels through its own door
         if not target or not target.get("tile") or not self.current_place or not self.tile_px: return None
-        path = self._paths(self.current_place).get(target["place"])
+        path = self._through(exit, target["place"]) if exit and exit.get("tile") else self._paths(self.current_place).get(target["place"])
         if path is None: return None
         legs, pos = [], self.pos
         p = self.current_place
-        for p, row, edge in path:
-            tile = row["x"], row["y"]; dirs = route(self.mem, p, pos, tile)
-            if dirs is None: return None
-            legs.append({"place": p, "dirs": dirs, "push": edge["dir"], "expect": edge["to"], "exit_tile": tile, "arrive": tuple(edge["arrive"])}); pos, p = tuple(edge["arrive"]), edge["to"]
+        for p, rec in path:
+            for door in rec["doors"]:  # the representative door first; another door of the same exit if its route is infeasible
+                tile = door["tile"]; dirs = route(self.mem, p, pos, tile, occupied=self.occupied(p))
+                if dirs is not None: break
+            else: return None
+            legs.append({"place": p, "dirs": dirs, "push": door["dir"], "expect": door["to"], "exit_tile": tile, "arrive": tuple(door["arrive"])}); pos, p = tuple(door["arrive"]), door["to"]
         tile = tuple(target["tile"]); facing = None
         if target["kind"] == "memory":
-            rows = {(r["x"], r["y"]): r for r in self.mem.rows("tiles") if r.get("place") == p}; near = []
-            for d, (dx, dy) in DIRS.items():
-                t = tile[0]-dx, tile[1]-dy
-                if rows.get(t, {}).get("floor") is False: continue
-                if (dirs := route(self.mem, p, pos, t)) is not None: near.append((t, d, dirs))
-            if not near: return None
-            tile, facing, dirs = min(near, key=lambda q: (abs(q[0][0]-pos[0])+abs(q[0][1]-pos[1]), q[1]))
-        else: dirs = route(self.mem, p, pos, tile)
+            found = self.beside(p, pos, tile)
+            if found is None: return None
+            tile, facing, dirs = found
+        else: dirs = route(self.mem, p, pos, tile, occupied=self.occupied(p))
         if dirs is None: return None
         legs.append({"place": p, "dirs": dirs + ([facing] if facing else []), "push": None, "expect": None, "target": target}); return legs
     def travel(self, ctx, legs, step, trace=None):
@@ -868,10 +911,12 @@ class World:
             if leg["place"] != place: return self._travel_result(results, "blocked", f"leg {n} unexpected place", ctx)
             result = approach(replace(ctx, max_inputs=min(ctx.max_inputs, TRAVEL_MAX_INPUTS-inputs)), self.pa, self.pa,
                               exit_target="exit" if leg.get("expect") else None, route={"dirs": leg["dirs"], "push": leg.get("push")})
+            if result.failure: result = replace(result, failure={**result.failure, "place": place})
             results.append(result); inputs += result.inputs
             # the skill checks every press for a cut; first vs last frame of a long walk is a scroll, not a cut (m1_decide2 replay step 42)
             is_cut = result.reason == "scene cut" or result.blank_seen; self._travel_cut |= is_cut; self.pos = fold(self.mem, place, self.pos, result.moves[:-1] if is_cut and result.moves else result.moves, self.tile_px, step, actors=self.actor_tiles)
             if leg.get("expect"):
+                if not is_cut and result.failure and result.failure.get("stage") == "route": return self._travel_result(results, "blocked", f"leg {n} route blocked", ctx)  # the route never reached the exit: not an exit mismatch
                 arrival = self._arrival(result.after, trace) if trace else None
                 edge = exit_to(self.mem, place, tuple(leg["exit_tile"]), leg["push"])
                 if not is_cut: return self._travel_result(results, "blocked", f"leg {n} exit mismatch", ctx)
@@ -903,9 +948,15 @@ class World:
         target = leg.get("target"); dx, dy = DIRS[leg["dirs"][-1]] if leg["dirs"] else (0, 0)
         if not target or target.get("kind") != "memory" or [m.get("dir") if isinstance(m, dict) else m[0] for m in result.moves] != leg["dirs"]: return False
         return (self.pos[0]+dx, self.pos[1]+dy) == tuple(target["tile"])
-    def _travel_result(self, results, status, reason, ctx):
+    def _travel_result(self, results, status, reason, ctx, failure=None):
         moves = [m for r in results for m in r.moves]
-        self._travelled = SkillResult(status, f"travel: {reason}" if reason else "", sum(r.inputs for r in results), sum(r.calls for r in results), results[0].before if results else ctx.env.screenshot(), results[-1].after if results else ctx.env.screenshot(), tuple(map(sum, zip(*(r.scroll for r in results)))) if results else (0, 0), any(r.blank_seen for r in results), moves, next((m.get("self_at") for m in reversed(moves) if isinstance(m, dict) and m.get("self_at") is not None), None)); return self._travelled
+        # a done travel has no failure: an accepted final facing press is blocked in its skill but not a failure here
+        failure = (failure or next((r.failure for r in results if r.failure), None)) if status == "blocked" else None
+        if failure:
+            step_dir = DIRS.get(failure.get("direction")); ahead = (self.pos[0] + step_dir[0], self.pos[1] + step_dir[1]) if step_dir else None
+            blockers = [i for i, t in self.entity_tiles.items() if ahead and tuple(t) == ahead]
+            failure = {**failure, "tile": tuple(self.pos), **({"blocker_id": blockers[0]} if len(blockers) == 1 else {})}
+        self._travelled = SkillResult(status, f"travel: {reason}" if reason else "", sum(r.inputs for r in results), sum(r.calls for r in results), results[0].before if results else ctx.env.screenshot(), results[-1].after if results else ctx.env.screenshot(), tuple(map(sum, zip(*(r.scroll for r in results)))) if results else (0, 0), any(r.blank_seen for r in results), moves, next((m.get("self_at") for m in reversed(moves) if isinstance(m, dict) and m.get("self_at") is not None), None), failure, settled=all(r.settled is not False for r in results)); return self._travelled
     def name(self, place, name, step, frame=None):
         self.new_arrival, self.merge_pending = False, None
         cut_arrival, self._cut_arrival = self._cut_arrival, None

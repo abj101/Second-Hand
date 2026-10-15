@@ -1,6 +1,47 @@
+import pytest
+
 from agent.memory import Memory
 from agent.space import mark_exit
 from tests.agent.test_options import INPUTS, at, room, setup, tile, walk
+
+OBSERVED = (2, 0, {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "observed"})
+INFERRED = (2, 1, {"dir": "DOWN", "to": "hall", "arrive": [1, 0], "src": "inferred"})  # a guessed way back, one tile from the observed door
+HALL = {"kind": "place", "place": "hall", "tile": (0, 0), "id": "hall", "stale": False}
+
+
+def rooms_with(mem, doors):  # only the room and hall places, then the room's door tiles in the given order (insertion order is row order)
+    mem.upsert("places", {"id": "room", "name": "Room", "screen": "world", "state": "place", "first": 1, "last": 1, "edges": []})
+    mem.upsert("places", {"id": "hall", "name": "Hall", "screen": "world", "state": "place", "first": 1, "last": 1, "edges": []})
+    for x, y, exit in doors: tile(mem, x, y, exit)
+
+
+@pytest.mark.parametrize("doors", [(OBSERVED, INFERRED), (INFERRED, OBSERVED)], ids=["observed-first", "inferred-first"])
+def test_inferred_duplicate_of_an_observed_door_is_one_exit_and_display_and_travel_pick_the_observed_one(tmp_path, doors):
+    mem = Memory(tmp_path); rooms_with(mem, doors)
+    world, per = setup(mem, []); world.pos = (0, 0)
+    rec = world._exits("room", {"room", "hall"})
+    assert len(rec) == 1 and (rec[0]["tile"], rec[0]["dir"]) == ((2, 0), "RIGHT")
+    assert (rec[0]["arrive"], rec[0]["src"]) == ([0, 0], "observed")  # fails before: the record has no arrive or src
+    assert [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["label"].startswith("exit ")] == ["exit RIGHT → Hall (used 1×)"]
+    legs = world.plan(HALL)
+    assert [(leg["exit_tile"], leg["push"], leg["arrive"], leg["expect"]) for leg in legs[:1]] == [((2, 0), "RIGHT", (0, 0), "hall")]
+
+
+def test_two_doors_to_one_destination_far_apart_stay_two_exits_and_plan_uses_one_of_them(tmp_path):
+    mem = Memory(tmp_path); rooms_with(mem, [(2, 0, OBSERVED[2]), (-2, -2, {"dir": "UP", "to": "hall", "arrive": [0, 1], "src": "observed"})])
+    world, per = setup(mem, []); world.pos = (0, 0)
+    labels = [o["label"].split(" (")[0] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["label"].startswith("exit ")]
+    assert labels == ["exit UP → Hall", "exit RIGHT → Hall"]
+    legs = world.plan(HALL)
+    assert (legs[0]["exit_tile"], legs[0]["push"], legs[0]["arrive"]) in {((2, 0), "RIGHT", (0, 0)), ((-2, -2), "UP", (0, 1))}
+
+
+@pytest.mark.parametrize("doors", [(OBSERVED, INFERRED), (INFERRED, OBSERVED)], ids=["observed-first", "inferred-first"])
+def test_unreachable_preferred_door_falls_back_to_another_door_of_the_same_exit(tmp_path, doors):
+    mem = Memory(tmp_path); rooms_with(mem, doors)
+    world, per = setup(mem, []); world.pos = (0, 0); world.actor_tiles = frozenset({(2, 0)})  # an actor holds the observed door: no route to it
+    legs = world.plan(HALL)
+    assert legs is not None and [(leg["exit_tile"], leg["push"], leg["arrive"]) for leg in legs[:1]] == [((2, 1), "DOWN", (1, 0))]
 
 
 def test_unverified_thing_next_to_a_verified_exit_is_that_exit_once(tmp_path):

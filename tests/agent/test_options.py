@@ -56,15 +56,45 @@ def scene(tmp_path):
 
 def test_modal_screen_offers_its_choices_then_free_input_and_no_go_to(tmp_path):
     mem = Memory(tmp_path); room(mem)
-    menu = [{"name": "fight", "kind": "menu_item", "at": [.3, .4]}, {"name": "bag", "kind": "menu_item", "at": [.3, .6]}, {"name": "box", "kind": "dialogue_box", "at": [.5, .9]}]
+    menu = [{"name": "fight", "kind": "menu_item", "at": [.3, .4], "selectable": True}, {"name": "bag", "kind": "menu_item", "at": [.3, .6], "selectable": True}, {"name": "box", "kind": "dialogue_box", "at": [.5, .9]}]
     world, per = setup(mem, menu, screen="menu")
     opts = world.options(per, "room", {}, 5, inputs=INPUTS)
     assert [(o["tool"], o["label"]) for o in opts] == [("select", "select fight"), ("select", "select bag"), ("advance", "advance"), ("cancel", "cancel"), ("buttons", BUTTONS)]
     assert opts[0]["action"] == {"thing": 1, "verb": "select"} and opts[2]["action"] == {"verb": "advance"} and opts[-1]["action"] is None
     kb = Memory(tmp_path / "kb"); room(kb)
-    world, per = setup(kb, [{"name": "keyboard", "kind": "keyboard", "at": [.5, .7]}, {"name": "letters", "kind": "menu_item", "at": [.4, .4]}], screen="keyboard")
+    world, per = setup(kb, [{"name": "keyboard", "kind": "keyboard", "at": [.5, .7]}, {"name": "letters", "kind": "menu_item", "at": [.4, .4], "selectable": True}], screen="keyboard")
     labels = [o["label"] for o in world.options(per, "room", {}, 5, inputs=INPUTS)]
     assert labels == ["select letters", "advance", "cancel", "type text into the field", BUTTONS]
+
+
+def labels_on(tmp_path, entities, screen):
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, entities, screen=screen)
+    return [o["label"] for o in world.options(per, "room", {}, 5, inputs=INPUTS)]
+
+
+def test_dialogue_over_furniture_and_npc_offers_no_select(tmp_path):
+    labels = labels_on(tmp_path, [{"name": "television", "kind": "furniture", "at": [.2, .3]}, {"name": "dialogue_box", "kind": "dialogue_box", "at": [.5, .9]},
+                                  {"name": "girl", "kind": "npc", "at": [.8, .4]}], "dialogue")
+    assert not any(label.startswith("select") for label in labels)
+    assert labels == ["advance", "cancel", BUTTONS]
+
+
+def test_dialogue_offers_select_only_for_flagged_yes_and_no(tmp_path):
+    labels = labels_on(tmp_path, [{"name": "yes", "kind": "menu_item", "at": [.3, .4], "selectable": True}, {"name": "no", "kind": "menu_item", "at": [.3, .6], "selectable": True},
+                                  {"name": "television", "kind": "furniture", "at": [.8, .3]}, {"name": "dialogue_box", "kind": "dialogue_box", "at": [.5, .9]}], "dialogue")
+    assert labels == ["select yes", "select no", "advance", "cancel", BUTTONS]
+
+
+def test_decorative_sprites_and_unflagged_items_are_not_choices_on_menus(tmp_path):
+    menu = labels_on(tmp_path / "menu", [{"name": "pokeball sprite", "kind": "menu_item", "at": [.8, .5]}, {"name": "fight", "kind": "menu_item", "at": [.3, .4], "selectable": True},
+                                         {"name": "bag", "kind": "menu_item", "at": [.3, .6], "selectable": True}], "menu")
+    title = labels_on(tmp_path / "title", [{"name": "logo", "kind": "logo", "at": [.5, .2]}, {"name": "start", "kind": "menu_item", "at": [.5, .6], "selectable": True}], "title")
+    battle = labels_on(tmp_path / "battle", [{"name": "enemy sprite", "kind": "monster", "at": [.7, .3]}, {"name": "fight", "kind": "menu_item", "at": [.3, .6], "selectable": True},
+                                             {"name": "run", "kind": "menu_item", "at": [.3, .8], "selectable": True}], "battle")
+    assert menu == ["select fight", "select bag", "advance", "cancel", BUTTONS]  # the sprite is not a choice
+    assert title == ["select start", "advance", "cancel", BUTTONS]
+    assert battle == ["select fight", "select run", "advance", "cancel", BUTTONS]  # the enemy sprite is not a choice
 
 
 def test_room_lists_exits_things_explore_and_free_input_in_rule_order_with_notes(tmp_path):
@@ -138,7 +168,7 @@ def test_a_thing_with_history_keeps_its_own_option(tmp_path):
     world, per = setup(mem, [*lamps, {"name": "sign", "kind": "furniture", "at": at(*SPOTS[12])}, {"name": "vase", "kind": "furniture", "at": at(*SPOTS[13])}])
     i = ids(world, per)
     mem.upsert("relations", {"id": "dn", "s": i["sign"], "p": "does_nothing", "o": "", "src": "observed", "sup": 0, "con": 0, "ev": [], "state": "live", "verb": "approach", "step": 5})  # talked-to or walked-into history, any state
-    fails = {fail_key("room", "approach", "vase", INPUTS): {"n": 1, "why": "wall", "step": 4, "act": "approach vase"}}
+    fails = {fail_key("room", "approach", None, INPUTS, ref=f"thing:{i['vase']}"): {"n": 1, "why": "wall", "step": 4, "act": "approach vase"}}
     opts = world.options(per, "room", fails, 9, inputs=INPUTS)
     by = {o["label"]: o for o in opts}
     assert by["approach sign"]["action"] == {"thing": 13, "verb": "approach"}  # index 0 is the player
@@ -188,12 +218,14 @@ def test_free_input_carries_this_places_button_failures_only(tmp_path):
 def test_fail_notes_use_the_loop_failure_key_and_mark_cycles(tmp_path):
     mem, world, per = scene(tmp_path)
     loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "loop"), "grid")
-    assert loop._fail_key("room", "approach", "npc") == fail_key("room", "approach", "npc", INPUTS)
-    fails = {fail_key("room", "approach", "npc", INPUTS): {"n": 2, "why": "wall", "step": 50, "act": "approach npc"},
-             fail_key("room", "approach", "Cave", INPUTS): {"n": 2, "why": "leads back to Cave: cycle", "step": 60}}
+    i = ids(world, per)
+    assert loop._fail_key("room", "approach", None, ref=f"thing:{i['npc']}") == fail_key("room", "approach", None, INPUTS, ref=f"thing:{i['npc']}")
+    base = {o["label"]: o for o in world.options(per, "room", {}, 120, inputs=INPUTS)}
+    fails = {base["approach npc"]["intent_key"]: {"n": 2, "why": "wall", "step": 50, "act": "approach npc"},
+             base["possible exit UP (unverified, never crossed)"]["intent_key"]: {"n": 2, "why": "leads back to Cave: cycle", "step": 60}}
     by = {o["label"]: o for o in world.options(per, "room", fails, 120, inputs=INPUTS)}
     assert by["approach npc"]["notes"] == ["tried here 2×, last: wall", "talked; same text as before (step 90)"]
-    assert by["interact with npc"]["notes"][0] == "tried here 2×, last: wall"  # same key: the loop's targets ignore the verb
+    assert by["interact with npc"]["notes"] == ["talked; same text as before (step 90)"]  # an interaction failure is not an approach failure
     assert by["possible exit UP (unverified, never crossed)"]["notes"] == ["part of a back-and-forth cycle (step 60)"]
     assert by["not an exit: fake (walked into 3×, steps 104–107)"]["notes"][0].startswith("refuted: not working")
 
@@ -332,7 +364,7 @@ def test_called_actor_option_uses_called_label_and_resolves_case_insensitively(t
     ident = world.entity_ids[1]
     mem.call(ident, "MOM", 41)
 
-    fail = {fail_key("room", "interact", "person", INPUTS): {"n": 1, "why": "blocked"}}
+    fail = {fail_key("room", "interact", None, INPUTS, ref=f"thing:{ident}"): {"n": 1, "why": "blocked"}}
     options = world.options(per, "room", fail, 42, inputs=INPUTS)
     interact = next(option for option in options if option["tool"] == "interact")
     assert interact["label"] == "interact with MOM"
@@ -346,3 +378,26 @@ def test_off_screen_exit_to_a_known_place_travels_through_its_verified_tile(tmp_
     off = {**per, "entities": [player()]}; world.before(off, "room", "room", (160, 144), 2)
     row = next(o for o in world.options(off, "room", {}, 2, inputs=INPUTS) if "Hall" in o["label"])
     assert row["action"] == {"go_to": "Hall"}  # not the door sprite's projected tile (m1_decide2: stairs walked into 16x)
+
+
+def test_selected_exit_counter_follows_the_exit_through_renames_and_reordering(tmp_path):
+    mem, world, per = scene(tmp_path)
+    key = next(o for o in world.options(per, "room", {}, 120, inputs=INPUTS) if o["label"].startswith("exit door"))["intent_key"]
+    fails = {key: {"n": 1, "why": "route blocked", "step": 5, "act": "approach exit: door"}}
+    assert next(o for o in world.options(per, "room", fails, 6, inputs=INPUTS) if o["intent_key"] == key)["notes"] == ["tried here 1×, last: route blocked"]
+    mem.upsert("places", {**mem.get("places", "hall"), "name": "Hallway"})  # the destination is renamed, the screen reordered
+    reordered = {**per, "entities": [per["entities"][0], *reversed(per["entities"][1:])]}
+    world.before(reordered, "room", "room", (160, 144), 6)
+    again = next(o for o in world.options(reordered, "room", fails, 6, inputs=INPUTS) if o["intent_key"] == key)
+    assert again["label"].startswith("exit door → Hallway") and again["notes"] == ["tried here 1×, last: route blocked"]
+    assert not any("route blocked" in n for o in world.options(reordered, "room", fails, 6, inputs=INPUTS) if o["intent_key"] != key for n in o["notes"])
+
+
+def test_selected_exit_travels_through_its_own_door_not_another_to_the_same_place(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    tile(mem, 2, 0, {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "observed"})
+    tile(mem, -2, 0, {"dir": "LEFT", "to": "hall", "arrive": [0, 0], "src": "observed"})
+    world, per = setup(mem, []); world.pos = (0, 0)
+    row = next(o for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["label"].startswith("exit LEFT"))
+    assert row["exit"] == {"tile": [-2, 0], "to": "hall"}
+    assert world.plan(world.resolve("Hall", per, "room"), exit=row["exit"])[0]["exit_tile"] == (-2, 0)

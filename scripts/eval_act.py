@@ -17,6 +17,7 @@ from agent.notebook import Notebook
 from agent import plan as plan_mod
 from agent.observer import for_model, wait_settled
 from agent.perceive import perceive
+from agent.space import DIRS
 from agent.world import _is_exit
 from scripts import run_agent
 from scripts.truth_pokered import read as truth_read
@@ -64,7 +65,7 @@ def report(summary, rows, steps, status, out):
 
 def main(argv=None):
     ap=argparse.ArgumentParser(); ap.add_argument("--frames",default=",".join(map(str,FRAMES))); ap.add_argument("--max-calls",type=int); ap.add_argument("--out",type=Path,default=OUT)
-    ap.add_argument("--run",default="m1_decide",help="--om truth/talk/plan: the recorded run"); ap.add_argument("--exact-exit",action="store_true",help="--om truth: ablate fix 2 (exact exit lookup)"); ap.add_argument("--strip-place",action="store_true",help="--om truth: a run recorded before the perceiver's place field"); ap.add_argument("--from-step",type=int,help="--om branch: checkpoint step; --om plan: planner checkpoint step"); ap.add_argument("--tries",type=int,help="--om plan: independent planner calls (1-8)"); ap.add_argument("--pick",help="--om branch: text of the option label to pick"); ap.add_argument("--om",choices=("places","cases","outcomes","truth","branch","talk","plan"),help="OM replay eval (no --max-calls needed)"); ap.add_argument("--live",action="store_true",help="--om cases: spend the requests; --om plan: spend up to --tries"); ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)"); ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)"); ap.add_argument("--fresh",action="store_true",help="--om cases/outcomes: rebuild the replay snapshots"); ap.add_argument("--arm",choices=("options","decide"),default="options",help="--om cases: decide = text-only act that answers {why, i}")
+    ap.add_argument("--run",default="m1_decide",help="--om truth/talk/plan: the recorded run"); ap.add_argument("--exact-exit",action="store_true",help="--om truth: ablate fix 2 (exact exit lookup)"); ap.add_argument("--strip-place",action="store_true",help="--om truth: a run recorded before the perceiver's place field"); ap.add_argument("--from-step",type=int,help="--om branch: checkpoint step; --om plan: planner checkpoint step"); ap.add_argument("--tries",type=int,help="--om plan: independent planner calls (1-8)"); ap.add_argument("--pick",help="--om branch: text of the option label to pick"); ap.add_argument("--om",choices=("places","cases","outcomes","truth","branch","talk","plan","reliability"),help="OM replay eval (no --max-calls needed); reliability: HF5 primitive + continuation check of --run at --from-step"); ap.add_argument("--live",action="store_true",help="--om cases: spend the requests; --om plan: spend up to --tries"); ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)"); ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)"); ap.add_argument("--fresh",action="store_true",help="--om cases/outcomes: rebuild the replay snapshots"); ap.add_argument("--arm",choices=("options","decide"),default="options",help="--om cases: decide = text-only act that answers {why, i}")
     a=ap.parse_args(argv)
     if a.om: return om_main(a, ap)
     if a.max_calls is None: ap.error("the following arguments are required: --max-calls")
@@ -113,6 +114,7 @@ FLOOR_OF_MAP = {37: "1F", 38: "2F"}  # truth.map of the m1_gp5 house (evaluation
 EXIT_ROWS = ("exit ", "possible exit ", "not an exit")  # option labels of exit records: verified, unverified, refuted
 
 class OmAbort(RuntimeError): pass  # the replay cannot continue: exit 2
+class OmIncompatible(OmAbort): pass  # a legacy replay met perception the cache does not hold: incompatible, inconclusive, exit 2
 class OmStop(Exception): pass  # outcome mode: the scripted action's presses are done; stop before any perceiver call on the new frame
 
 def _jsonl(path):
@@ -187,7 +189,7 @@ class Replay:
             if (MODEL_CACHE / f"{self.real._key(system, user, images, schema)}.json").is_file(): return self.real.ask(system, user, images, schema, role=role)
             if role == "perceiver":
                 self.misses += 1; self.miss_steps.append(self.step)
-                if self.misses > PERCEIVER_MISSES: raise OmAbort(f"{self.misses} perceiver cache misses (limit {PERCEIVER_MISSES}), last at step {self.step}: the replay no longer matches the cache")
+                if self.misses > PERCEIVER_MISSES: raise OmIncompatible(f"{self.misses} perceiver cache misses (limit {PERCEIVER_MISSES}), first at step {self.miss_steps[0]}, last at step {self.step}: the old replay no longer matches the cache")
             else: self.skill_misses += 1  # the recording stored no reply here either (uncached = no data), so no data is the replay
             return Reply("", None, 0.0, None, None)  # not stored: .cache/model is never written by a miss
         if role == "plan":
@@ -570,6 +572,7 @@ def om_talk(run):
                     and any(o.get("tool") == "interact" and o.get("label", "").casefold().startswith("interact with mom") for o in options))
     rep.stop_when = complete
     try: rep.run(last)
+    except OmIncompatible: raise  # inconclusive, not a verdict on the talk: om_main reports exit 2
     except OmAbort as e: print(f"replay stopped: {e}")
     loop = rep.loop
     if loop is None: return 1
@@ -666,6 +669,145 @@ def om_plan(run, step, tries, live=False):
         return 0 if successes >= math.ceil(2 * tries / 3) else 1
     finally: env.close()
 
+# ---- --om reliability (HF5 WP B): one production Loop step, from a copy of runs/<run>/checkpoint/<step>, executes the recorded
+# choice (the act is scripted to it). Perception, skill reads and any continuation act come from .cache/model only; a miss stops
+# that part (never requested, never refilled). RAM truth is read here, for the assertions only; agent/ never sees it.
+HF5 = Path(".tmp/hf/HF5")  # scratch: a copy of each checkpoint; runs/ and .cache/ are only read
+RELIABILITY_CONTINUATION = 3  # autonomous steps after the primitive
+
+class CacheMiss(Exception):  # a model call the cache does not hold: nothing is requested and the step stops here
+    def __init__(self, role, step): super().__init__(f"{role} cache miss at step {step}"); self.role, self.step = role, step
+class Unexecuted(Exception): pass  # the primitive could not run the recorded choice
+
+def _hf5_path(name):
+    root = HF5.resolve(); target = (root / name).resolve()
+    if target == root or root not in target.parents: raise ValueError(f"unsafe HF5 scratch path: {target}")
+    return target
+
+def _ram_actors(ram):
+    """Tiles of the non-player sprites, relative to the player (16 px tiles; sprite slot 0 is the player)."""
+    player = next((s for s in ram["sprites"] if s["slot"] == 0), None)
+    if player is None: raise Unexecuted("RAM shows no player sprite")
+    return {(round((s["x"] - player["x"]) / 16), round((s["y"] - player["y"]) / 16)) for s in ram["sprites"] if s["slot"] != 0}
+
+def _primitive_checks(before, after, skill, leg, pos0, keys):
+    """The primitive's RAM-truth assertions: [(name, passed, detail)]. Route and first press are judged against the actor tiles
+    RAM shows; the reported failure stage against where RAM shows the walk ended."""
+    if "exit_tile" not in leg: raise Unexecuted("the recorded route has no exit tile to judge the stage against")
+    actors = _ram_actors(before)
+    route = [pos0]
+    for d in leg.get("dirs") or []: route.append((route[-1][0] + DIRS[d][0], route[-1][1] + DIRS[d][1]))
+    held = {(pos0[0] + dx, pos0[1] + dy) for dx, dy in actors}
+    hit = [t for t in route[1:] if t in held]
+    first_offset = DIRS.get(keys[0]) if keys else None  # a button press (A, B, START) walks nowhere
+    into = first_offset is not None and first_offset in actors
+    moved = (before["map"], before["x"], before["y"]) != (after["map"], after["x"], after["y"])
+    crossed = after["map"] != before["map"]
+    here, exit_rel = (after["x"] - before["x"], after["y"] - before["y"]), (leg["exit_tile"][0] - pos0[0], leg["exit_tile"][1] - pos0[1])
+    expected = None if crossed else "crossing" if here == exit_rel else "route"
+    reported = (skill.failure or {}).get("stage")
+    return [
+        ("route excludes the actor tile", not hit, f"route {route[1:]}; actor tiles {sorted(held)}; overlap {hit or 'none'}"),
+        ("first press is not into the actor", not into, f"first press {keys[0] if keys else 'none'}; actor offsets {sorted(actors)}"),
+        ("position changes vs before", moved, f"(map,x,y) {(before['map'], before['x'], before['y'])} -> {(after['map'], after['x'], after['y'])}"),
+        ("reported failure stage matches RAM", reported == expected and (expected is not None or skill.status == "done"),
+         f"reported {reported!r} ({skill.status}: {skill.reason!r}); RAM expects {expected!r}"),
+    ]
+
+def _rel_finish(primitive, continuation, counter, before):
+    after = _budget(); unchanged = before == after
+    print(f"ledger total {before.get('total')} -> {after.get('total')}; m1 {before.get('m1')} -> {after.get('m1')}")
+    print(f"ledger unchanged: {'yes' if unchanged else 'no'}")
+    print(f"reliability: primitive={primitive} continuation={continuation} requests={counter['requests']} ledger_unchanged={'yes' if unchanged else 'no'}")
+    if counter["requests"] or not unchanged: return 2  # the zero-request contract broke: this run is no evidence
+    if primitive == "FAIL": return 1
+    return 0 if primitive == "PASS" and continuation.startswith("COMPLETED") else 2  # a cache miss or an unfinished continuation is no pass
+
+def om_reliability(run, step):
+    counter, before = {"requests": 0}, _budget()
+    cp, first = Path("runs") / run / "checkpoint" / f"{step:06d}", step + 1
+    trace, presses_file = Path("runs") / run / "trace.jsonl", Path("runs") / run / "presses.jsonl"
+    rec = next((r for r in _jsonl(trace) if r.get("step") == first), None) if trace.exists() else None
+    missing = [n for n in ("memory", "pyboy.state", "harness.json") if not (cp / n).exists()] + ([] if rec else [f"trace row {first}"])
+    if missing: print(f"missing checkpoint evidence in {cp}: {', '.join(missing)}"); return _rel_finish("INCONCLUSIVE", "NOT RUN", counter, before)
+    rec_action, rec_skill = (rec.get("act") or {}).get("action"), rec.get("skill") or {}
+    presses = next((r["keys"] for r in _jsonl(presses_file) if r.get("step") == first), []) if presses_file.exists() else []
+    print(f"recorded step {first}: place {rec.get('place')!r}, choice {(rec.get('choice') or {}).get('verb')} {(rec.get('choice') or {}).get('target')!r}, "
+          f"action {rec_action}, skill {rec_skill.get('status')} ({rec_skill.get('reason')!r}), presses {presses}")
+    try:
+        work = _hf5_path(f"{run}_{step:06d}")
+        shutil.rmtree(work, ignore_errors=True); shutil.copytree(cp / "memory", work / "memory")
+        for name in ("pyboy.state", "harness.json"): shutil.copy2(cp / name, work / name)
+        env = PyBoyEnv(find_rom(), state=str(work / "pyboy.state")); env.tile_px = 16
+    except (OSError, ValueError) as e:
+        print(f"cannot start the replay: {e}"); return _rel_finish("INCONCLUSIVE", "NOT RUN", counter, before)
+    real = Ollama(OM_MODEL, cache_dir=MODEL_CACHE)
+    def no_http(payload):
+        counter["requests"] += 1; raise OmAbort("HTTP attempted by the reliability replay")
+    real._post = no_http
+    st = {"phase": "primitive", "loop": None, "options": [], "captured": [], "travel": None, "keys": []}
+    def cached(system, user, images, schema): return (MODEL_CACHE / f"{real._key(system, user, images, schema)}.json").is_file()
+    class Stub:
+        calls = seq = 0
+        def ask(self, system, user, images=(), schema=None, *, role=""):
+            if role == "plan": return Reply("", {"goals": [], "focus": "", "why": "", "lesson": None}, 0.0, None, None)  # not perception: no planner call
+            if role not in ("perceiver", "skill", "act"): raise Unexecuted(f"unexpected model role {role!r}")
+            if st["phase"] == "primitive" and role == "act":  # the recorded choice, by its action on the offered options
+                n = next((o["n"] for o in st["options"] if o.get("action") == rec_action), None)
+                if n is None: raise Unexecuted(f"the recorded choice {rec_action} is not offered at step {first}")
+                return Reply("", {"place": "", "notebook": [], "action": {"i": n}, "text": None, "expect": "screen_changes", "why": "reliability: the recorded choice"}, 0.0, None, None)
+            if not cached(system, user, images, schema): raise CacheMiss(role, st["loop"].step_no + 1)
+            return real.ask(system, user, images, schema, role=role)
+    real_act = loop_mod.act
+    def act(*args, options=None, **kwargs):
+        st["options"] = options or []; return real_act(*args, options=options, **kwargs)
+    loop_mod.act = act
+    env_press = env.press
+    def logged_press(key, *args, **kwargs): st["keys"].append(key); return env_press(key, *args, **kwargs)
+    env.press = logged_press
+    loop = Loop(env, Stub(), Memory(work / "memory"), "pokemon_red"); loop.restore(json.loads((work / "harness.json").read_text(encoding="utf-8")))
+    st["loop"] = loop
+    real_travel = loop.world.travel
+    def travel(ctx, legs, step_no, trace=None):
+        st["travel"] = {"legs": legs, "pos0": tuple(loop.world.pos)}; return real_travel(ctx, legs, step_no, trace)
+    loop.world.travel = travel
+    def capture(name):
+        real_fn = getattr(loop, name)
+        def wrapped(s, skill, *args, **kwargs): st["captured"].append(skill); return real_fn(s, skill, *args, **kwargs)
+        setattr(loop, name, wrapped)
+    capture("_settle"); capture("_hold_action")
+    primitive, continuation, reason, checks, missed = "INCONCLUSIVE", "NOT RUN", None, None, None
+    try:
+        ram_before = truth_read(env)
+        print(f"RAM before step {first}: (map,x,y)=({ram_before['map']},{ram_before['x']},{ram_before['y']}); actor offsets {sorted(_ram_actors(ram_before))}")
+        try: loop.step()
+        except CacheMiss as miss: missed = miss
+        ram_after = truth_read(env)
+        if missed and not st["captured"]: reason = f"{missed.role} cache miss at step {missed.step} before the route ran: the restored frame's perception is not cached under the current prompt"
+        elif not st["captured"] or not st["travel"]: reason = "the recorded choice ran no travel route"
+        else:
+            checks = _primitive_checks(ram_before, ram_after, st["captured"][0], st["travel"]["legs"][0], st["travel"]["pos0"], st["keys"])
+            if ram_after["map"] != ram_before["map"]: print(f"extra evidence (not asserted): map {ram_before['map']} -> {ram_after['map']}")
+        if checks is None: print(f"primitive INCONCLUSIVE: {reason}")
+        else:
+            for name, ok, detail in checks: print(f"  {'PASS' if ok else 'FAIL'} {name}: {detail}")
+            primitive = "PASS" if all(ok for _, ok, _ in checks) else "FAIL"
+        if missed and checks is not None:  # the after-frame's perception missed: the primitive stands, the continuation stops here
+            continuation = f"INCONCLUSIVE(step {missed.step})"; print(f"continuation stopped: {missed.role} cache miss on the after-frame of step {missed.step}")
+        elif checks is not None:
+            st["phase"] = "continuation"
+            for _ in range(RELIABILITY_CONTINUATION):
+                n = loop.step_no + 1
+                try: loop.step()
+                except CacheMiss as miss: continuation = f"INCONCLUSIVE(step {miss.step})"; print(f"continuation stopped: {miss.role} cache miss at step {miss.step}"); break
+                except (Unexecuted, OmAbort) as error: continuation = f"INCONCLUSIVE(step {n})"; print(f"continuation stopped at step {n}: {error}"); break
+            else: continuation = f"COMPLETED(steps {first + 1}-{first + RELIABILITY_CONTINUATION})"
+    except (Unexecuted, OmAbort) as error:
+        reason = str(error); print(f"primitive INCONCLUSIVE: {reason}")
+    finally:
+        loop_mod.act = real_act; env.close()
+    return _rel_finish(primitive, continuation, counter, before)
+
 def om_main(a, ap):
     global DECIDE, OM_CAP
     sys.stdout.reconfigure(encoding="utf-8")  # option labels carry arrows; a redirected cp1252 stdout cannot print them
@@ -678,11 +820,16 @@ def om_main(a, ap):
         if a.from_step is None: ap.error("--om plan requires --from-step")
         if a.tries is None or not 1 <= a.tries <= 8: ap.error("--om plan requires --tries from 1 to 8")
     if a.om == "places" and a.live: ap.error("--live applies to --om cases")
+    if a.om == "reliability":
+        if a.from_step is None: ap.error("--om reliability requires --from-step")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", a.run): ap.error("--run must be a run name")
     if a.om in ("places", "cases", "outcomes"): _old_perceiver()  # their recordings predate the place field
     try:
         if a.om == "talk": return om_talk(a.run)
         if a.om == "plan": return om_plan(a.run, a.from_step, a.tries, a.live)
+        if a.om == "reliability": return om_reliability(a.run, a.from_step)
         return om_branch(a.run, a.from_step, a.pick) if a.om == "branch" else om_truth(a.run, no_names=a.strip_place, exact_exit=a.exact_exit) if a.om == "truth" else om_places() if a.om == "places" else om_outcomes(a.steps, a.fresh) if a.om == "outcomes" else om_cases(a.live, a.steps, a.fresh)
+    except OmIncompatible as e: print(f"incompatible old replay / inconclusive: {e}", flush=True); return 2
     except OmAbort as e: print(f"ABORT: {e}", flush=True); return 2
     except run_agent.CallCap as e: print(f"CallCap: {e}", flush=True); return 3
     except ModelUnavailable as e: print(f"model_unavailable={e}", flush=True); return 4

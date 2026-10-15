@@ -112,7 +112,7 @@ def test_approach_keeps_sidestepping_past_a_two_tile_obstacle(monkeypatch):
         def tick(self, frames=1): pass
 
     frame = Image.new("RGB", (160, 144), "#777")
-    monkeypatch.setattr(skills, "wait_settled", lambda env: SimpleNamespace(frame=frame, blank_seen=False))
+    monkeypatch.setattr(skills, "wait_settled", lambda env: SimpleNamespace(frame=frame, settled=True, blank_seen=False))
     def step(ctx, direction, before):
         if ctx.env.unknown: return SimpleNamespace(frame=frame, blank_seen=False), None, False, None
         dx, dy = {"LEFT": (-1, 0), "RIGHT": (1, 0), "UP": (0, -1), "DOWN": (0, 1)}[direction]

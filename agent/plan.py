@@ -26,11 +26,11 @@ SCHEMA = {"type": "object", "properties": {"goals": {"type": "array", "items": {
 class Plan:
     ops: list; focus: str; lesson: str | None; why: str; facts: list = field(default_factory=list)
 
-def plan(model, trigger: str, notebook, view: str, screen_text: list, recent: list[str]) -> Plan:
+def plan(model, trigger: str, notebook, view: str, screen_text: list, recent: list[str], failure: str | None = None) -> Plan:
     lines = [f"Trigger: {trigger}", f"Goal tree (focus: {notebook.focus or 'none'}):\n{notebook.render()}",
              f"Log (what already happened):\n{notebook.render_log(40)}", f"Map and memory:\n{view or 'none'}",
              f"Text on screen now: {'; '.join(str(t) for t in screen_text) or 'none'}",
-             f"Recent actions: {'; '.join(recent) or 'none'}", REPLY]
+             f"Recent actions: {'; '.join(recent) or 'none'}", *([f"Last failure: {failure}"] if failure else []), REPLY]
     data = model.ask(SYSTEM, "\n".join(lines), [], SCHEMA, role="plan").data
     data = data if isinstance(data, dict) else {}
     ops = [dict(o, section="goals") for o in data.get("goals") or [] if isinstance(o, dict)] if isinstance(data.get("goals"), list) else []

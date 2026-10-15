@@ -100,3 +100,26 @@ def test_snap_to_text_uses_nearest_matching_box_only():
     assert snap_to_text("proceed button", [0.83, 0.79], tokens) == pytest.approx([0.85, 0.82])
     assert snap_to_text("Settings", [0.5, 0.5], tokens) == [0.5, 0.5]
     assert snap_to_text("Skip", [0.1, 0.9], tokens) == [0.1, 0.9]  # matching text, but too far away
+
+
+def test_selectable_is_kept_only_when_a_real_true():
+    from agent.perceive import SCHEMA
+
+    base = {"kind": "menu_item", "name": "YES", "at": [500, 500]}
+    assert normalize({"entities": [{**base, "selectable": True}]})["entities"] == [{**base, "at": [.5, .5], "selectable": True}]
+    for value in ("true", 1, None, False):
+        assert normalize({"entities": [{**base, "selectable": value}]})["entities"] == [{"kind": "menu_item", "name": "YES", "at": [.5, .5]}]
+    assert normalize({"entities": [base]})["entities"] == [{"kind": "menu_item", "name": "YES", "at": [.5, .5]}]
+    assert SCHEMA["properties"]["entities"]["items"]["properties"]["selectable"] == {"type": "boolean"}
+    assert "selectable" not in SCHEMA["properties"]["entities"]["items"]["required"]
+
+
+def test_dialogue_over_furniture_has_no_selectable_flags():
+    perception = {"screen": "dialogue", "text": ["MOM: Right."], "entities": [
+        {"kind": "furniture", "name": "television", "at": [300, 200]},
+        {"kind": "player", "name": "player", "at": [500, 700]},
+        {"kind": "dialogue_box", "name": "dialogue_box", "at": [500, 900]},
+    ]}
+    out = normalize(perception)
+    assert out["screen"] == "dialogue" and len(out["entities"]) == 3
+    assert all("selectable" not in e for e in out["entities"])

@@ -1,4 +1,5 @@
 import json
+import pytest
 from types import SimpleNamespace
 
 from agent.memory import Memory
@@ -832,6 +833,75 @@ def test_travel_leg_through_a_matching_exit_counts_the_crossing_both_ways(tmp_pa
     assert mem.get("crossings", "source@1,0>expected")["n"] == 1 and mem.get("crossings", "expected@0,0>source")["n"] == 1
 
 
+ROUTE_DIRS = [("RIGHT", 1, 0), ("LEFT", -1, 0), ("UP", 0, -1), ("DOWN", 0, 1)]
+
+
+def _route_world(mem, env):  # player starts at (8, 8); callers route it towards a blocker two tiles away
+    from agent.skills import Ctx; from tests.agent.fakes import StubModel
+    world = World(mem, 16); world.current_place = "room"; world.pa = [.5, .5]; world.pos = (8, 8)
+    return world, Ctx(env, StubModel([]), 16)
+
+
+@pytest.mark.parametrize("guarded", [True, False])
+@pytest.mark.parametrize("key, dx, dy", ROUTE_DIRS)
+def test_route_blocked_expect_leg_is_not_an_exit_mismatch(tmp_path, key, dx, dy, guarded):
+    from tests.agent.fakes import GridEnv
+
+    mem = Memory(tmp_path); place(mem, "room", "room"); place(mem, "hall", "hall")
+    blocker, exit_tile = (8 + 2 * dx, 8 + 2 * dy), (8 + 3 * dx, 8 + 3 * dy)
+    mem.upsert("tiles", {"id": f"room@{exit_tile[0]},{exit_tile[1]}", "place": "room", "x": exit_tile[0], "y": exit_tile[1], "floor": True, "blocked": [], "pushed": [], "step": 1,
+                         "exit": {"dir": key, "to": "hall", "arrive": [0, 0], "src": "observed"}})
+    exit_before = mem.get("tiles", f"room@{exit_tile[0]},{exit_tile[1]}")["exit"]
+    env = GridEnv(); env.door, env.npc = (-5, -5), blocker
+    world, ctx = _route_world(mem, env); world.entity_tiles = {"guard": blocker} if guarded else {}
+    legs = [{"place": "room", "dirs": [key] * 3, "push": key, "expect": "hall", "exit_tile": exit_tile},
+            {"place": "hall", "dirs": ["LEFT"], "push": None}]
+
+    result = world.travel(ctx, legs, 1)
+
+    expected = {"stage": "route", "reason": "route blocked", "direction": key, "place": "room", "tile": (8 + dx, 8 + dy)}
+    assert result.status == "blocked" and result.reason == "travel: leg 1 route blocked"
+    assert result.inputs == 2 and env.player == (8 + dx, 8 + dy)
+    assert result.failure == ({**expected, "blocker_id": "guard"} if guarded else expected)
+    assert world.current_place == "room" and world.pos == (8 + dx, 8 + dy) and not world._travel_open
+    assert mem.get("tiles", f"room@{exit_tile[0]},{exit_tile[1]}")["exit"] == exit_before and mem.rows("crossings") == []
+
+
+@pytest.mark.parametrize("key, dx, dy", ROUTE_DIRS)
+def test_route_blocked_travel_folds_each_move_once_and_prepare_does_not_refold(tmp_path, key, dx, dy):
+    from tests.agent.fakes import GridEnv
+
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    blocker = (8 + 2 * dx, 8 + 2 * dy)
+    env = GridEnv(); env.door, env.npc = (-5, -5), blocker
+    world, ctx = _route_world(mem, env); world.actor_tiles = frozenset({blocker})
+
+    result = world.travel(ctx, [{"place": "room", "dirs": [key] * 3, "push": None}], 1)
+    assert world.pos == (8 + dx, 8 + dy)
+    world.prepare(result, "room", False, 2)
+
+    assert world.pos == (8 + dx, 8 + dy)
+
+
+@pytest.mark.parametrize("actor", [True, False])
+@pytest.mark.parametrize("key, dx, dy", ROUTE_DIRS)
+def test_actor_block_is_not_stored_as_a_wall_but_a_real_wall_is(tmp_path, key, dx, dy, actor):
+    from tests.agent.fakes import GridEnv
+
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    blocker = (8 + 2 * dx, 8 + 2 * dy)
+    env = GridEnv(); env.door, env.npc = (-5, -5), (-6, -6)
+    if actor: env.npc = blocker
+    else: env.walls.add(blocker)
+    world, ctx = _route_world(mem, env)
+    if actor: world.actor_tiles = frozenset({blocker})
+
+    world.travel(ctx, [{"place": "room", "dirs": [key] * 3, "push": None}], 1)
+
+    row = mem.get("tiles", f"room@{8 + dx},{8 + dy}")
+    assert row is not None and (key in row["blocked"]) is (not actor)
+
+
 def test_beyond_suffix_counts_in_words_and_drops_zero_parts():
     from agent.world import _beyond_suffix
     assert _beyond_suffix(None) == "" and _beyond_suffix({"unused_exits": 0, "unexplored": 0}) == ""
@@ -863,8 +933,8 @@ def test_here_flag_lists_failed_button_combos_and_drops_them_from_untried(tmp_pa
     mem = Memory(tmp_path); world = World(mem, 16); world.current_place = "room"
     mem.upsert("tiles", {"id": "room@0,0", "place": "room", "x": 0, "y": 0,
                          "floor": True, "blocked": [], "pushed": [], "exit": None, "step": 1})
-    fails = {"room|up": {"n": 4, "why": "x", "step": 9, "act": "buttons UP A"},
-             "other|up": {"n": 1, "why": "x", "step": 10, "act": "buttons UP"}}
+    fails = {"room|buttons|up": {"n": 4, "why": "x", "step": 9, "act": "buttons UP A"},
+             "other|buttons|up": {"n": 1, "why": "x", "step": 10, "act": "buttons UP"}}
     base = world.here_flag()
     assert base == "here: blocked none; open none; untried UP, DOWN, LEFT, RIGHT; self unlocked"
     assert world.here_flag({}) == base
@@ -882,3 +952,96 @@ def test_open_screen_edges_count_unseen_cells_past_them_until_seen(tmp_path):
     assert edge["LEFT"] == [] and edge["RIGHT"] == list(range(9)) and edge["UP"] == edge["DOWN"] == list(range(1, 10))
     mem = Memory(tmp_path); mem.upsert("seen", {"id": "p", "cells": ["5,0"], "open": ["5,0", "5,1"]})
     assert open_cells(mem, "p") == {"5,1"}
+
+
+SYMMETRIES = [lambda x, y: (x, y), lambda x, y: (y, x), lambda x, y: (-x, y), lambda x, y: (x, -y),
+              lambda x, y: (-x, -y), lambda x, y: (-y, x), lambda x, y: (y, -x), lambda x, y: (-y, -x)]
+
+
+def _rooms(mem, id, cells):  # open cells are floor; every other tile in the 5x5 box around them is wall
+    for x in range(-2, 3):
+        for y in range(-2, 3):
+            mem.upsert("tiles", {"id": f"{id}@{x},{y}", "place": id, "x": x, "y": y, "floor": (x, y) in cells, "blocked": [], "pushed": [], "exit": None, "step": 1})
+
+
+def _walk(start, dirs):
+    from agent.space import DIRS
+    at, visited = start, [start]
+    for d in dirs: at = (at[0] + DIRS[d][0], at[1] + DIRS[d][1]); visited.append(at)
+    return visited
+
+
+@pytest.mark.parametrize("T", SYMMETRIES)
+def test_plan_detours_around_an_actor_in_the_current_place(tmp_path, T):
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    _rooms(mem, "room", {T(x, y) for x in (-1, 0, 1) for y in (-1, 0, 1)})
+    start, goal, actor = T(-1, 0), T(1, 0), T(0, 0)
+    world = World(mem, 16); world.current_place = "room"; world.pos = start; world.actor_tiles = frozenset({actor})
+
+    legs = world.plan({"kind": "place", "place": "room", "tile": goal, "id": "room", "stale": False})
+
+    assert legs is not None and len(legs) == 1
+    visited = _walk(start, legs[0]["dirs"])
+    assert visited[-1] == goal and actor not in visited
+
+
+@pytest.mark.parametrize("T", SYMMETRIES)
+def test_plan_has_no_route_through_a_one_cell_corridor_held_by_an_actor(tmp_path, T):
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    _rooms(mem, "room", {T(-1, 0), T(0, 0), T(1, 0)})
+    world = World(mem, 16); world.current_place = "room"; world.pos = T(-1, 0); world.actor_tiles = frozenset({T(0, 0)})
+
+    assert world.plan({"kind": "place", "place": "room", "tile": T(1, 0), "id": "room", "stale": False}) is None
+
+
+def test_plan_routes_direct_again_once_the_actor_tiles_are_cleared(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    _rooms(mem, "room", {(x, y) for x in (-1, 0, 1) for y in (-1, 0, 1)})
+    world = World(mem, 16); world.current_place = "room"; world.pos = (-1, 0); world.actor_tiles = frozenset({(0, 0)})
+    target = {"kind": "place", "place": "room", "tile": (1, 0), "id": "room", "stale": False}
+    assert len(world.plan(target)[0]["dirs"]) == 4  # around the actor, not straight through it
+
+    world.actor_tiles = frozenset()
+
+    assert world.plan(target)[0]["dirs"] == ["RIGHT", "RIGHT"]
+
+
+@pytest.mark.parametrize("T", SYMMETRIES)
+def test_plan_memory_target_stands_on_a_free_tile_beside_it_and_faces_it(tmp_path, T):
+    from agent.space import DIRS
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    _rooms(mem, "room", {T(x, y) for x in (-1, 0, 1) for y in (-1, 0, 1)})
+    tile, start, actor = T(1, 0), T(-1, 0), T(0, 0)  # the nearest stand tile is the actor's
+    world = World(mem, 16); world.current_place = "room"; world.pos = start; world.actor_tiles = frozenset({actor})
+
+    legs = world.plan({"kind": "memory", "place": "room", "tile": tile, "id": "fern", "stale": False})
+
+    *walk, facing = legs[-1]["dirs"]; visited = _walk(start, walk)
+    assert actor not in visited and abs(visited[-1][0] - tile[0]) + abs(visited[-1][1] - tile[1]) == 1
+    assert (visited[-1][0] + DIRS[facing][0], visited[-1][1] + DIRS[facing][1]) == tile
+
+
+def test_plan_ignores_actors_of_another_place_on_later_legs(tmp_path):
+    from agent.space import mark_exit
+    mem = Memory(tmp_path); place(mem, "room", "room"); place(mem, "other", "other")
+    _rooms(mem, "room", {(-1, 0), (0, 0)}); _rooms(mem, "other", {(0, 0), (1, 0), (2, 0)})
+    mark_exit(mem, "room", (0, 0), "RIGHT", "other", (0, 0), 1)
+    world = World(mem, 16); world.current_place = "room"; world.pos = (-1, 0)
+    world.actor_tiles = frozenset({(1, 0)})  # a room actor standing where the other-place corridor runs
+
+    legs = world.plan({"kind": "place", "place": "other", "tile": (2, 0), "id": "other", "stale": False})
+
+    assert [leg["place"] for leg in legs] == ["room", "other"]
+    assert legs[0]["dirs"] == ["RIGHT"] and legs[1]["dirs"] == ["RIGHT", "RIGHT"]
+
+
+def test_plan_route_to_an_exit_tile_avoids_an_actor(tmp_path):
+    from agent.space import mark_exit
+    mem = Memory(tmp_path); place(mem, "room", "room"); place(mem, "other", "other")
+    _rooms(mem, "room", {(x, y) for x in (-1, 0, 1) for y in (-1, 0, 1)}); _rooms(mem, "other", {(0, 0)})
+    mark_exit(mem, "room", (1, 0), "RIGHT", "other", (0, 0), 1)
+    world = World(mem, 16); world.current_place = "room"; world.pos = (-1, 0); world.actor_tiles = frozenset({(0, 0)})
+
+    legs = world.plan({"kind": "place", "place": "other", "tile": (0, 0), "id": "other", "stale": False})
+
+    assert legs[0]["exit_tile"] == (1, 0) and (0, 0) not in _walk((-1, 0), legs[0]["dirs"])

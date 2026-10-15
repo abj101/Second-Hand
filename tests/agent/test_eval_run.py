@@ -603,3 +603,22 @@ def test_truth_reader_keeps_symbol_map_dimensions_in_two_by_two_blocks():
     row = read_truth(StubEnv())
 
     assert row["map_h"] == 7 and row["map_w"] == 10
+
+
+def test_execution_success_skips_pending_rows_and_counts_each_action_once(tmp_path):
+    run = tmp_path / "exec"
+    trace = [
+        {"step": 1, "place": "p", "observation_status": "pending", "execution": "done", "action_step": None, "verdict": "hit", "skill": {"status": "done", "inputs": 2}},
+        {"step": 2, "place": "p", "observation_status": "settled", "execution": "done", "action_step": 1, "verdict": "hit", "skill": {"status": "done", "inputs": 2}},
+        {"step": 3, "place": "p", "observation_status": "settled", "execution": "blocked", "action_step": None, "verdict": "miss", "skill": {"status": "blocked", "inputs": 1}},
+        {"step": 4, "place": "p", "observation_status": "settled", "execution": "failed", "action_step": None, "verdict": "hit", "skill": {"status": "failed", "inputs": 0}},
+        {"step": 5, "place": "p", "observation_status": "pending", "execution": None, "action_step": None, "verdict": "unobservable", "skill": None},
+        {"step": 6, "place": "p", "observation_status": "settled", "execution": "done", "action_step": 5, "verdict": "hit", "skill": {"status": "done", "inputs": 1}},
+        {"step": 7, "place": "p", "observation_status": "settled", "execution": "done", "action_step": 5, "verdict": "hit", "skill": {"status": "done", "inputs": 1}},
+    ]
+    write(run / "trace.jsonl", trace)
+
+    result = evaluate(run)
+
+    # actions 1 (done), 3 (blocked), 4 (zero-input select, failed though its verdict is a hit), 5 (done, resolved once at step 6)
+    assert result["execution_success"] == {"done": 2, "failed": 2, "total": 4, "pending_rows": 2, "rate": 0.5}
