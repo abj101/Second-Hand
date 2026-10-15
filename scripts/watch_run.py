@@ -139,7 +139,7 @@ button,select{background:var(--panel);color:var(--fg);border:1px solid var(--dim
 canvas{display:block;width:100%;background:var(--bg);border:1px solid var(--dim)}
 #edges div{color:var(--muted);border-bottom:1px solid var(--subtle);padding:2px 0}
 footer{display:flex;justify-content:space-between;border-top:1px solid var(--fg);padding:10px 18px;color:var(--muted);font-size:10px}
-@media (max-width:1100px){body{height:auto;overflow:auto}main{grid-template-columns:1fr;grid-template-rows:none}.grow{flex:none}.grow>:last-child{max-height:420px}}
+@media (max-width:1100px){body{height:auto;overflow:auto}main{grid-template-columns:1fr;grid-template-rows:none}.grow{flex:none}.grow>:last-child{flex:none;max-height:420px}}
 </style></head><body>
 <header><b>AVATAR / RUN</b><span id="run" class="muted"></span><span style="flex:1"></span>
 <button id="follow">FOLLOW LIVE</button><span id="badge" class="badge"><i></i><span>IDLE</span></span></header>
