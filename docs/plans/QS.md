@@ -33,9 +33,13 @@ before accepting it.
 ACCEPTANCE: run each card's acceptance commands yourself. A card is done only when
 they exit 0. A failed card gets one precise repair round, then report the blocker;
 never broaden scope. After each parallel batch run
-`.venv-agent/Scripts/python.exe -B -m pytest tests/agent -q -p no:cacheprovider -n auto --basetemp=.tmp/qs/pytest`.
-Append `--basetemp=.tmp/qs/pytest` to EVERY pytest command in this packet: the sandbox
-TEMP (AppData\Local\Packages\sandbox...\AC\Temp) is not writable and pytest exits 3.
+`.venv-agent/Scripts/python.exe -B -m pytest tests/agent -q -p no:cacheprovider -n auto`.
+TEMP FIRST: the sandbox TEMP (AppData\Local\Packages\sandbox...\AC\Temp) is not
+writable, which breaks pytest and every tempfile user. In each shell, before any
+pytest or script command, run:
+  New-Item -ItemType Directory -Force .tmp/qs/tmp | Out-Null; $env:TEMP = "$PWD\.tmp\qs\tmp"; $env:TMP = $env:TEMP
+and confirm `python -c "import tempfile; print(tempfile.gettempdir())"` prints that
+folder. Workers' shells need the same line.
 Unit tests use StubModel only. Locate code by symbol (CodeGraph), not line number.
 
 LIMITS: never edit contracts.md (the section 4 text goes into the Result). No game
@@ -56,7 +60,11 @@ Planning audit 2026-10-14 (memory `project-planning-audit`; design §0). On m1_h
 
 ## 1. Entry criteria
 - HF1–HF5 committed (e5420d3). **The working tree has uncommitted edits** in `agent/loop.py`, `agent/memory.py`, `agent/world.py`, `scripts/run_agent.py`, `docs/plans/HF5.md`, `tests/agent/*` and the w0 golden trace (seen 2026-10-14). They must be committed or explicitly parked by the user before QS starts. If `git status --short agent scripts tests` shows changes you didn't make, stop and ask.
-- The baseline suite has been measured at entry (with `--basetemp=.tmp/qs/pytest`) and its count recorded in the Result. Expected, measured 2026-10-14: **519 passed + 1 known failure** (`test_loop.py::test_stage_b_cap_override_keeps_phase_and_m1_limits`, budget-edit related, not QS). Any other failure: stop. The first Sol entry attempt exited 3 because the sandbox TEMP isn't writable. `test_run_provenance.py::test_source_fingerprint_without_git_is_incomplete` now sets `GIT_CEILING_DIRECTORIES`, so an in-repo basetemp doesn't count as a git checkout.
+- The baseline suite has been measured at entry, with TEMP/TMP set to `.tmp/qs/tmp` as the paste block says, and its count recorded in the Result. Expected, measured 2026-10-14 that way: **519 passed + 1 known failure** (`test_loop.py::test_stage_b_cap_override_keeps_phase_and_m1_limits`, "expected CallCap not raised"; budget-edit related, not QS). Any other failure: stop.
+- History:
+  - The first Sol entry attempt exited 3 because pytest couldn't use the sandbox TEMP.
+  - The second attempt, with `--basetemp`, still failed `test_eval_run.py::test_e4_metrics_and_offline_repredict_preserve_chooser_guess`, because `_repredict()` uses `tempfile`. Redirecting TEMP/TMP fixes both.
+  - `test_run_provenance.py::test_source_fingerprint_without_git_is_incomplete` sets `GIT_CEILING_DIRECTORIES`, so an in-repo temp folder doesn't count as a git checkout.
 - On disk: `runs/m1_hf_checkpoint_1`, `runs/m1_ip` (checkpoints 000100, 000125), `runs/m1_decide3`, `runs/m1_gp5`, and `.venv-agent`. The ROM is not needed: there's no emulator in this phase.
 - Ledger `runs/e3_budget.json` has been read at entry. If the remaining cap is < 6, QS.6's live part waits for a user cap decision. Everything else proceeds.
 
