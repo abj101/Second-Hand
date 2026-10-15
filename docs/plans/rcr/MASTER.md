@@ -199,7 +199,7 @@ S0 builds S1-S3, S5, S6, S8, S11 and S14 into `eval_run.py`, reusing `_entity_du
 
 1. ~~R3 grouping by history~~: **resolved 10-15, allowed** (§10).
 2. ~~Live-view work and RCR Phase C~~: **resolved 10-15, build on top** (§3). The question still asked at gates: whether a commit may include files that carry live-view hunks.
-3. **Ledger caps for Phase D:** the R3 20-call replay, then two live runs.
+3. ~~Ledger caps for Phase D~~: **resolved 10-15.** The user raised the caps by 1,000 (TOTAL 4815, M1 4765; 3,756 had been used) and pre-approved all of Phase D: R3.7's 20-call replay with its fallbacks (+2, +20), the live run after R1 and the live run after R3. Each live run is a clean boot, `--steps 150 --max-calls 400`. No section needs to come back for budget unless the ledger runs out.
 4. **Go-ahead for implementation.** The coordinator recommends this order:
    - **S0:** the coordinator writes the scorecard in `eval_run.py` with a Haiku worker, and records the `m1_bedroom_live` baseline. 0 cloud calls.
    - **Sections:** R1, then R4, then R2, then R3. Each runs in a fresh **Sonnet orchestrator** session with its packet's paste block and Haiku workers.
