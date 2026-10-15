@@ -93,3 +93,16 @@ def test_stuck_repeat_edge_is_not_progress():
     assert stuck.update(edge) is None
     assert stuck.progress_n == 1
     assert stuck.seen_edges == {"p_start>p_next"}
+
+
+def test_repeated_dialogue_counts_toward_stall():
+    stuck = Stuck()
+    reasons = [stuck.update({"screen": "dialogue", "fresh_text": False}) for _ in range(20)]
+    assert reasons[:19] == [None] * 19 and reasons[19] == "no_progress"
+
+
+def test_fresh_intro_dialogue_neither_counts_nor_resets_stall():
+    stuck = Stuck()
+    stuck.progress_n = 5
+    for _ in range(30): assert stuck.update({"screen": "dialogue", "fresh_text": True}) is None
+    assert stuck.progress_n == 5

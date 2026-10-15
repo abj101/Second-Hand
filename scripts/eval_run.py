@@ -686,6 +686,7 @@ def _lifecycle(run):
         records = value if isinstance(value, list) else [value]
         if op == "set" and r.get("section") == "goals":
             records = [value]
+        elif op not in {"quests", "migrate_quest", "set"}: records = []  # fact/belief rows are not quests
         for q in records:
             if not is_heard(q): continue
             key = quest_key(q, r.get("key") if op == "set" else None)

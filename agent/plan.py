@@ -8,6 +8,7 @@ SYSTEM = (
     "Quests describe outcomes in the game world, and Act chooses how to achieve them. "
     "Never name buttons, directions, coordinates, or a specific door in a quest. "
     "Every quest must cite why, using a fact or belief key. "
+    "Exploring is how Act finds things, not a quest: do not make quests to explore or investigate a place; make a quest only for an outcome the game told you about or showed you. "
     "Beliefs are hypotheses, not facts. "
     "When new evidence arrives, say which beliefs it supports or contradicts, then revise or refute them with a reason. "
     "Keep refuted ideas ruled out. "

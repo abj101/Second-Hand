@@ -820,3 +820,20 @@ def test_lifecycle_truth_join_reports_place_purity_reach_closure_maps_and_quests
     assert result["truth_join"]["place_purity"] == {"places": 2, "impure": 1, "purity": 0.5, "spanning": {"b": ["0x00", "0x28"]}}
     assert result["truth_join"]["reach_closure_maps"] == [{"key": "badge", "step": 3, "map": "0x00", "check": "check reach Town at step 3"}]
     assert result["history_metrics"]["quests_per_door"] == {"count": 1, "of": 2, "keys": ["door"]}
+
+
+def test_heard_leads_not_lost_when_still_present_or_parked(tmp_path):
+    from scripts.eval_run import _lifecycle
+
+    run = tmp_path / "heard-fact"
+    write(run / "trace.jsonl", [{"step": 1, "screen": "world", "place": "p", "plan": {"trigger": "x"}}])
+    heard = {"key": "q", "text": "Find the guide", "status": "open", "why": ["f"]}
+    write(run / "memory" / "notebook.history", [
+        {"step": 1, "op": "fact", "value": {"key": "f", "text": "go", "source": "heard"}},
+        {"step": 2, "op": "quests", "value": [heard, {"key": "p", "text": "Ask", "status": "parked", "why": ["f"]}]},
+    ])
+    (run / "memory" / "notebook.json").write_text(json.dumps({
+        "facts": {"f": {"source": "heard"}}, "quests": [heard, {**heard, "key": "p", "status": "parked"}]}), encoding="utf-8")
+
+    assert _lifecycle(run)["history_metrics"]["heard_leads"] == {
+        "opened": 2, "closed": 0, "parked": 1, "still_open": 1, "dropped": 0, "silently_lost": 0}

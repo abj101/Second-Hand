@@ -12,6 +12,7 @@ _TACTICAL = re.compile(
     r"\b(?:press|move|walk|go|step|head)\s+(?:up|down|left|right|north|south|east|west)\b",
     re.I,
 )
+_EXPLORE = re.compile(r"^\s*(?:explore|investigate|look around|search)\b.*\b(?:place|room|area|surroundings)", re.I)
 _QUEST_FIELDS = {"key", "text", "why", "done_when", "status", "evidence", "check", "approach"}
 _BELIEF_FIELDS = {"key", "text", "because", "confidence", "status", "reason"}
 _FACT_FIELDS = {"key", "text", "from", "source", "place"}
@@ -184,6 +185,9 @@ class Notebook:
                 if self._bad_quest(incoming_raw.get("text", ""), self.buttons):
                     flags.append(f"rejected {key}: name an outcome")
                     continue
+                if _EXPLORE.search(str(incoming_raw.get("text", ""))) and not self._heard_quest(incoming_raw):
+                    flags.append(f"rejected {key}: exploring is not a quest")
+                    continue
                 old = old_by_key.get(key, {})
                 quest = {**old, **incoming_raw, "key": key}
                 quest["opened"] = old.get("opened", step)
@@ -197,6 +201,11 @@ class Notebook:
                         quest["check"] = old.get("check")
                     elif isinstance(incoming_raw.get("check"), dict) and incoming_raw["check"].get("kind") == "text" and not _valid_check(incoming_raw["check"]):
                         flags.append(f"refused {key}: text check needs at least four characters and a three-letter word")
+                        quest.pop("check", None)
+                        if "check" in old:
+                            quest["check"] = old["check"]
+                    elif (why := self._impossible_check(incoming_raw.get("check"), step)):
+                        flags.append(f"impossible check {key}: {why}")
                         quest.pop("check", None)
                         if "check" in old:
                             quest["check"] = old["check"]
@@ -322,6 +331,19 @@ class Notebook:
             return True
         return any(len(button) >= 2 and re.search(rf"(?<!\w){re.escape(button)}(?!\w)", text, re.I)
                    for button in (str(button).strip() for button in buttons) if button)
+
+    def _impossible_check(self, check, step):
+        """Why a check can never pass: reach to the place we stand in, or speak to a lowercase role word (no NPC speaks as "villager"); a capitalised heard name stays allowed."""
+        if not isinstance(check, dict): return None
+        arg = str(check.get("arg", "")).strip()
+        if check.get("kind") == "reach":
+            here = self._place_entries(step)[-1:]
+            if here and any(_edit_distance_one(_strip_place_id(arg), _strip_place_id(n)) for n in here[-1][1]):
+                return "already here; name a place you have not reached"
+        if check.get("kind") == "speak" and arg and arg == arg.casefold():
+            spoken = {m.group(1).casefold() for e in self.log if (m := re.match(r'(.+?) at .+: "', str(e.get("text", ""))))}
+            if arg not in spoken: return "that person has no name; use a text check on their words"
+        return None
 
     def _heard_quest(self, quest):
         if quest.get("source") == "heard":

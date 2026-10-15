@@ -35,6 +35,7 @@ class Stuck:
             if new_edge: self.seen_edges.add(edge)
             if current_new or new_edge: self.progress()
             else: self.progress_n += 1
+        elif row.get("fresh_text") is False: self.progress_n += 1  # repeated dialogue/menu text is a stall; fresh text neither counts nor resets
         choice = row.get("choice") or {}
         action = (choice.get("verb"), choice.get("target"), choice.get("id")) if choice else None
         frame = row.get("frame_hash") or (row.get("frame") if not no_change else None)

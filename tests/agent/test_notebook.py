@@ -478,3 +478,35 @@ def test_migrated_chapter_omits_tactical_goals(tmp_path):
     summary = notebook(tmp_path).data["chapters"][0]["summary"]
 
     assert summary == "Find the person (active)"
+
+
+def test_reach_check_for_current_place_is_refused_and_flagged(tmp_path):
+    nb = notebook(tmp_path, places=lambda: [(2, ["Harbor [p3]"])])
+    q = quest(check={"kind": "reach", "arg": "Harbor"})
+    result = nb.apply_plan(plan([q, quest("far", text="Find the lighthouse", check={"kind": "reach", "arg": "Lighthouse"})]), 3)
+    quests = {x["key"]: x for x in nb.data["quests"]}
+    assert "check" not in quests["q"] and quests["q"]["status"] == "open"
+    assert quests["far"]["check"]["arg"] == "Lighthouse"
+    assert "impossible check q: already here; name a place you have not reached" in result["flags"]
+
+
+def test_speak_check_on_unnamed_person_is_refused_but_unmet_named_person_allowed(tmp_path):
+    nb = notebook(tmp_path)
+    nb.note(2, 'MOM at home: "Hello."')
+    result = nb.apply_plan(plan([
+        quest("a", text="Talk to the local", check={"kind": "speak", "arg": "villager"}),
+        quest("b", text="Meet the professor", check={"kind": "speak", "arg": "Prof. Elm"}),
+        quest("c", text="Talk to mom again", check={"kind": "speak", "arg": "mom"})]), 3)
+    quests = {x["key"]: x for x in nb.data["quests"]}
+    assert "check" not in quests["a"] and "impossible check a: that person has no name; use a text check on their words" in result["flags"]
+    assert quests["b"]["check"]["arg"] == "Prof. Elm" and quests["c"]["check"]["arg"] == "mom"
+
+
+def test_generic_explore_quest_rejected_unless_heard(tmp_path):
+    nb = notebook(tmp_path)
+    nb.apply_plan({"quests": [], "beliefs": [], "facts": [fact()]}, 1)
+    result = nb.apply_plan(plan([
+        quest("e", text="Explore the room", why=["x"]),
+        quest("h", text="Search the area north of town", why=["heard_fact"])]), 2)
+    assert [q["key"] for q in nb.data["quests"]] == ["h"]
+    assert "rejected e: exploring is not a quest" in result["flags"]

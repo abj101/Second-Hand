@@ -289,10 +289,10 @@ class Loop:
         drift_fix = self.world.observe_after(after_per, after, after_reused, next_place, after.size, self.step_no, skill=skill)
         row["tile"], row["drift_fix"] = self.world.pos if self.tile_px else None, list(drift_fix) if drift_fix else None
         row["self_spot"], row["self_locked"] = self.world.self_spot, self.world._self_from_motion
-        self._learn(after_per.get("text", []), per.get("text", []), self.step_no, next_place, after_per.get("screen"))
+        fresh_text = self._learn(after_per.get("text", []), per.get("text", []), self.step_no, next_place, after_per.get("screen"))
         self.place, self.prev, self.prev_frame, self.cached, self.cached_hash = next_place, after_per, after, after_per, after_hash
         self.prev_frame_mark_eligible = after_mark_eligible
-        self.pending_cut, self.pending_via, self.pending_key = False, None, None; reason = self.stuck.update(row)
+        self.pending_cut, self.pending_via, self.pending_key = False, None, None; reason = self.stuck.update({**row, "fresh_text": fresh_text})
         if any(at == self.step_no and dst == next_place for at, dst in self.new_places): self.stuck.progress()  # world progress only (Stuck.update counts first-time edges itself); text and repeat crossings never count
         if reason == "no_progress" or (self.stall_unchanged > 0 and self.stuck.progress_n >= 10): self._event("T4", "stuck: no_progress", self.step_no)
         self.repair_pending = self.parse_failed and self.empty_streak >= 8 and not self.repair_used; self.repair_used |= self.repair_pending
@@ -397,12 +397,12 @@ class Loop:
         for text in (t for t in texts if t not in seen): self.mem.know(text, src="game_text", step=step)
         if self.conversation["lines"] and (screen == "world" or place != self.conversation["place"]):
             self._flush_conversation(step)
-        if screen == "menu": return  # menu text is knowledge only: no conversation, no trigger
+        if screen in ("menu", "title", "keyboard", "other"): return bool(fresh)  # non-dialogue, non-world text is knowledge only: no conversation, no trigger
         if screen == "world":
             if fresh:
                 self.text_for_trigger = " / ".join(fresh)
                 self.notebook.note(step, f"text at {self.world.place_label(place) if place else '?'}: " + " / ".join(f'"{t}"' for t in fresh)); self._event("T1", f"new game text: {self.text_for_trigger[:200]}", step)
-            return
+            return bool(fresh)
         if not self.conversation["lines"]: self.conversation["place"] = place
         lines = self.conversation["lines"]
         for text in fresh:
@@ -415,6 +415,7 @@ class Loop:
                 if overlap: lines[-1] = previous + line[overlap:]
                 else: lines.append(line)
             else: lines.append(line)
+        return bool(fresh)
 
     def _flush_conversation(self, step):
         lines = self.conversation["lines"]
@@ -505,7 +506,7 @@ class Loop:
             self.stall_unchanged += 1
             if self.stall_unchanged >= 2:
                 self.stall_unchanged = 0
-                fallback = {"key": "explore_untried_exit", "text": "explore an exit or area not yet tried", "approach": "Try an exit or area absent from the evidence packet.", "done_when": "reach a new area or verify a route", "status": "open", "why": "stall"}
+                fallback = {"key": "explore_untried_exit", "text": "reach an exit or area not yet tried", "approach": "Try an exit or area absent from the evidence packet.", "done_when": "reach a new area or verify a route", "status": "open", "why": "stall"}
                 norm = lambda t: " ".join(re.sub(r"[^\w\s]", " ", str(t).casefold()).split())
                 if not any(q.get("key") == fallback["key"] or norm(q.get("text")) == norm(fallback["text"]) for q in self.notebook.data["quests"]):
                     extra = self.notebook.apply_plan(SimpleNamespace(quests=[fallback], beliefs=[], facts=[], note="", why="stall", focus=""), step)  # only the fallback: the plan is not applied twice

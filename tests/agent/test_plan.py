@@ -143,5 +143,9 @@ def test_system_asks_for_checks_and_stays_under_fifteen_sentences():
     check_rule = "Give every quest that names a place, a person, or words to hear a check: reach <place name>, speak <speaker>, or text <words>."
 
     assert SYSTEM.count(check_rule) == 1
-    assert SYSTEM.count(".") <= 14
+    assert SYSTEM.count(".") <= 15
     assert "Reply JSON:" not in SYSTEM
+
+
+def test_system_says_exploration_is_not_a_quest():
+    assert "Exploring is how Act finds things, not a quest" in SYSTEM

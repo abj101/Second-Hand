@@ -835,7 +835,7 @@ def test_unchanged_stalls_keep_evidence_and_add_fallback_quest(tmp_path):
 
     loop._apply_plan(SimpleNamespace(quests=[], beliefs=[], facts=[], note="", why="same"), "stuck: no_progress", 2)
     fallback = loop.notebook.data["quests"][-1]
-    assert fallback["text"] == "explore an exit or area not yet tried"
+    assert fallback["text"] == "reach an exit or area not yet tried"
     assert fallback["why"] == "stall" and loop.stall_unchanged == 0
 
 
@@ -2113,3 +2113,10 @@ def test_failed_chapter_backs_off(tmp_path):
     loop.notebook.data["notes"] += [{"step": 20 + n, "trigger": "t", "text": "m"} for n in range(6)]
     loop._after_outcome(30)
     assert model.roles == ["chapter", "chapter"]
+
+
+def test_title_text_is_not_a_game_text_trigger(tmp_path):
+    loop = _loop(tmp_path)
+    assert loop._learn(["GAME FREAK Red Version"], [], 3, "p", "title") is True
+    assert loop.events == [] and loop.conversation["lines"] == [] and loop.text_for_trigger == ""
+    assert any("GAME FREAK" in r["text"] for r in loop.mem.rows("knowledge"))
