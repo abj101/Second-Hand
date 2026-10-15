@@ -287,6 +287,13 @@ class Memory:
                 row = {"id": eid, "kind": kind, "name": label, "place": None if global_key else place,
                        "at": entity.get("at"), "attrs": {}, "first": step, "last": step,
                        "seen": 0, "src": "observed"}
+                # why a new record: the track offered (if any) and every same-place record of this kind, with its name and tile distance
+                near = [{"id": r["id"], "name": r.get("name"), "tile": r.get("tile"), "last": r.get("last"), "used": r["id"] in used, "name_d": _distance(r.get("name", ""), name),
+                         "tile_d": max(abs(tile[0] - r["tile"][0]), abs(tile[1] - r["tile"][1])) if tile and r.get("tile") else None}
+                        for r in self.rows("entities") if r.get("place") == place and normalize_kind(r.get("kind")) == nk]
+                with (self.root / "mints.jsonl").open("a", encoding="utf-8") as f:
+                    f.write(json.dumps({"step": step, "id": eid, "name": label, "kind": kind, "place": place, "at": entity.get("at"), "tile": tile,
+                                        "track": (tracks or {}).get(i), "track_place": (hit or {}).get("place"), "near": near}) + "\n")
             row.update(kind=kind, name=row.get("name", name), at=entity.get("at"), last=step,
                        seen=row.get("seen", 0) + 1, status="seen", misses=0)
             if tile:

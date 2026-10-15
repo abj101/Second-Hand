@@ -364,3 +364,12 @@ def test_never_crossed_door_with_a_crossed_doors_label_is_a_new_place_not_its_de
     lab = {"screen": "world", "entities": [{"name": "machine", "kind": "object"}, {"name": "bookshelf", "kind": "furniture"}]}
     pid = mem.match_place(lab, 9, prev="p_out", cut=True, via="house door", exit=(-1, 6, "UP"), via_id="e_house_door_2")
     assert pid not in ("p_house", "p_out") and mem.get("places", pid)["state"] == "candidate"
+
+
+def test_new_record_is_logged_with_the_records_it_did_not_match(tmp_path):
+    mem = Memory(tmp_path)
+    mem.observe({"entities": [{"kind": "npc", "name": "girl", "at": [.5, .5]}]}, "p", 1, {0: (2, 2)})
+    mem.observe({"entities": [{"kind": "npc", "name": "girl", "at": [.9, .5]}]}, "p", 2, {0: (9, 2)})  # too far for the same girl: a second record
+    rows = [json.loads(line) for line in (tmp_path / "mints.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [r["name"] for r in rows] == ["girl", "girl#2"]
+    assert rows[1]["near"][0]["name"] == "girl" and rows[1]["near"][0]["tile_d"] == 7 and rows[1]["near"][0]["name_d"] == 0
