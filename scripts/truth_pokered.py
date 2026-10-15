@@ -28,12 +28,16 @@ def read(env) -> dict:
     row["rival_name"] = _text(env, 0xD34A, 11)
     row["screen_text"] = "\n".join("".join(_CHARS.get(tile, "?") for tile in tilemap[y * 20:(y + 1) * 20]).rstrip()
                                     for y in range(18)).strip()
-    sprites = []
+    row["sprites"] = sprites(env)
+    return row
+
+
+def sprites(env) -> list[dict]:
+    out = []
     for slot in range(16):
         base = 0xC100 + slot * 16
-        picture, image = ram(base), ram(base + 2)
-        y, x = ram(base + 4), ram(base + 6)
+        picture, image = env.ram(base), env.ram(base + 2)
+        y, x = env.ram(base + 4), env.ram(base + 6)
         if picture not in (0, 0xFF) and image != 0xFF and 0 <= y < 144 and 0 <= x < 160:
-            sprites.append({"slot": slot, "picture": picture, "y": y, "x": x})
-    row["sprites"] = sprites
-    return row
+            out.append({"slot": slot, "picture": picture, "y": y, "x": x})
+    return out

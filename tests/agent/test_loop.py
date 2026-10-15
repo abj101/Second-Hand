@@ -17,10 +17,8 @@ def act_reply(i=0, expect="screen_changes", verb="approach"):
     return reply({"place": "", "notebook": [], "action": None if i is None else {"thing": i, "verb": verb}, "text": None, "expect": expect, "why": "test"})
 def fake_act(i=0, expect="screen_changes", verb="approach"):
     return lambda *a, **k: SimpleNamespace(place="", ops=[], action=None if i is None else {"thing": i, "verb": verb}, expect=expect, why="test", text=None)
-def perception(*, two=False, press=False):
-    affs = ([{"verb":"press","target":"A","at":[500,500]}] if press else
-        [{"verb":"approach","target":"player","at":[500,500]}] * (2 if two else 1))
-    return {"screen":"room","text":[],"entities":[{"kind":"player","name":"Hand","at":[500,500]}],"affordances":affs}
+def perception():
+    return {"screen":"room","text":[],"entities":[{"kind":"player","name":"Hand","at":[500,500]}]}
 
 
 def test_numbered_thing_uses_exact_entity_id(tmp_path, monkeypatch):
@@ -102,7 +100,7 @@ def test_twenty_steps_have_contract_keys_and_reuse(tmp_path):
 
 def test_act_receives_controls_as_text(tmp_path, monkeypatch):
     from agent import loop as loop_module
-    data = perception(two=True)
+    data = perception()
     class Captures(StubModel):
         def ask(self, *args, **kwargs):
             if kwargs.get("role") == "act": self.prompt = args[1]
@@ -113,7 +111,7 @@ def test_act_receives_controls_as_text(tmp_path, monkeypatch):
     assert "Controls:\nMove with arrows\nConfirm with A" in model.prompt
 
 def test_restore_and_parse_failure(tmp_path):
-    model=StubModel([reply(perception(two=True)),act_reply(0)])
+    model=StubModel([reply(perception()),act_reply(0)])
     loop=Loop(GridEnv(),model,Memory(tmp_path/"memory"),"grid"); row=loop.step()
     assert row["choice"]["called"]
     restored=Loop(loop.env,model,loop.mem,"grid"); restored.restore(loop.state())
@@ -158,7 +156,7 @@ def test_cut_before_frame_suppresses_marker_and_same_raw_after_frame_reuses(tmp_
     loop = Loop(env, StubModel([]), Memory(tmp_path/"memory"), "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     loop.prev, loop.prev_frame = {"screen": "world"}, Image.new("RGB", (160, 144), "white")
-    per = {"screen":"world", "text":[], "entities":[{"name":"player", "kind":"player", "at":[.5,.5]}], "affordances":[]}
+    per = {"screen":"world", "text":[], "entities":[{"name":"player", "kind":"player", "at":[.5,.5]}]}
     calls, contexts, acts = [], [], []
     def perceive(_model, image, ctx):
         calls.append(image); contexts.append(ctx)
@@ -190,7 +188,7 @@ def test_stationary_two_fresh_frames_confirm_drift(tmp_path, monkeypatch, views)
         frame = original(); frame.putpixel((0, 0), (env.phase, 0, 0)); return frame
     env.screenshot = screenshot; offset = [0.6]
     def perceive(*_):
-        return {"screen":"world","text":[],"affordances":[{"verb":"approach","target":"lamp","at":[offset[0],.5]}],"entities":[{"name":"player","kind":"player","at":[.5,.5]}, {"name":"lamp","kind":"object","at":[offset[0],.5]}]}, reply({"screen":"world","text":[],"entities":[],"affordances":[]})
+        return {"screen":"world","text":[],"entities":[{"name":"player","kind":"player","at":[.5,.5]}, {"name":"lamp","kind":"object","at":[offset[0],.5]}]}, reply({"screen":"world","text":[],"entities":[]})
     monkeypatch.setattr(module, "perceive", perceive)
     monkeypatch.setattr(module, "act", fake_act(1))
     def still(*a,**k):
@@ -214,7 +212,6 @@ def test_loop_fixes_swapped_player_before_approaching_target(tmp_path, monkeypat
     perceptions = []
     def perceive(*_):
         data = {"screen": "world", "text": [],
-                "affordances": [{"verb": "approach", "target": "Chest", "at": [.6, .5]}],
                 "entities": [{"name": "Guide", "kind": "player", "at": [.6875, .5]},
                              {"name": "Hero", "kind": "npc", "at": [.5, .5]},
                              {"name": "Chest", "kind": "object", "at": [.6, .5]}]}
@@ -256,8 +253,7 @@ def test_grid_loop_reuses_two_spatial_exits_between_floors(tmp_path, monkeypatch
     def perceive(*_):
         floor = floors[env.scene]
         dy = (2 if env.scene == 0 else -1) * 16/144
-        return {"screen":"world","text":[],"affordances":[{"verb":"approach","target":"exit: passage","at":[.5,.5+dy]}],
-                "entities":[{"name":"player","kind":"player","at":[.5,.5]}, {"name":floor,"kind":"object","at":[.7,.5]},
+        return {"screen":"world","text":[],"entities":[{"name":"player","kind":"player","at":[.5,.5]}, {"name":floor,"kind":"object","at":[.7,.5]},
                             {"name":"exit: passage","kind":"exit","at":[.5,.5+dy]}]}, reply({})
     monkeypatch.setattr(module, "perceive", perceive)
     monkeypatch.setattr(module, "act", fake_act(2, "place_changes"))
@@ -336,7 +332,6 @@ def test_dialogue_opening_over_world_keeps_place(tmp_path, monkeypatch):
     from agent import loop as loop_module
     env = GridEnv()
     start = perception(); start["screen"] = "world"
-    start["affordances"][0]["verb"] = "interact"
     destination = perception(); destination["screen"] = "dialogue"; destination["text"] = ["Hello!"]
     model = StubModel([reply(start), act_reply(0, verb="interact"), reply(destination)])
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
@@ -354,7 +349,6 @@ def test_interact_scroll_with_new_text_is_not_a_cut(tmp_path, monkeypatch):
     from agent import loop as loop_module
     env = GridEnv()
     start = perception(); start["screen"] = "world"
-    start["affordances"][0]["verb"] = "interact"
     destination = perception(); destination["screen"] = "world"; destination["text"] = ["Hello!"]
     model = StubModel([reply(start), act_reply(0, verb="interact"), reply(destination)])
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
@@ -429,7 +423,6 @@ def test_blocked_exit_overrides_pixel_prediction_and_cannot_hit(tmp_path, monkey
     from agent import loop as loop_module
     env = GridEnv()
     start = perception(); start["screen"] = "world"
-    start["affordances"] = [{"verb": "approach", "target": "exit: door mat", "at": [0.3, 0.9]}]
     start["entities"].append({"kind": "exit", "name": "exit: door mat", "at": [0.3, 0.9]})
     model = StubModel([reply(start), act_reply(1), reply(start)])
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
@@ -451,7 +444,7 @@ def test_mislabelled_player_does_not_shift_tiles_or_duplicate_entities(tmp_path,
     env.screenshot = lambda: (f := shot(env), f.putpixel((0, 0), (env.phase, 0, 0)))[0]
     def perceive(*_):
         seen.append(1); player = [.5, .5] if len(seen) == 1 else [.5, .5 + 3 * 16 / 144]  # second view labels another sprite as the player
-        data = {"screen":"world","text":[],"affordances":[{"verb":"approach","target":"lamp","at":[.7,.5]}],"entities":[{"name":"player","kind":"player","at":player}, {"name":"lamp","kind":"object","at":[.7,.5]}]}
+        data = {"screen":"world","text":[],"entities":[{"name":"player","kind":"player","at":player}, {"name":"lamp","kind":"object","at":[.7,.5]}]}
         return data, reply(data)
     monkeypatch.setattr(module, "perceive", perceive)
     def still(*a, **k):
@@ -515,7 +508,7 @@ def test_resume_preserves_cut_if_post_perception_fails(tmp_path):
             if self.calls==2: self.calls+=1; raise ModelUnavailable("offline")
             return super().ask(*a,**k)
     env=CutEnv(); mem=Memory(tmp_path/"memory")
-    loop=Loop(env,FailsAfterChoice([reply(perception(press=True)),reply({"place":"","notebook":[],"action":{"verb":"advance"},"text":None,"expect":"place_changes","why":"test"})]),mem,"grid")
+    loop=Loop(env,FailsAfterChoice([reply(perception()),reply({"place":"","notebook":[],"action":{"verb":"advance"},"text":None,"expect":"place_changes","why":"test"})]),mem,"grid")
     with pytest.raises(ModelUnavailable): loop.step()
     assert loop.state()["pending_cut"]
     town=perception(); town["screen"]="town"
@@ -571,8 +564,7 @@ def test_tracked_approach_scroll_does_not_split_but_real_cuts_do(tmp_path, monke
 
     def run_case(root, verb="approach", reason="", blank=False):
         env = GridEnv(); before = env.screenshot()
-        start = perception(two=True); start["screen"] = "world"
-        for aff in start["affordances"]: aff["verb"] = verb
+        start = perception(); start["screen"] = "world"
         destination = perception(); destination["screen"] = "world"
         destination["entities"] += [{"kind":"object", "name":"new landmark", "at":[.2,.2]}, {"kind":"exit", "name":"exit: door", "at":[500,500]}]
         if verb == "interact": destination["text"] = ["Visible dialogue"]
@@ -610,7 +602,7 @@ def test_runner_press_exception_and_truncation(tmp_path, monkeypatch):
         def press(self,*a,**k): raise RuntimeError("focus lost")
         def save(self,path): Path(path).write_text("state")
         def close(self): pass
-    model=StubModel([reply(perception(press=True)),reply({"place":"","notebook":[],"action":{"verb":"advance"},"text":None,"expect":"screen_changes","why":"test"})]); model._post=lambda p: None
+    model=StubModel([reply(perception()),reply({"place":"","notebook":[],"action":{"verb":"advance"},"text":None,"expect":"screen_changes","why":"test"})]); model._post=lambda p: None
     monkeypatch.setattr(run_agent,"PyBoyEnv",lambda *a,**k: Broken())
     monkeypatch.setattr(run_agent,"find_rom",lambda:"rom")
     monkeypatch.setattr(run_agent,"Ollama",lambda *a,**kw:model)
@@ -632,7 +624,7 @@ def test_runner_call_cap_and_unavailable_checkpoint(tmp_path, monkeypatch):
     class Posts(StubModel):
         def ask(self,*a,**k): self._post({}); return super().ask(*a,**k)
     monkeypatch.setattr(run_agent,"Ollama",lambda *a,**k:model)
-    model=Posts([reply(perception(press=True)),reply({"place":"","notebook":[],"action":{"verb":"advance"},"text":None,"expect":"screen_changes","why":"test"})]); model._post=lambda p:None
+    model=Posts([reply(perception()),reply({"place":"","notebook":[],"action":{"verb":"advance"},"text":None,"expect":"screen_changes","why":"test"})]); model._post=lambda p:None
     assert run_agent.main(["--steps","1","--max-calls","1","--run",str(tmp_path/"cap")]) == 3
     assert (tmp_path/"cap/checkpoint/000000/harness.json").exists()
     class Offline(StubModel):
@@ -931,7 +923,7 @@ def test_actor_speaker_name_attaches_after_new_text(tmp_path, monkeypatch):
 
     before = {"screen": "world", "text": [], "entities": [
         {"kind": "player", "name": "player", "at": [.5, .5]},
-        {"kind": "npc", "name": "person", "at": [.6, .5]}], "affordances": []}
+        {"kind": "npc", "name": "person", "at": [.6, .5]}]}
     after = {**before, "text": ["MOM: Hello there."]}
     perceptions, calls = [before, after], [0]
     def perceive(*_):
@@ -967,8 +959,7 @@ def test_act_prompt_summarizes_recent_repeated_blocked_action(tmp_path, monkeypa
 
     data = {"screen": "world", "text": [], "entities": [
                 {"kind": "player", "name": "player", "at": [.5, .5]},
-                {"kind": "npc", "name": "npc", "at": [.6, .5]}],
-            "affordances": [{"verb": "approach", "target": "npc", "at": [.6, .5]}]}
+                {"kind": "npc", "name": "npc", "at": [.6, .5]}]}
     monkeypatch.setattr(module, "perceive", lambda *args: (data, reply(data)))
     def blocked(ctx, *args, **kwargs):
         frame = ctx.env.screenshot()
@@ -1004,8 +995,7 @@ def test_act_recent_groups_by_action_and_caps_mixed_outcomes(tmp_path, monkeypat
             if kwargs.get("role") == "act": self.prompts.append(args[1])
             return super().ask(*args, **kwargs)
 
-    data = {"screen": "world", "text": [], "entities": [{"kind": "player", "name": "player", "at": [.5, .5]}],
-            "affordances": [{"verb": "approach", "target": "npc", "at": [.6, .5]}]}
+    data = {"screen": "world", "text": [], "entities": [{"kind": "player", "name": "player", "at": [.5, .5]}]}
     monkeypatch.setattr(module, "perceive", lambda *args: (data, reply(data)))
     def blocked(ctx, *args, **kwargs):
         frame = ctx.env.screenshot()
@@ -1041,8 +1031,7 @@ def test_act_recent_says_no_effect_when_every_run_left_the_screen_unchanged(tmp_
             if kwargs.get("role") == "act": self.prompts.append(args[1])
             return super().ask(*args, **kwargs)
 
-    data = {"screen": "world", "text": [], "entities": [{"kind": "player", "name": "player", "at": [.5, .5]}],
-            "affordances": [{"verb": "approach", "target": "npc", "at": [.6, .5]}]}
+    data = {"screen": "world", "text": [], "entities": [{"kind": "player", "name": "player", "at": [.5, .5]}]}
     monkeypatch.setattr(module, "perceive", lambda *args: (data, reply(data)))
     def blocked(ctx, *args, **kwargs):
         frame = ctx.env.screenshot()
@@ -1641,11 +1630,11 @@ class Roles(StubModel):
 
 def pick_reply(i): return reply({"place": "", "notebook": [], "action": {"i": i}, "text": None, "expect": "screen_changes", "why": "test"})
 def free_reply(action): return reply({"place": "", "notebook": [], "action": action, "text": None, "expect": "screen_changes", "why": "test"})
-def dialogue_scene(): return {"screen": "dialogue", "text": ["Watch the television?"], "affordances": [], "entities": [
+def dialogue_scene(): return {"screen": "dialogue", "text": ["Watch the television?"], "entities": [
     {"name": "television", "kind": "object", "at": [.2, .3]}, {"name": "player", "kind": "player", "at": [.5, .5]}, {"name": "dialogue box", "kind": "dialogue_box", "at": [.5, .85]}]}
-def menu_scene(): return {"screen": "menu", "text": ["FIGHT BAG"], "affordances": [], "entities": [
+def menu_scene(): return {"screen": "menu", "text": ["FIGHT BAG"], "entities": [
     {"name": "FIGHT", "kind": "menu_item", "at": [.3, .4], "selectable": True}, {"name": "BAG", "kind": "menu_item", "at": [.3, .6], "selectable": True}]}
-def world_scene(): return {"screen": "world", "text": [], "affordances": [], "entities": [{"name": "player", "kind": "player", "at": [.5, .5]}]}
+def world_scene(): return {"screen": "world", "text": [], "entities": [{"name": "player", "kind": "player", "at": [.5, .5]}]}
 
 def options_seen(monkeypatch):
     from agent import loop as module

@@ -41,7 +41,7 @@ class Loop:
         self.cause = None  # failure_cause text of the last failed act (planner and chooser read it)
         self.reported = None  # the failure evidence last raised as an urgent replan: [intent, stage, blocker or tile]
         self.reperception_used = False
-        self.world = World(mem, self.tile_px)
+        self.world = World(mem, self.tile_px); self.world.tracker.wrap(env)
         self.entered, self.events, self.chapter_after, self._chapter_due = {}, [], 0, False  # entered: place -> step last entered; events: [{kind T1..T5, text, step}] consumed whole by one plan call
         self.notebook = Notebook(mem.root, buttons=env.inputs(), places=self._places)
         self.last_plan, self._plan_row = None, None

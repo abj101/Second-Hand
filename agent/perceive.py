@@ -1,4 +1,4 @@
-"""Perceiver: one screenshot -> visible text, entities and affordances (spec §6).
+"""Perceiver: one screenshot -> visible text, place and entities (spec §6).
 
 Models answer on a 0-1000 grid (Gemma and Qwen both ground natively on it); the output here is
 normalized to [0, 1] screen fractions. Nothing returned is a fact until it is verified (spec §2).
@@ -11,7 +11,6 @@ from PIL import Image
 from agent.locate import rulers
 from agent.model import Ollama, Reply
 
-VERBS = ("approach", "interact", "select", "click", "drag", "advance", "cancel", "type", "press")
 PLACEMENTS = ("top wall", "bottom wall", "left wall", "right wall", "room edge", "screen edge", "middle")
 
 SYSTEM = (
@@ -76,19 +75,10 @@ def normalize(data: dict | None) -> dict:
     if isinstance(text, str): text = text.splitlines()  # Gemma sometimes ignores the array schema
     screen = data.get("screen")
     out = {"screen": screen if screen in ("world", "dialogue", "menu", "keyboard", "battle", "title", "other") else "other", "text": [str(t) for t in text if t],
-           "entities": [], "affordances": [], **({"place": data["place"].strip()[:40]} if isinstance(data.get("place"), str) and data["place"].strip() else {})}
+           "entities": [], **({"place": data["place"].strip()[:40]} if isinstance(data.get("place"), str) and data["place"].strip() else {})}
     for e in data.get("entities") or []:
         if isinstance(e, dict) and (at := _point(e.get("at"))):
             out["entities"].append({"kind": str(e.get("kind") or ""), "name": str(e.get("name") or ""), "at": at,
                                     **({"placement": e["placement"]} if e.get("placement") in PLACEMENTS else {}),
                                     **({"selectable": True} if e.get("selectable") is True else {})})
-    for a in data.get("affordances") or []:
-        if isinstance(a, dict) and (to := _point(a.get("to"))) and str(a.get("verb") or "").lower() != "drag": a = {**a, "at": a["to"]}
-        if isinstance(a, dict) and (at := _point(a.get("at"))):
-            row = {"verb": str(a.get("verb") or "").lower(), "target": str(a.get("target") or ""), "at": at,
-                   "why": str(a.get("why") or ""), **({"placement": a["placement"]} if a.get("placement") in PLACEMENTS else {})}
-            if to := _point(a.get("to")):
-                if row["verb"] == "drag": row["to"] = to
-                else: row["at"] = to
-            out["affordances"].append(row)
     return out

@@ -145,7 +145,7 @@ def test_cut_arrival_name_cannot_merge_back_to_departed_place(tmp_path):
     world = World(mem, 16); skill = type("Skill", (), {"scroll": None})()
     world._prepared = (skill, "left", 10, None, (0, 0))
     world.after(skill, "left", "arrival", True, 10)
-    world.before({"screen": "world", "entities": [], "text": [], "affordances": []},
+    world.before({"screen": "world", "entities": [], "text": []},
                  "arrival", "left", (160, 144), 11)
 
     assert world.name("arrival", "Left", 11) == "arrival"
@@ -266,7 +266,7 @@ def test_loop_travel_fetch_leg_traverses_three_rooms_and_faces_remembered_target
     for x in (0, 2): mem.upsert("tiles", {"id": f"c@{x},0", "place": "c", "x": x, "y": 0, "floor": True, "blocked": [], "pushed": [], "exit": None})
     entity(mem, "fern", "Fern", "c", [1, 0]); mem.upsert("entities", {**mem.get("entities", "fern"), "status": "remembered"})
     env = ThreeRooms(); player = {"name": "Player", "kind": "player", "at": [.5, .5]}; fern = {"name": "Fern", "kind": "npc", "at": [.6, .5]}
-    initial = {"screen": "world", "text": [], "entities": [player], "affordances": []}; final = {**initial, "entities": [player, fern]}; model = StubModel([SimpleNamespace(data=initial), SimpleNamespace(data=final)])
+    initial = {"screen": "world", "text": [], "entities": [player]}; final = {**initial, "entities": [player, fern]}; model = StubModel([SimpleNamespace(data=initial), SimpleNamespace(data=final)])
     loop = Loop(env, model, mem, "grid"); loop.place, loop.prev_frame = "a", env.screenshot()
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     acts, calls = [], []
@@ -287,7 +287,7 @@ def test_evidence_counts_distinct_world_frames_and_restores_seen_entities(tmp_pa
     mem = Memory(tmp_path); place(mem, "room", "room")
     world = World(mem, 16); player = {"name": "Player", "kind": "player", "at": [.5, .5]}
     item = {"name": "Coin", "kind": "object", "at": [.6, .5]}
-    world.before({"screen": "world", "entities": [player, item], "text": [], "affordances": [{"target": "Coin"}]}, "room", None, (160, 144), 1)
+    world.before({"screen": "world", "entities": [player, item], "text": []}, "room", None, (160, 144), 1)
     ident = next(r["id"] for r in mem.rows("entities") if r["name"] == "Coin")
     for step, color in ((2, "red"), (3, "blue")):
         world.observe_after({"screen": "world", "entities": [player]}, Image.new("RGB", (160, 144), color), False, "room", (160, 144), step)
@@ -316,7 +316,7 @@ def test_seen_cells_union_the_full_view_rectangles(tmp_path):
     mem = Memory(tmp_path); place(mem, "room", "room"); world = World(mem, 16)
     env = GridEnv()
     player = {"name": "Player", "kind": "player", "at": [.5, .5]}
-    world.before({"screen": "world", "entities": [player], "text": [], "affordances": []}, "room", None, (160, 144), 1)
+    world.before({"screen": "world", "entities": [player], "text": []}, "room", None, (160, 144), 1)
     world.observe_after({"screen": "world", "entities": [player]}, env.screenshot(), False, "room", (160, 144), 1)
     env.press("RIGHT", frames=16)
     world.prepare(SimpleNamespace(moves=[("RIGHT", (-16, 0))]), "room", False, 2)
@@ -340,14 +340,14 @@ def test_tiers_keep_landmarks_promote_interest_blockers_and_cap_is_not_deletion(
                 {"name": "Chest", "kind": "object", "at": [.55, .6]},
                 {"name": "Sign", "kind": "object", "at": [.45, .6]}]
     world = World(mem, 16)
-    _, _, ids = world.before({"screen": "world", "entities": entities, "text": ["Sign"], "affordances": [{"verb": "interact", "target": "Chest"}]}, "room", None, (160, 144), 1)
+    _, _, ids = world.before({"screen": "world", "entities": entities, "text": ["Sign"]}, "room", None, (160, 144), 1)
     oak, guide, exit_id, chest, sign = (ids[i] for i in (1, 2, 3, 4, 5))
     assert mem.get("entities", oak)["tier"] == "landmark"
     assert mem.get("entities", guide)["tier"] == "interest"
     assert mem.get("entities", chest)["tier"] == "landmark" and mem.get("entities", sign)["tier"] == "interest"
     mem.upsert("places", {**mem.get("places", "room"), "edges": [{"via": "exit: path south", "ok": 0}]})
     mem.upsert("relations", {"id": "failed_exit", "s": exit_id, "p": "leads_to", "o": "other", "src": "observed", "sup": 1, "con": 2, "state": "refuted"})
-    world._tiers({"entities": [entities[3]], "text": [], "affordances": [{"verb": "approach", "target": "exit: path south"}]}, "room", {0: exit_id})
+    world._tiers({"entities": [entities[3]], "text": []}, "room", {0: exit_id})
     assert mem.get("entities", exit_id)["tier"] == "landmark"
     world.prepare(SimpleNamespace(moves=[("RIGHT", -16), ("RIGHT", (0, 0))]), "room", False, 2)
     assert mem.get("entities", oak)["tier"] == "interest"
@@ -562,7 +562,7 @@ def test_loop_act_uses_world_facts_active_quests_and_labels(tmp_path, monkeypatc
     entity(mem, "chest", "Chest", "home", [1, 0]); mem.upsert("entities", {**mem.get("entities", "chest"), "tier": "landmark"})
     entity(mem, "oak", "Oak", "home", [2, 0]); mem.upsert("entities", {**mem.get("entities", "oak"), "tier": "landmark"})
     per = {"screen": "world", "text": [], "entities": [{"name": "Player", "kind": "player", "at": [.5, .5]},
-                                                                  {"name": "Chest", "kind": "object", "at": [.6, .5]}], "affordances": []}
+                                                                  {"name": "Chest", "kind": "object", "at": [.6, .5]}]}
     env = GridEnv(); model = StubModel([SimpleNamespace(data=per), SimpleNamespace(data=per)]); loop = Loop(env, model, mem, "grid")
     loop.place, loop.prev_frame = "home", env.screenshot()
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
@@ -588,7 +588,7 @@ def test_evidence_actor_stales_after_twenty_steps(tmp_path):
     mem = Memory(tmp_path); place(mem, "room", "room"); world = World(mem, 16)
     player = {"name": "Player", "kind": "player", "at": [.5, .5]}
     npc = {"name": "Guide", "kind": "npc", "at": [.4, .5]}
-    _, _, ids = world.before({"screen": "world", "entities": [player, npc], "text": [], "affordances": []}, "room", None, (160, 144), 1)
+    _, _, ids = world.before({"screen": "world", "entities": [player, npc], "text": []}, "room", None, (160, 144), 1)
     ident = ids[1]
     place(mem, "other", "other")
     mem.upsert("entities", {"id": "remote", "name": "Remote", "kind": "object", "place": "other", "status": "seen", "misses": 0, "last": 1})
@@ -608,7 +608,7 @@ def test_miss_hash_survives_world_checkpoint(tmp_path):
     mem = Memory(tmp_path); place(mem, "room", "room"); world = World(mem, 16)
     player = {"name": "Player", "kind": "player", "at": [.5, .5]}
     item = {"name": "Coin", "kind": "object", "at": [.55, .5]}
-    ids = world.before({"screen": "world", "entities": [player, item], "text": [], "affordances": []}, "room", None, (160, 144), 1)[2]
+    ids = world.before({"screen": "world", "entities": [player, item], "text": []}, "room", None, (160, 144), 1)[2]
     ident, frame = ids[1], Image.new("RGB", (160, 144), "red")
     world.observe_after({"screen": "world", "entities": [player]}, frame, False, "room", (160, 144), 2)
     restored = World(mem, 16); restored.restore(world.state())
@@ -622,7 +622,7 @@ def test_evidence_actor_is_remembered_then_stale_after_twenty_steps(tmp_path):
     mem = Memory(tmp_path); place(mem, "room", "room"); world = World(mem, 16)
     player = {"name": "Player", "kind": "player", "at": [.5, .5]}
     npc = {"name": "Guide", "kind": "npc", "at": [.4, .5]}
-    ident = world.before({"screen": "world", "entities": [player, npc], "text": [], "affordances": []}, "room", None, (160, 144), 1)[2][1]
+    ident = world.before({"screen": "world", "entities": [player, npc], "text": []}, "room", None, (160, 144), 1)[2][1]
     world.observe_after({"screen": "world", "entities": [player]}, Image.new("RGB", (160, 144), "red"), False, "room", (160, 144), 2)
     assert mem.get("entities", ident)["status"] == "remembered"
     world.observe_after({"screen": "world", "entities": [player]}, Image.new("RGB", (160, 144), "blue"), False, "room", (160, 144), 20)
@@ -637,8 +637,8 @@ def test_tiers_preserve_transient_interest_and_promote_offscreen_text_names(tmp_
     ui_id = mem.observe({"entities": [{"name": "Start", "kind": "menu_item"}]}, "room", 1)[0]
     mem.upsert("entities", {**mem.get("entities", ui_id), "tier": "interest"})
     note_id = mem.upsert("entities", {"id": "map", "name": "Old Map", "kind": "object", "place": "room", "tier": "landmark", "status": "remembered", "misses": 0})["id"]
-    world.before({"screen": "menu", "entities": [{"name": "Start", "kind": "menu_item"}], "text": [], "affordances": []}, "room", None, (160, 144), 2)
-    world._tiers({"entities": [], "text": ["The Old Map points north"], "affordances": []}, "room", {})
+    world.before({"screen": "menu", "entities": [{"name": "Start", "kind": "menu_item"}], "text": []}, "room", None, (160, 144), 2)
+    world._tiers({"entities": [], "text": ["The Old Map points north"]}, "room", {})
     assert mem.get("entities", ui_id)["tier"] == "interest"
     assert mem.get("entities", note_id)["tier"] == "interest"
 
@@ -694,7 +694,7 @@ def test_old_anchor_checkpoint_keys_are_ignored_and_motion_spot_restores(tmp_pat
 
 def test_anchor_stand_in_applies_only_while_anchor_unknown(tmp_path):
     mem = Memory(tmp_path); world = World(mem, 16)
-    per = {"screen": "world", "text": [], "affordances": [], "entities": [
+    per = {"screen": "world", "text": [], "entities": [
         {"name": "player", "kind": "player", "at": [.5, .5]},
         {"name": "guard", "kind": "npc", "at": [.3, .5]}, {"name": "bard", "kind": "npc", "at": [.7, .5]}]}
     _, _, ids = world.before(per, "room", "room", SIZE, 1)

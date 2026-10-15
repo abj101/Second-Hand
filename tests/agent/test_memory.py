@@ -177,12 +177,11 @@ def test_refuted_view_cap_and_chooser_history_survives_crowded_memory(tmp_path):
 
 
 def test_resolve_ambiguous_name_by_nearest_tile(tmp_path):
-    from agent.decide import resolve_target
     mem = Memory(tmp_path)
     for i, tile in enumerate(([0, 0], [5, 5])):
         mem.upsert("entities", {"id": f"e_{i}", "kind": "object", "name": f"shelf#{i + 2}", "place": "p", "tile": tile})
     assert mem.resolve("shelf", "p") is None and mem.resolve("shelf", "p", (3, 3)) is None
-    assert mem.resolve("shelf", "p", (5, 6)) == "e_1" and resolve_target(mem, "exit: shelf", "p", (1, 0)) == "e_0"
+    assert mem.resolve("shelf", "p", (5, 6)) == "e_1"
 
 
 def test_match_place_ignores_exit_prefix_and_follows_leads_to(tmp_path):

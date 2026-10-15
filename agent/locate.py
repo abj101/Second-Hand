@@ -6,7 +6,6 @@ All points are [x, y] screen fractions in [0, 1].
 
 from __future__ import annotations
 
-from difflib import SequenceMatcher
 
 from PIL import Image, ImageDraw
 
@@ -14,7 +13,6 @@ from agent.model import Ollama, Reply
 
 ZOOM_FRAC = 0.25    # crop side as a fraction of frame width
 ZOOM_LONG_SIDE = 768
-SNAP_MAX_DIST = 0.08  # a text match farther than this (frame fractions) from the point is a different thing
 
 REFINE_SYSTEM = "You locate one thing in an enlarged part of a video game screenshot."
 REFINE_PROMPT = ('Point to the centre of "{target}". Answer JSON {{"at": [x, y]}} on a 0-1000 grid of THIS image '
@@ -49,24 +47,6 @@ def refine(model: Ollama, image: Image.Image, target: str, at: list[float]) -> t
     px = x0 + min(max(p[0], 0), 1000) / 1000 * (x1 - x0)
     py = y0 + min(max(p[1], 0), 1000) / 1000 * (y1 - y0)
     return [px / image.width, py / image.height], reply
-
-
-def _same_text(a: str, b: str) -> bool:
-    a, b = " ".join(a.casefold().split()), " ".join(b.casefold().split())
-    return bool(a and b) and (a in b or b in a or SequenceMatcher(None, a, b).ratio() >= 0.8)
-
-
-def snap_to_text(target: str, at: list[float], tokens: list[tuple[str, list[float]]]) -> list[float]:
-    """Move `at` to the centre of the nearest OCR box whose text matches `target`; unchanged if none is close."""
-    best, best_d = None, SNAP_MAX_DIST
-    for text, (x0, y0, x1, y1) in tokens:
-        if not _same_text(target, text):
-            continue
-        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        d = ((cx - at[0]) ** 2 + (cy - at[1]) ** 2) ** 0.5
-        if d <= best_d:
-            best, best_d = [cx, cy], d
-    return best or at
 
 
 def rulers(image: Image.Image, margin: int = 36) -> Image.Image:

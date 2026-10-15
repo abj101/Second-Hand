@@ -46,7 +46,7 @@ class GridEnv:
         if self.scene == 0 and visible(self.door): entities.append({"name": "exit: door", "kind": "exit", "at": at(self.door)})
         if self.animated and visible((9, 7)): entities.append({"name": "fountain", "kind": "object", "at": at((9, 7))})
         if self.hud: entities.append({"name": "hp bar", "kind": "object", "at": [16 / 160, 16 / 144]})
-        return {"screen": "world", "text": [], "entities": entities, "affordances": []}
+        return {"screen": "world", "text": [], "entities": entities}
 
     def screenshot(self) -> Image.Image:
         if self._transition: return Image.new("RGB", (160, 144), "white")

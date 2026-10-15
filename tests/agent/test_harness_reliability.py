@@ -191,11 +191,11 @@ def test_duplicate_exit_records_pick_the_observed_door_and_the_failure_note_foll
 
 
 # ---------------------------------------------------------------- case 4
-def dialogue_scene(): return {"screen": "dialogue", "text": ["Watch the television?"], "affordances": [], "entities": [
+def dialogue_scene(): return {"screen": "dialogue", "text": ["Watch the television?"], "entities": [
     {"name": "television", "kind": "object", "at": [.2, .3]}, {"name": "player", "kind": "player", "at": [.5, .5]}, {"name": "dialogue box", "kind": "dialogue_box", "at": [.5, .85]}]}
-def menu_scene(): return {"screen": "menu", "text": ["FIGHT BAG"], "affordances": [], "entities": [
+def menu_scene(): return {"screen": "menu", "text": ["FIGHT BAG"], "entities": [
     {"name": "FIGHT", "kind": "menu_item", "at": [.3, .4], "selectable": True}, {"name": "BAG", "kind": "menu_item", "at": [.3, .6], "selectable": True}]}
-def world_scene(): return {"screen": "world", "text": [], "affordances": [], "entities": [{"name": "player", "kind": "player", "at": [.5, .5]}]}
+def world_scene(): return {"screen": "world", "text": [], "entities": [{"name": "player", "kind": "player", "at": [.5, .5]}]}
 
 
 def test_dialogue_over_room_objects_offers_no_select_and_advance_progresses_the_text(tmp_path, monkeypatch):
@@ -235,7 +235,7 @@ def test_typing_field_on_a_name_screen_is_offered_and_typing_runs_to_the_name(tm
             for x in range(0, 160, 2): draw.line((x, 0, x, 143), fill="#666")
             draw.rectangle((8 * self.cursor[1], 8 * self.cursor[0], 8 * self.cursor[1] + 7, 8 * self.cursor[0] + 7), fill="#222")
             return image
-    keyboard = {"screen": "menu", "text": ["NAME?"], "affordances": [], "entities": [{"name": "keyboard", "kind": "keyboard", "at": [.5, .5]}]}
+    keyboard = {"screen": "menu", "text": ["NAME?"], "entities": [{"name": "keyboard", "kind": "keyboard", "at": [.5, .5]}]}
     env = Textured(menu=True); shown = []
     model = NameModel([reply(keyboard), Reply("", {"presets": ["Blue"]}, 0, None, None), Reply("", {"items": ["RED", "BLUE"], "cursor": 0, "layout": "vertical"}, 0, None, None),
                        reply(keyboard)], env)  # the last: the screen after the typing

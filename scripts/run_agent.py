@@ -158,10 +158,11 @@ def main(argv=None):
     model._post = guarded; loop = Loop(env, model, Memory(run / "memory"), a.game, **({"act_text": True} if modes["act_text"] else {}), **({"decide": True} if modes["decide"] else {}))
     loop.invocation = invocation_row["invocation"]
     if cp: loop.restore(state)
-    press = env.press; failed = [False]; keys = []
-    def guarded_press(*args, **kwargs):
-        keys.append(args[0] if args else kwargs.get("key"))
-        try: return press(*args, **kwargs)
+    press = env.press; failed = [False]; keys = []; clip = []  # clip: every emulated frame of this step's presses, for the viewer
+    def guarded_press(key, frames=8, on_frame=None):
+        keys.append(key)
+        def both(image): clip.append(image); on_frame and on_frame(image)
+        try: return press(key, frames, on_frame=both)
         except BaseException: failed[0] = True; raise
     env.press = guarded_press
     try:
@@ -170,12 +171,14 @@ def main(argv=None):
             (run / "frames").mkdir(exist_ok=True); wait_settled(env); truth = {"step": loop.step_no+1, **read(env)}
             with (run / "truth.jsonl").open("a", encoding="utf8") as f: f.write(json.dumps(truth)+"\n")
             active_step[0]=loop.step_no+1; old_calls, old_requests = model.calls, invocation[0]
-            keys.clear()
+            keys.clear(); clip.clear()
             try: row = loop.step()
             except Exception as e:
                 if failed[0]: loop.cached = loop.cached_hash = None; cp=_checkpoint(env, loop, run); print(f"input_error={e}; checkpoint={cp}",flush=True); return 0
                 raise
             with (run / "presses.jsonl").open("a", encoding="utf8") as f: f.write(json.dumps({"step": row["step"], "keys": keys})+"\n")
+            # ponytail: every 2nd frame at 33 ms = real time (GB is ~60 fps); browsers clamp GIF delays under 20 ms
+            if len(clip) > 1: clip[0].save(run / "frames" / f"{row['step']:06d}_motion.gif", save_all=True, append_images=clip[2::2], duration=33, loop=0)
             choice = row.get("choice") or {}
             print(f"step={row['step']} place={row['place']} task={row['task']} choice={choice.get('verb')}:{choice.get('target')} verdict={row['verdict']} uncached={model.calls-old_calls} requests={invocation[0]-old_requests}", flush=True)
             if loop.step_no % 25 == 0: _checkpoint(env, loop, run)

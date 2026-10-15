@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent.memory import Memory
 
-FRAME = re.compile(r"\d{6}(_after)?\.png")
+FRAME = re.compile(r"\d{6}(_after\.png|_motion\.gif|\.png)")
 
 
 class RunState:
@@ -99,7 +99,7 @@ def handler(follow: Follow):
                 since = int((query.get("since") or ["0"])[0] or 0) if (query.get("run") or [""])[0] == run_state.run.name else 0
                 return self._send(200, json.dumps(run_state.state(since), default=str).encode(), "application/json")
             if url.path.startswith("/frames/") and (data := follow.current().frame(url.path[8:])) is not None:
-                return self._send(200, data, "image/png")
+                return self._send(200, data, "image/gif" if url.path.endswith(".gif") else "image/png")
             self._send(404, b"not found", "text/plain")
     return Handler
 
@@ -158,7 +158,7 @@ footer{display:flex;justify-content:space-between;border-top:1px solid var(--fg)
 const $=id=>document.getElementById(id), rows=[], esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const PAD=["UP","DOWN","LEFT","RIGHT","A","B","START","SELECT"], DIR={UP:"↑",DOWN:"↓",LEFT:"←",RIGHT:"→"};
 let pinned=null, chosenPlace=null, last={};
-let after=false; $("after").onclick=()=>{after=!after; $("after").textContent=after?"AFTER":"BEFORE"; render()};
+const VIEWS=["BEFORE","AFTER","MOTION"]; let after=0; $("after").onclick=()=>{after=(after+1)%3; $("after").textContent=VIEWS[after]; render()};  // MOTION: the step's presses frame by frame (run_agent.py)
 let overlay=false; $("overlay").onclick=()=>{overlay=!overlay; $("overlay").textContent=overlay?"OVERLAY ON":"OVERLAY OFF"; $("frame").hidden=overlay; $("lens").hidden=!overlay; render()};
 $("follow").onclick=()=>{pinned=null;chosenPlace=null;render()};
 $("place").onchange=e=>{chosenPlace=e.target.value;render()};
@@ -179,7 +179,7 @@ function render(){
   const r=sel(), live=rows[rows.length-1];
   $("run").textContent=last.run||""; $("badge").className="badge"+(last.live?" live":""); $("badge").lastChild.textContent=last.live?"LIVE":"IDLE";
   $("fstat").textContent=live?`STEP ${String(live.step).padStart(5,"0")} / ${label(live.place).toUpperCase()}`:"STEP —"; $("fcalls").textContent=`${last.calls||0} MODEL CALLS`;
-  if(r){ const src="/"+(after&&r.after?r.after:r.frame); if(!$("frame").src.endsWith(src)) $("frame").src=src; $("fstep").textContent="STEP "+r.step+(pinned!=null?" / PINNED":"");
+  if(r){ const src="/"+(after===2&&r.frame?r.frame.replace(".png","_motion.gif"):after===1&&r.after?r.after:r.frame); if(!$("frame").src.endsWith(src)) $("frame").src=src; $("fstep").textContent="STEP "+r.step+(pinned!=null?" / PINNED":"");
     const c=r.choice||{}, sk=r.skill||{}, p=r.plan, o=r.outcome||{}, a=r.act||{}, pr=r.pred||{}, j=v=>v==null?"":typeof v==="object"?JSON.stringify(v):String(v);
     const ents=r.entities||[];
     const groups=[  // only what the vision and act calls returned, plus the outcome and any replan
@@ -213,7 +213,7 @@ function lens(r){ // the perception layer over a small copy of the frame: detect
   if(r.player_fix&&r.player_fix.from&&r.player_fix.to){const [a,b]=at(r.player_fix.from),[c,d]=at(r.player_fix.to); ctx.strokeStyle="#858585"; ctx.setLineDash([3,3]); ctx.beginPath(); ctx.moveTo(a,b); ctx.lineTo(c,d); ctx.stroke(); ctx.setLineDash([])}
   for(const e of ents){ const [x,y]=at(e.at), me=String(e.kind).toLowerCase()==="player";
     ctx.strokeStyle=me?"#f2f2f2":"#c8c8c8"; ctx.beginPath(); ctx.moveTo(x-5,y); ctx.lineTo(x+5,y); ctx.moveTo(x,y-5); ctx.lineTo(x,y+5); ctx.stroke();
-    const text=me?"YOU":(e.name||e.kind||"?"), w=ctx.measureText(text).width+6, lx=Math.min(Math.max(x-w/2,0),cv.width-w), ly=Math.max(y-7,13);
+    const text=me?"YOU":(e.name||e.kind||"?")+(e.id?" ["+e.id+"]":""), w=ctx.measureText(text).width+6, lx=Math.min(Math.max(x-w/2,0),cv.width-w), ly=Math.max(y-7,13);
     ctx.fillStyle="#080808"; ctx.fillRect(lx,ly-12,w,12); ctx.strokeStyle="#303030"; ctx.strokeRect(lx,ly-12,w,12); ctx.fillStyle=me?"#f2f2f2":"#c8c8c8"; ctx.fillText(text,lx+3,ly);}
 }
 function goals(){

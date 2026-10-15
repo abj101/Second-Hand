@@ -31,9 +31,7 @@ class DryModel:
 
     def ask(self, system, user, images=(), schema=None, *, role=""):
         if role == "perceiver":
-            data = {"screen": self.screen, "text": [], "entities": self.entities,
-                    "affordances": [{"verb": self.verb, "target": "dry target",
-                                     "at": self.point, "why": "offline scoring check"}]}
+            data = {"screen": self.screen, "text": [], "entities": self.entities}
         else:
             data = {"place": "dry", "notebook": [], "action": {"i": 0},
                     "expect": "screen_changes", "why": "offline scoring check"}
@@ -59,10 +57,7 @@ def _point_for(action, per):
     """Resolve legacy options and model-owned S2 action shapes for one scorer."""
     if not isinstance(action, dict):
         return "invalid", None, None
-    affs, entities = per.get("affordances", []), per.get("entities", [])
-    if type(action.get("i")) is int and 0 <= action["i"] < len(affs):
-        row = affs[action["i"]]
-        return f'{row.get("verb", "")} {row.get("target", "")}'.strip(), row.get("at"), row.get("verb")
+    entities = per.get("entities", [])
     if isinstance(action.get("buttons"), list):
         names = [str(value).upper() for value in action["buttons"]]
         return "buttons " + " ".join(names), None, "buttons"

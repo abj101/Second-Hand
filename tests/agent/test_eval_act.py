@@ -8,7 +8,7 @@ from tests.agent.fakes import StubModel
 def answer(step):
     text = "All boys leave home some day" if step == 51 else "Visible town"
     screen = "dialogue" if step == 51 else "world"
-    per = Reply("per", {"screen":screen,"text":[text],"entities":[],"affordances":[]}, 1, None, None)
+    per = Reply("per", {"screen":screen,"text":[text],"entities":[]}, 1, None, None)
     ops = [{"op":"set","section":"goals","key":"leave","value":{"text":"Leave home","evidence":"leave home","source":"heard","status":"active"}}] if step == 51 else []
     data = {"place":"Town","notebook":ops,"action":{"buttons":["A"]},"text":None,"expect":"screen_changes","why":"Continue"}
     return [per, Reply("act",data,1,None,None)]

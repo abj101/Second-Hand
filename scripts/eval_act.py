@@ -90,7 +90,7 @@ def main(argv=None):
             if step in done: continue
             with Image.open(FRAME_DIR/f"{step:06d}.png") as im: frame=for_model(im); per,preply=perceive(model,frame,ctx)
             raw[0]=None; result=act(model,frame,per,notebook.render(),"none",[],brief,prefs,list(_INPUTS))
-            r={"step":step,"screen":per["screen"],"text":per["text"],"entities_count":len(per["entities"]),"affordances":per["affordances"],"perceive_raw":{"text":preply.text,"data":preply.data},"act_reply":{"raw":raw[0],"parsed":result.__dict__},"act_parsed":result.__dict__,"notebook_ops":result.ops,"truth_map":truth.get(step,{}).get("map"),"complete":True}
+            r={"step":step,"screen":per["screen"],"text":per["text"],"entities_count":len(per["entities"]),"perceive_raw":{"text":preply.text,"data":preply.data},"act_reply":{"raw":raw[0],"parsed":result.__dict__},"act_parsed":result.__dict__,"notebook_ops":result.ops,"truth_map":truth.get(step,{}).get("map"),"complete":True}
             rows.append(r)
             with rp.open("a",encoding="utf-8") as f: f.write(json.dumps(r,ensure_ascii=False)+"\n")
             done.add(step); report(summary,rows,steps,status,out)

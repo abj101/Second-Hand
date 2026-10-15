@@ -145,7 +145,7 @@ def test_call_is_rebuilt_from_manifest_call_record_and_image_refs(tmp_path, monk
     assert record["response"] == reply.text
 
 
-PERCEPTION = {"screen": "world", "text": [], "entities": [{"name": "player", "kind": "player", "at": [0.5, 0.5]}], "affordances": []}
+PERCEPTION = {"screen": "world", "text": [], "entities": [{"name": "player", "kind": "player", "at": [0.5, 0.5]}]}
 PLAN = {"goals": [], "focus": "", "why": "nothing new"}
 ACTION = {"place": "", "notebook": [], "action": None, "text": None, "expect": "screen_changes", "why": "test"}
 

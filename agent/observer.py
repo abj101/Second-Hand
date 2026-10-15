@@ -60,20 +60,6 @@ def _residual(frames: list[Image.Image], shifts: list[tuple[int, int]]):
     return (x0 + int(xs.min()), y0 + int(ys.min()), x0 + int(xs.max()) + 1, y0 + int(ys.max()) + 1), tile, coverage, True
 
 
-def residual_box(frames: list[Image.Image], shifts: list[tuple[int, int]]) -> tuple[int, int, int, int] | None:
-    box = _residual(frames, shifts)[0]
-    if box is None: return None
-    dx, dy = (round(v / 2) for v in shifts[-1])
-    return box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy
-
-
-def residual(frames: list[Image.Image], shifts: list[tuple[int, int]]) -> tuple[float, float] | None:
-    box, _tile, _coverage, accepted = _residual(frames, shifts)
-    if box is None or not accepted: return None
-    x0, y0, x1, y1 = box; dx, dy = shifts[-1]; w, h = frames[0].size
-    return ((x0 + x1 + dx) / (2 * w), (y0 + y1 + dy) / (2 * h))
-
-
 def wait_settled(env, *, quiet: int = 24, max_frames: int = 600) -> Settle:
     quiet = max(1, quiet)
     frame = env.screenshot()

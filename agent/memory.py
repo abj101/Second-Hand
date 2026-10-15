@@ -254,7 +254,8 @@ class Memory:
         return place
 
     def observe(self, perception: dict, place: str, step: int,
-                tiles: dict[int, tuple[int, int]] | None = None) -> dict[int, str]:
+                tiles: dict[int, tuple[int, int]] | None = None, tracks: dict[int, str] | None = None) -> dict[int, str]:
+        """tracks: entity index -> id of the pixel track under it (agent/track.py). That record is the same thing whatever the model now calls it."""
         result, used = {}, set(); actors = {"person", "npc", "character", "enemy", "monster", "animal"}
         for i, entity in enumerate(perception.get("entities", [])):
             name, kind = str(entity.get("name", "")).strip(), str(entity.get("kind", "unknown"))
@@ -271,6 +272,11 @@ class Memory:
             exact = [r for r in candidates if _base(r.get("name", "")) == _base(name)]
             pool = exact or candidates
             row = pool[0] if len(pool) == 1 else min(pool, key=lambda r: max(abs(tile[0] - r["tile"][0]), abs(tile[1] - r["tile"][1])) if r.get("tile") else 2) if tile and pool else max(exact, key=lambda r: r.get("seen", 0), default=None)  # several same-name: nearest tile, like resolve(); no tile = no evidence of a distinct object (fuzzy ties still mint)
+            hit = self.get("entities", (tracks or {}).get(i))
+            if hit and hit.get("place") == place and hit["id"] not in used:
+                row = hit
+                if _base(name) != _base(row.get("name", "")) and name not in row.get("aliases", []): row["aliases"] = [*row.get("aliases", []), name]
+                kind = row.get("kind", kind)  # the track says which thing; the model's new name or kind is only an alias
             if row is None:
                 eid = self._id("entities", name)
                 duplicate = bool(all_candidates) or any(

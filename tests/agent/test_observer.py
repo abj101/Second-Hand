@@ -1,7 +1,7 @@
 import numpy as np
 from PIL import Image
 
-from agent.observer import changed, cut, for_model, residual, snap, scroll, wait_settled
+from agent.observer import _residual, changed, cut, for_model, snap, scroll, wait_settled
 
 
 class StubEnv:
@@ -86,6 +86,7 @@ def test_residual_finds_compact_screen_anchored_motion():
     image = np.tile(tile, (9, 10, 1))[:144, :160]
     first = image.copy(); first[68:76, 80:88] = (255, 20, 20)
     moved = np.roll(image, 16, axis=1); moved[68:76, 80:88] = (255, 20, 20)
-    spot = residual([Image.fromarray(first), Image.fromarray(moved)], [(0, 0), (16, 0)])
-    assert spot is not None
+    box, _tile, _coverage, accepted = _residual([Image.fromarray(first), Image.fromarray(moved)], [(0, 0), (16, 0)])
+    assert accepted
+    spot = ((box[0] + box[2] + 16) / 320, (box[1] + box[3]) / 288)  # box centre plus the camera shift
     assert abs(spot[0] - .5) <= 8 / 160 and abs(spot[1] - 72 / 144) <= 8 / 144

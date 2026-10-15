@@ -8,6 +8,7 @@ from agent.memory import TRANSIENT, _base, _distance, _nameable, normalize_kind,
 from agent.observer import changed, cut
 from agent.space import DIRS, exit_to, fold, frontier, mark_exit, route, tile_of
 from agent.skills import SkillResult, approach, on_player, press
+from agent.track import Tracker
 
 TRAVEL_MAX_INPUTS = 120
 MISS_TO_STALE, MISS_TO_GONE, ACTOR_STALE_STEPS = 2, 4, 20
@@ -70,6 +71,7 @@ class World:
     size = None
     def __init__(self, mem, tile_px):
         self.mem, self.tile_px = mem, tile_px
+        self.tracker = Tracker(tile_px or 16)  # pixel tracks keep one id per moving thing; Loop wraps the env so it sees every frame
         self.pos, self.drift, self.drift_ref = (0, 0), None, None
         self.entity_tiles, self.entity_ids, self.anchors, self.actor_tiles = {}, {}, [], frozenset()
         self.entities, self.pa, self._prepared = [], None, None
@@ -124,20 +126,34 @@ class World:
         self.current_place, self.size = place, size
         if prior and place != prior:
             self.pos, self.drift, self.drift_ref = self._seen_at(place) or (0, 0), None, None
-            self._observed_per = None
+            self._observed_per = None; self.tracker.clear()
         player = next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         pa = self.self_spot if self._self_from_motion else self._anchor(per, size) if player else None
         self.pa = pa
+        px, py = (pa[0] * size[0], pa[1] * size[1]) if pa else (0, 0); self.tracker.ignore = [(max(0, int(px) - 10), max(0, int(py) - 10), int(px) + 10, int(py) + 10)] if pa else []  # the player animates in place: not a thing that moved
         proj = lambda at: tile_of(at, pa, self.pos, size, self.tile_px) if pa and self.tile_px and isinstance(at, list) and len(at) == 2 else None
         tiles = {i: t for i, e in enumerate(per.get("entities", [])) if e.get("kind", "").casefold() != "player" and (t := proj(e.get("at")))}
-        ids = self.entity_ids if per is self._observed_per else self.mem.observe(per, place, step, tiles)
-        self._observed_per = per
+        ids = self.entity_ids if per is self._observed_per else self.mem.observe(per, place, step, tiles, self._hits(per))
+        self._observed_per = per; self._follow(per, ids)
         self.actor_tiles = frozenset(tiles[i] for i, e in enumerate(per.get("entities", [])) if i in tiles and self._actor(ids.get(i), e))
         self.entity_ids, self.entity_tiles = ids, {ids[i]: p for i, p in tiles.items() if i in ids}
         self.entities = [{"id": ids.get(i), "name": e.get("name"), "kind": e.get("kind"), "at": e.get("at")}
                          for i, e in enumerate(per.get("entities", []))]
         self._tiers(per, place, ids)
         return proj, tiles, ids
+    def _hits(self, per):  # entity index -> id of the live pixel track under it (within a tile)
+        hits = {}
+        for i, e in enumerate(per.get("entities", [])):
+            if e.get("kind", "").casefold() != "player" and isinstance(e.get("at"), list) and len(e["at"]) == 2 and (t := self.tracker.near(e["at"], hits.values())): hits[i] = t
+        return hits
+    def _follow(self, per, ids):  # seed tracks for what was just perceived; a track lost in view for a while (no text box over it) means the thing left: "gone"
+        self.tracker.seed([(ids[i], e["at"], self._actor(ids[i], e)) for i, e in enumerate(per.get("entities", []))
+                           if i in ids and e.get("kind", "").casefold() != "player" and isinstance(e.get("at"), list) and len(e["at"]) == 2])
+        if per.get("screen") != "world" or per.get("text") or any(e.get("kind") == "dialogue_box" for e in per.get("entities", [])): return
+        for ident in self.tracker.gone() - set(ids.values()):
+            self.tracker.tracks.pop(ident)
+            row = self.mem.get("entities", ident)
+            if row and row.get("status") != "gone": self.mem.upsert("entities", {**row, "status": "gone"})
     def _promote(self, ids):
         for ident in ids:
             row = self.mem.get("entities", ident)
@@ -229,7 +245,7 @@ class World:
             status = old_status
             tier = row.get("tier", "landmark")
             is_matched = row.get("place") == place and ident in matched
-            if is_matched: continue
+            if is_matched or status == "gone": continue
             if status == "seen": row = {**row, "status": "remembered"}; status = "remembered"
             if self._actor(ident, row):
                 if step - row.get("last", step) >= ACTOR_STALE_STEPS and status != "stale":
@@ -401,7 +417,8 @@ class World:
             old = {(e.get("name", "").casefold(), e.get("kind")): self.entity_ids[i] for i, e in enumerate(self.entities)
                    if i in self.entity_ids and sum((x.get("name", "").casefold(), x.get("kind")) == (e.get("name", "").casefold(), e.get("kind")) for x in self.entities) == 1}
             new = {(e.get("name", "").casefold(), e.get("kind")): i for i, e in enumerate(per.get("entities", [])) if i in tiles and sum((x.get("name", "").casefold(), x.get("kind")) == (e.get("name", "").casefold(), e.get("kind")) for x in per.get("entities", [])) == 1}
-            pairs = {old[k]: new[k] for k in old.keys() & new.keys() if old[k] in self.entity_tiles}; anchor = self.drift_ref or {i: self.entity_tiles[i] for i in pairs}
+            walked = self.tracker.moved()  # things that moved on their own are not fixed references
+            pairs = {old[k]: new[k] for k in old.keys() & new.keys() if old[k] in self.entity_tiles and old[k] not in walked}; anchor = self.drift_ref or {i: self.entity_tiles[i] for i in pairs}
             delta = [(tuple(anchor[i][j] - tiles[n][j] for j in (0, 1)), i) for i, n in pairs.items() if i in anchor]
             if delta:
                 dx, dy = (sorted(v[0][j] for v in delta)[len(delta) // 2] for j in (0, 1)); drift = (dx, dy) if (dx, dy) != (0, 0) else None
@@ -410,8 +427,8 @@ class World:
                 elif drift and drift == self.drift: self.pos = (self.pos[0] + dx, self.pos[1] + dy); drift_fix = (dx, dy); tiles = {i: (p[0] + dx, p[1] + dy) for i, p in tiles.items()}; self.drift = self.drift_ref = None
                 else: self.drift, self.drift_ref = drift, anchor if drift else None
         if not reused:
-            self.entity_ids = self.mem.observe(per, place, step, tiles)
-            self._observed_per = per
+            self.entity_ids = self.mem.observe(per, place, step, tiles, self._hits(per))
+            self._observed_per = per; self._follow(per, self.entity_ids)
         self._screen_things(per, frame, place, size, step)
         self._tiers(per, place, self.entity_ids)
         self._record_view(per, frame, reused, place, size, step, aa, self.entity_ids)
