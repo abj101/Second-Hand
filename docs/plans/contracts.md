@@ -405,7 +405,9 @@ class Tasks:
     # The trace row gets "wake": reason | null.
 class Stuck:
     def update(self, row: dict) -> str | None      # "no_change" (8 steps), "same_action" (3 times on the same frame), "budget",
-        # "no_progress": 25 steps with no new place and no new verified edge (user-approved 2026-10-11, E3 repair)
+        # "no_progress": 20 steps with no first visit of a world place and no first verified (place, next_place) edge
+        # (QS 2026-10-15; was 25 with any verified edge). State adds seen_edges (old checkpoints: empty set).
+    def progress(self) -> None                     # QS: resets the no_progress counter (game text, quest closure)
 ```
 
 ## chooser and orchestrator
@@ -465,16 +467,21 @@ runs/<run_id>/
 
 ## notebook and act
 
-R1 P1 (built 2026-10-12, behind `--act`; P4 makes it the only path). W1 changes approved 2026-10-12.
+R1 P1 (built 2026-10-12, behind `--act`; P4 makes it the only path). W1 changes approved 2026-10-12. Notebook replaced by QS quest state (merged 2026-10-15 from [QS.md](QS.md) §9; design [quest-state.md](quest-state.md)).
 
 ```python
-# agent/notebook.py — model-owned notes, code-stored at <memory root>/notebook.json (+ notebook.history op log)
-SECTIONS = ("goals", "hints", "lessons")        # W1: "places" removed; code owns places (see world)
-CAPS = {"lessons": 10, "hints": 20}             # most recent kept; done/dropped goals capped at 10
+# agent/notebook.py — quest state at <memory root>/notebook.json (v2) + notebook.history op log; a v1 file migrates in memory until a mutation
+SECTIONS = ("facts", "beliefs", "quests", "notes", "chapters")  # plus the code-written event `log`
+MAX_OPEN = 5                                                     # extra open quests are parked
 class Notebook:
-    def __init__(self, root: Path) -> None
-    def apply(self, ops: list[dict], step: int) -> int     # {"op": "set"|"remove", "section", "key" (<= 40 chars), "value"}; returns ops applied
-    def render(self, limit: int = 6000) -> str             # drops oldest lessons, hints, finished goals first
+    def __init__(self, root: Path, *, buttons=(), labels=None) -> None   # buttons: env.inputs(); labels(): current canonical place label(s)
+    focus: str | None                                            # read-only: key of the first open quest
+    def apply_plan(self, plan: "Plan", step: int, *, buttons=()) -> dict  # reconcile + invariants; {"quests_changed", "beliefs_changed", "flags"}; reorders count
+    def run_checks(self, step: int) -> list[str]                 # reach/speak/text checks on every open quest; keys closed this step
+    def apply_chapter(self, chapter: dict, step: int) -> bool    # guard: every open quest and held belief kept or in open_leads; False keeps notes
+    def note(self, step: int, text: str) -> None                 # code event log (unchanged)
+    def render(self, limit: int = 6000) -> str                   # planner view: facts, beliefs (incl. ruled out), quests, chapters, current notes
+    def render_focus(self, limit: int = 4000) -> str             # act view: top quest, other open quests one line each, facts, recent log
 
 # agent/act.py — one structured model call per step
 @dataclass
@@ -494,6 +501,26 @@ def act(model, image, perception: dict, notebook: str, facts: str, flags: list[s
 - Trace rows carry `"option": {"n","tool","label","notes"} | null`. The `failed here before` flag is gone; its content is in option notes.
 - `Loop` passes the compact `World.view` as the act facts and the default view to the planner (see world).
 - Reply-format text (`REPLY`, `REPLY_OPTIONS`, `OPTION_NOTE`, `SYSTEM`) was shortened without removing any field or action shape. Limit for the whole act prompt: 1,600 tokens (len/4, dry gate).
+
+**QS quest state (merged 2026-10-15, gate 266681e):**
+- `Notebook.data`: `facts` and `beliefs` are keyed dicts; `quests`, `notes`, `chapters` are ordered lists. Invariants (tested as `test_inv1`…`test_inv8` in `tests/agent/test_notebook.py`):
+  - omitted heard quests are kept and flagged;
+  - done/dropped need evidence (dropping a heard quest needs a fact or belief reference);
+  - at most 5 open quests;
+  - door, coordinate, button and direction text is rejected;
+  - belief revisions keep their history and reason;
+  - re-sets merge (`evidence`, `opened` and check history are preserved);
+  - facts are add-only;
+  - nothing is deleted.
+
+  Facts and open quests are never dropped to fit a render budget.
+- `agent.plan`: `Plan(quests: list[dict], beliefs: list[dict], facts: list[dict], note: str, why: str)`. `plan(model, trigger, notebook, view, screen_text, recent, evidence: str | None = None)` (`evidence=` replaces `failure=`). `chapter(model, notebook) -> dict | None`. The planner sees persisted state, including chapters and the current chapter's notes.
+- Loop:
+  - **Triggers:** only T1 game text, T2 first navigable place, T3 quest closed, T4 stall (`Stuck` `no_progress`), T5 no open quest. Priority T3 > T1 > T2 > T5 > T4; T2 and T4 keep the 3-step floor. An action failure no longer sets planner urgency; `cause` stays act-facing and goes into the evidence packet (≤ 600 chars).
+  - **Plan trace rows:** `{"trigger", "focus", "quests_changed", "beliefs_changed", "flags", "why"}`.
+  - **After each step:** checks run on all open quests after settled outcomes. A chapter compacts when a heard or top quest closes, or when there are more than 12 notes.
+  - **Checkpoint state:** `stall_unchanged` persists (old checkpoints default to 0).
+- Act/decide output shape is unchanged. `Act.ops` is parsed but never applied to the notebook: closure belongs to checks and the planner.
 
 ## world
 
