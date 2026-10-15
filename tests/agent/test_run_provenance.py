@@ -87,7 +87,8 @@ def test_manifest_has_listed_keys_and_one_line_per_invocation(tmp_path):
     assert lines[1]["provenance"] == "incomplete" and lines[1]["notes"] == ["calls.jsonl write failed"]
 
 
-def test_source_fingerprint_without_git_is_incomplete(tmp_path):
+def test_source_fingerprint_without_git_is_incomplete(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))  # a basetemp inside a repo must not count as git
     fingerprint = source_fingerprint(tmp_path)
 
     assert fingerprint["head"] is None and fingerprint["dirty"] == {}
