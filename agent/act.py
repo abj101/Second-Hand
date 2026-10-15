@@ -7,9 +7,8 @@ from agent.observer import for_model
 from agent.predict import EFFECTS
 
 SYSTEM = ("You play a video game you have never seen, from screenshots only. Your goal is to finish the game. "
-  "A planner keeps your goals; you work on the focus, the last goal in the goal path. Read all on-screen text. "
+  "A planner keeps your quests; work on the top quest. Other open quests are listed; if an option would finish one of them now, you may take it. Read all on-screen text. "
   "The log lists what already happened, people's words included: do not repeat finished conversations or actions unless the focus needs them. "
-  "When the focus's done_when sign is visible, mark it done with the evidence; if it cannot work from here after several tries, mark it blocked and say why. "
   "Treat your notes as hypotheses: what you see now beats what you wrote. "
   "Flags list actions that already failed here: after one failure try something different and never repeat one that failed twice. "
   "When you are stuck, write down what you learned. Return only JSON.")
@@ -56,7 +55,7 @@ def _option_text(o: dict) -> str:  # the tool word once: the label alone when it
     return o["label"] if any(f" {t} " in f" {' '.join(head.split()[:3])} " for t in (w, o["tool"].casefold())) else f"{o['tool']} {o['label']}"
 
 DECIDE_SYSTEM = ("You choose the next action in a video game. You do not see the screen: the facts below come from the game's map memory "
-  "and a screen reader, and they are true. Work on the focus, the last goal in the goal path. Pick exactly one of the numbered options. "
+  "and a screen reader, and they are true. A planner keeps your quests; work on the top quest. Other open quests are listed; if an option would finish one of them now, you may take it. Pick exactly one of the numbered options. "
   "An option whose notes say it failed or had no effect should not be picked again while another option could still work. "
   "Return only JSON.")
 

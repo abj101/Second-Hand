@@ -550,14 +550,255 @@ def _e4_metrics(run, trace, truth_rows, from_step=None):
                         str((r.get("outcome") or {}).get("to") or ""))
     ordered = sorted(trace, key=lambda x: x.get("step", 0))
     repeats = Counter((action(a), action(b), observed(a), observed(b)) for a, b in zip(ordered, ordered[1:]) if action(a)[1] and action(b)[1] and observed(a)[0] and observed(b)[0])
-    plans = [(i, r) for i, r in enumerate(trace) if r.get("wake")]
-    done_plans = {t.get("plan_step") for t in replay(run / "memory" / "tasks.jsonl") if t.get("status") == "done" and isinstance(t.get("plan_step"), int)}
+    plans = [(i, r) for i, r in enumerate(trace)
+             if isinstance(r.get("plan"), dict) and r["plan"]]
+    if not plans: plans = [(i, r) for i, r in enumerate(trace) if r.get("wake")]
+    notebook = {}
+    try: notebook = json.loads((run / "memory" / "notebook.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError): pass
+    quests = notebook.get("quests") if isinstance(notebook, dict) else None
+    if isinstance(quests, list):
+        done_plans = {step for q in quests if isinstance(q, dict) and q.get("status") in {"done", "closed"}
+                      for step in (q.get("plan_step"), q.get("opened"), q.get("closed_step"), q.get("closed"))
+                      if isinstance(step, int)}
+        history = _history(run)
+        for row in history:
+            if row.get("op") != "quests": continue
+            value = row.get("value", [])
+            if isinstance(value, dict): value = [value]
+            if isinstance(value, list):
+                done_plans.update(step for q in value if isinstance(q, dict) and q.get("status") in {"done", "closed"}
+                                  for step in (q.get("plan_step"), q.get("opened"), q.get("closed"))
+                                  if isinstance(step, int))
+    else:
+        done_plans = {t.get("plan_step") for t in replay(run / "memory" / "tasks.jsonl")
+                      if t.get("status") == "done" and isinstance(t.get("plan_step"), int)}
     completed = sum(row.get("step") in done_plans for _, row in plans)
     return {"doors_verified": len(verified - {None}),
             "patterns_promoted": sum(r.get("state") == "promoted" for r in replay(run / "memory" / "patterns.jsonl")),
             "battles": battles, "moves_selected": moves,
             "repeat_sequences": {"length": 2, "count": sum(n > 1 for n in repeats.values())},
             "reflection_usefulness": {"plan_calls": len(plans), "goals_completed": completed}}
+
+
+def _history(run):
+    path = run / "memory" / "notebook.history"
+    try:
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def _lifecycle(run):
+    """Replay trigger rules and summarize notebook history without creating a model."""
+    from agent.tasks import Stuck
+
+    run = Path(run)
+    trace = sorted(read(run / "trace.jsonl"), key=lambda row: row.get("step", 0))
+    history = _history(run)
+    notebook = {}
+    try: notebook = json.loads((run / "memory" / "notebook.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError): pass
+    notebook = notebook if isinstance(notebook, dict) else {}
+    facts = notebook.get("facts", {})
+    facts = facts if isinstance(facts, dict) else {}
+
+    def quest_key(q, fallback=None):
+        return str(q.get("key") or q.get("id") or fallback or "") if isinstance(q, dict) else ""
+
+    def is_heard(q):
+        if not isinstance(q, dict): return False
+        if q.get("source") == "heard": return True
+        why = q.get("why", [])
+        refs = re.findall(r"[\w.-]+", " ".join(map(str, why)) if isinstance(why, list) else str(why))
+        return any(isinstance(facts.get(ref), dict) and facts[ref].get("source") == "heard" for ref in refs)
+
+    # A history log row is the notebook's actual note() shape. Its text is an
+    # approximation of a flushed dialogue event; a trace trigger is explicit.
+    def is_dialogue_log(row):
+        text = str(row.get("text", "")).strip()
+        return row.get("op") == "log" and bool(re.match(r"^(?:text\s+at\s+.+|.+\s+at\s+.+):\s*\".*\"\s*$", text, re.I))
+
+    text_steps = {r.get("step") for r in history if is_dialogue_log(r) and isinstance(r.get("step"), int)}
+    closed_steps = {r.get("step") for r in history if r.get("op") == "check" and isinstance(r.get("step"), int)}
+    # v1 set-goal rows store the identifier in row.key; v2 stores full snapshots.
+    for r in history:
+        value = r.get("value")
+        records = value if isinstance(value, list) else [value]
+        if r.get("op") == "set" and r.get("section") == "goals": records = [value]
+        if r.get("op") in {"quests", "set", "migrate_quest"} and any(
+                isinstance(q, dict) and q.get("status") in {"closed", "done", "completed", "dropped"}
+                for q in records):
+            if isinstance(r.get("step"), int): closed_steps.add(r["step"])
+
+    calls, marked_text, seen_world = [], set(), set()
+    pending_text = []
+    log_events = sorted(s for s in text_steps if isinstance(s, int))
+    next_log = 0
+    pending_stall = False
+    pending_place = False
+    seen_call_steps = set()
+    last_call_step = None
+    stuck = Stuck()
+    for row in trace:
+        step, screen = row.get("step"), row.get("screen")
+        plan_row = row.get("plan") if isinstance(row.get("plan"), dict) else {}
+        trigger = str(plan_row.get("trigger") or row.get("trigger") or "")
+        explicit_text = trigger.casefold().startswith("new game text")
+        while next_log < len(log_events) and isinstance(step, int) and log_events[next_log] <= step:
+            log_step = log_events[next_log]
+            next_log += 1
+            if log_step not in marked_text:
+                marked_text.add(log_step)
+                pending_text.append(log_step)
+                stuck.progress()
+        if explicit_text and step not in marked_text:
+            marked_text.add(step)
+            pending_text.append(step)
+            stuck.progress()
+        if step in closed_steps or str(row.get("quest_event", "")).casefold() == "closed":
+            stuck.progress()
+
+        place = row.get("place")
+        first_place = screen == "world" and place and place not in seen_world
+        if first_place:
+            seen_world.add(place)
+            pending_place = True
+        replay_row = dict(row)
+        if not replay_row.get("verified_edge"):
+            outcome, basis = row.get("outcome") or {}, (row.get("outcome") or {}).get("basis") or {}
+            if "place_changes" in outcome.get("effects", []) and basis.get("place_changes") == "pixel":
+                replay_row["verified_edge"] = True
+        event = stuck.update(replay_row)
+        pending_stall = pending_stall or event == "no_progress"
+
+        # T1 and T5 are urgent. T2/T4 obey the same three-step planning floor
+        # as the runtime loop; their pending events survive until eligible.
+        eligible_floor = last_call_step is None or not isinstance(step, int) or step - last_call_step >= 3
+        chosen = None
+        if isinstance(step, int) and step not in seen_call_steps:
+            if pending_text and screen == "world": chosen = "T1 new game text"
+            elif step == 1: chosen = "T5 empty first step"
+            elif pending_place and eligible_floor: chosen = "T2 first world place"
+            elif pending_stall and eligible_floor: chosen = "T4 no progress"
+        if chosen:
+            calls.append({"step": step, "trigger": chosen})
+            seen_call_steps.add(step)
+            last_call_step = step
+            if chosen == "T1 new game text": pending_text.clear()
+            if chosen == "T2 first world place": pending_place = False
+            if chosen == "T4 no progress": pending_stall = False
+
+    plan_ops = {"quests", "belief", "fact", "planner_note", "check", "chapter"}
+    plan_rows = [row for row in history if row.get("op") in plan_ops or
+                 row.get("op") == "set" and row.get("section") in {"goals", "facts"}]
+    counts = Counter(str(row.get("step")) for row in trace
+                     if isinstance(row.get("plan"), dict) and row.get("step") is not None)
+    history_calls = Counter(str(row.get("step")) for row in history
+                            if row.get("op") == "plan" and row.get("step") is not None)
+    writes_by_step = {str(row.get("step")) for row in plan_rows if row.get("step") is not None}
+    for step in writes_by_step:
+        history_calls[step] = max(history_calls[step], 1)
+    for step, n in history_calls.items():
+        counts[step] = max(counts[step], n)
+    plan_calls = {step: n for step, n in sorted(counts.items(), key=lambda x: int(x[0]) if x[0].isdigit() else -1)}
+
+    opened, closed, parked = set(), set(), set()
+    for r in history:
+        op = r.get("op")
+        value = r.get("quest") if op == "migrate_quest" else r.get("value")
+        records = value if isinstance(value, list) else [value]
+        if op == "set" and r.get("section") == "goals":
+            records = [value]
+        for q in records:
+            if not is_heard(q): continue
+            key = quest_key(q, r.get("key") if op == "set" else None)
+            if not key: continue
+            opened.add(key)
+            status = str(q.get("status", "active")).casefold()
+            if status in {"closed", "done", "completed"}: closed.add(key)
+            elif status in {"parked", "paused", "suspended"}: parked.add(key)
+        if op == "check" and r.get("key"):
+            key = str(r["key"])
+            if key in opened: closed.add(key)
+    final_quests = notebook.get("quests")
+    if isinstance(final_quests, list):
+        final_quest_rows = [(q, None) for q in final_quests]
+    elif isinstance(notebook.get("goals"), dict):
+        final_quest_rows = [(q, key) for key, q in notebook["goals"].items()]
+    else:
+        final_quest_rows = []
+    final_quest_states = {}
+    for q, fallback_key in final_quest_rows:
+        key = quest_key(q, fallback_key)
+        if is_heard(q) or key in opened:
+            if key:
+                opened.add(key)
+                final_quest_states[key] = str(q.get("status", "active")).casefold()
+    still_open = {k for k, status in final_quest_states.items()
+                  if status not in {"closed", "done", "completed", "dropped", "parked", "paused", "suspended"}}
+    dropped = {k for k, status in final_quest_states.items() if status == "dropped"}
+    closed |= {k for k, status in final_quest_states.items() if status in {"closed", "done", "completed"}}
+    parked |= {k for k, status in final_quest_states.items() if status in {"parked", "paused", "suspended"}}
+    still_open -= closed | parked | dropped
+    lost = opened - closed - parked - still_open
+    parked -= closed
+
+    tactical = re.compile(r"#\d|\(\s*-?\d+\s*,\s*-?\d+\s*\)|^(?:press|move|walk|go)\s+(?:up|down|left|right)\b", re.I)
+    labels = notebook.get("labels", {})
+    button_names = list(labels) if isinstance(labels, dict) else list(labels) if isinstance(labels, list) else []
+    button_re = re.compile(r"\b(?:" + "|".join(re.escape(str(b)) for b in button_names if str(b)) + r")\b", re.I) if button_names else None
+    quests = final_quests if isinstance(final_quests, list) else [dict(v, key=k) for k, v in notebook.get("goals", {}).items()
+                                                                    if isinstance(v, dict)] if isinstance(notebook.get("goals"), dict) else []
+    matches = sorted({quest_key(q) for q in quests if isinstance(q, dict) and quest_key(q) and
+                      (tactical.search(str(q.get("text", ""))) or button_re and button_re.search(str(q.get("text", ""))))})
+
+    belief_revisions = []
+    seen_revisions = set()
+    for r in history:
+        if r.get("op") not in {"belief", "migrate_fact"}: continue
+        value = r.get("fact") if r.get("op") == "migrate_fact" else r.get("value")
+        value = value if isinstance(value, dict) else {}
+        key = r.get("key") or value.get("key")
+        for rev in value.get("history", []) if isinstance(value.get("history"), list) else []:
+            if not isinstance(rev, dict): continue
+            item = (str(key or ""), rev.get("step"), rev.get("from_text"), rev.get("reason"))
+            if key and item not in seen_revisions:
+                seen_revisions.add(item)
+                belief_revisions.append({"key": str(key), "step": rev.get("step"),
+                                         "from_text": rev.get("from_text"), "reason": rev.get("reason", "")})
+    # v1 recordings may have no revision history; retain value transitions as a fallback.
+    if not belief_revisions:
+        latest = {}
+        for r in history:
+            if r.get("op") not in {"belief", "migrate_fact"}: continue
+            value = r.get("fact") if r.get("op") == "migrate_fact" else r.get("value")
+            value = value if isinstance(value, dict) else {}
+            key = r.get("key") or value.get("key")
+            if key and key in latest and latest[key] != value:
+                belief_revisions.append({"key": str(key), "step": r.get("step"), "reason": value.get("reason", "")})
+            if key: latest[key] = value
+
+    state_ops = {"quests", "belief", "fact", "check", "chapter"}
+    changed_steps = {str(r.get("step")) for r in history if r.get("op") in state_ops}
+    stall_no_change = 0
+    for row in trace:
+        p = row.get("plan")
+        if not isinstance(p, dict) or not re.search(r"stuck|no.progress|stall", str(p.get("trigger", "")), re.I): continue
+        if "quests_changed" in p or "beliefs_changed" in p:
+            unchanged = not p.get("quests_changed") and not p.get("beliefs_changed")
+        else:
+            unchanged = str(row.get("step")) not in changed_steps
+        stall_no_change += bool(unchanged)
+    text_source = "trace plan trigger metadata + notebook.history note() dialogue-log approximation"
+    return {"trigger_replay": {"calls": calls, "count": len(calls), "text_event_steps": sorted(s for s in marked_text if isinstance(s, int)),
+                               "text_event_source": text_source},
+            "history_metrics": {"plan_calls_per_step": plan_calls,
+                                "heard_leads": {"opened": len(opened), "closed": len(closed),
+                                                "parked": len(parked), "still_open": len(still_open),
+                                                "silently_lost": len(lost)},
+                                "rule4_quest_matches": matches, "belief_revisions": belief_revisions,
+                                "stall_calls_changed_nothing": stall_no_change}}
 
 
 def _repredict(run, trace, hide_memory=False):
@@ -780,6 +1021,9 @@ def evaluate(run, *, repredict=False, hide_memory=False, from_step=None):
 
 if __name__ == "__main__":
     args = sys.argv[1:]
+    if len(args) == 2 and args[0] == "--lifecycle":
+        print(json.dumps(_lifecycle(args[1]), indent=2, ensure_ascii=False))
+        raise SystemExit(0)
     flags, paths, from_step = set(), [], None
     i = 0
     while i < len(args):

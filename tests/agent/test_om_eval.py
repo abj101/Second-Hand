@@ -131,47 +131,141 @@ class StubModel:
 
 def _fake_plan_checkpoint(tmp_path):
     nb = eval_act.Notebook(tmp_path / "memory")
-    nb.apply([{"op": "set", "section": "goals", "key": "finish", "value": {"text": "Finish", "done_when": "game over", "status": "active"}}], 1)
-    nb.set_focus("finish", 1)
+    nb.apply_plan(eval_act.plan_mod.Plan(
+        quests=[
+            {"key": "oak", "text": "Find Oak", "why": ["oak_line"], "done_when": "speak with Oak", "status": "open"},
+            {"key": "lab", "text": "Find the lab", "why": ["lab_line"], "done_when": "reach the lab", "status": "open"},
+        ], beliefs=[], facts=[
+            {"key": "oak_line", "text": "Prof. Oak next door is looking for you.", "source": "heard"},
+            {"key": "lab_line", "text": "Gary is out at Grandpa's lab.", "source": "heard"},
+        ], note="", why="fixture"), 49)
     nb.note(49, 'MOM at tiled room: "PROF. OAK, next door, is looking for you."')
     per = {"text": ["dialogue text"]}
     world = type("World", (), {"view": lambda self, goal, place: "memory view", "place_label": lambda self, place: "outside"})()
     loop = type("Loop", (), {"prev": per, "notebook": nb, "world": world, "place": "p1",
-                              "_goal_text": lambda self: "finish Finish"})()
-    env = type("Env", (), {"closed": False, "close": lambda self: setattr(self, "closed", True)})()
+                              "_goal_text": lambda self: "Find Oak",
+                              "_evidence": lambda self: "heard: Oak and Grandpa's lab\nsteps since progress: 20" + ("\nlast stall changed nothing; revise a belief or reorder" if self.stall_unchanged else ""),
+                              "stall_unchanged": 0})()
+    env = type("Env", (), {"closed": False, "inputs": lambda self: eval_act._INPUTS,
+                             "close": lambda self: setattr(self, "closed", True)})()
     return loop, env
 
-def test_om_plan_dry_prints_exact_planner_prompt_without_model_or_ledger(monkeypatch, tmp_path, capsys):
+def test_om_plan_dry_prints_migrated_state_prompt_and_token_count_without_model_or_ledger(monkeypatch, tmp_path, capsys):
     loop, env = _fake_plan_checkpoint(tmp_path)
     monkeypatch.setattr(eval_act, "_plan_checkpoint", lambda run, step: (loop, env))
     monkeypatch.setattr(eval_act, "_plan_recent", lambda run, step: ["approach person -> same"])
     monkeypatch.setattr(eval_act, "Ollama", lambda *args, **kwargs: pytest.fail("dry mode created a model"))
     monkeypatch.setattr(eval_act.run_agent, "_ledger", lambda *args: pytest.fail("dry mode touched ledger"))
-    assert eval_act.om_plan("fixture", 50, 3, live=False) == 0
+    assert eval_act.om_plan("fixture", 100, 3, live=False) == 0
     output = capsys.readouterr().out
-    assert "Trigger: new game text: MOM at tiled room" in output
-    assert "Map and memory:\nmemory view" in output and "dialogue text" in output
-    assert "Recent actions: approach person -> same" in output and env.closed
+    assert '"key": "oak"' in output and '"key": "lab"' in output
+    assert "Trigger: stall: no progress for 20 steps" in output
+    assert "New evidence: heard: Oak and Grandpa's lab" in output
+    assert "Map and memory: memory view" in output and "dialogue text" in output
+    assert "Recent actions: approach person -> same" in output and "tokens~" in output
+    assert "SYSTEM + USER, len/4" in output and "requests=0" in output and env.closed
+
+def test_om_plan_cli_defaults_tries_for_exact_dry_syntax(monkeypatch, tmp_path, capsys):
+    loop, env = _fake_plan_checkpoint(tmp_path)
+    monkeypatch.setattr(eval_act, "_plan_checkpoint", lambda run, step: (loop, env))
+    monkeypatch.setattr(eval_act, "_plan_recent", lambda run, step: [])
+    monkeypatch.setattr(eval_act, "Ollama", lambda *args, **kwargs: pytest.fail("dry mode created a model"))
+    monkeypatch.setattr(eval_act.run_agent, "_ledger", lambda *args: pytest.fail("dry mode touched ledger"))
+    assert eval_act.main(["--om", "plan", "--run", "fixture", "--from-step", "100"]) == 0
+    assert "requests=0" in capsys.readouterr().out
+    assert env.closed
 
 def test_om_plan_live_uses_independent_notebooks_and_caps_retry_posts(monkeypatch, tmp_path, capsys):
     loop, env = _fake_plan_checkpoint(tmp_path)
     replies = [
-        {"facts": [{"key": "oak", "text": "Prof. Oak next door is looking for you.", "source": "heard"}],
-         "goals": [{"op": "set", "key": "oak", "value": {"text": "Find Oak", "source": "heard", "status": "active"}}], "focus": "oak", "why": "heard"},
-        {"facts": [], "goals": [], "focus": "finish", "why": "baseline"},
-        {"facts": [], "goals": [], "focus": "finish", "why": "baseline"},
+        {"facts": [], "beliefs": [], "quests": [
+            {"key": "oak", "text": "Find Oak", "why": ["oak_line"], "done_when": "speak with Oak", "status": "open"},
+            {"key": "lab", "text": "Find the lab", "why": ["lab_line"], "done_when": "reach the lab", "status": "open"},
+        ], "note": "Both heard leads remain open.", "why": "The dialogue names both destinations."},
+        {"facts": [], "beliefs": [], "quests": [
+            {"key": "oak", "text": "Find Oak", "why": ["oak_line"], "done_when": "speak with Oak", "status": "open"},
+        ], "note": "Keep looking for Oak.", "why": "I kept one lead."},
+        {"facts": [], "beliefs": [], "quests": [], "note": "No leads.", "why": "I forgot the leads."},
     ]
-    stub = StubModel(replies, posts_per_ask=2)
+    stub = StubModel(replies)
     ledger = []
     monkeypatch.setattr(eval_act, "_plan_checkpoint", lambda run, step: (loop, env))
     monkeypatch.setattr(eval_act, "_plan_recent", lambda run, step: [])
     monkeypatch.setattr(eval_act, "Ollama", lambda model, *, cache_dir: (pytest.fail("cache enabled") if cache_dir is not None else stub))
     monkeypatch.setattr(eval_act, "_budget", lambda: {"total": len(ledger)})
     monkeypatch.setattr(eval_act.run_agent, "_ledger", lambda *args: ledger.append(args))
-    assert eval_act.om_plan("fixture", 50, 3, live=True) == 1  # only one try earns both criteria
+    assert eval_act.om_plan("fixture", 100, 3, live=True) == 1  # only one raw reply keeps both heard quests
     assert len(ledger) == stub.posts == 3 and stub.asks == 3
-    assert all("oak" not in prompt[1] for prompt in stub.prompts[1:])
-    assert "successes=1/3; requests=3" in capsys.readouterr().out and env.closed
+    assert all("Find Oak" in prompt[1] for prompt in stub.prompts)
+    output = capsys.readouterr().out
+    assert "successes=1/3; requests=3" in output and "quests=[]" in output
+    assert "omitted lab" in output and "reconcile flags=" in output and env.closed
+
+def test_om_plan_caps_each_retry_post(monkeypatch, tmp_path, capsys):
+    loop, env = _fake_plan_checkpoint(tmp_path)
+    stub = StubModel([{"facts": [], "beliefs": [], "quests": [], "note": "", "why": ""}], posts_per_ask=2)
+    ledger = []
+    monkeypatch.setattr(eval_act, "_plan_checkpoint", lambda run, step: (loop, env))
+    monkeypatch.setattr(eval_act, "_plan_recent", lambda run, step: [])
+    monkeypatch.setattr(eval_act, "Ollama", lambda model, *, cache_dir: stub)
+    monkeypatch.setattr(eval_act, "_budget", lambda: {"total": len(ledger)})
+    monkeypatch.setattr(eval_act.run_agent, "_ledger", lambda *args: ledger.append(args))
+    assert eval_act.om_plan("fixture", 100, 1, live=True) == 1
+    assert len(ledger) == stub.posts == 1 and stub.asks == 1
+    assert "try 1: failed: planner request cap" in capsys.readouterr().out and env.closed
+
+def test_om_plan_stall_pivot_uses_unchanged_evidence_and_reports_belief_change(monkeypatch, tmp_path, capsys):
+    loop, env = _fake_plan_checkpoint(tmp_path)
+    stub = StubModel([{"facts": [], "quests": [], "beliefs": [
+        {"key": "oak_location", "text": "Oak may be elsewhere.", "because": ["oak_line"], "confidence": "mid", "status": "revised", "reason": "The route attempts failed."},
+    ], "note": "The location belief changed after the stalled route.", "why": "The evidence does not support the original location."}])
+    monkeypatch.setattr(eval_act, "_plan_checkpoint", lambda run, step: (loop, env))
+    monkeypatch.setattr(eval_act, "_plan_recent", lambda run, step: [])
+    monkeypatch.setattr(eval_act, "Ollama", lambda model, *, cache_dir: stub)
+    monkeypatch.setattr(eval_act, "_budget", lambda: {"total": 0})
+    monkeypatch.setattr(eval_act.run_agent, "_ledger", lambda *args: None)
+    assert eval_act.om_plan("fixture", 125, 1, live=True) == 0
+    output = capsys.readouterr().out
+    assert loop.stall_unchanged == 1
+    assert "last stall changed nothing; revise a belief or reorder" in stub.prompts[0][1]
+    assert "oak_location" in output and "route attempts failed" in output and "successes=1/1" in output
+
+def test_om_plan_stall_pivot_accepts_reordering_retained_quests_citing_belief(monkeypatch, tmp_path, capsys):
+    loop, env = _fake_plan_checkpoint(tmp_path)
+    stub = StubModel([{"facts": [], "beliefs": [
+        {"key": "route_blocked", "text": "The usual route may be blocked.", "because": ["oak_line"], "confidence": "mid", "status": "held"},
+    ], "quests": [
+        {"key": "lab", "text": "Find the lab", "why": ["route_blocked"], "done_when": "reach the lab", "status": "open"},
+        {"key": "oak", "text": "Find Oak", "why": ["route_blocked"], "done_when": "speak with Oak", "status": "open"},
+    ], "note": "The blocked route changes which lead comes first.", "why": "The route belief supports this order."}])
+    monkeypatch.setattr(eval_act, "_plan_checkpoint", lambda run, step: (loop, env))
+    monkeypatch.setattr(eval_act, "_plan_recent", lambda run, step: [])
+    monkeypatch.setattr(eval_act, "Ollama", lambda model, *, cache_dir: stub)
+    monkeypatch.setattr(eval_act, "_budget", lambda: {"total": 0})
+    monkeypatch.setattr(eval_act.run_agent, "_ledger", lambda *args: None)
+    assert eval_act.om_plan("pivot-reorder", 125, 1, live=True) == 0
+    assert "successes=1/1" in capsys.readouterr().out and env.closed
+
+def test_om_plan_stall_pivot_rejects_renames_and_new_keys_as_reordering(monkeypatch, tmp_path, capsys):
+    loop, env = _fake_plan_checkpoint(tmp_path)
+    monkeypatch.setattr(eval_act, "_plan_checkpoint", lambda run, step: (loop, env))
+    monkeypatch.setattr(eval_act, "_plan_recent", lambda run, step: [])
+    monkeypatch.setattr(eval_act, "_budget", lambda: {"total": 0})
+    monkeypatch.setattr(eval_act.run_agent, "_ledger", lambda *args: None)
+    replies = [
+        {"facts": [], "beliefs": [{"key": "route_blocked", "text": "Blocked.", "because": ["oak_line"], "confidence": "mid", "status": "held"}],
+         "quests": [{"key": "new_lab", "text": "Find the lab", "why": ["route_blocked"], "status": "open"},
+                    {"key": "new_oak", "text": "Find Oak", "why": ["route_blocked"], "status": "open"}], "note": "Renamed leads.", "why": "The labels changed."},
+        {"facts": [], "beliefs": [{"key": "route_blocked", "text": "Blocked.", "because": ["oak_line"], "confidence": "mid", "status": "held"}],
+         "quests": [{"key": "oak", "text": "Find Oak", "why": ["route_blocked"], "status": "open"},
+                    {"key": "new", "text": "Explore another route", "why": ["route_blocked"], "status": "open"},
+                    {"key": "lab", "text": "Find the lab", "why": ["route_blocked"], "status": "open"}], "note": "Inserted a new lead without changing existing order.", "why": "The list grew."},
+    ]
+    for i, reply in enumerate(replies):
+        stub = StubModel([reply])
+        monkeypatch.setattr(eval_act, "Ollama", lambda model, *, cache_dir, stub=stub: stub)
+        assert eval_act.om_plan(f"pivot-negative-{i}", 125, 1, live=True) == 1
+    assert "successes=0/1" in capsys.readouterr().out and env.closed
 
 def test_exit_truth_1F_fails_when_the_rug_is_verified():
     options = [_opt(1, "approach", "exit door mat → outside (used 3×, last step 40)"), FREE]

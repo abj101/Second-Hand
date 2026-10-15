@@ -89,7 +89,7 @@ def main(argv=None):
         for step in steps:
             if step in done: continue
             with Image.open(FRAME_DIR/f"{step:06d}.png") as im: frame=for_model(im); per,preply=perceive(model,frame,ctx)
-            raw[0]=None; result=act(model,frame,per,notebook.render(),"none",[],brief,prefs,list(_INPUTS)); notebook.apply(result.ops,step)
+            raw[0]=None; result=act(model,frame,per,notebook.render(),"none",[],brief,prefs,list(_INPUTS))
             r={"step":step,"screen":per["screen"],"text":per["text"],"entities_count":len(per["entities"]),"affordances":per["affordances"],"perceive_raw":{"text":preply.text,"data":preply.data},"act_reply":{"raw":raw[0],"parsed":result.__dict__},"act_parsed":result.__dict__,"notebook_ops":result.ops,"truth_map":truth.get(step,{}).get("map"),"complete":True}
             rows.append(r)
             with rp.open("a",encoding="utf-8") as f: f.write(json.dumps(r,ensure_ascii=False)+"\n")
@@ -600,28 +600,34 @@ def _om_scratch(name):
     if target == root or root not in target.parents: raise ValueError(f"unsafe OM scratch path: {target}")
     return target
 
+def _qs6_scratch(name):
+    root = Path(".tmp/qs/qs6").resolve(); target = (root / name).resolve()
+    if target == root or root not in target.parents: raise ValueError(f"unsafe QS.6 scratch path: {target}")
+    return target
+
+class _PlanCheckpointEnv:
+    tile_px = 16
+    def screenshot(self): return Image.new("RGB", (160, 144))
+    def inputs(self): return _INPUTS
+    def close(self): pass
+
 def _plan_checkpoint(run, step):
     cp = Path("runs") / run / "checkpoint" / f"{step:06d}"
-    out = _om_scratch(f"{run}_plan_{step}")
+    out = _qs6_scratch(f"checkpoint/{run}_{step}")
     shutil.rmtree(out, ignore_errors=True); shutil.copytree(cp / "memory", out / "memory")
-    env = PyBoyEnv(find_rom(), state=str(cp / "pyboy.state")); env.tile_px = 16
+    env = _PlanCheckpointEnv()
     loop = Loop(env, None, Memory(out / "memory"), "pokemon_red")
     loop.restore(json.loads((cp / "harness.json").read_text(encoding="utf-8")))
     return loop, env
 
-def _plan_prompt(trigger, notebook, view, screen_text, recent):
-    return "\n".join((f"Trigger: {trigger}", f"Goal tree (focus: {notebook.focus or 'none'}):\n{notebook.render()}",
-                       f"Log (what already happened):\n{notebook.render_log(40)}", f"Map and memory:\n{view or 'none'}",
-                       f"Text on screen now: {'; '.join(str(t) for t in screen_text) or 'none'}",
-                       f"Recent actions: {'; '.join(recent) or 'none'}", plan_mod.REPLY))
-
 def _plan_recent(run, step):
-    rows = sorted((r for s, r in stage(run).trace.items() if s <= step), key=lambda r: r["step"])[-5:]
+    rows = sorted((r for r in _jsonl(Path("runs") / run / "trace.jsonl") if r.get("step", 0) <= step), key=lambda r: r["step"])[-5:]
     return [f"{(r.get('choice') or {}).get('verb')} {(r.get('choice') or {}).get('target') or ''} -> {r.get('verdict')}" for r in rows]
 
 def _independent_notebook(source, root):
+    shutil.rmtree(root, ignore_errors=True)
     notebook = Notebook(root)
-    notebook.data, notebook.focus, notebook.log = deepcopy(source.data), source.focus, deepcopy(source.log)
+    notebook.data, notebook.log = deepcopy(source.data), deepcopy(source.log)
     return notebook
 
 def om_plan(run, step, tries, live=False):
@@ -631,15 +637,24 @@ def om_plan(run, step, tries, live=False):
         per = loop.prev or {}
         recent = _plan_recent(run, step)
         view = loop.world.view(loop._goal_text(), loop.place)
-        if step == 50:
-            dialogue = _dialogue_entries(loop.notebook)
-            last = str((dialogue or loop.notebook.log or [{"text": ""}])[-1].get("text", ""))
-            trigger = f"new game text: {last}"
-        else: trigger = f"arrived somewhere new: {loop.world.place_label(loop.place)}"
-        prompt = _plan_prompt(trigger, loop.notebook, view, per.get("text", []), recent)
+        trigger = "stall: no progress for 20 steps"
+        if step == 125: loop.stall_unchanged = 1
+        evidence = loop._evidence()
         if not live:
             before = _budget()
-            print(f"SYSTEM:\n{plan_mod.SYSTEM}\n\nUSER:\n{prompt}\n\nJSON SCHEMA:\n{json.dumps(plan_mod.SCHEMA, ensure_ascii=False)}")
+            class Capture:
+                captured = None
+                def ask(self, system, user, images=(), schema=None, *, role=""):
+                    self.captured = (system, user, schema)
+                    return Reply("", {}, 0.0, None, None)
+            capture = Capture()
+            plan_mod.plan(capture, trigger, loop.notebook, view, per.get("text", []), recent, evidence)
+            system, user, schema = capture.captured
+            prompt = system + "\n" + user
+            print(f"MIGRATED STATE:\n{json.dumps(loop.notebook.data, ensure_ascii=False, indent=2)}")
+            print(f"TRIGGER: {trigger}\nEVIDENCE:\n{evidence}")
+            print(f"SYSTEM:\n{system}\n\nUSER:\n{user}\n\nJSON SCHEMA:\n{json.dumps(schema, ensure_ascii=False)}")
+            print(f"prompt chars={len(prompt)}; tokens~{len(prompt)/4:.1f} (SYSTEM + USER, len/4)")
             print(f"requests=0; ledger before={before}; after={_budget()}; unchanged={before == _budget()}")
             return 0
 
@@ -650,20 +665,32 @@ def om_plan(run, step, tries, live=False):
             counter["requests"] += 1
             return post(payload)
         model._post = guarded
-        successes = 0; target = re.compile(r"oak|next door", re.I)
+        successes = 0
         print(f"ledger before={before}; tries={tries}; request cap={tries}")
         for n in range(1, tries + 1):
-            trial = _independent_notebook(loop.notebook, Path(".tmp/ip") / f"{run}_plan_{step}_{n}")
+            trial = _independent_notebook(loop.notebook, _qs6_scratch(f"trials/{run}_{step}_{n}"))
             try:
-                result = plan_mod.plan(model, trigger, trial, view, per.get("text", []), recent)
-                trial.apply(result.ops, step); trial.set_focus(result.focus or trial.focus, step)
-                path = trial.path(); path_text = " > ".join(str(trial.data["goals"].get(k, {}).get("text", "")) for k in path)
-                print(f"try {n}: facts={json.dumps(result.facts, ensure_ascii=False)}; goals={json.dumps(result.ops, ensure_ascii=False)}; focus={result.focus!r}; path={path_text!r}; why={result.why!r}")
-                if step == 50:
-                    heard_goal = any((op.get("value") or {}).get("source") == "heard" and re.search(r"oak", str((op.get("value") or {}).get("text", "")), re.I) for op in result.ops)
-                    heard_fact = any(re.search(r"oak", str(f.get("text", "")), re.I) and re.search(r"next door", str(f.get("text", "")), re.I) for f in result.facts)
-                    successes += bool(heard_goal and heard_fact)
-                else: successes += bool(target.search(path_text))
+                result = plan_mod.plan(model, trigger, trial, view, per.get("text", []), recent, evidence)
+                reconciled = trial.apply_plan(result, step, buttons=env.inputs())
+                quest_rows = [{k: q.get(k) for k in ("key", "text", "status", "why", "check")} for q in result.quests]
+                print(f"try {n}: quests={json.dumps(quest_rows, ensure_ascii=False)}; beliefs={json.dumps(result.beliefs, ensure_ascii=False)}; note={result.note!r}; why={result.why!r}; reconcile flags={json.dumps(reconciled['flags'], ensure_ascii=False)}")
+                if step == 100:
+                    facts = {f.get("key"): f for f in [*loop.notebook.data["facts"].values(), *result.facts] if isinstance(f, dict)}
+                    heard_refs = {key for key, fact in facts.items() if fact.get("source") == "heard"}
+                    heard_quests = [q for q in result.quests if q.get("status", "open") == "open" and bool(set([q.get("why")] if isinstance(q.get("why"), str) else q.get("why", [])) & heard_refs)]
+                    tactical = any(trial._bad_quest(q.get("text", ""), env.inputs()) for q in result.quests)
+                    successes += len(heard_quests) >= 2 and bool(result.note.strip()) and not tactical
+                elif step == 125:
+                    changed_belief = any(b.get("status") in ("revised", "refuted") and str(b.get("reason", "")).strip() for b in result.beliefs)
+                    beliefs = set(loop.notebook.data["beliefs"]) | {b.get("key") for b in result.beliefs}
+                    order = [q.get("key") for q in result.quests]
+                    old_order = [q.get("key") for q in loop.notebook.data["quests"]]
+                    retained = set(order) & set(old_order)
+                    old_retained = [key for key in old_order if key in retained]
+                    new_retained = [key for key in order if key in retained]
+                    reordered = len(retained) >= 2 and old_retained != new_retained
+                    reordered_by_belief = reordered and any(beliefs & set([q.get("why")] if isinstance(q.get("why"), str) else q.get("why", [])) for q in result.quests)
+                    successes += changed_belief or reordered_by_belief
             except (run_agent.CallCap, ModelUnavailable) as e: print(f"try {n}: failed: {e}")
         print(f"successes={successes}/{tries}; requests={counter['requests']}; ledger before={before}; after={_budget()}")
         return 0 if successes >= math.ceil(2 * tries / 3) else 1
@@ -818,7 +845,10 @@ def om_main(a, ap):
         if a.live: ap.error("--om talk is a zero-request replay")
     if a.om == "plan":
         if a.from_step is None: ap.error("--om plan requires --from-step")
-        if a.tries is None or not 1 <= a.tries <= 8: ap.error("--om plan requires --tries from 1 to 8")
+        if a.tries is None:
+            if a.live: ap.error("live --om plan requires --tries from 1 to 8")
+            a.tries = 1
+        if not 1 <= a.tries <= 8: ap.error("--om plan requires --tries from 1 to 8")
     if a.om == "places" and a.live: ap.error("--live applies to --om cases")
     if a.om == "reliability":
         if a.from_step is None: ap.error("--om reliability requires --from-step")

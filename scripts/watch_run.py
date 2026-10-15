@@ -149,7 +149,7 @@ footer{display:flex;justify-content:space-between;border-top:1px solid var(--fg)
 <section class="grow"><div id="card" class="out"><div class="k">MODEL OUTPUT</div><div class="big">WAITING FOR TRACE</div><div class="muted">start scripts/run_agent.py on this run</div></div><div id="detail" class="kv"></div></section>
 <section class="grow"><h3>MAP <select id="place"></select></h3><canvas id="map"></canvas></section>
 <div class="col"><section><h3>CONTROLS <span id="ckind"></span></h3><div id="controls"></div></section>
-<section class="grow"><h3>GOALS <span id="gfocus"></span></h3><div id="goals"></div></section></div>
+<section class="grow"><h3>QUESTS / BELIEFS / NOTE <span id="gfocus"></span></h3><div id="goals"></div></section></div>
 <section class="grow"><h3>FEED <span id="fcount"></span></h3><div id="feed"></div></section>
 <section class="grow"><h3>PLACE LINKS <span>learned moves between places</span></h3><div id="edges"></div></section>
 </main>
@@ -217,10 +217,22 @@ function lens(r){ // the perception layer over a small copy of the frame: detect
     ctx.fillStyle="#080808"; ctx.fillRect(lx,ly-12,w,12); ctx.strokeStyle="#303030"; ctx.strokeRect(lx,ly-12,w,12); ctx.fillStyle=me?"#f2f2f2":"#c8c8c8"; ctx.fillText(text,lx+3,ly);}
 }
 function goals(){
-  const g=(last.notebook||{}).goals||{}, focus=(last.notebook||{}).focus, out=[]; $("gfocus").textContent=focus?"FOCUS "+focus:"";
-  const walk=(parent,depth)=>Object.entries(g).filter(([,v])=>(v.parent||null)===parent).forEach(([k,v])=>{
-    out.push(`<div class="${k===focus?"focus":""} ${esc(v.status)}" style="padding-left:${depth*14}px" title="${esc(v.done_when)}">${k===focus?"> ":"  "}${esc(k)}  <span>${esc(v.text)} / ${esc(v.status||"active")}</span></div>`); walk(k,depth+1);});
-  walk(null,0); $("goals").innerHTML=out.join("")||'<span class="muted">NO NOTEBOOK YET</span>';
+  const nb=last.notebook||{}, focus=nb.focus, out=[]; $("gfocus").textContent=focus?"FOCUS "+focus:"";
+  if(Array.isArray(nb.quests)){
+    for(const q of nb.quests){const key=q.key||q.id||"quest", check=q.check?`${q.check.kind}: ${q.check.arg}`:"";
+      out.push(`<div class="${esc(q.status)}">${esc(key)}  <span>${esc(q.text)} / ${esc(q.status||"active")}${check?` / check ${esc(check)}`:""}</span></div>`);}
+    const beliefs=nb.beliefs||{};
+    for(const [key,b] of Object.entries(beliefs)){const state=b.stance||b.status||"held";
+      out.push(`<div>${esc(state==="ruled_out"||state==="ruled out"?"RULED OUT":"HELD")}  <span>${esc(key)} / ${esc(b.text||b.value||"")}${b.reason?` / ${esc(b.reason)}`:""}</span></div>`);}
+    const notes=Array.isArray(nb.notes)?nb.notes:[], note=notes[notes.length-1];
+    if(note) out.push(`<div>LATEST NOTE  <span>${esc(typeof note==="string"?note:note.text||note.note||"")}</span></div>`);
+  }else{
+    const g=nb.goals||{};
+    const walk=(parent,depth)=>Object.entries(g).filter(([,v])=>(v.parent||null)===parent).forEach(([k,v])=>{
+      out.push(`<div class="${k===focus?"focus":""} ${esc(v.status)}" style="padding-left:${depth*14}px" title="${esc(v.done_when)}">${k===focus?"> ":"  "}${esc(k)}  <span>${esc(v.text)} / ${esc(v.status||"active")}</span></div>`); walk(k,depth+1);});
+    walk(null,0);
+  }
+  $("goals").innerHTML=out.join("")||'<span class="muted">NO NOTEBOOK YET</span>';
 }
 function map(r){
   const places=(last.places||[]).filter(p=>p.state!=="merged"), cur=chosenPlace||(r&&r.place);

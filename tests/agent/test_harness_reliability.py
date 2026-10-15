@@ -294,11 +294,22 @@ PLAN = {"goals": [{"op": "set", "key": "g1", "value": {"text": "leave the room",
         "focus": "g1", "lesson": None, "why": "start"}
 
 
-def test_door_crossing_keeps_place_identity_heard_facts_and_the_goal_path_through_a_checkpoint(tmp_path, monkeypatch):
+def test_door_crossing_keeps_place_identity_heard_facts_and_the_top_quest_through_a_checkpoint(tmp_path, monkeypatch):
     env = Track()  # the door at (10,8) opens into scene 1
     grid_perception(monkeypatch, env)
     root = tmp_path / "memory"
-    loop = loop_for(env, tmp_path, [reply(PLAN)])
+    plan = {"quests": [{"key": "g1", "text": "Find the person next door", "why": ["find_person"], "status": "open",
+                        "done_when": "speak to them"}],
+            "facts": [{"key": "find_person", "text": "A person next door is looking for you.", "from": "MOM", "source": "heard"}],
+            "beliefs": [], "note": "Find the person who is looking for me.", "why": "heard a lead"}
+    class LocalPlanModel(StubModel):
+        def ask(self, *args, **kwargs):
+            if kwargs.get("role") == "plan":
+                self.calls += 1
+                return reply(plan)
+            return super().ask(*args, **kwargs)
+    loop = loop_for(env, tmp_path, [])
+    loop.model = LocalPlanModel([])
     monkeypatch.setattr(loop_module, "act", pick(lambda o: o["label"].startswith("possible exit door")))
 
     first = loop.step()
@@ -306,14 +317,15 @@ def test_door_crossing_keeps_place_identity_heard_facts_and_the_goal_path_throug
     second = loop.step()
 
     assert env.scene == 1 and first["place"] != second["place"] and [c["n"] for c in loop.mem.rows("crossings")] == [1, 1]  # one crossing, counted once per side
-    assert loop.notebook.focus == "g1" and loop.notebook.data["goals"]["g1"]["status"] == "active"
+    assert loop.notebook.focus == "g1" and loop.notebook.data["quests"][0]["key"] == "g1" and loop.notebook.data["quests"][0]["status"] == "open"
     saved = json.loads((root / "notebook.json").read_text(encoding="utf8"))
-    assert saved["hints"]["find_person"]["source"] == "heard"
+    assert saved["facts"]["find_person"]["source"] == "heard"
 
     state = json.loads(json.dumps(loop.state()))
     resumed = Loop(env, StubModel([]), Memory(root), "grid"); resumed.restore(state)
     again = resumed.step()
 
     assert again["place"] == second["place"] and resumed.place == loop.place  # the same room keeps its identity after the restore
-    assert resumed.notebook.focus == "g1" and resumed.notebook.data["goals"]["g1"]["status"] == "active"
-    assert resumed.notebook.data["hints"]["find_person"]["text"].startswith("A person next door")
+    assert resumed.notebook.focus == "g1" and resumed.notebook.data["quests"][0]["key"] == "g1" and resumed.notebook.data["quests"][0]["status"] == "open"
+    assert resumed.notebook.data["facts"]["find_person"]["source"] == "heard"
+    assert resumed.notebook.data["facts"]["find_person"]["text"].startswith("A person next door")

@@ -1,48 +1,58 @@
 # Handoff notes
 
-Last written: 2026-10-14, after IP (gate PASS; planner 3/3 + 3/3; six requests). Branch `feat/lean-agent`. Packet: [IP.md](IP.md); previous: [OM3.md](OM3.md), sections 11–13.
+Last written: 2026-10-15, QS Amendment A complete. Branch `feat/lean-agent`; [QS Result](QS.md#9-result-filled-in-by-the-orchestrator) has commands and evidence. Gate passes with the permitted HF3 cache exception. No push.
 
 ## State of the code
-- Planner `Plan.facts` stores relevant heard/seen information in notebook `hints` (20 entries, keys overwrite). `Notebook.render()` and `render_focus()` label it `facts (what the game told or showed):`; planner and decide see it. Render trimming drops lessons, finished goals, then facts.
-- `Loop._learn` buffers fresh off-world dialogue/menu lines, joins prefix/overlap extensions, strips continuation marks, and flushes once on return to world or place change: `<speaker or text> at <place>: "<joined sentence(s)>"`. World-screen text still logs immediately; knowledge stays per line. Fully known conversations do not log again.
-- Planner checkpoint fields `conversation: {place, lines}` and `text_for_trigger` keep an unfinished conversation across restore. The world-screen text trigger includes up to 200 characters and bypasses the three-step floor.
-- `Memory.call(entity_id, name, step)` attaches the first `called` speaker name to an actor. World option/view labels prefer it; resolve matches it case-insensitively. Failure keys and actions retain perceived names.
-- Planner rules prefer heard goals, allow heard places before mapping, and put exploration under the purpose it serves. `render_focus` shows 10 recent log entries; persisted history and planner `render_log(40)` are unchanged.
-- `eval_act.py --om talk --run R` uses recorded decisions/cached perception and stops after the first later named interaction. `--om plan --run R --from-step N --tries K` prints the checkpoint planner prompt; `--live` makes independent, uncached planner tries. Each POST, including retries, counts against K (at most 8).
-- Earlier world fixes remain: first place name sticks; open cells beyond screen edges count as unexplored; off-screen verified exits travel through their recorded tile; long travel uses per-press cuts. Moving-actor identity is still unsolved.
+- QS.1–QS.7 accepted by root. Notebook v2: keyed facts/beliefs; ordered quests, notes, chapters; separate code event log. Read-only focus is the first open quest key. v1 migrates in memory until mutation records the original in history.
+- All eight named invariant tests pass:
+  - `test_inv1_omitted_heard_quest_kept_and_flagged`
+  - `test_inv2_done_and_dropped_require_evidence_and_reference`
+  - `test_inv3_open_quests_over_limit_are_parked`
+  - `test_inv4_tactical_quest_text_is_rejected`
+  - `test_inv5_belief_revision_has_reason_and_refuted_is_rendered`
+  - `test_inv6_quest_reset_preserves_evidence_opened_and_check_results`
+  - `test_inv7_facts_are_add_only_and_conflicts_get_suffix`
+  - `test_inv8_nothing_deleted`
+- Checks run on every open quest; evidence/opened/check history survive resetting. Omitted heard quests persist, extra open quests park, reorders count as changes. Facts/open quests and held beliefs are protected in rendering; irreducible protected content may exceed the render budget.
+- Planner SYSTEM has 13 sentences reviewed against the approved design. Plan returns quests/beliefs/facts/note/why; accepted chapters reach later prompts. Act sees top/other open quests. Act ops no longer mutate the notebook.
+- T1 complete game text, T2 first navigable place, T3 quest closed, T4 sustained stall, T5 no open quest. Priority T3/T1/T2/T5/T4; T2/T4 retain the three-step floor. Failures, revisits and cycles are act/evidence information.
+- Stuck tracks first places and verified place>next_place edges, N=20; text/closure/arrival reset progress. First unchanged stall asks for a pivot at N/2; a second adds the generic fallback. stall_unchanged and optional evidence state round-trip through checkpoints.
+- Evidence <=600 chars: new places, grouped target/outcome attempts, movement/failure deltas, heard text, closed checks, progress and reconcile flags plus pivot instruction. A separate post-plan journal retains attempts beyond act's five-row tail.
+- `--lifecycle` is a zero-model trigger replay plus full-history/final-state metrics; removed/dropped heard leads count lost and planner writes coalesce to events. Viewer shows v2 quests/checks, beliefs and latest note, with v1 fallback. eval_plan is v2 and dry-runnable.
+- `--om plan` copies checkpoint harness/memory, migrates v1, calls actual Loop evidence and plan prompt; no perception/ROM restore needed. Dry prints state/prompt/len/4; live prints every try's returned fields/flags. Each try starts independently; actual posts are capped and ledgered.
 
 ## Decisions in force
-- Ponytail full, CodeGraph first, Headroom on every coding task. Python: `.venv-agent/Scripts/python.exe`.
-- This phase used Luna high workers with explicit model/effort, per user instruction overriding old packet tier names.
-- No game-specific code/prompts in `agent/`; no mechanical option filtering or history-based removal/reordering.
-- Commit at passed gates using explicit paths; never `git add -A`, never push. Only the user merges contract proposals and approves budget cap raises/live runs.
+- Ponytail Full, CodeGraph before code reads/edits, Headroom for large output. All implementation cards explicitly used gpt-6-luna/high with disjoint ownership; root reran acceptance. Amendment A authorized the final repair/legacy fixture ports.
+- Frozen contracts.md unchanged; replacement proposal and optional hooks are in QS Result for user merge. No game-specific agent code, option suppression, cap increases, live game runs or pushes. Unit models are stubs.
+- Six authorized live requests are exhausted. No further live tuning or clean boot is authorized by this result. Clean-boot funding is the user's decision.
 
 ## Measured numbers
-- Final suite: **354 passed**, `-m pytest tests/agent -q -p no:cacheprovider -n auto` (~35 s). All WP acceptance commands exited 0.
-- `scripts/eval_act.py --om cases`: right present 8/8, exit truth 8/8, size 8/8; 1,374–1,601 tokens. Existing evaluator cap 1,700 unchanged. Zero requests.
-- `scripts/eval_act.py --om talk --run m1_decide3`: one first-conversation log at step 47 includes the full Oak/next-door sentence and starts `MOM at tiled room`; `e_person_2` and `e_npc_2` have `called: MOM`; step 56 offers `interact with MOM`. Zero requests.
-- `scripts/eval_act.py --om plan --run m1_decide3 --from-step 50 --tries 3 --live`: facts plus heard Oak goal 3/3; focus goes next door beneath finding Oak.
-- Same command with `--from-step 75`: relevant focus path 3/3, `finish the game > find Professor Oak > explore outside a house`.
-- Ledger `runs/e3_budget.json`: total **2864/2925**, M1 **2816/2875**; IP spent **6/8**, no retries/cap changes. Remaining total 61, M1 59. Evidence: `.tmp/ip/gate-{suite,cases,talk,plan50,plan75}.txt`; dry prompts `.tmp/ip/plan{50,75}-dry.txt`.
-- Recommend funding a clean-boot run; checkpoint intent checks passed, but destination navigation has not been measured. No live run started.
+- Entry suite 521 passed/0 failed; final suite 564 passed/0 failed, 60.55 s: `.venv-agent/Scripts/python.exe -B -m pytest tests/agent -q -p no:cacheprovider -n auto`; `.tmp/qs/amendment-final-suite.txt`. Earlier 449/97 and 551/7 failures are documented diagnostics superseded by the final gate.
+- Root card tests: notebook 23, plan+act 24, tasks 7, loop 112, eval_run 40, evaluator pair 35, legacy/golden 3 passed. Invariant gate notebook+plan 29 passed. Exact commands/logs in QS Result.
+- Lifecycle: HF checkpoint 12, decide3 12, gp5 12 calls; no failure-only triggers. `python -B scripts/eval_run.py --lifecycle runs/<run>`; `.tmp/qs/gate-lifecycle-<run>.txt`. Source: trace metadata + notebook.history dialogue approximation. HF historical lost leads=2; replay numbers do not claim repair of old runs.
+- Lifecycle audit passes lost=1/open=0/calls=1; proper regressions included. Golden audit: only act trace plan fields, 0 forbidden changes; per-field counts in Result. Root eval_plan dry: ok, 0 requests, P1–P4.
+- Migration: both heard leads open, no open try_* quests. Dry plan sizes at 100/125: 1404.8/1451.2 tokens, below 3000. `python -B scripts/eval_act.py --om plan --run m1_ip --from-step <100|125>`; gate-plan-*-dry logs.
+- Live 100: 3/3 retain both heard leads, nonempty notes, 0 tactical quest rejections. Live 125: 3/3 reverse the retained quest pair citing held/mid oak_in_lab, rather than revising/refuting a belief. `--tries 3 --live` on the same commands; `.tmp/qs/final-plan-<100|125>-live.txt` contains every response.
+- Act/decide prompt size inconclusive: `python -B scripts/eval_act.py --om cases --arm decide`, exit 2, 4 old cache misses (limit 3), first/last steps 1/2; 0 requests. No size pass against 1700 claimed; packet permits the cache exception.
+- Ledger total 3216 -> 3222, M1 3168 -> 3174, exactly 6 requests. Caps unchanged 3265/3215; remaining 43/41. `Get-Content runs/e3_budget.json`; caps from scripts.run_agent. Logs gate-ledger-before/after-live.txt.
+- Staged code/test lines: agent +659/-175; scripts +352/-59; tests/fixtures +1199/-180. Report only; explicit fixture staging includes 273-line v1 and changed golden trace, plus new 119-line test_plan.
 
 ## Environment and gotchas
-- Original `runs/m1_decide3`, checkpoints 000050/000075 and model cache are untouched; replays use `.tmp/om/` copies.
-- Changing agent code/evaluator rebuilds OM snapshots (hash includes both). Older pickle snapshots receive defaults for the new conversation fields. Recorded option matching tolerates called-label changes via the cached target index.
-- `.claude/` remains untracked. Live viewer: `scripts/watch_run.py` on 127.0.0.1:8765; check it before a future live run.
-- Golden `tests/agent/data/w0_golden` is ignored but tracked; regenerate with `W0_REGEN=1` only for a justified world change, then stage explicit paths with `-f`.
+- Every shell before tests/scripts: create `.tmp/qs/tmp`, set TEMP and TMP to `$PWD\.tmp\qs\tmp`, confirm `tempfile.gettempdir()` there. Use `.venv-agent/Scripts/python.exe -B`; scratch only `.tmp/qs/`.
+- Protected checkpoint/memory hashes: 58 files, 0 changed before/after live (`.tmp/qs/protected-before.json`, gate-protected-final.txt). Existing cache, runs and checkpoints preserved; only approved ledger counters changed.
+- Viewer already listening on 8765, PID 8676; acceptance skipped by packet, process untouched. Headroom proxy unreachable; local compression/retrieval usable. Earlier automatic review denied a private-source export and viewer-management command; bounded inspection/existing-listener skip sufficed.
+- Pre-action truth S corresponds to post-action trace S-1; avoid mixing coordinates. Old perception fixtures are incompatible with HF3; do not silently re-record.
+- Pre-existing untracked `.claude/` untouched. Data fixtures are ignored by data/ and were explicitly force-staged. Contracts proposal remains separate from frozen contracts.md.
 
 ## Deviations from plan and contracts
-- IP's merge-ready contract additions are in [IP.md section 9](IP.md#9-result-filled-in-by-the-orchestrator); **contracts.md was not edited**. User must merge them.
-- Act log view was bounded from 15 to 10 entries because conversation-sized entries retained old boot/menu text and failed the dry size gate; full history/planner history remain. Initial dry size 6/8, fresh-line correction 7/8, final 8/8. Limits unchanged.
-- Notebook comment `moment` became `briefly` to pass the literal game-name substring scan. Talk replay stops once its evidence is complete (step 56).
+- Amendment A authorized QS.5 round 2 and QS.6/QS.7 ports from uncommitted work. Root repaired no implementation files; all cards stayed with Luna/high workers. Goldens changed planner metadata only.
+- Gate passes with the explicitly permitted cache-dependent act/decide size measurement inconclusive. Legacy lifecycle text replay is approximate. Live notes still contain door-level suggestions although quests remain strategic; no extra spend to tune them.
 
 ## Do not retry
-- Do not re-measure these six live planner tries or the old eight live option cases. Do not iterate prompt wording with live spend.
-- Do not raise caps or launch a clean-boot run autonomously. Existing requests cannot fund the proposed ~250-request run.
+- Do not launch a live game, raise caps, spend more live requests, push or rewrite frozen contracts from this packet.
+- Do not infer live autonomy from checkpoint prompts, silently refresh perception caches, or reuse old route perceptions after divergence.
 
 ## Open issues for the next phase (user decides)
-1. Moving-NPC identity: m1_decide3 has 39 actor ids; this replay attaches MOM to two ids. Match nearby known actors so names/history follow them.
-2. Outside explore routes were blocked twice at step 80; investigate separately from intent planning.
-3. Outdoor perception/re-looks cost about 2.4 requests/step; a clean-boot run needs a user-approved cap raise.
-4. Planner edits can leave children of removed exploration parents; the outside leaf's completion condition remains broad. Check sustained pursuit and observable completion in the next funded run.
+1. Whether to fund a clean-boot QS run; cache-compatible act/decide size measurement and live autonomy remain unvalidated. Planner notes can still suggest specific doors; lab co-location is a model belief, not a heard fact.
+2. HF place-merge labels and moving-NPC identity remain open; QS exposes uncertainty without fixing perception/world memory.
+3. HF3 cache incompatibility/re-record decision, probe settle gating and remembered blockers on travel legs remain open. Boundary coverage for agent -> scripts/truth imports was previously missing.

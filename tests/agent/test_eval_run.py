@@ -549,6 +549,182 @@ def test_l1_no_effect_streak_requires_exact_effect_list(tmp_path):
     assert evaluate(run)["no_effect_streak_max"] == 3
 
 
+def test_lifecycle_replays_stuck_and_reads_v2_history(tmp_path):
+    from scripts.eval_run import _lifecycle
+
+    run = tmp_path / "lifecycle"
+    trace = [{"step": step, "screen": "world", "place": "p", "outcome": {"effects": ["no_change"]}}
+             for step in range(1, 44)]
+    trace[21]["plan"] = {"trigger": "new game text: heard a lead"}
+    write(run / "trace.jsonl", trace)
+    write(run / "memory" / "notebook.history", [
+        {"step": 2, "op": "quests", "value": [{"key": "lead", "text": "Find the guide", "source": "heard",
+                                                         "evidence": "talked to guide", "status": "active"}]},
+        {"step": 3, "op": "belief", "key": "route", "value": {"stance": "held", "reason": "saw a path"}},
+        {"step": 4, "op": "belief", "key": "route", "value": {"stance": "ruled_out", "reason": "door was locked"}},
+        {"step": 6, "op": "quests", "value": [{"key": "lead", "text": "Find the guide", "source": "heard",
+                                                         "evidence": "talked to guide", "status": "closed"}]},
+    ])
+    (run / "memory" / "notebook.json").write_text(json.dumps({
+        "quests": [{"key": "lead", "text": "Find the guide", "source": "heard", "evidence": "talked to guide", "status": "closed"},
+                   {"key": "tiny", "text": "Press A to open the door", "status": "active"}],
+        "beliefs": {"route": {"stance": "ruled_out", "reason": "door was locked"}}, "labels": ["A"], "notes": []
+    }), encoding="utf-8")
+
+    result = _lifecycle(run)
+
+    assert {row["trigger"] for row in result["trigger_replay"]["calls"]} == {
+        "T1 new game text", "T2 first world place", "T4 no progress", "T5 empty first step"}
+    assert result["history_metrics"]["heard_leads"] == {
+        "opened": 1, "closed": 1, "parked": 0, "still_open": 0, "silently_lost": 0}
+    assert len(result["history_metrics"]["belief_revisions"]) == 1
+    assert result["history_metrics"]["belief_revisions"][0]["reason"] == "door was locked"
+    assert result["history_metrics"]["rule4_quest_matches"] == ["tiny"]
+
+
+def test_lifecycle_prioritizes_text_over_first_place_at_one_step(tmp_path):
+    from scripts.eval_run import _lifecycle
+
+    run = tmp_path / "priority"
+    trace = [
+        {"step": 1, "screen": "world", "place": "first"},
+        {"step": 2, "screen": "world", "place": "second"},
+        {"step": 4, "screen": "world", "place": "second",
+         "plan": {"trigger": "new game text: new dialogue"}},
+        {"step": 7, "screen": "world", "place": "second"},
+    ]
+    write(run / "trace.jsonl", trace)
+
+    calls = _lifecycle(run)["trigger_replay"]["calls"]
+
+    assert [(row["step"], row["trigger"]) for row in calls] == [
+        (1, "T5 empty first step"), (4, "T1 new game text"), (7, "T2 first world place")]
+
+
+def test_lifecycle_reads_v1_notebook_log_and_goal_history_shapes(tmp_path):
+    from scripts.eval_run import _lifecycle
+
+    run = tmp_path / "v1-history"
+    write(run / "trace.jsonl", [
+        {"step": 1, "screen": "world", "place": "a"},
+        {"step": 4, "screen": "world", "place": "a"},
+        {"step": 8, "screen": "world", "place": "b"},
+    ])
+    write(run / "memory" / "notebook.history", [
+        {"step": 2, "op": "set", "section": "goals", "key": "lead-1",
+         "value": {"text": "Find the guide", "source": "heard", "status": "active"}},
+        {"step": 3, "op": "log", "text": 'SPEAKER at tiledroom: "The road is north"'},
+        {"step": 6, "op": "set", "section": "goals", "key": "lead-1",
+         "value": {"text": "Find the guide", "source": "heard", "status": "closed"}},
+        {"step": 6, "op": "check", "key": "lead-1", "evidence": "found"},
+    ])
+    (run / "memory" / "notebook.json").write_text(json.dumps({
+        "goals": {"lead-1": {"text": "Find the guide", "source": "heard", "status": "closed"},
+                  "false-positive": {"text": "North is a town", "status": "active"},
+                  "tactical": {"text": "Go to #12", "status": "active"}},
+        "facts": {}, "beliefs": {}, "notes": []
+    }), encoding="utf-8")
+
+    result = _lifecycle(run)
+
+    assert result["trigger_replay"]["calls"] == [
+        {"step": 1, "trigger": "T5 empty first step"},
+        {"step": 4, "trigger": "T1 new game text"},
+        {"step": 8, "trigger": "T2 first world place"},
+    ]
+    assert result["trigger_replay"]["text_event_steps"] == [3]
+    assert "notebook.history" in result["trigger_replay"]["text_event_source"]
+    assert result["history_metrics"]["heard_leads"] == {
+        "opened": 1, "closed": 1, "parked": 0, "still_open": 0, "silently_lost": 0}
+    assert result["history_metrics"]["rule4_quest_matches"] == ["tactical"]
+
+
+def test_lifecycle_reads_v2_fact_references_quest_snapshots_and_revisions(tmp_path):
+    from scripts.eval_run import _lifecycle
+
+    run = tmp_path / "v2-history"
+    write(run / "trace.jsonl", [
+        {"step": 1, "screen": "world", "place": "a"},
+        {"step": 4, "screen": "world", "place": "a",
+         "plan": {"trigger": "stuck:no_progress", "quests_changed": 0, "beliefs_changed": 0}},
+        {"step": 7, "screen": "world", "place": "a",
+         "plan": {"trigger": "stuck:no_progress", "quests_changed": 1, "beliefs_changed": 0}},
+    ])
+    heard = {"key": "lead-key", "text": "Find the path", "why": ["heard-fact"], "status": "active"}
+    lost = {"key": "lost-key", "text": "Find the other path", "why": ["heard-fact"], "status": "active"}
+    write(run / "memory" / "notebook.history", [
+        {"step": 2, "op": "migrate_fact", "fact": {"key": "heard-fact", "source": "heard"}},
+        {"step": 2, "op": "migrate_quest", "quest": heard},
+        {"step": 2, "op": "migrate_quest", "quest": lost},
+        {"step": 3, "op": "belief", "key": "route", "value": {"history": [
+            {"step": 3, "from_text": "old route", "reason": "saw sign"},
+            {"step": 5, "from_text": "new route", "reason": "door blocked"}]}},
+        {"step": 4, "op": "quests", "value": [{**heard, "status": "active"},
+                                                        {**lost, "status": "dropped"}]},
+        {"step": 6, "op": "quests", "value": [{**heard, "status": "parked"}]},
+        {"step": 6, "op": "check", "key": "lead-key", "evidence": "confirmed"},
+        {"step": 7, "op": "plan", "value": {"trigger": "stuck:no_progress"}},
+    ])
+    (run / "memory" / "notebook.json").write_text(json.dumps({
+        "quests": [{**heard, "status": "parked"}],
+        "facts": {"heard-fact": {"source": "heard"}}, "beliefs": {}, "notes": []
+    }), encoding="utf-8")
+
+    metrics = _lifecycle(run)["history_metrics"]
+
+    assert metrics["heard_leads"] == {
+        "opened": 2, "closed": 1, "parked": 0, "still_open": 0, "silently_lost": 1}
+    assert [row["reason"] for row in metrics["belief_revisions"]] == ["saw sign", "door blocked"]
+    assert metrics["stall_calls_changed_nothing"] == 1
+    assert metrics["plan_calls_per_step"]["7"] == 1
+
+
+def test_lifecycle_counts_removed_heard_leads_as_lost_and_groups_planner_writes(tmp_path):
+    from scripts.eval_run import _lifecycle
+
+    run = tmp_path / "removed-lead"
+    write(run / "trace.jsonl", [{"step": 1, "screen": "world", "place": "p",
+                                 "plan": {"trigger": "no open quest"}}])
+    write(run / "memory" / "notebook.history", [
+        {"step": 1, "op": "set", "section": "goals", "key": "lead",
+         "value": {"text": "Find the library", "source": "heard", "status": "active"}},
+        {"step": 1, "op": "set", "section": "goals", "key": "other",
+         "value": {"text": "Find a task", "source": "assumed", "status": "active"}},
+        {"step": 1, "op": "belief", "key": "route", "value": {"stance": "held"}},
+        {"step": 2, "op": "remove", "section": "goals", "key": "lead"},
+    ])
+    (run / "memory" / "notebook.json").write_text(json.dumps({
+        "goals": {"other": {"text": "Find a task", "source": "assumed", "status": "active"}},
+        "facts": {},
+    }), encoding="utf-8")
+
+    metrics = _lifecycle(run)["history_metrics"]
+
+    assert metrics["heard_leads"] == {
+        "opened": 1, "closed": 0, "parked": 0, "still_open": 0, "silently_lost": 1}
+    assert metrics["plan_calls_per_step"]["1"] == 1
+
+
+def test_e4_reflection_attributes_v2_completion_to_opening_plan_step(tmp_path):
+    from scripts.eval_run import _e4_metrics
+
+    run = tmp_path / "e4-v2"
+    (run / "memory").mkdir(parents=True)
+    (run / "memory" / "notebook.json").write_text(json.dumps({
+        "quests": [{"key": "q", "text": "Find the guide", "status": "done", "opened": 5, "closed": 9}],
+        "facts": {}, "beliefs": {}, "notes": []
+    }), encoding="utf-8")
+    write(run / "memory" / "notebook.history", [
+        {"step": 5, "op": "plan", "value": {"trigger": "new game text"}},
+        {"step": 9, "op": "quests", "value": [{"key": "q", "text": "Find the guide",
+                                                       "status": "done", "opened": 5, "closed": 9}]},
+    ])
+
+    result = _e4_metrics(run, [{"step": 5, "plan": {"trigger": "new game text"}}], [])
+
+    assert result["reflection_usefulness"] == {"plan_calls": 1, "goals_completed": 1}
+
+
 def test_l1_health_keeps_missing_evidence_unknown(tmp_path):
     health = evaluate(tmp_path / "missing")["health"]
 

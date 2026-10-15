@@ -7,7 +7,7 @@ from agent.memory import _key
 from agent.notebook import FINISHED, Notebook
 from agent.observer import cut, for_model, wait_settled
 from agent.perceive import perceive
-from agent.plan import plan
+from agent.plan import chapter, plan
 from agent.predict import PRED, effects, predict, verdict
 from agent.skills import Ctx, SkillResult, press_seq, run_affordance, wait_until
 from agent.tasks import Stuck
@@ -41,9 +41,12 @@ class Loop:
         self.reported = None  # the failure evidence last raised as an urgent replan: [intent, stage, blocker or tile]
         self.reperception_used = False
         self.world = World(mem, self.tile_px)
+        self.notebook.labels = lambda: [self.world.place_label(self.place)] if self.place else []
         self.last_plan, self.text_pending, self.focus_closed, self._plan_row = None, False, None, None
         self.conversation, self.text_for_trigger = {"place": None, "lines": []}, ""
-        self.fails, self.moves, self.urgent, self.arrived = {}, [], None, None  # per-place failed actions, recent place moves, a replan reason that skips the throttle
+        self.fails, self.moves, self.urgent, self.arrived = {}, [], None, None
+        self.stall_unchanged, self.plan_flags, self._planned_closed, self._planned_top, self.cycle_flag, self.new_places, self.stall_pending = 0, [], [], None, None, [], False
+        self.planner_evidence, self.fail_baseline, self.progress_event = [], {}, False
         self.pending = None  # an action whose after-frame had not settled: its state for _resolve (None when none)
         self.unsettled = 0  # outer-step waits in a row that never settled; HF contract 5: one observe-only retry, then act on the latest frame (ponytail: not checkpointed, a restore may hold once more)
         self.invocation = None  # the runner's manifest invocation number (set by scripts/run_agent.py)
@@ -106,17 +109,21 @@ class Loop:
         view = self.world.view(self._goal_text(), place)
         self._plan_row = None
         if (trigger := self._plan_trigger(per)):
-            p = plan(self.model, trigger, self.notebook, view, per.get("text", []), [f"{(r.get('choice') or {}).get('verb')} {(r.get('choice') or {}).get('target') or ''} -> {r.get('verdict')}" for r in self.recent], failure=self.cause)
-            ops = self.notebook.apply(p.ops, self.step_no + 1); self.notebook.set_focus(p.focus or self.notebook.focus, self.step_no + 1)
-            self.notebook.apply([{"op": "set", "section": "hints", "key": f["key"], "value": {k: f[k] for k in ("text", "from", "source") if f.get(k)}} for f in (getattr(p, "facts", []) or [])], self.step_no + 1)
-            if p.lesson: self.notebook.note(self.step_no + 1, f"lesson: {p.lesson}")
+            top_before = self.notebook.focus
+            self._planned_top = top_before
+            evidence = self._evidence()
+            p = plan(self.model, trigger, self.notebook, view, per.get("text", []), [f"{(r.get('choice') or {}).get('verb')} {(r.get('choice') or {}).get('target') or ''} -> {r.get('verdict')}" for r in self.recent], evidence=evidence)
+            self.new_places, self.planner_evidence = [], []
+            result = self._apply_plan(p, trigger, self.step_no + 1, top_before)
             self.last_plan, self.text_pending, self.focus_closed, self.urgent, self.arrived = self.step_no + 1, False, None, None, None
-            self._plan_row = {"trigger": trigger, "focus": self.notebook.focus, "ops": ops, "why": p.why}
+            self.fail_baseline = {key: value.get("n", 0) for key, value in self.fails.items()}
+            self._plan_row = {"trigger": trigger, "focus": self.notebook.focus, "quests_changed": result["quests_changed"], "beliefs_changed": result["beliefs_changed"], "flags": result["flags"], "why": p.why}
             view = self.world.view(self._goal_text(), place)
         affs, targets, preds, intents = [], [], [], []  # intents: each affordance's intent key, resolved before input
         choice, player = None, next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         act_route = travel_legs = None; refused = False  # refused: no route to an on-screen target avoids the known blockers (occupied tiles, remembered avoid tile)
         act_flags = list(self.flags)
+        if self.cycle_flag: act_flags.append(self.cycle_flag)
         if marked and not (self.act_text or self.decide): act_flags.append('the sprite inside the red box is you')
         if self.recent or self.stuck.n:
             runs = []
@@ -147,11 +154,9 @@ class Loop:
         act_flags.append(self.world.here_flag(self.fails))
         options = self.world.options(per, place, self.fails, self.step_no + 1, inputs=list(self.env.inputs()))  # failure history is in the option notes
         a = act(self.model, None if self.act_text or self.decide else model_frame, per, self.notebook.render_focus(), self.world.view(self._goal_text(), place, compact=True), act_flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged" and p.get("screen") == "world"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]], options=options, **({"decide": True} if self.decide else {}))
+        applied = 0
         picked = next((o for o in options if o["n"] == getattr(a, "option", None)), None)
         own_pick = picked if picked and picked.get("action") == a.action else None  # the option act picked, when its action is the one it answered with
-        applied = self.notebook.apply(a.ops, self.step_no + 1, structure=False)
-        closed = self.notebook.data["goals"].get(self.notebook.focus or "", {})
-        if closed.get("status") in FINISHED: self.focus_closed, self.moves = f"focus {self.notebook.focus} {closed['status']}: {closed.get('evidence', '')}", []  # progress: the place-move history starts over
         named = self.world.name(place, a.place or per.get("place") or "", self.step_no + 1, frame=before)
         if named != place:  # model says this new arrival is a known place
             place = self.place = named
@@ -283,7 +288,12 @@ class Loop:
         self._learn(after_per.get("text", []), per.get("text", []), self.step_no, next_place, after_per.get("screen"))
         self.place, self.prev, self.prev_frame, self.cached, self.cached_hash = next_place, after_per, after, after_per, after_hash
         self.prev_frame_mark_eligible = after_mark_eligible
-        self.pending_cut, self.pending_via, self.pending_key = False, None, None; reason = self.stuck.update(row); self.repair_pending = self.parse_failed and self.empty_streak >= 8 and not self.repair_used; self.repair_used |= self.repair_pending
+        self.pending_cut, self.pending_via, self.pending_key = False, None, None; reason = self.stuck.update(row); self.stall_pending |= reason == "no_progress"
+        if self.progress_event or verified_edge or any(at == self.step_no and dst == next_place for at, dst in self.new_places):
+            self.stuck.progress(); self.stall_pending = False
+        elif next_place != place: self.stall_pending = False
+        self.progress_event = False
+        self.repair_pending = self.parse_failed and self.empty_streak >= 8 and not self.repair_used; self.repair_used |= self.repair_pending
         if s["unknown"]: reason = "player position unknown"
         self.cause = None
         if choice is not None:
@@ -303,7 +313,7 @@ class Loop:
                 f = self.fails.setdefault(intent, {"n": 0}); f.update(n=f["n"] + 1, why=(skill.reason or f"verdict {v}")[:40], step=self.step_no, act=f"{verb} {target}".strip())
                 if stage == "route" and blocker and held and not refused and blocker != tid: f.update(avoid=list(held), blocker=blocker)  # the next route goes around it
                 evidence = [intent, stage, blocker or (list(held) if held else None)]  # a repeat of the same failure is not new evidence: one replan per change
-                if evidence != self.reported: self.urgent = self.urgent or f"new failure: {self.cause}"; self.reported = evidence
+                self.reported = evidence
                 if thing and not route: self.mem.relate(thing, PRED["no_change"], "", src="observed", step=self.step_no, hit=False, verb=verb)  # the thing itself is contradicted; never deleted
             else:
                 if intent in self.fails and not str(self.fails[intent].get("why", "")).endswith(": cycle"): self.fails.pop(intent)  # a success clears this intent's own counter, never another's
@@ -311,7 +321,10 @@ class Loop:
                     self.mem.upsert("relations", {**failure, "con": 0, "ev": [], "state": "live"})  # ponytail: a success clears the failure row in place (no sup accounting: predict reads it)
         if s["go_to"]: reason = s["go_to"]
         if s["no_action"] and not reason: reason = "your last reply had no valid action, so nothing happened: use one of the action shapes"
-        self.flags = [x for x in (reason, f"last action {skill.status}: {skill.reason}" if skill.status != "done" else None, f"cause: {self.cause}" if self.cause else None, f"verdict {v}" if v in ("miss", "surprise") else None, f"merge_pending: {self.world.merge_pending}" if self.world.merge_pending else None) if x]; self.world.merge_pending = None; self.world.new_arrival = False
+        self.flags = [x for x in (reason, f"last action {skill.status}: {skill.reason}" if skill.status != "done" else None, f"cause: {self.cause}" if self.cause else None, f"verdict {v}" if v in ("miss", "surprise") else None, self.cycle_flag, f"merge_pending: {self.world.merge_pending}" if self.world.merge_pending else None) if x]; self.cycle_flag = None; self.world.merge_pending = None; self.world.new_arrival = False
+        self._after_outcome(self.step_no)
+        self.planner_evidence.append({"step": row["step"], "place": place, "target": (aff or {}).get("target"), "verdict": v})
+        self.planner_evidence = self.planner_evidence[-40:]
         self.trace.write(row); self.recent = [*self.recent, row][-5:]
         self.pending = None
         return row
@@ -380,6 +393,7 @@ class Loop:
         known = {_key(r.get("text", "")) for r in self.mem.rows("knowledge")}
         fresh = [t for t in texts if t not in seen and _key(t) not in known]
         for text in (t for t in texts if t not in seen): self.mem.know(text, src="game_text", step=step)
+        if fresh: self.stuck.progress(); self.stall_pending = False; self.progress_event = True
         if self.conversation["lines"] and (screen == "world" or place != self.conversation["place"]):
             self._flush_conversation(step)
         if screen == "world":
@@ -410,6 +424,7 @@ class Loop:
         place = self.conversation["place"]
         self.text_for_trigger = joined
         self.notebook.note(step, f'{speaker or "text"} at {self.world.place_label(place) if place else "?"}: "{joined}"')
+        self.stuck.progress(); self.stall_pending = False; self.progress_event = True
         self.text_pending = True
         self.conversation = {"place": None, "lines": []}
     def _screen_route(self, place, t, push, avoid=()):  # to an on-screen entity at tile t; an actor holds its tile, so stop beside it, facing it; avoid: tiles a route blocker held
@@ -458,35 +473,93 @@ class Loop:
             put(next(iter(names)) if len(names) == 1 else f"{place}|{name}", dict(f))
         return out
     def _moved(self, src, dst, via, step, key=None):
+        self.cycle_flag = None
         label = self.world.place_label
         self.notebook.note(step, f"went from {label(src)} to {label(dst)}" + (f" via {via}" if via else ""))
         self.moves = [*self.moves, [step, src, dst, via or "", key]][-6:]
         last = self.moves[-4:]  # A<->B four times running, however slowly; progress (a focus closing) clears self.moves
         if len(last) == 4 and len({(m[1], m[2]) for m in last}) == 2 and all(a[2] == b[1] for a, b in zip(last, last[1:])):
-            self.urgent = f"cycle: went back and forth between {label(src)} and {label(dst)} {len(last)} times in {step - last[0][0]} steps without progress"; self.moves = []
+            self.cycle_flag = f"cycle: went back and forth between {label(src)} and {label(dst)} {len(last)} times without progress"; self.moves = []
             for m in last:  # act sees, in each of the two places, that the way it keeps taking only leads back
                 if m[3]: f = self.fails.setdefault((m[4] if len(m) > 4 else None) or self._fail_key(m[1], "", m[3]), {"n": 0}); f.update(n=f["n"] + 1, why=f"leads back to {label(m[2])}: cycle", step=step)
-        elif (self.mem.get("places", dst) or {}).get("visits", 0) <= 1 and not any(m[1] == dst for m in self.moves):
-            self.urgent = self.urgent or f"arrived somewhere new: {label(dst)}"
-        else: self.arrived = f"arrived at {label(dst)} (been here before)"
+        elif (self.mem.get("places", dst) or {}).get("visits", 0) <= 1 and not any(place == dst for _, place in self.new_places):
+            self.arrived = f"arrived somewhere new: {label(dst)}"
+            self.new_places.append((step, dst))
+        else: self.arrived = None
     def _goal_text(self):
-        goals = self.notebook.data["goals"]; path = self.notebook.path()
-        keys = path or [k for k, v in goals.items() if v.get("status", "active") == "active"]
-        return " ".join(f"{k} {goals[k].get('text', '')}" for k in keys)
+        quest = next((q for q in self.notebook.data["quests"] if q.get("status") == "open"), None)
+        return " ".join(str(quest.get(k, "")) for k in ("text", "approach") if quest and quest.get(k))
+    def _apply_plan(self, p, trigger, step, top_before=None):
+        old = {q.get("key"): q.get("status") for q in self.notebook.data["quests"]}
+        result = self.notebook.apply_plan(p, step)
+        self._planned_closed = [q.get("key") for q in self.notebook.data["quests"] if q.get("status") in FINISHED and old.get(q.get("key")) not in FINISHED]
+        self._planned_top = top_before
+        if trigger.startswith("stuck:"): self.stall_pending = False
+        if trigger.startswith("stuck:") and not (result["quests_changed"] or result["beliefs_changed"]):
+            self.stall_unchanged += 1
+            if self.stall_unchanged >= 2:
+                p.quests.append({"key": "explore_untried_exit", "text": "explore an exit or area not yet tried", "approach": "Try an exit or area absent from the evidence packet.", "done_when": "reach a new area or verify a route", "status": "open", "why": "stall"})
+                result = self.notebook.apply_plan(p, step)
+                self.stall_unchanged = 0
+        elif result["quests_changed"] or result["beliefs_changed"]:
+            self.stall_unchanged = 0
+        self.plan_flags = result["flags"]
+        return result
+    def _evidence(self):
+        since = self.last_plan or 0
+        rows = [r for r in self.planner_evidence if r.get("step", 0) > since]
+        if not rows: rows = [r for r in self.recent if r.get("step", 0) > since]
+        places = [label for at, place in self.new_places if at > since for label in [self.world.place_label(place)]]
+        tried = {}
+        for row in rows:
+            choice = row.get("choice") or {}
+            target = row.get("target") or choice.get("target") or choice.get("go_to")
+            if target:
+                counts = tried.setdefault(self.world.place_label(row.get("place")), {}).setdefault(str(target), {})
+                outcome = str(row.get("verdict") or "tried")
+                counts[outcome] = counts.get(outcome, 0) + 1
+        heard = [str(e.get("text", "")) for e in self.notebook.log if e.get("step", 0) > since and " at " in str(e.get("text", ""))]
+        closed = [f"{q.get('key')} at {item.get('step')}" for q in self.notebook.data["quests"]
+                  for item in q.get("check_history", []) if item.get("result") == "pass" and item.get("step", 0) > since]
+        failed = [f"{self.world.place_label(str(key).split('|', 1)[0])}: {value.get('act') or key} -> {value.get('why', 'failed')} x{value.get('n', 1) - self.fail_baseline.get(key, 0)}"
+                  for key, value in self.fails.items() if value.get("n", 0) > self.fail_baseline.get(key, 0)]
+        moved = {}
+        for at, src, dst, via, *_ in self.moves:
+            if at <= since: continue
+            exits = moved.setdefault(self.world.place_label(src), {})
+            exits[via or "unknown"] = exits.get(via or "unknown", 0) + 1
+        stall = "last stall changed nothing; revise a belief or reorder" if self.stall_unchanged else ""
+        lines = [f"new places: {', '.join(dict.fromkeys(places)) or 'none'}"[:60],
+                 f"tried by place: {json.dumps(tried, ensure_ascii=False, separators=(',', ':'))}"[:105],
+                 f"moves: {json.dumps(moved, ensure_ascii=False, separators=(',', ':'))}"[:60],
+                 f"failed attempts: {'; '.join(failed) or 'none'}"[:60],
+                 f"heard: {' / '.join(heard) or 'none'}"[:60], f"closed checks: {', '.join(closed) or 'none'}"[:60],
+                 f"steps since progress: {20 if self.stall_pending else self.stuck.progress_n}",
+                 ("reconcile flags: " + "; ".join(self.plan_flags))[:90] if self.plan_flags else "",
+                 stall]
+        return "\n".join(line for line in lines if line)[:600]
+    def _after_outcome(self, step):
+        top = self._planned_top or self.notebook.focus
+        checked = self.notebook.run_checks(step)
+        closed = list(dict.fromkeys([*self._planned_closed, *checked]))
+        if closed:
+            self.focus_closed = f"quest {', '.join(closed)} closed"
+            self.stuck.progress(); self.stall_pending = False; self.progress_event = False; self.moves = []
+        quests = [q for q in self.notebook.data["quests"] if q.get("key") in closed]
+        if len(self.notebook.data["notes"]) > 12 or any(q.get("key") == top or self.notebook._heard_quest(q) for q in quests):
+            self.notebook.apply_chapter(chapter(self.model, self.notebook), step)
+        self._planned_closed, self._planned_top = [], None
     def _plan_trigger(self, per):
-        """Events that warrant replanning; the model decides what they mean. Closing the focus always replans, the rest at most every 3 steps."""
+        """Replan for text, new places, empty quest state, or sustained stagnation."""
         if self.focus_closed: return self.focus_closed
-        if self.urgent: return self.urgent
         if self.text_pending and per.get("screen") == "world": return f"new game text: {self.text_for_trigger[:200]}"
-        if self.last_plan is not None and self.step_no + 1 - self.last_plan < 3: return None
-        if self.arrived: return self.arrived
-        goal = self.notebook.data["goals"].get(self.notebook.focus or "")
-        if not goal or goal.get("status") in FINISHED: return "no focus goal yet" if not goal else f"focus {self.notebook.focus} is {goal['status']}"
-        stuck = next((f for f in self.flags if f in ("same_action", "no_progress")), None)
-        # ponytail: 8-step floor on stuck replans; m1_gp replanned every ~3 steps into button-level goals
-        return f"stuck: {stuck}" if stuck and (self.last_plan is None or self.step_no + 1 - self.last_plan >= 8) else None
+        floor = self.last_plan is not None and self.step_no + 1 - self.last_plan < 3
+        if self.arrived and not floor: return self.arrived
+        if self.notebook.focus is None: return "no open quest"
+        stalled = self.stall_pending or "no_progress" in self.flags or (self.stall_unchanged > 0 and self.stuck.progress_n >= 10)
+        return "stuck: no_progress" if stalled and not floor else None
     def state(self):
-        state = {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "reperception_used": self.reperception_used, "perception": self.cached, "frame_hash": self.cached_hash, "perception_marked": self.cached_marked, "frame_mark_eligible": self.prev_frame_mark_eligible, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "pending_via": self.pending_via, "pending_key": self.pending_key, "pending": self.pending, "flags": self.flags, "planner": {"last": self.last_plan, "text_pending": self.text_pending, "focus_closed": self.focus_closed, "fails": self.fails, "moves": self.moves, "urgent": self.urgent, "arrived": self.arrived, "conversation": self.conversation, "text_for_trigger": self.text_for_trigger, "cause": self.cause, "reported": self.reported}}
+        state = {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "reperception_used": self.reperception_used, "perception": self.cached, "frame_hash": self.cached_hash, "perception_marked": self.cached_marked, "frame_mark_eligible": self.prev_frame_mark_eligible, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "pending_via": self.pending_via, "pending_key": self.pending_key, "pending": self.pending, "flags": self.flags, "planner": {"last": self.last_plan, "text_pending": self.text_pending, "focus_closed": self.focus_closed, "fails": self.fails, "moves": self.moves, "urgent": self.urgent, "arrived": self.arrived, "stall_unchanged": self.stall_unchanged, "stall_pending": self.stall_pending, "plan_flags": self.plan_flags, "cycle_flag": self.cycle_flag, "new_places": self.new_places, "planner_evidence": self.planner_evidence, "fail_baseline": self.fail_baseline, "conversation": self.conversation, "text_for_trigger": self.text_for_trigger, "cause": self.cause, "reported": self.reported}}
         if not self.provenance_incomplete: state["modes"] = {"decide": bool(self.decide), "act_text": bool(self.act_text)}  # after a legacy restore the modes are not written: they were never recorded
         return state
     def restore(self, state):
@@ -505,7 +578,13 @@ class Loop:
         self.cached, self.cached_hash, self.cached_marked, self.cached_version = state.get("perception"), state.get("frame_hash"), bool(state.get("perception_marked", False)), state.get("perception_version")
         self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = bool(state.get("parse_failed")), int(state.get("empty_streak", 0)), bool(state.get("repair_used")), bool(state.get("repair_pending")); self.pending_cut, self.pending_via, self.pending_key = bool(state.get("pending_cut")), state.get("pending_via"), state.get("pending_key"); self.flags = state.get("flags", [])
         planner = state.get("planner") or {}; self.last_plan, self.text_pending, self.focus_closed = planner.get("last"), bool(planner.get("text_pending")), planner.get("focus_closed")
-        self.fails, self.moves, self.urgent, self.arrived = self._migrate(planner.get("fails") or {}), planner.get("moves") or [], planner.get("urgent"), planner.get("arrived")
+        self.fails, self.moves, self.urgent = self._migrate(planner.get("fails") or {}), planner.get("moves") or [], planner.get("urgent")
+        self.arrived = planner.get("arrived") if str(planner.get("arrived") or "").startswith("arrived somewhere new:") else None
+        self.stall_unchanged, self.plan_flags, self.cycle_flag = int(planner.get("stall_unchanged", 0)), planner.get("plan_flags") or [], planner.get("cycle_flag")
+        self.stall_pending = bool(planner.get("stall_pending", False))
+        self.new_places = planner.get("new_places") or []
+        self.planner_evidence = planner.get("planner_evidence") or []
+        self.fail_baseline = planner.get("fail_baseline", {key: value.get("n", 0) for key, value in self.fails.items()} if self.last_plan is not None else {})
         self.conversation, self.text_for_trigger = planner.get("conversation") or {"place": None, "lines": []}, planner.get("text_for_trigger", "")
         self.cause, self.reported = planner.get("cause"), planner.get("reported")  # checkpoints before these fields: None
         self.pending = state.get("pending")  # checkpoints before this field: no pending action

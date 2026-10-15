@@ -14,19 +14,18 @@ sys.path.insert(0, str(ROOT))
 from PIL import Image
 
 from agent.act import act
-from agent.loop import Loop
 from agent.brief import _load, defaults
 from agent.memory import Memory
 from agent.model import ModelUnavailable, Ollama
 from agent.notebook import Notebook
-from agent.plan import plan
+from agent.plan import Plan, plan
 from agent.world import World
 from scripts.eval_frames import BUTTONS, GAME, _guarded_post
 from scripts.run_agent import CallCap, _ledger
 
 RUN_NAME = "m1_gp_eval"
 CASES = {"P1": ("runs/m1_ps_fp", 80, 82), "P2": ("runs/m1_ps_fp", 80, 82), "P3": ("runs/m1_gp", 75, 88), "P4": ("runs/m1_gp2", 125, 127)}  # run, checkpoint step, situation step
-OUT = ROOT / ".tmp/gp/eval_plan.json"
+OUT = ROOT / ".tmp/qs/qs5/eval_plan.json"
 P_OK, P_BAD = re.compile(r"door|rug|mat|exit|outside|leave|way out|front"), re.compile(r"stair|upstairs|2f|bed")
 A_OK, A_BAD = re.compile(r"door|rug|mat|exit|outside|bottom|south"), re.compile(r"stair|mom|mother|woman|lady")
 TRIGGER_P1 = "new game text was seen (see the log)"
@@ -37,8 +36,9 @@ GOALS = [("top", {"text": "Finish the game", "status": "active", "parent": None}
                        "evidence": "PROF. OAK, next door, is looking for you.", "status": "active"}),
          ("leave_house", {"text": "Leave the house", "parent": "find_oak", "done_when": "the screen shows outdoors", "status": "active"}),
          ("use_stairs", {"text": "Leave via the stairs", "parent": "leave_house", "status": "active"})]
-DRY = {"plan": {"goals": [{"op": "set", "key": "door", "value": {"text": "Leave by the door at the bottom of 1F", "parent": None, "done_when": "outdoors", "status": "active"}}],
-                "focus": "door", "lesson": None, "why": "dry"},
+DRY = {"plan": {"quests": [{"key": "door", "text": "Leave by the door at the bottom of 1F", "parent": None,
+                              "check": {"kind": "reach", "arg": "outdoors"}, "status": "open"}],
+                "beliefs": [], "facts": [], "note": "", "why": "dry"},
        "act": {"place": "x", "notebook": [], "action": {"go_to": "door"}, "text": None, "expect": "place_changes", "why": "dry"}}
 
 
@@ -61,7 +61,7 @@ def _setup(tmp, case):
     if case == "P3":  # the live log at the stall; goals/lessons written under the old planner prompt are cleared
         nb_dir = tmp / "nb"; nb_dir.mkdir()
         for name in ("notebook.json", "notebook.history"): shutil.copy(checkpoint / "memory" / name, nb_dir / name)
-        nb = Notebook(nb_dir); nb.data = {s: {} for s in nb.data}; nb.focus = None
+        nb = Notebook(nb_dir); nb.data = {"quests": [], "beliefs": {}, "facts": {}, "notes": [], "chapters": []}
         return world, nb, TRIGGER_P3
     nb = Notebook(tmp / "nb")
     # the log the live loop would have written by step 80: game text and moves between places (Loop._learn / Loop._moved)
@@ -76,9 +76,12 @@ def _setup(tmp, case):
     if case == "P1":
         return world, nb, TRIGGER_P1
     nb.note(79, 'talked to Mom; she said: "All boys leave home some day." and "PROF. OAK, next door, is looking for you."')
-    nb.apply([{"op": "set", "section": "goals", "key": k, "value": v} for k, v in GOALS], 80)
-    nb.set_focus("use_stairs", 80)
-    nb.apply([{"op": "focus", "status": "blocked", "evidence": "the stairs lead up to the bedroom on 2F where I started, not outside"}], 81, structure=False)
+    seeded = [{"key": k, **v} for k, v in GOALS]
+    nb.apply_plan(Plan(seeded, [], [], "", "seeded case"), 80)
+    if case == "P2":
+        blocked = [dict(q, status="blocked") if q["key"] == "use_stairs" else q for q in seeded]
+        nb.apply_plan(Plan(blocked, [], [], "", "stairs disproved"), 81)
+    nb.note(81, "stairs lead up to the bedroom on 2F where I started, not outside")
     return world, nb, TRIGGER_P2
 
 
@@ -123,8 +126,9 @@ P4_BAD, A4_BAD = re.compile(r"\b(enter|go into|back into)\b.*\b(house|home|build
 
 def _p4_pass(focus, goal, old, nb):  # after the bounce: a new focus, or the old one closed
     text = f'{goal.get("text", "")} {goal.get("done_when", "")}'.casefold()
-    old_status = nb.data["goals"].get(old, {}).get("status")
-    return bool(focus) and not P4_BAD.search(text) and (focus != old or old_status in ("blocked", "dropped"))
+    old_status = next((q.get("status") for q in nb.data.get("quests", [])
+                       if q.get("key") == old or q.get("id") == old), None)
+    return bool(focus) and not P4_BAD.search(text) and (focus != old or old_status in ("blocked", "dropped", "closed", "done"))
 
 
 def _a4_pass(action, target, why):  # the house door is directly above the player: no walking back into it
@@ -148,22 +152,25 @@ def _frame_per(case):
 def _run_try(case, n, model, frame, per, results):
     controls = "\n".join(_load(GAME).get("controls", []))
     p_pass_fn, a_pass_fn = PASSES[case]
-    with tempfile.TemporaryDirectory(prefix=f"{case}_", dir=ROOT / ".tmp/gp") as tmp:
+    with tempfile.TemporaryDirectory(prefix=f"{case}_", dir=ROOT / ".tmp/qs/qs5") as tmp:
         world, nb, trigger = _setup(Path(tmp), case)
-        # mechanical frontier pick, no model call: Loop._unexplored only reads self.mem, self.pos and self.tile_px, all of which World carries
-        route = Loop._unexplored(world, world.current_place) if case == "P3" else None
-        goal_text = " ".join(nb.data["goals"][k].get("text", "") for k in nb.path())
+        route = None
+        quests = nb.data.get("quests", [])
+        goal_text = " ".join(q.get("text", "") for q in quests if isinstance(q, dict))
         view = world.view(goal_text, world.current_place)
         old_focus = nb.focus
         p = plan(model, trigger, nb, view, [], [])
-        nb.apply(p.ops, 81); nb.set_focus(p.focus, 81)
-        goal = nb.data["goals"].get(nb.focus, {}) if nb.focus else {}
-        row = {"case": case, "try": n, "cached": n == 1, "focus": nb.focus, "focus_text": goal.get("text", ""),
-               "done_when": goal.get("done_when", ""), "p_pass": p_pass_fn(nb.focus, goal, old_focus, nb),
-               "goal_tree": nb.render(), "plan_why": p.why, "plan_ops": p.ops}
+        changed = nb.apply_plan(p, 81, buttons=())
+        quests = nb.data.get("quests", [])
+        top = next((q for q in quests if isinstance(q, dict) and not q.get("parent")), quests[0] if quests else {})
+        key = top.get("key") or top.get("id") or top.get("text", "")
+        goal = {**top, "done_when": (top.get("check") or {}).get("arg", top.get("done_when", ""))}
+        row = {"case": case, "try": n, "cached": n == 1, "focus": key, "focus_text": goal.get("text", ""),
+               "done_when": goal.get("done_when", ""), "p_pass": p_pass_fn(key, goal, old_focus, nb),
+               "goal_tree": nb.render(), "plan_why": p.why, "plan_ops": changed}
         if case == "P3": row["unexplored_route"] = route
         results.append(row)
-        a = act(model, frame, per, nb.render_focus(), view, [], controls, defaults(GAME), BUTTONS, places=[])
+        a = act(model, frame, per, goal.get("text", ""), view, [], controls, defaults(GAME), BUTTONS, places=[])
         target = _target(a.action, per["entities"])
         row.update(act_action=a.action, act_target=target, act_why=a.why, act_ops=a.ops, a_pass=a_pass_fn(a.action, target, a.why))
 
@@ -177,7 +184,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     cases = [c.strip() for c in a.cases.split(",") if c.strip()]
     if not set(cases) <= set(CASES): ap.error(f"unknown case in --cases: {a.cases}")
-    OUT.parent.mkdir(parents=True, exist_ok=True); (ROOT / ".tmp/gp").mkdir(parents=True, exist_ok=True)
+    OUT.parent.mkdir(parents=True, exist_ok=True)
     attempts, results, status, error = [0], [], "ok", None
     try:
         for case in cases:
