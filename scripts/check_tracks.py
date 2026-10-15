@@ -7,13 +7,13 @@ from collections import defaultdict
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent.env_pyboy import PyBoyEnv, find_rom
-from agent.memory import Memory
+from agent.memory import Memory, normalize_kind
 from agent.observer import wait_settled
 from agent.track import Tracker
 from agent.world import ACTOR_KINDS, World
 from scripts.truth_pokered import read, sprites
 
-CENTER = (8, 12)  # RAM sprite (x, y) -> screen centre; the player's RAM (64, 60) is the tile at (64, 64)..(80, 80)
+CENTER = (8, 5)  # RAM sprite (x, y) -> visible centre: the live agent's motion-locked self spot was (72, 65) for the player's RAM (64, 60) on every step of m1_ot_live
 
 def _jsonl(path): return [json.loads(l) for l in Path(path).read_text(encoding="utf8").splitlines() if l.strip()]
 
@@ -21,6 +21,7 @@ def check(run, steps=None, baseline=False, first=51):
     src = Path("runs") / run; trace = {r["step"]: r for r in _jsonl(src / "trace.jsonl")}; presses = {r["step"]: r["keys"] for r in _jsonl(src / "presses.jsonl")}
     env = PyBoyEnv(find_rom(), state=str(src / "checkpoint" / f"{max(first - 1, 0):06d}" / "pyboy.state")); env.tile_px = 16
     world = World(Memory(Path(tempfile.mkdtemp())), 16); tracker = world.tracker
+    world.self_spot, world._self_from_motion = [72 / 160, 65 / 144], True  # the spot the live loop locks from motion (m1_ot_live); the replay has no skill moves to lock it
     owner, seq, errs, off = {}, defaultdict(list), [], []  # owner: entity id -> real sprite slot; seq: slot -> ids in perception order
     centres = lambda: {s["slot"]: (s["x"] + CENTER[0], s["y"] + CENTER[1]) for s in sprites(env) if s["slot"]}
     real_update = tracker.update
@@ -40,7 +41,7 @@ def check(run, steps=None, baseline=False, first=51):
             per = {"screen": "world", "text": [], "entities": [{k: e[k] for k in ("kind", "name", "at")} for e in row["entities"]]}
             world.pos = (t["x"], t["y"]); world.before(per, row["place"], prior, (160, 144), s); prior = row["place"]; c = centres()
             for i, e in enumerate(per["entities"]):
-                if i in world.entity_ids and e["kind"].casefold() != "player" and c:
+                if i in world.entity_ids and normalize_kind(e["kind"]) in ACTOR_KINDS and c:  # only what the model calls a character can be a sprite; a chair beside one is not
                     d, slot = min((max(abs(e["at"][0] * 160 - x), abs(e["at"][1] * 144 - y)), k) for k, (x, y) in c.items())
                     if d <= 12: owner[world.entity_ids[i]] = slot; seq[slot].append(world.entity_ids[i])
         for key in presses.get(s, []): env.press(key, 16); wait_settled(env)

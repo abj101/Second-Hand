@@ -88,3 +88,42 @@ def test_self_moving_npc_is_not_camera_drift(tmp_path):
         if not tracked: world.tracker.clear()
         world.observe_after(_per((88, 24), "girl"), frame(0, (80, 16)), False, "room", (W, H), 2)
         assert (world.drift is None) == tracked
+
+
+def test_phase_snaps_seed_and_near_to_sprite_centres():
+    tr = Tracker(); tr.phase = (8, 4)
+    tr.seed([("a", (79 / W, 89 / H), True)], frame(0))  # 7 px off the centre (72, 84)
+    assert (tr.tracks["a"]["x"], tr.tracks["a"]["y"]) == (72, 84)
+    assert tr.near((82 / W, 84 / H)) == "a" and tr.near((104 / W, 84 / H)) is None  # 10 px off matches; 32 px off (two cells) does not
+
+def test_no_phase_keeps_raw_point():
+    tr = Tracker(); tr.seed([("a", (79 / W, 89 / H), True)], frame(0))
+    assert (tr.tracks["a"]["x"], tr.tracks["a"]["y"]) == (79, 89)
+
+def test_world_sets_phase_from_motion_locked_player(tmp_path):
+    mem, world = _world(tmp_path)
+    world._self_from_motion, world.self_spot = True, (72 / W, 68 / H)
+    world.before(_per((40, 24), "girl"), "room", None, (W, H), 1)
+    assert world.tracker.phase == (8, 4)
+    world._self_from_motion = False
+    world.before(_per((40, 24), "girl"), "room", "room", (W, H), 2)
+    assert world.tracker.phase is None
+
+def test_npc_beside_chair_keeps_own_record(tmp_path):
+    mem, world = _world(tmp_path)
+    world.tracker.update(frame(0, (32, 16)))
+    def per(npc_x): return {"screen": "world", "text": [], "entities": [{"name": "player", "kind": "player", "at": [88 / W, 72 / H]},
+                                                                         {"name": "chair", "kind": "chair", "at": [40 / W, 24 / H]},
+                                                                         {"name": "girl", "kind": "person", "at": [npc_x / W, 24 / H]}]}
+    world.before(per(56), "room", None, (W, H), 1)
+    chair, npc = world.entity_ids[1], world.entity_ids[2]
+    world.before(per(56), "room", "room", (W, H), 2)
+    assert npc != chair and mem.get("entities", npc)["name"] == "girl"
+    assert "girl" not in (mem.get("entities", chair).get("aliases") or []) and mem.get("entities", chair)["name"] == "chair"
+
+def test_furniture_gets_no_pixel_track_hit(tmp_path):
+    _, world = _world(tmp_path)
+    world.tracker.update(frame(0, (32, 16)))
+    world.tracker.seed([("npc", (56 / W, 24 / H), True)], frame(0))  # a live NPC track one tile from the chair
+    assert world._hits({"entities": [{"name": "chair", "kind": "chair", "at": [40 / W, 24 / H]}]}) == {}
+    assert world._hits({"entities": [{"name": "girl", "kind": "person", "at": [56 / W, 24 / H]}]}) == {0: "npc"}

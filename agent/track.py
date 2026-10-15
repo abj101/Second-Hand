@@ -9,7 +9,13 @@ LOST_SCORE, GONE_FRAMES, BLOB = 30.0, 24, 6  # mean abs diff above which a still
 class Tracker:
     def __init__(self, tile_px: int = 16):
         self.tile_px, self.tracks, self.frame, self.arr, self.ignore = tile_px, {}, None, None, []  # ignore: boxes (x0, y0, x1, y1) of screen-fixed motion, set by World
+        self.phase = None  # (px, py): pixel phase of sprite centres, set by World from the player's motion-locked spot; None = unknown
     def clear(self): self.tracks = {}; self.frame = self.arr = None
+    def _snap(self, x, y):
+        # ponytail: assumes sprites at rest sit on the player's tile grid (true for grid games like Pokemon); a free-moving game needs a pixel search instead.
+        if self.phase is None: return x, y
+        t, (px, py) = self.tile_px, self.phase
+        return px + round((x - px) / t) * t, py + round((y - py) / t) * t
     def _patch(self, x, y):
         h, w = self.arr.shape[:2]; r = self.tile_px // 2; x, y = round(x), round(y)
         return self.arr[y - r:y + r, x - r:x + r] if r <= x <= w - r and r <= y <= h - r else None
@@ -19,13 +25,13 @@ class Tracker:
         if self.arr is None: return
         h, w = self.arr.shape[:2]
         for ident, (fx, fy), actor in items:
-            x, y = fx * w, fy * h; t = self.tracks.get(ident)
+            x, y = self._snap(fx * w, fy * h); t = self.tracks.get(ident)
             if t and t["status"] == "live" and max(abs(t["x"] - x), abs(t["y"] - y)) <= self.tile_px / 2: t["actor"], t["own"] = actor, (0, 0); continue
             self.tracks[ident] = {"x": x, "y": y, "actor": actor, "status": "live", "lost": 0, "own": (0, 0), "patch": self._patch(x, y)}
     def near(self, at, used=()):
         """The live track within a tile of the screen fraction `at` (nearest first), or None."""
         if self.arr is None: return None
-        h, w = self.arr.shape[:2]; x, y = at[0] * w, at[1] * h
+        h, w = self.arr.shape[:2]; x, y = self._snap(at[0] * w, at[1] * h)
         hits = [(max(abs(t["x"] - x), abs(t["y"] - y)), i) for i, t in self.tracks.items() if t["status"] == "live" and i not in used]
         d, i = min(hits, default=(2 * self.tile_px, None))
         return i if d <= self.tile_px else None

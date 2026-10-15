@@ -130,6 +130,7 @@ class World:
         player = next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         pa = self.self_spot if self._self_from_motion else self._anchor(per, size) if player else None
         self.pa = pa
+        self.tracker.phase = (round(pa[0] * size[0]) % self.tile_px, round(pa[1] * size[1]) % self.tile_px) if pa and self._self_from_motion and self.tile_px else None  # sprites rest on the player's grid
         px, py = (pa[0] * size[0], pa[1] * size[1]) if pa else (0, 0); self.tracker.ignore = [(max(0, int(px) - 10), max(0, int(py) - 10), int(px) + 10, int(py) + 10)] if pa else []  # the player animates in place: not a thing that moved
         proj = lambda at: tile_of(at, pa, self.pos, size, self.tile_px) if pa and self.tile_px and isinstance(at, list) and len(at) == 2 else None
         tiles = {i: t for i, e in enumerate(per.get("entities", [])) if e.get("kind", "").casefold() != "player" and (t := proj(e.get("at")))}
@@ -144,11 +145,11 @@ class World:
     def _hits(self, per):  # entity index -> id of the live pixel track under it (within a tile)
         hits = {}
         for i, e in enumerate(per.get("entities", [])):
-            if e.get("kind", "").casefold() != "player" and isinstance(e.get("at"), list) and len(e["at"]) == 2 and (t := self.tracker.near(e["at"], hits.values())): hits[i] = t
+            if normalize_kind(e.get("kind")) in ACTOR_KINDS and isinstance(e.get("at"), list) and len(e["at"]) == 2 and (t := self.tracker.near(e["at"], hits.values())): hits[i] = t  # only moving things have pixel tracks; furniture matches by name and tile
         return hits
     def _follow(self, per, ids):  # seed tracks for what was just perceived; a track lost in view for a while (no text box over it) means the thing left: "gone"
         self.tracker.seed([(ids[i], e["at"], self._actor(ids[i], e)) for i, e in enumerate(per.get("entities", []))
-                           if i in ids and e.get("kind", "").casefold() != "player" and isinstance(e.get("at"), list) and len(e["at"]) == 2])
+                           if i in ids and self._actor(ids[i], e) and e.get("kind", "").casefold() != "player" and isinstance(e.get("at"), list) and len(e["at"]) == 2])
         if per.get("screen") != "world" or per.get("text") or any(e.get("kind") == "dialogue_box" for e in per.get("entities", [])): return
         for ident in self.tracker.gone() - set(ids.values()):
             self.tracker.tracks.pop(ident)
