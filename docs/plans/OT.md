@@ -70,3 +70,18 @@ Option A built (tracks only, no prompt change, no overlay tags). OT1-OT4 done, s
 
 Deviations: (1) the association radius is one tile, not half: the model's points are 8-16 px off the real sprite. (2) Tracking uses the motion pixels, not a patch search (patch search latched onto background when the seed point was off). (3) No path drawn in the viewer.
 Open issues: replays diverge from recording around step 72/83, so the Pallet NPC wandering several tiles is only covered for a few perceptions; a track is seeded at the model's (inexact) point until it moves; a still NPC whose point is >1 tile off is still matched by name/tile (stage b); the "gone" rule has no menu detection beyond screen != world, text and dialogue_box. Live check (slice L) still needs a ledger cap.
+
+## 8. Slice L result (2026-10-15)
+
+Live run `runs/m1_ot_live`: a copy of `m1_decide3` resumed at checkpoint 100 (Pallet Town, 3 RAM sprites) for 60 steps (101-160). It used 113 requests; ledger 3538 -> 3651 of 3815 (cap +150 approved by the user, commit d5ec697). The agent stayed in Pallet Town: repeated NPC dialogue, with "surprise" verdicts on direction presses.
+
+| Steps 101-140, same start | old code (`m1_decide3`) | OT (`m1_ot_live`) |
+|---|---|---|
+| new actor records (3 real sprites) | 14 | 9 (none after step 140) |
+| actor records still on the map (seen/remembered/stale) | 33 | 4 |
+| records marked gone | 1 | 12 |
+| renames absorbed as aliases | 0 | 14 |
+
+`check_tracks` replay (it diverges from the live recording after 16 steps): id switches 2 vs 4 baseline, ghosts 4 vs 14, tracker error mean 6.4 px vs 14.0.
+
+Remaining: 9 new records is still about 3x the real sprite count. Likely causes are tracks seeded at the model's inexact point, and still NPCs perceived more than a tile off (see section 7 open issues).
