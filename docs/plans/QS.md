@@ -60,11 +60,14 @@ Planning audit 2026-10-14 (memory `project-planning-audit`; design §0). On m1_h
 
 ## 1. Entry criteria
 - HF1–HF5 committed (e5420d3). **The working tree has uncommitted edits** in `agent/loop.py`, `agent/memory.py`, `agent/world.py`, `scripts/run_agent.py`, `docs/plans/HF5.md`, `tests/agent/*` and the w0 golden trace (seen 2026-10-14). They must be committed or explicitly parked by the user before QS starts. If `git status --short agent scripts tests` shows changes you didn't make, stop and ask.
-- The baseline suite has been measured at entry, with TEMP/TMP set to `.tmp/qs/tmp` as the paste block says, and its count recorded in the Result. Expected, measured 2026-10-14 that way: **519 passed + 1 known failure** (`test_loop.py::test_stage_b_cap_override_keeps_phase_and_m1_limits`, "expected CallCap not raised"; budget-edit related, not QS). Any other failure: stop.
+- The baseline suite has been measured at entry, with TEMP/TMP set to `.tmp/qs/tmp` as the paste block says, and its count recorded in the Result. Expected, measured 2026-10-14 that way: **521 passed, 0 failed**. Any failure: stop.
 - History:
   - The first Sol entry attempt exited 3 because pytest couldn't use the sandbox TEMP.
   - The second attempt, with `--basetemp`, still failed `test_eval_run.py::test_e4_metrics_and_offline_repredict_preserve_chooser_guess`, because `_repredict()` uses `tempfile`. Redirecting TEMP/TMP fixes both.
   - `test_run_provenance.py::test_source_fingerprint_without_git_is_incomplete` sets `GIT_CEILING_DIRECTORIES`, so an in-repo temp folder doesn't count as a git checkout.
+  - The third attempt hit `PermissionError [WinError 5]` in `run_agent._ledger`'s rapid `tmp.replace`, because the sandbox briefly holds fresh files. It's fixed for real:
+    - `run_agent._replace` retries the replace, like `Notebook._save` does.
+    - The formerly "known" failure was a stale test with the old caps 2925/2875 hard-coded. It now reads `run_agent.TOTAL_CAP`/`M1_CAP`.
 - On disk: `runs/m1_hf_checkpoint_1`, `runs/m1_ip` (checkpoints 000100, 000125), `runs/m1_decide3`, `runs/m1_gp5`, and `.venv-agent`. The ROM is not needed: there's no emulator in this phase.
 - Ledger `runs/e3_budget.json` has been read at entry. If the remaining cap is < 6, QS.6's live part waits for a user cap decision. Everything else proceeds.
 

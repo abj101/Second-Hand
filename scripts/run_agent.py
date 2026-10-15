@@ -1,5 +1,5 @@
 """Checkpointed Pokémon Red runner for the E3 agent loop."""
-import argparse, hashlib, json, shutil, subprocess, sys
+import argparse, hashlib, json, shutil, subprocess, sys, time
 from datetime import datetime, timezone
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -12,6 +12,7 @@ from scripts.truth_pokered import read
 class CallCap(RuntimeError): pass
 MODEL = "gemma4:31b-cloud"
 MAX_HASHED_BYTES = 5 * 1024 * 1024
+TOTAL_CAP, M1_CAP = 3265, 3215  # persistent e3 ledger caps; raised only with user approval
 def _flag(name, value):
     dashed = name.replace("_", "-"); return f"--{dashed}" if value else f"--no-{dashed}"
 def resolve_modes(saved: dict | None, decide: bool | None, act_text: bool | None, *, resume: bool = False) -> tuple[dict, list[str]]:
@@ -56,6 +57,12 @@ def append_manifest(run: Path, record: dict) -> dict:
     row = {"invocation": count + 1, **record}
     with path.open("a", encoding="utf8") as f: f.write(json.dumps(row) + "\n")
     return row
+def _replace(tmp, path):  # Windows: a scanner or sandbox filter can hold the fresh temp file briefly (same as Notebook._save)
+    for wait in (0, .05, .1, .2, .4, .8):
+        time.sleep(wait)
+        try: return tmp.replace(path)
+        except PermissionError:
+            if wait == .8: raise
 def flag_manifest(run: Path, invocation: int, note: str) -> None:
     path = run / "manifest.jsonl"; rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     for row in rows:
@@ -71,16 +78,16 @@ def _ledger(run, stage, cap):
                 data = json.loads(path.read_text()) if path.exists() else {"total": 0}
                 if data["total"] >= 600: raise CallCap("persistent call budget exhausted")
                 data["total"] += 1
-                tmp = path.with_suffix(".tmp"); tmp.write_text(json.dumps(data)); tmp.replace(path)
+                tmp = path.with_suffix(".tmp"); tmp.write_text(json.dumps(data)); _replace(tmp, path)
                 return
             data = json.loads(path.read_text()) if path.exists() else {"total": 0, "smoke": 0, "m1": 0}
             bucket = "m1" if "m1" in str(run).lower() else "smoke"
             base = {"a":180,"b":300,"p":30,"q":60,"c":546}.get(stage)
             key, limit = (f"stage_{stage}", min(cap, base)) if stage and base else (None, None)
-            if data["total"] >= 3265 or data[bucket] >= (3215 if bucket == "m1" else 50) or (key and data.get(key,0) >= limit): raise CallCap("persistent call budget exhausted")
+            if data["total"] >= TOTAL_CAP or data[bucket] >= (M1_CAP if bucket == "m1" else 50) or (key and data.get(key,0) >= limit): raise CallCap("persistent call budget exhausted")
             data["total"] += 1; data[bucket] += 1
             if key: data[key] = data.get(key,0)+1
-            tmp = path.with_suffix(".tmp"); tmp.write_text(json.dumps(data)); tmp.replace(path)
+            tmp = path.with_suffix(".tmp"); tmp.write_text(json.dumps(data)); _replace(tmp, path)
         finally: lock.seek(0); msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
 def _truncate(path, step):
     if path.exists(): path.write_text("".join(line for line in path.read_text().splitlines(True)

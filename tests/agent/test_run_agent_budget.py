@@ -44,3 +44,15 @@ def test_e4_uses_separate_600_request_ledger(tmp_path, monkeypatch):
     with pytest.raises(CallCap): _ledger("runs/e4", None, 1000)
     assert json.loads(e4.read_text()) == {"total": 600}
     assert e3.read_bytes() == e3_before
+
+
+def test_ledger_write_retries_a_briefly_held_file(tmp_path, monkeypatch):
+    from pathlib import Path
+    monkeypatch.chdir(tmp_path); monkeypatch.setattr("time.sleep", lambda s: None)
+    real, held = Path.replace, [1]
+    def replace(self, target):
+        if held: held.pop(); raise PermissionError(5, "Access is denied")
+        return real(self, target)
+    monkeypatch.setattr(Path, "replace", replace)
+    _ledger("runs/m1", None, 0)
+    assert json.loads((tmp_path / "runs/e3_budget.json").read_text())["total"] == 1 and not held
