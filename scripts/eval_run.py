@@ -8,6 +8,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+_TACTICAL = re.compile(
+    r"\(\s*-?\d+\s*,\s*-?\d+\s*\)|"
+    r"\b(?:door|exit|stairs|mat|rug|gate)\w*\s*#\d|"
+    r"\b(?:press|move|walk|go|step|head)\s+(?:up|down|left|right|north|south|east|west)\b",
+    re.I,
+)
+
 MAPS = {"0x26": "Red's house 2F", "0x25": "Red's house 1F",
         "0x00": "Pallet Town", "0x28": "Oak's lab"}
 EDGES = (("0x26", "0x25"), ("0x25", "0x00"), ("0x00", "0x28"))
@@ -738,7 +745,6 @@ def _lifecycle(run):
     matches = sorted({quest_key(q) for q in quests if isinstance(q, dict) and quest_key(q) and
                       (tactical.search(str(q.get("text", ""))) or button_re and button_re.search(str(q.get("text", ""))))})
 
-    from agent.notebook import _TACTICAL
     created = {}
     for r in history:
         value = r.get("quest") if r.get("op") == "migrate_quest" else r.get("value")
@@ -835,7 +841,9 @@ def _lifecycle(run):
     for row in trace:
         p = row.get("plan")
         if not isinstance(p, dict) or not (re.search(r"no.progress|\bT4\b", str(p.get("trigger", "")), re.I) or any(isinstance(e, dict) and e.get("kind") == "T4" for e in p.get("events") or [])): continue
-        if "quests_changed" in p or "beliefs_changed" in p:
+        if isinstance(p.get("ops"), list):
+            unchanged = not any(isinstance(r, dict) and r.get("result") == "ok" for r in p["ops"])
+        elif "quests_changed" in p or "beliefs_changed" in p:
             unchanged = not p.get("quests_changed") and not p.get("beliefs_changed")
         else:
             unchanged = str(row.get("step")) not in changed_steps

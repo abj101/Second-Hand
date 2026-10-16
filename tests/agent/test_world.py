@@ -666,15 +666,15 @@ def test_loop_act_uses_world_facts_active_quests_and_labels(tmp_path, monkeypatc
     env = GridEnv(); model = StubModel([SimpleNamespace(data=per), SimpleNamespace(data=per)]); loop = Loop(env, model, mem, "grid")
     loop.place, loop.prev_frame = "home", env.screenshot()
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
-    loop.notebook.data["quests"] = [{"key": "find_chest", "text": "Find Chest", "status": "open"}]
-    loop.notebook.data["facts"] = {"chest": {"key": "chest", "text": "Chest is in Home", "from": "world", "source": "saw"}}
+    t1 = loop.notebook.heard(0, None, "Home", "Chest is in Home.")
+    loop.notebook.apply_ops([{"op": "add", "key": "find_chest", "text": "Find Chest", "why": [t1]}, {"op": "top", "key": "find_chest"}], 0)
     seen = {}
     monkeypatch.setattr(loop_module, "act", lambda *args, **kwargs: (seen.update(notebook=args[3], view=args[4], places=kwargs["places"]) or
                       SimpleNamespace(place="Home", ops=[], action=None, expect="none", why="test", text=None)))
 
     loop.step()
 
-    assert "Focus: find_chest" in seen["notebook"] and "Find Chest" in seen["notebook"] and "Chest is in Home" in seen["notebook"]
+    assert "Top quest: Find Chest" in seen["notebook"] and "Chest is in Home" in seen["notebook"]
     assert "Here: Home" in seen["view"] and "Thing" not in seen["view"]  # the ACT facts are compact: the options name the things
     assert "Thing" in loop.world.view(loop._goal_text(), "home") and "chest" in loop.world.view(loop._goal_text(), "home").casefold()  # the planner's view keeps them
     assert "Town [p_world]" in seen["places"] and "Town [p_world2]" in seen["places"]

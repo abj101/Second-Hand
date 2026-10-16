@@ -1,6 +1,6 @@
 # RCR R2: Quest state and planner contract
 
-Status: Phase A approved 10-15 · Phase B packet written (below), not started · Branch: feat/lean-agent · Evidence: `runs/m1_bedroom_live`
+Status: Phase A approved 10-15 · R2.1–R2.4 implemented 10-16; gate blocked (43 failed / 587 passed), see §9 Result · Branch: feat/lean-agent · Evidence: `runs/m1_bedroom_live`
 
 ## 1. Mechanism: the missing invariant
 
@@ -143,7 +143,7 @@ Offline checks (0 cloud calls):
 
 # Phase B: implementation packet (R2)
 
-Status: not started · Branch: feat/lean-agent · Approved solution: §1-§6 above, with the coordinator's rulings (MASTER §10).
+Status: implemented 10-16; full-suite gate blocked, no staging or commit · Branch: feat/lean-agent · Approved solution: §1-§6 above, with the coordinator's rulings (MASTER §10).
 
 **Changes from Phase A** (simplifications; the interfaces are unchanged):
 - **Target is one string.** The planner writes a place or thing name, our printed label, or a ref. `World.ref` resolves it, and the ref kind (`place:` means be there, `thing:` means talk to it) replaces the `reach`/`talk` fields.
@@ -171,7 +171,8 @@ Status: not started · Branch: feat/lean-agent · Approved solution: §1-§6 abo
 
 ## 1. Entry criteria
 - R1 has landed (`World.ref/canon/known/history`). The live-view work stays uncommitted, and R2 builds on top of it (user decision, MASTER §3). In R2's files, `agent/loop.py` and `tests/agent/test_loop.py` carry live-view hunks.
-- R4's gate commit exists. R2 then runs serially in the main tree. Because R2.1 removes `FINISHED`, `apply_plan` and the Notebook constructor args that loop.py imports, nothing in R2 runs in parallel with R4.
+- R4 gate: commit 3f521e8 (648 tests green on 10-16). It holds only R4's non-live files. R4's hunks in `agent/loop.py`, `observer.py`, `test_loop.py`, `test_observer.py` and `test_run_provenance.py` stay uncommitted next to the live-view hunks: the hold removal, the single walker, the result/`Stuck` wiring and the settle window. 3f521e8 alone does not run; the working tree is the only runnable R4. Treat every uncommitted hunk in those files as protected, R4's and live-view alike.
+- R2 then runs serially in the main tree. Because R2.1 removes `FINISHED`, `apply_plan` and the Notebook constructor args that loop.py imports, nothing in R2 runs in parallel with R4.
 - On disk: `runs/m1_bedroom_live` (calls.jsonl, trace.jsonl, memory/notebook.history, memory/relations.jsonl) and `.venv-agent`.
 
 ## 2. Gate
@@ -328,7 +329,7 @@ def plan(model, trigger: str, notebook, view: str, screen_text: list, recent: li
 - **Goal:** Loop uses `apply_ops`, `heard` and `observe`; T3 comes from id closures only; dead planner state is gone.
 - **Change `agent/loop.py`** (only these hunks; against R4's step order `settle → observe → maybe_plan → decide → resolve → execute → settle → observe → result → record`):
   1. Construct `Notebook(mem.root, ref=self.world.ref, canon=self.world.canon)`. Delete `_places` and `entered`, including their state and restore keys.
-  2. Plan site: call `results = self.notebook.apply_ops(p.ops, step, p.why)`. The plan row becomes `{"trigger", "events", "focus", "ops": results, "why"}`. R4's "changed nothing" test becomes `not any(r["result"] == "ok" for r in results)`. Delete `_apply_plan`'s quest diffing and `FINISHED`, plus `stall_unchanged`, the fallback quest and `plan_flags` if R4 left them.
+  2. Plan site: call `results = self.notebook.apply_ops(p.ops, step, p.why)`. The plan row becomes `{"trigger", "events", "focus", "ops": results, "why"}`. R4's "changed nothing" test becomes `not any(r["result"] == "ok" for r in results)`. Delete `_apply_plan`'s quest diffing and `FINISHED`, plus `stall_unchanged`, the fallback quest and `plan_flags` (R4 left all of them; also their `state`/`restore` keys and the "last stall changed nothing" evidence line). R4's T4 test in `_after_outcome` still reads `self.stall_unchanged > 0 and self.stuck.progress_n >= 10`; drop that clause so T4 fires only on `Stuck`'s `no_progress`.
   3. After the second settle/observe and before `result`: `self._closed(self.notebook.observe(step, f"place:{place}", talked), step, top)`. `talked` holds the `thing:<tid>` refs for which this step recorded a `says` relation (R1's speaker-binding site). `_closed` keeps T3 and `stuck.progress()` and drops `_chapter_due`.
   4. `_learn` world-screen text and `_flush_conversation`: `self.notebook.heard(step, speaker, self.world.place_label(place) if place else "?", text)` replaces `notebook.note(...)`. T1 is unchanged.
   5. Delete the chapter wiring (`chapter` import, `_chapter_due`, `chapter_after`, the `_after_outcome` chapter call).
@@ -347,7 +348,7 @@ def plan(model, trigger: str, notebook, view: str, screen_text: list, recent: li
   - `<py> -c "import json,subprocess as s;f='tests/agent/data/w0_golden/act/trace.jsonl';o=[json.loads(l) for l in s.run(['git','show','HEAD:'+f],capture_output=True,text=True).stdout.splitlines()];n=[json.loads(l) for l in open(f)];d=lambda r:{k:v for k,v in r.items() if k!='plan'};assert list(map(d,o))==list(map(d,n)),'non-plan fields changed'"`.
   - The golden is git-ignored but tracked: `git add -f` it at the gate.
 - **Acceptance:** `<py> -m pytest tests/agent/test_loop.py tests/agent/test_qs_e2e.py tests/agent/test_om_eval.py tests/agent/test_world_golden.py -q -p no:cacheprovider -n auto`, then `<live>`, then the full suite (§2).
-- **Live-view hunks:** before editing, save `git diff agent/loop.py tests/agent/test_loop.py > .tmp/r2/pre_r24.diff`. Edit only the R2 hunks listed above. Afterwards, every live-view hunk in the pre-snapshot must still be in the new diff (check by hand or with `git diff` hunk headers), and `<live>` must pass.
+- **Live-view hunks:** before editing, save `git diff agent/loop.py tests/agent/test_loop.py > .tmp/r2/pre_r24.diff`. Edit only the R2 hunks listed above. The snapshot holds R4's uncommitted hunks as well as the live-view ones (§1); keep both. Afterwards, every live-view hunk in the pre-snapshot must still be in the new diff (check by hand or with `git diff` hunk headers), and `<live>` must pass.
 - **Risk:** R4's restructure moves the speaker-binding site. Find it with CodeGraph `"says relate speaker call tid"`, not by line number.
 
 ## 6. Test layers
@@ -365,13 +366,131 @@ def plan(model, trigger: str, notebook, view: str, screen_text: list, recent: li
 - When the planner runs (R4); render_focus beyond the interim shape and the act prompt (R3); `World.view` contents (R3); refs, canon and history internals (R1); the perceiver; live runs; contracts.md edits.
 
 ## 9. Result (filled in by the orchestrator)
-- **Gate:** (each §2 metric with its number and command)
-- **Commit list:**
-  - R2-only, add at the gate: `agent/notebook.py`, `agent/plan.py`, `scripts/eval_plan.py`, `scripts/eval_act.py`, `tests/agent/test_notebook.py`, `tests/agent/test_plan.py`, `tests/agent/test_eval_plan.py`, `tests/agent/test_qs_e2e.py`, `tests/agent/test_om_eval.py`, the deleted `tests/agent/data/qs/notebook-v1.json`, the golden (`git add -f`), `docs/plans/rcr/R2-quests.md`.
-  - **live-view, do not add** unless the coordinator has asked the user: `agent/loop.py`, `tests/agent/test_loop.py`.
-- **Deviations:** —
-- **Contract text for the coordinator:** §4 above, plus any change.
-- **For S0 (`eval_run.py:778`):** plan rows no longer have `quests_changed`/`beliefs_changed`. "Unchanged" = `not any(r["result"] == "ok" for r in row["plan"]["ops"])`.
+
+**2026-10-16 (finalize): gate PASS.** The user authorized fixing the three blocked consumers, and a Haiku worker migrated them:
+- `scripts/eval_run.py` carries its own copy of the old `_TACTICAL` regex, since it is a measurement script. A T4 plan row counts as unchanged when it has an `ops` list with no `"ok"` result. The `quests_changed` and history fallbacks stay for old runs.
+- `test_harness_reliability.py` door/checkpoint test: the stub reply is now v3 `ops/why` citing a `heard` t-line. Its asserts check `data["text"]` and `Top quest:` after the restore.
+- `test_world.py` act test: the quest is seeded through `heard` + `apply_ops`, and the test expects `Top quest: Find Chest` plus the cited line.
+
+Orchestrator reruns:
+- Full suite: **630 passed, 0 failed** (77 s).
+- `<live>`: **11 passed**, and **9 passed**.
+- `eval_plan.py --check all`: exit 0.
+
+R2-only paths are committed. `agent/loop.py` and `tests/agent/test_loop.py` stay unstaged (live-view). The BLOCKED record below is kept as history.
+
+**2026-10-16: gate BLOCKED.** R2.1 through R2.4 were implemented serially in the main tree on `feat/lean-agent`, starting at `3f521e8`. No worktree, agent cloud calls, live agent runs, staging, commit or push. Every worker spawn explicitly used **gpt-6-luna, reasoning high**. All acceptance results below were run by the orchestrator.
+
+**Gate metrics (§2):**
+
+- **Suite: FAIL — 43 failed, 587 passed**, 25,434 warnings, 68.96 s, exit 1. Command: `<py> -m pytest tests/agent -q -p no:cacheprovider -n auto`.
+- **Live-view kept: PASS.** `<py> -m pytest tests/agent/test_realtime_env.py -q -p no:cacheprovider -n auto`: **11 passed**, exit 0. `<py> -m pytest tests/agent/test_observer.py tests/agent/test_track.py tests/agent/test_watch_run.py -k test_live -q -p no:cacheprovider -n auto`: **9 passed**, exit 0. These commands also passed at the earlier WP boundaries.
+- Preservation: compared `git diff agent/loop.py tests/agent/test_loop.py` to `.tmp/r2/pre_r24.diff` and the saved working-tree copies. R2 hunks only; continuous/live observation code and R4 behavior outside those hunks retained. `<py> .tmp/r2/check_preservation.py`: **15 protected tracked file hashes unchanged, 15 loop functions outside R2 unchanged, 2 live loop tests unchanged**, exit 0. The other changed test bodies concern retired planner state/evidence/check APIs. Existing untracked live-view files were not edited.
+- **S8: PASS.** `<py> scripts/eval_plan.py --run runs/m1_bedroom_live --check size`: six notebook renders **322, 724, 793, 1,076, 1,242, 1,242 chars**, maximum **1,242 ≤ 3,500**, exit 0. These are the R2 notebook sections; historical map/evidence/screen/recent fields absent from plan rows are shown as empty/default sections, so the printed prompt total is not a reconstruction of the original full planner prompt.
+- **S12 + S5a: PASS.** `<py> scripts/eval_plan.py --run runs/m1_bedroom_live --check ops`: six transcribed replies **410, 491, 240, 408, 349, 100 chars**, maximum **491 ≤ 600**; **14 ops, 14 result rows** (11 ok, 3 explicit errors), exit 0. Omission remains a visible no-op. S55's legacy source cannot be mapped and its add/top are refused; S76's add reaches the open cap. These refusals are printed, not silently repaired or counted as applied.
+- **S5b proxy: PASS.** `<py> scripts/eval_plan.py --run runs/m1_bedroom_live --check observe`: **7/7** targeted quests close exactly at steps **6, 20, 26, 41, 55, 58, 76**, exit 0.
+- **Finished-target re-adds: 0**, report only, from `--check ops`.
+- `<py> scripts/eval_plan.py --run runs/m1_bedroom_live --check all`: exit 0.
+- **Generic: PASS.** `rg -ni 'door|window|rug|stairs|oak|mom|next door' agent/notebook.py agent/plan.py`: no matches, expected exit **1**.
+- **Golden: PASS.** `W0_REGEN=1 <py> -m pytest tests/agent/test_world_golden.py -q -p no:cacheprovider`: **1 passed**, exit 0. The R2.4 comparison against HEAD, removing only each row's `plan`, exits 0: **all 8 rows' non-plan fields unchanged; 3 plan fields changed**. Only the tracked golden trace changed.
+- **S10 (report only): R2 agent net −421 lines.** Requested `git diff --stat agent/ scripts/eval_plan.py scripts/eval_act.py` was run; it also includes protected pre-existing live/R4 work, so the R2-only numbers below use the pre-R2.4 working-tree copies for shared files and HEAD for R2-only files. Code/tests/deleted fixture net **−1,229 lines**.
+- `git diff --check` on R2 code/tests: exit 0; only Git's CRLF notices. Existing SDL2 and Pillow warnings were not changed.
+
+**WP acceptance, run by the orchestrator:**
+
+- R2.1: `<py> -m pytest tests/agent/test_notebook.py -q -p no:cacheprovider` — **41 passed**; notebook **254 lines**. Notebook-only generic grep passed immediately; the two-file grep still matched the untouched old planner sentence until R2.2, then passed.
+- R2.2: `<py> -m pytest tests/agent/test_plan.py -q -p no:cacheprovider` — **4 passed**; planner **64 lines**.
+- R2.3: `<py> -m pytest tests/agent/test_eval_plan.py -q -p no:cacheprovider` — **3 passed**, plus the three replay commands above.
+- R2.4: `<py> -m pytest tests/agent/test_loop.py tests/agent/test_qs_e2e.py tests/agent/test_om_eval.py tests/agent/test_world_golden.py -q -p no:cacheprovider -n auto` — **134 passed**, exit 0, 45.92 s. Its required full-suite gate fails as recorded above.
+
+**Blocking failures and final attempt:**
+
+- **41 failures in `tests/agent/test_eval_run.py`** flow through `scripts/eval_run.py:741`, which imports the deliberately removed `agent.notebook._TACTICAL`.
+- `test_harness_reliability.py::test_door_crossing_keeps_place_identity_heard_facts_and_the_top_quest_through_a_checkpoint` still supplies the old `quests/facts/beliefs/note` planner reply and checks the old fact store. The v3 planner consumes `ops/why`.
+- `test_world.py::test_loop_act_uses_world_facts_active_quests_and_labels` still seeds `facts` and expects `Focus: find_chest`; R2's required interim render is `Focus:\nTop quest: ...\nBecause:` with cited t-lines.
+- Orchestrator isolated all three failure classes with `<py> -m pytest tests/agent/test_eval_run.py::test_lifecycle_replays_stuck_and_reads_v2_history tests/agent/test_harness_reliability.py::test_door_crossing_keeps_place_identity_heard_facts_and_the_top_quest_through_a_checkpoint tests/agent/test_world.py::test_loop_act_uses_world_facts_active_quests_and_labels -q -p no:cacheprovider --tb=short`: **3 failed**, exit 1. These are R2-induced integration gaps, not pre-existing failures.
+- The worker's first R2.4 preflight had **131 passed, 2 failed** (unset seeded `prev_frame`, removed `Plan.facts` assertion); one test-adaptation round produced **133 passed** before the orchestrator's acceptance. After the full-suite failure, the **one final same-tier attempt** was explicitly spawned as **gpt-6-luna high** with the measured failure output pasted into its prompt. It found **no contract-compliant repair within the WP's owned files** and made **no edits**. No tier escalation or compatibility shim was attempted.
+- `scripts/eval_run.py` is coordinator-owned; it and `tests/agent/test_eval_run.py`, `test_harness_reliability.py`, `test_world.py` are outside every R2 WP's ownership. The coordinator must authorize/perform those consumer and fixture migrations before this gate can pass. Restoring filters, facts/restatement, or old focus formatting would contradict §4. Stopped at this gate; no layered repair.
+- R2.3 used one repair round after the orchestrator's assertion reproduced `_cite(nb, 'b', [{'key': 'b', 'because': []}]) == []` instead of `['b']`. The same worker received that failure output, included same-reply belief keys, added a regression, and passed the orchestrator's rerun. No second R2.3 failure or final attempt was needed.
+
+**Net lines (before → after; R2-only):**
+
+- `agent/notebook.py`: **541 → 254 (−287)**.
+- `agent/plan.py`: **164 → 64 (−100)**.
+- `agent/loop.py`: **572 → 538 (−34)**, versus the pre-R2.4 working tree.
+- `scripts/eval_plan.py`: **215 → 312 (+97)**.
+- `scripts/eval_act.py`: **893 → 805 (−88)**.
+- `tests/agent/test_notebook.py`: **512 → 184 (−328)**.
+- `tests/agent/test_plan.py`: **151 → 59 (−92)**.
+- `tests/agent/test_eval_plan.py`: **0 → 93 (+93)**.
+- `tests/agent/test_loop.py`: **1,956 → 1,906 (−50)**, versus the pre-R2.4 working tree.
+- `tests/agent/test_qs_e2e.py`: **108 → 89 (−19)**.
+- `tests/agent/test_om_eval.py`: **333 → 185 (−148)**.
+- Deleted `tests/agent/data/qs/notebook-v1.json`: **273 → 0 (−273)**.
+- Replay tool growth is the legacy/current history adapter, three actual replay checks, printed section/result evidence and standalone CLI. Lines are report-only; no code was compressed to hit a line target.
+
+**Commit list:** **none; index remains empty and HEAD remains `3f521e8`** because the gate failed. R2-only changes remain unstaged: `agent/notebook.py`, `agent/plan.py`, `scripts/eval_plan.py`, `scripts/eval_act.py`, `tests/agent/test_notebook.py`, `tests/agent/test_plan.py`, new `tests/agent/test_eval_plan.py`, `tests/agent/test_qs_e2e.py`, `tests/agent/test_om_eval.py`, deleted v1 fixture, `tests/agent/data/w0_golden/act/trace.jsonl`, and this document. **`agent/loop.py` and `tests/agent/test_loop.py` remain unstaged**, carrying R2 plus protected live/R4 edits.
+
+Other pre-existing unstaged/untracked work retained: `agent/env_pyboy.py`, `agent/model.py`, `agent/observer.py`, `agent/track.py`; `scripts/run_agent.py`, `scripts/truth_pokered.py`, `scripts/watch_run.py`, `scripts/check_live_view.py`; `tests/agent/test_env.py`, `test_model.py`, `test_observer.py`, `test_run_provenance.py`, `test_track.py`, `test_watch_run.py`, `test_realtime_env.py`; `docs/plans/handoff-notes.md`, `docs/plans/rcr/MASTER.md`, `docs/plans/continuous-live-view.md`; `.claude/`. No MASTER, handoff-notes or contracts edit was made; the coordinator owns the cross-section handoff.
+
+**Contract text for the coordinator / R3:** §4 stands: v3 `Notebook.apply_ops(ops, step, why="")` returns one result per item; `heard` writes code-owned verbatim t-lines; `observe` closes canonical place/thing targets; quests retain ordered priority, dropped history and cited sources. `Plan` is `(ops, why)` with a 200-char why cap. Target is one string resolved by `World.ref`. Only observed closures emit T3/progress; planner done/drop do not. Interim `render_focus` shows the top quest, target label, cited game text and fitting recent move log; no beliefs, planner why or other quests. R3 owns its next rewrite. The private unused `_closed` top argument was removed with chapters.
+
+**For S0:** remove its dependency on the deleted filter and migrate v3 text/quest/op history consumers. Plan rows no longer have `quests_changed`/`beliefs_changed`. "Unchanged" = `not any(r["result"] == "ok" for r in row["plan"]["ops"])`. MASTER §8/§9 should receive the blocked gate, the −421 agent line delta and the measured replay numbers through the coordinator.
+
+**Recorded-run command output (orchestrator; all three commands exit 0):**
+
+`<py> scripts/eval_plan.py --run runs/m1_bedroom_live --check size`
+
+```text
+step 1: notebook_total=322 notebook_last_ops=24 notebook_last_why=16 notebook_open_quests=115 notebook_closed=17 notebook_held_beliefs=129 notebook_ruled_out=11 notebook_game_text=10 trigger=22 evidence=30 map=20 screen_text=24 recent=20 reply=288 prompt_total=732
+step 41: notebook_total=724 notebook_last_ops=24 notebook_last_why=16 notebook_open_quests=261 notebook_closed=17 notebook_held_beliefs=224 notebook_ruled_out=11 notebook_game_text=171 trigger=256 evidence=30 map=20 screen_text=24 recent=20 reply=288 prompt_total=1368
+step 55: notebook_total=793 notebook_last_ops=24 notebook_last_why=16 notebook_open_quests=330 notebook_closed=17 notebook_held_beliefs=224 notebook_ruled_out=11 notebook_game_text=171 trigger=39 evidence=30 map=20 screen_text=24 recent=20 reply=288 prompt_total=1220
+step 64: notebook_total=1076 notebook_last_ops=24 notebook_last_why=16 notebook_open_quests=397 notebook_closed=17 notebook_held_beliefs=319 notebook_ruled_out=11 notebook_game_text=292 trigger=120 evidence=30 map=20 screen_text=24 recent=20 reply=288 prompt_total=1584
+step 76: notebook_total=1242 notebook_last_ops=24 notebook_last_why=16 notebook_open_quests=466 notebook_closed=17 notebook_held_beliefs=416 notebook_ruled_out=11 notebook_game_text=292 trigger=39 evidence=30 map=20 screen_text=24 recent=20 reply=288 prompt_total=1669
+step 99: notebook_total=1242 notebook_last_ops=24 notebook_last_why=16 notebook_open_quests=466 notebook_closed=17 notebook_held_beliefs=416 notebook_ruled_out=11 notebook_game_text=292 trigger=27 evidence=30 map=20 screen_text=24 recent=20 reply=288 prompt_total=1657
+```
+
+`<py> scripts/eval_plan.py --run runs/m1_bedroom_live --check ops`
+
+```text
+step 1: source_reply_chars=1083 ops_json_chars=410
+  ops=[{"op": "believe", "key": "bel_game_freak_clue", "text": "The text 'GAME FREAK' is a clue or identifier for the game world", "because": []}, {"op": "add", "key": "explore_place_1", "text": "Investigate the surroundings of place 1", "why": ["bel_game_freak_clue"], "target": "place:p_place"}, {"op": "top", "key": "explore_place_1"}]
+  results=[{"op": "believe", "key": "bel_game_freak_clue", "result": "ok"}, {"op": "add", "key": "explore_place_1", "result": "ok"}, {"op": "top", "key": "explore_place_1", "result": "ok"}]
+step 41: omitted quests are no-ops: explore_place_1
+step 41: source_reply_chars=2220 ops_json_chars=491
+  ops=[{"op": "believe", "key": "bel_starting_room", "text": "Place 2 is Ash's bedroom", "because": []}, {"op": "add", "key": "explore_place_2", "text": "Investigate the objects in place 2", "why": ["bel_starting_room"], "target": null}, {"op": "add", "key": "find_exit_place_2", "text": "Find a way out of the current room", "why": ["bel_starting_room"], "target": null}, {"op": "top", "key": "explore_place_2"}]
+  results=[{"op": "believe", "key": "bel_starting_room", "result": "ok"}, {"op": "add", "key": "explore_place_2", "result": "ok"}, {"op": "add", "key": "find_exit_place_2", "result": "ok"}, {"op": "top", "key": "explore_place_2", "result": "ok"}]
+ERROR step 55: cannot map quest explore_place_3 source 'fact_reached_place_3' to a t-key or belief
+step 55: omitted quests are no-ops: find_exit_place_2
+step 55: source_reply_chars=3005 ops_json_chars=240
+  ops=[{"op": "add", "key": "explore_place_3", "text": "Determine the nature of place 3", "why": [], "target": null}, {"op": "top", "key": "explore_place_3"}]
+  results=[{"op": "add", "key": "explore_place_3", "result": "error: why must cite text or a belief"}, {"op": "top", "key": "explore_place_3", "result": "error: key is not open"}]
+step 64: omitted quests are no-ops: find_exit_place_2
+step 64: source_reply_chars=2178 ops_json_chars=408
+  ops=[{"op": "believe", "key": "bel_tiled_room_home", "text": "The tiled room is part of the player's home.", "because": []}, {"op": "add", "key": "meet_prof_oak", "text": "Find and speak with PROF. OAK", "why": ["bel_tiled_room_home"], "target": null}, {"op": "top", "key": "meet_prof_oak"}]
+  results=[{"op": "believe", "key": "bel_tiled_room_home", "result": "ok"}, {"op": "add", "key": "meet_prof_oak", "result": "ok"}, {"op": "top", "key": "meet_prof_oak", "result": "ok"}]
+step 76: omitted quests are no-ops: find_exit_place_2
+step 76: source_reply_chars=3574 ops_json_chars=349
+  ops=[{"op": "believe", "key": "bel_place_4_is_outside", "text": "Place 4 is the area outside the house.", "because": []}, {"op": "add", "key": "explore_place_4", "text": "Determine the nature of place 4", "why": ["bel_place_4_is_outside"], "target": null}]
+  results=[{"op": "believe", "key": "bel_place_4_is_outside", "result": "ok"}, {"op": "add", "key": "explore_place_4", "result": "error: maximum open quests reached"}]
+step 99: omitted quests are no-ops: find_exit_place_2, explore_place_1
+step 99: source_reply_chars=3956 ops_json_chars=100
+  ops=[]
+  results=[]
+re-adds of finished target: 0
+```
+
+`<py> scripts/eval_plan.py --run runs/m1_bedroom_live --check observe`
+
+```text
+talk thing:e_new_game: expected=6 closed=6
+talk thing:e_ash: expected=20 closed=20
+talk thing:e_new_name: expected=26 closed=26
+place place:p_place_2: expected=41 closed=41
+place place:p_place_3: expected=55 closed=55
+talk thing:e_character_3: expected=58 closed=58
+place place:p_place_4: expected=76 closed=76
+```
 
 ## 10. Handoff
 No `handoff-notes.md` rewrite from this section; the coordinator owns program memory in MASTER. Add the Result numbers to MASTER §8/§9 via the coordinator, and note in Result anything the R3 session needs for `render_focus`.

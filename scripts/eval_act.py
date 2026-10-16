@@ -1,6 +1,4 @@
 import argparse, hashlib, io, json, pickle, re, shutil, subprocess
-import math
-from copy import deepcopy
 from collections import Counter, defaultdict
 from pathlib import Path
 import sys
@@ -13,8 +11,7 @@ from agent.env_pyboy import PyBoyEnv, _INPUTS, find_rom
 from agent.loop import Loop
 from agent.memory import Memory
 from agent.model import ModelUnavailable, Ollama, Reply
-from agent.notebook import Notebook, _valid_check
-from agent import plan as plan_mod
+from agent.notebook import Notebook
 from agent.observer import for_model, wait_settled
 from agent.perceive import perceive
 from agent.space import DIRS
@@ -65,7 +62,7 @@ def report(summary, rows, steps, status, out):
 
 def main(argv=None):
     ap=argparse.ArgumentParser(); ap.add_argument("--frames",default=",".join(map(str,FRAMES))); ap.add_argument("--max-calls",type=int); ap.add_argument("--out",type=Path,default=OUT)
-    ap.add_argument("--run",default="m1_decide",help="--om truth/talk/plan: the recorded run"); ap.add_argument("--exact-exit",action="store_true",help="--om truth: ablate fix 2 (exact exit lookup)"); ap.add_argument("--strip-place",action="store_true",help="--om truth: a run recorded before the perceiver's place field"); ap.add_argument("--from-step",type=int,help="--om branch: checkpoint step; --om plan: planner checkpoint step"); ap.add_argument("--tries",type=int,help="--om plan: independent planner calls (1-8)"); ap.add_argument("--pick",help="--om branch: text of the option label to pick"); ap.add_argument("--om",choices=("places","cases","outcomes","truth","branch","talk","plan","reliability","act-size"),help="OM replay eval (no --max-calls needed); reliability: HF5 primitive + continuation check of --run at --from-step"); ap.add_argument("--live",action="store_true",help="--om cases: spend the requests; --om plan: spend up to --tries"); ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)"); ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)"); ap.add_argument("--fresh",action="store_true",help="--om cases/outcomes: rebuild the replay snapshots"); ap.add_argument("--arm",choices=("options","decide"),default="options",help="--om cases: decide = text-only act that answers {why, i}")
+    ap.add_argument("--run",default="m1_decide",help="--om truth/talk: the recorded run"); ap.add_argument("--exact-exit",action="store_true",help="--om truth: ablate fix 2 (exact exit lookup)"); ap.add_argument("--strip-place",action="store_true",help="--om truth: a run recorded before the perceiver's place field"); ap.add_argument("--from-step",type=int,help="--om branch/reliability/act-size: checkpoint step"); ap.add_argument("--pick",help="--om branch: text of the option label to pick"); ap.add_argument("--om",choices=("places","cases","outcomes","truth","branch","talk","reliability","act-size"),help="OM replay eval (no --max-calls needed); reliability: HF5 primitive + continuation check of --run at --from-step"); ap.add_argument("--live",action="store_true",help="--om cases: spend the requests"); ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)"); ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)"); ap.add_argument("--fresh",action="store_true",help="--om cases/outcomes: rebuild the replay snapshots"); ap.add_argument("--arm",choices=("options","decide"),default="options",help="--om cases: decide = text-only act that answers {why, i}")
     a=ap.parse_args(argv)
     if a.om: return om_main(a, ap)
     if a.max_calls is None: ap.error("the following arguments are required: --max-calls")
@@ -557,7 +554,8 @@ def om_branch(run, step, pick):
     return 0 if last["map"] != first["map"] else 1
 
 def _dialogue_entries(notebook):
-    return [e for e in notebook.log if re.match(r"[^:]+ at .+: \"", str(e.get("text", "")))]
+    return [{"step": e.get("step"), "text": f'{e.get("speaker") or "text"} at {e.get("where", "?")}: "{e.get("text", "")}"'}
+            for e in notebook.data["text"]]
 
 def om_talk(run):
     counter = {"requests": 0}; rec = stage(run); last = max(rec.trace)
@@ -620,16 +618,6 @@ def _plan_checkpoint(run, step):
     loop.restore(json.loads((cp / "harness.json").read_text(encoding="utf-8")))
     return loop, env
 
-def _plan_recent(run, step):
-    rows = sorted((r for r in _jsonl(Path("runs") / run / "trace.jsonl") if r.get("step", 0) <= step), key=lambda r: r["step"])[-5:]
-    return [f"{(r.get('choice') or {}).get('verb')} {(r.get('choice') or {}).get('target') or ''} -> {r.get('verdict')}" for r in rows]
-
-def _independent_notebook(source, root):
-    shutil.rmtree(root, ignore_errors=True)
-    notebook = Notebook(root)
-    notebook.data, notebook.log = deepcopy(source.data), deepcopy(source.log)
-    return notebook
-
 def om_act_size(run, step):
     """The decide prompt act would send at a checkpoint (0 requests: a capturing stub, never HTTP): characters and len/4 tokens."""
     loop, env = _plan_checkpoint(run, step)
@@ -649,75 +637,6 @@ def om_act_size(run, step):
         print(f"decide prompt chars={len(system) + len(user)} (system {len(system)} + user {len(user)}); tokens~{(len(system) + len(user)) / 4:.1f} (len/4); options={len(options)}")
         print(f"requests=0; ledger unchanged={before == _budget()}")
         return 0
-    finally: env.close()
-
-def om_plan(run, step, tries, live=False):
-    if not 1 <= tries <= 8: raise ValueError("--tries must be between 1 and 8")
-    loop, env = _plan_checkpoint(run, step)
-    try:
-        per = loop.prev or {}
-        recent = _plan_recent(run, step)
-        view = loop.world.view(loop._goal_text(), loop.place)
-        trigger = "stuck: no_progress"
-        if step == 125: loop.stall_unchanged = 1
-        evidence = loop._evidence()
-        if not live:
-            before = _budget()
-            class Capture:
-                captured = None
-                def ask(self, system, user, images=(), schema=None, *, role=""):
-                    self.captured = (system, user, schema)
-                    return Reply("", {}, 0.0, None, None)
-            capture = Capture()
-            plan_mod.plan(capture, trigger, loop.notebook, view, per.get("text", []), recent, evidence)
-            system, user, schema = capture.captured
-            prompt = system + "\n" + user
-            print(f"MIGRATED STATE:\n{json.dumps(loop.notebook.data, ensure_ascii=False, indent=2)}")
-            print(f"TRIGGER: {trigger}\nEVIDENCE:\n{evidence}")
-            print(f"SYSTEM:\n{system}\n\nUSER:\n{user}\n\nJSON SCHEMA:\n{json.dumps(schema, ensure_ascii=False)}")
-            print(f"prompt chars={len(prompt)}; tokens~{len(prompt)/4:.1f} (SYSTEM + USER, len/4)")
-            print(f"requests=0; ledger before={before}; after={_budget()}; unchanged={before == _budget()}")
-            return 0
-
-        before = _budget(); counter = {"requests": 0}; model = Ollama(OM_MODEL, cache_dir=None); post = model._post
-        def guarded(payload):
-            if counter["requests"] >= tries: raise run_agent.CallCap("planner request cap")
-            run_agent._ledger(Path("runs/m1_om"), None, 8)
-            counter["requests"] += 1
-            return post(payload)
-        model._post = guarded
-        successes, split = 0, {"revise_refute": 0, "reorder": 0}
-        print(f"ledger before={before}; tries={tries}; request cap={tries}")
-        for n in range(1, tries + 1):
-            trial = _independent_notebook(loop.notebook, _qs6_scratch(f"trials/{run}_{step}_{n}"))
-            try:
-                result = plan_mod.plan(model, trigger, trial, view, per.get("text", []), recent, evidence)
-                reconciled = trial.apply_plan(result, step, buttons=env.inputs())
-                quest_rows = [{k: q.get(k) for k in ("key", "text", "status", "why", "check")} for q in result.quests]
-                print(f"try {n}: quests={json.dumps(quest_rows, ensure_ascii=False)}; beliefs={json.dumps(result.beliefs, ensure_ascii=False)}; note={result.note!r}; why={result.why!r}; reconcile flags={json.dumps(reconciled['flags'], ensure_ascii=False)}")
-                if step == 100:
-                    named = {q.get("key") for q in result.quests}  # the model's own reply, not the leads reconcile kept
-                    heard = [q for q in trial.data["quests"] if q.get("key") in named and q.get("status") == "open" and trial._heard_quest(q)]
-                    checks = {q["key"]: "valid" if _valid_check(q.get("check")) else "needs check" if f"needs check {q['key']}" in reconciled["flags"] else "MISSING" for q in heard}
-                    rejected = [f for f in reconciled["flags"] if f.startswith("rejected")]
-                    print(f"try {n}: heard open={len(heard)}; checks={json.dumps(checks)}; rejected={len(rejected)}")
-                    successes += len(heard) >= 2 and "MISSING" not in checks.values() and not rejected
-                elif step == 125:
-                    changed_belief = any(b.get("status") in ("revised", "refuted") and str(b.get("reason", "")).strip() for b in result.beliefs)
-                    beliefs = set(loop.notebook.data["beliefs"]) | {b.get("key") for b in result.beliefs}
-                    order = [q.get("key") for q in result.quests]
-                    old_order = [q.get("key") for q in loop.notebook.data["quests"]]
-                    retained = set(order) & set(old_order)
-                    old_retained = [key for key in old_order if key in retained]
-                    new_retained = [key for key in order if key in retained]
-                    reordered = len(retained) >= 2 and old_retained != new_retained
-                    reordered_by_belief = reordered and any(beliefs & set([q.get("why")] if isinstance(q.get("why"), str) else q.get("why", [])) for q in result.quests)
-                    split["revise_refute"] += changed_belief; split["reorder"] += reordered_by_belief and not changed_belief
-                    print(f"try {n}: revise/refute={bool(changed_belief)}; reorder={bool(reordered_by_belief)}")
-                    successes += changed_belief or reordered_by_belief
-            except (run_agent.CallCap, ModelUnavailable) as e: print(f"try {n}: failed: {e}")
-        print(f"successes={successes}/{tries}; split={json.dumps(split)}; requests={counter['requests']}; ledger before={before}; after={_budget()}")
-        return 0 if successes >= math.ceil(2 * tries / 3) else 1
     finally: env.close()
 
 # ---- --om reliability (HF5 WP B): one production Loop step, from a copy of runs/<run>/checkpoint/<step>, executes the recorded
@@ -864,16 +783,10 @@ def om_main(a, ap):
     sys.stdout.reconfigure(encoding="utf-8")  # option labels carry arrows; a redirected cp1252 stdout cannot print them
     if a.arm == "decide": DECIDE, OM_CAP = True, 16
     if a.live and a.dry: ap.error("--live and --dry are exclusive")
-    if a.om in ("talk", "plan", "act-size") and not re.fullmatch(r"[A-Za-z0-9_-]+", a.run): ap.error("--run must be a run name")
+    if a.om in ("talk", "act-size") and not re.fullmatch(r"[A-Za-z0-9_-]+", a.run): ap.error("--run must be a run name")
     if a.om == "talk":
         if a.live: ap.error("--om talk is a zero-request replay")
     if a.om == "act-size" and (a.live or a.from_step is None): ap.error("--om act-size is a zero-request measure and requires --from-step")
-    if a.om == "plan":
-        if a.from_step is None: ap.error("--om plan requires --from-step")
-        if a.tries is None:
-            if a.live: ap.error("live --om plan requires --tries from 1 to 8")
-            a.tries = 1
-        if not 1 <= a.tries <= 8: ap.error("--om plan requires --tries from 1 to 8")
     if a.om == "places" and a.live: ap.error("--live applies to --om cases")
     if a.om == "reliability":
         if a.from_step is None: ap.error("--om reliability requires --from-step")
@@ -881,7 +794,6 @@ def om_main(a, ap):
     if a.om in ("places", "cases", "outcomes"): _old_perceiver()  # their recordings predate the place field
     try:
         if a.om == "talk": return om_talk(a.run)
-        if a.om == "plan": return om_plan(a.run, a.from_step, a.tries, a.live)
         if a.om == "act-size": return om_act_size(a.run, a.from_step)
         if a.om == "reliability": return om_reliability(a.run, a.from_step)
         return om_branch(a.run, a.from_step, a.pick) if a.om == "branch" else om_truth(a.run, no_names=a.strip_place, exact_exit=a.exact_exit) if a.om == "truth" else om_places() if a.om == "places" else om_outcomes(a.steps, a.fresh) if a.om == "outcomes" else om_cases(a.live, a.steps, a.fresh)

@@ -293,10 +293,8 @@ def test_door_crossing_keeps_place_identity_heard_facts_and_the_top_quest_throug
     env = Track()  # the door at (10,8) opens into scene 1
     grid_perception(monkeypatch, env)
     root = tmp_path / "memory"
-    plan = {"quests": [{"key": "g1", "text": "Find the person next door", "why": ["find_person"], "status": "open",
-                        "done_when": "speak to them"}],
-            "facts": [{"key": "find_person", "text": "A person next door is looking for you.", "from": "MOM", "source": "heard"}],
-            "beliefs": [], "note": "Find the person who is looking for me.", "why": "heard a lead"}
+    plan = {"ops": [{"op": "add", "key": "g1", "text": "Find the person next door", "why": ["t1"]},
+                    {"op": "top", "key": "g1"}], "why": "heard a lead"}
     class LocalPlanModel(StubModel):
         def ask(self, *args, **kwargs):
             if kwargs.get("role") == "plan":
@@ -305,6 +303,7 @@ def test_door_crossing_keeps_place_identity_heard_facts_and_the_top_quest_throug
             return super().ask(*args, **kwargs)
     loop = loop_for(env, tmp_path, [])
     loop.model = LocalPlanModel([])
+    assert loop.notebook.heard(0, "MOM", "room", "A person next door is looking for you.") == "t1"
     monkeypatch.setattr(loop_module, "act", pick(lambda o: o["label"].startswith("possible exit door")))
 
     first = loop.step()
@@ -314,7 +313,7 @@ def test_door_crossing_keeps_place_identity_heard_facts_and_the_top_quest_throug
     assert env.scene == 1 and first["place"] != second["place"] and [c["n"] for c in loop.mem.rows("crossings")] == [1]  # one departure crossing
     assert loop.notebook.focus == "g1" and loop.notebook.data["quests"][0]["key"] == "g1" and loop.notebook.data["quests"][0]["status"] == "open"
     saved = json.loads((root / "notebook.json").read_text(encoding="utf8"))
-    assert saved["facts"]["find_person"]["source"] == "heard"
+    assert saved["text"][0]["key"] == "t1" and saved["text"][0]["speaker"] == "MOM"
 
     state = json.loads(json.dumps(loop.state()))
     resumed = Loop(env, StubModel([]), Memory(root), "grid"); resumed.restore(state)
@@ -322,5 +321,5 @@ def test_door_crossing_keeps_place_identity_heard_facts_and_the_top_quest_throug
 
     assert again["place"] == second["place"] and resumed.place == loop.place  # the same room keeps its identity after the restore
     assert resumed.notebook.focus == "g1" and resumed.notebook.data["quests"][0]["key"] == "g1" and resumed.notebook.data["quests"][0]["status"] == "open"
-    assert resumed.notebook.data["facts"]["find_person"]["source"] == "heard"
-    assert resumed.notebook.data["facts"]["find_person"]["text"].startswith("A person next door")
+    assert resumed.notebook.data["text"][0]["text"].startswith("A person next door")
+    assert "Top quest: Find the person next door" in resumed.notebook.render_focus()

@@ -8,12 +8,11 @@ from agent.memory import Memory
 from tests.agent.fakes import GridEnv
 
 SCENE = {"screen": "world", "text": [], "entities": [{"name": "player", "kind": "player", "at": [.5, .5]}]}
-EMPTY_PLAN = {"focus": "", "quests": [], "beliefs": [], "facts": [], "note": "", "why": "nothing new"}
-CHAPTER = {"summary": "The guide was met at the lab.", "ruled_out": [], "open_leads": []}
+EMPTY_PLAN = {"ops": [], "why": "nothing new"}
 
 
 class Scripted:
-    """Answers by role: plan replies come from a queue (then an empty plan), chapter calls get a valid chapter."""
+    """Answers plan calls from a queue, then returns an empty plan."""
     def __init__(self, plans=()): self.plans, self.queue, self.calls, self.roles = [], list(plans), 0, []
 
     def ask(self, system, user, images=(), schema=None, *, role=""):
@@ -21,7 +20,7 @@ class Scripted:
         if role == "plan":
             self.plans.append(user)
             return SimpleNamespace(data=self.queue.pop(0) if self.queue else EMPTY_PLAN, text="")
-        return SimpleNamespace(data=CHAPTER if role == "chapter" else {}, text="")
+        return SimpleNamespace(data={}, text="")
 
 
 def scene(monkeypatch):
@@ -40,11 +39,6 @@ def new_loop(tmp_path, model):
     loop = Loop(StillEnv(), model, Memory(tmp_path / "memory"), "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     return loop
-
-
-def talk(loop, text):  # a dialogue screen, then the world: the conversation flushes into the log and queues T1
-    step = loop.step_no + 1
-    loop._learn([text], [], step, loop.place, "dialogue"); loop._learn([], [], step, loop.place, "world")
 
 
 def test_planner_calls_are_bounded_and_events_never_lost(tmp_path, monkeypatch):
@@ -71,38 +65,25 @@ def test_planner_calls_are_bounded_and_events_never_lost(tmp_path, monkeypatch):
     assert {e["kind"] for e in consumed} >= {"T1", "T2", "T5"}
 
 
-def test_heard_quest_closes_by_check_and_compacts_across_restore(tmp_path, monkeypatch):
+def test_targeted_quest_closes_by_id_after_checkpoint_restore(tmp_path, monkeypatch):
     scene(monkeypatch)
-    heard_plan = {"focus": "", "beliefs": [], "note": "A guide waits at the lab.", "why": "heard a lead",
-                  "facts": [{"key": "guide_lead", "text": "A guide waits at the lab.", "from": "MOM", "source": "heard"}],
-                  "quests": [{"key": "meet_guide", "text": "Meet the guide at the lab", "why": ["guide_lead"], "done_when": "the guide speaks",
-                              "status": "open", "check": {"kind": "speak", "arg": "Guide"}}]}
-    model = Scripted([heard_plan])
+    model = Scripted()
     loop = new_loop(tmp_path, model)
-    loop.step()  # T5: nothing known yet, an empty plan
-    talk(loop, "MOM: Go and meet the guide at the lab.")
-    for _ in range(4):  # T1 plans once the floor passes
-        loop.step()
-        if loop.notebook.data["quests"]: break
-    quest = loop.notebook.data["quests"][0]
-    assert quest["key"] == "meet_guide" and quest["check"] == {"kind": "speak", "arg": "Guide"} and loop.notebook._heard_quest(quest)
-
-    talk(loop, "GUIDE: Welcome to the lab.")  # the speaker's line, after the quest opened
-    loop.step()  # run_checks closes it; a heard quest closing compacts: one chapter call
-    assert loop.notebook.data["quests"][0]["status"] == "done" and model.roles.count("chapter") == 1
-    assert [e["kind"] for e in loop.events].count("T3") == 1
-    chapters = loop.notebook.data["chapters"]
-    assert chapters[0]["summary"] == CHAPTER["summary"] and loop.notebook.data["notes"] == []
-
-    state = json.loads(json.dumps(loop.state()))  # a checkpoint restore mid-run, with the notebook reloaded from disk
+    loop.mem.upsert("places", {"id": "lab", "name": "Lab", "screen": "world", "state": "place", "visits": 1})
+    loop.notebook.heard(0, "MOM", "house", "Go to the lab.")
+    loop.notebook.apply_ops([{"op": "add", "key": "meet_guide", "text": "Meet the guide at the lab",
+                             "why": ["t1"], "target": "place:lab"}], 1, "heard a lead")
+    state = json.loads(json.dumps(loop.state()))
     resumed = new_loop(tmp_path, model)
     resumed.restore(state)
-    assert resumed.events == loop.events and resumed.notebook.data["quests"] == loop.notebook.data["quests"]
-    assert resumed.notebook.data["chapters"] == chapters and resumed.notebook.data["notes"] == loop.notebook.data["notes"]
+    resumed.mem.match_place = lambda *args, **kwargs: "lab"
+    resumed._plan_trigger = lambda per: None
 
-    before = len(model.plans)
-    for _ in range(4):
-        resumed.step()
-        if len(model.plans) > before: break
-    assert len(model.plans) == before + 1 and "T3" not in [e["kind"] for e in resumed.events]
-    assert "quest meet_guide closed" in model.plans[-1] and CHAPTER["summary"] in model.plans[-1]  # the next planner prompt holds the chapter
+    row = resumed.step()
+
+    quest = resumed.notebook.data["quests"][0]
+    assert quest["key"] == "meet_guide" and quest["target"] == "place:lab"
+    assert quest["status"] == "done" and quest["closed"] == 1
+    assert [event["kind"] for event in resumed.events] == ["T3"]
+    assert row["verdict"] == "progress" and resumed.stuck.progress_n == 0
+    assert model.plans == []

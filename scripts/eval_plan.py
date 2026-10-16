@@ -1,214 +1,311 @@
-"""Offline eval of the goal planner, notebook and act on recorded Pokemon Red situations (P1/P2 in runs/m1_ps_fp, P3 in runs/m1_gp)."""
+"""Offline replays for planner size, op transcription, and target closure."""
+
 import argparse
 import json
 import re
-import shutil
 import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PIL import Image
-
-from agent.act import act
-from agent.brief import _load, defaults
 from agent.memory import Memory
-from agent.model import ModelUnavailable, Ollama
 from agent.notebook import Notebook
-from agent.plan import Plan, plan
+from agent.plan import REPLY, plan
 from agent.world import World
-from scripts.eval_frames import BUTTONS, GAME, _guarded_post
-from scripts.run_agent import CallCap, _ledger
-
-RUN_NAME = "m1_gp_eval"
-CASES = {"P1": ("runs/m1_ps_fp", 80, 82), "P2": ("runs/m1_ps_fp", 80, 82), "P3": ("runs/m1_gp", 75, 88), "P4": ("runs/m1_gp2", 125, 127)}  # run, checkpoint step, situation step
-OUT = ROOT / ".tmp/qs/qs5/eval_plan.json"
-P_OK, P_BAD = re.compile(r"door|rug|mat|exit|outside|leave|way out|front"), re.compile(r"stair|upstairs|2f|bed")
-A_OK, A_BAD = re.compile(r"door|rug|mat|exit|outside|bottom|south"), re.compile(r"stair|mom|mother|woman|lady")
-TRIGGER_P1 = "new game text was seen (see the log)"
-TRIGGER_P2 = "focus use_stairs blocked: the stairs lead up to the bedroom on 2F where I started, not outside"
-TRIGGER_P3 = "no focus goal yet"
-GOALS = [("top", {"text": "Finish the game", "status": "active", "parent": None}),
-         ("find_oak", {"text": "Find Prof. Oak", "parent": "top", "source": "heard",
-                       "evidence": "PROF. OAK, next door, is looking for you.", "status": "active"}),
-         ("leave_house", {"text": "Leave the house", "parent": "find_oak", "done_when": "the screen shows outdoors", "status": "active"}),
-         ("use_stairs", {"text": "Leave via the stairs", "parent": "leave_house", "status": "active"})]
-DRY = {"plan": {"quests": [{"key": "door", "text": "Leave by the door at the bottom of 1F", "parent": None,
-                              "check": {"kind": "reach", "arg": "outdoors"}, "status": "open"}],
-                "beliefs": [], "facts": [], "note": "", "why": "dry"},
-       "act": {"place": "x", "notebook": [], "action": {"go_to": "door"}, "text": None, "expect": "place_changes", "why": "dry"}}
 
 
-class DryModel:
-    def ask(self, system, user, images=(), schema=None, *, role=""):
-        return SimpleNamespace(data=DRY[role], text="", ms=0, prompt_tokens=0, output_tokens=0)
+def _rows(path):
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _setup(tmp, case):
-    run, ck, _ = CASES[case]
-    checkpoint = ROOT / run / "checkpoint" / f"{ck:06d}"; trace_path = ROOT / run / "trace.jsonl"
-    state = json.loads((checkpoint / "harness.json").read_text(encoding="utf-8"))
-    shutil.copytree(checkpoint / "memory", tmp / "memory")
-    mem = Memory(tmp / "memory")
-    world = World(mem, 16); world.restore(state); world.current_place = state["place"]
-    if case == "P4":  # the live notebook at the bounce, copied as-is (goals, focus, log); trigger is Loop._moved's text
-        nb_dir = tmp / "nb"; nb_dir.mkdir()
-        for name in ("notebook.json", "notebook.history"): shutil.copy(checkpoint / "memory" / name, nb_dir / name)
-        return world, Notebook(nb_dir), f"cycle: went back and forth between {world.place_label('p_world_2')} and {world.place_label('p_world')} 4 times in 8 steps without progress"
-    if case == "P3":  # the live log at the stall; goals/lessons written under the old planner prompt are cleared
-        nb_dir = tmp / "nb"; nb_dir.mkdir()
-        for name in ("notebook.json", "notebook.history"): shutil.copy(checkpoint / "memory" / name, nb_dir / name)
-        nb = Notebook(nb_dir); nb.data = {"quests": [], "beliefs": {}, "facts": {}, "notes": [], "chapters": []}
-        return world, nb, TRIGGER_P3
-    nb = Notebook(tmp / "nb")
-    # the log the live loop would have written by step 80: game text and moves between places (Loop._learn / Loop._moved)
-    events = [(r["step"], f'text: "{r["text"]}"') for r in mem.rows("knowledge") if r.get("src") == "game_text" and r["step"] <= ck]
-    rows = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    moved = lambda a, b, via: f"went from {world.place_label(a)} to {world.place_label(b)}" + (f" via {via}" if via else "")
-    for prev, row in zip(rows, rows[1:]):
-        if row["step"] > ck: break
-        if prev.get("next_place") and row["place"] != prev["next_place"]: events.append((row["step"], moved(prev["next_place"], row["place"], "a step taken to locate yourself")))
-        if row.get("next_place") and row["next_place"] != row["place"]: events.append((row["step"], moved(row["place"], row["next_place"], (row.get("choice") or {}).get("target"))))
-    for step, text in sorted(events, key=lambda e: e[0]): nb.note(step, text)
-    if case == "P1":
-        return world, nb, TRIGGER_P1
-    nb.note(79, 'talked to Mom; she said: "All boys leave home some day." and "PROF. OAK, next door, is looking for you."')
-    seeded = [{"key": k, **v} for k, v in GOALS]
-    nb.apply_plan(Plan(seeded, [], [], "", "seeded case"), 80)
-    if case == "P2":
-        blocked = [dict(q, status="blocked") if q["key"] == "use_stairs" else q for q in seeded]
-        nb.apply_plan(Plan(blocked, [], [], "", "stairs disproved"), 81)
-    nb.note(81, "stairs lead up to the bedroom on 2F where I started, not outside")
-    return world, nb, TRIGGER_P2
+def _world(run):
+    return World(Memory(Path(run) / "memory"), 16)
 
 
-def _p_pass(focus, goal, *_):
-    text = f'{goal.get("text", "")} {goal.get("done_when", "")}'.casefold()
-    return bool(focus) and bool(P_OK.search(text)) and not P_BAD.search(text)
+def _text_from_log(value, step, rows):
+    match = re.match(r"(.+?) at ([^:]+):\s*(.*)$", str(value), re.S)
+    if not match:
+        return
+    speaker, where, text = match.groups()
+    text = text.strip()
+    if text.startswith('"') and text.endswith('"'):
+        text = text[1:-1]
+    rows.append({"key": f"t{len(rows) + 1}", "step": step,
+                 "speaker": None if speaker.casefold() == "text" else speaker,
+                 "where": where, "text": text})
 
 
-P3_OK, P3_BAD = re.compile(r"explor|exit|stair|door|unseen|new|leave|room|area", re.I), re.compile(r"\b(?i:press|button|up|down|left|right|start|select)\b|\bA\b|\bB\b")
+def _legacy_quest(row, world):
+    q = dict(row)
+    q["key"] = str(q.get("key") or q.get("id") or "")
+    q["text"] = str(q.get("text") or "")
+    q["why"] = q.get("why", [])
+    status = q.get("status")
+    q["status"] = status if status in ("done", "dropped") else "open"
+    check = q.get("check")
+    raw_target = q.get("target") or (check.get("arg") if isinstance(check, dict) else None)
+    q["target"] = world.ref(raw_target) if raw_target is not None else None
+    q["label"] = raw_target
+    q.setdefault("opened", 0)
+    q.setdefault("closed", None)
+    q.setdefault("reason", "")
+    return q
 
 
-def _p3_pass(focus, goal, *_):  # case-sensitive A/B so the article "a" is not read as a button
-    text = f'{goal.get("text", "")} {goal.get("done_when", "")}'
-    return bool(focus) and bool(P3_OK.search(text)) and not P3_BAD.search(text)
+def notebook_at(run: Path, step: int) -> Notebook:
+    """Build a v3 notebook from the history events no later than step."""
+    run = Path(run)
+    scratch = tempfile.TemporaryDirectory(prefix="eval-plan-")
+    world = _world(run)
+    nb = Notebook(Path(scratch.name), ref=world.ref, canon=world.canon)
+    nb._scratch = scratch
+    nb.data = {"text": [], "quests": [], "beliefs": {}, "last": {}}
+    for event in _rows(run / "memory" / "notebook.history"):
+        at = event.get("step", 0)
+        if type(at) is int and at > step:
+            continue
+        op = event.get("op")
+        if op == "quests" and isinstance(event.get("value"), list):
+            nb.data["quests"] = [_legacy_quest(q, world) for q in event["value"] if isinstance(q, dict)]
+        elif op in ("add", "done", "drop", "top", "target", "observe") and isinstance(event.get("quest"), dict):
+            q = event["quest"]
+            prior = next((i for i, old in enumerate(nb.data["quests"]) if old.get("key") == q.get("key")), None)
+            if prior is not None:
+                nb.data["quests"].pop(prior)
+            if op == "add" or prior is not None:
+                index = 0 if op == "top" else min(prior if prior is not None else len(nb.data["quests"]), len(nb.data["quests"]))
+                nb.data["quests"].insert(index, q)
+        elif op in ("belief", "believe", "refute"):
+            belief = event.get("value", event.get("belief"))
+            if isinstance(belief, dict) and belief.get("status") in ("held", "refuted"):
+                nb.data["beliefs"][belief.get("key", event.get("key"))] = belief
+        elif op == "text" and isinstance(event.get("value"), dict):
+            nb.data["text"].append(event["value"])
+        elif op == "log":
+            _text_from_log(event.get("text", ""), at, nb.data["text"])
+        elif op == "last" and isinstance(event.get("value"), dict):
+            nb.data["last"] = event["value"]
+    return nb
 
 
-def _target(action, entities):
-    if not action:
-        return ""
-    if "go_to" in action:
-        return action["go_to"]
-    if "thing" in action:
-        return entities[action["thing"]].get("name", "")
-    return ""
+class _Capture:
+    def ask(self, system, user, images, schema, role):
+        self.prompt = user
+        return SimpleNamespace(data={"ops": [], "why": ""})
 
 
-def _a_pass(action, target, why):
-    buttons = (action or {}).get("buttons") or []
-    down = buttons.count("DOWN") * 2 > len(buttons) if buttons else False
-    text_ok = bool(A_OK.search(f"{target} {why}".casefold())) and not A_BAD.search(target.casefold())
-    return down or text_ok
+def _size(run):
+    failed = False
+    for row in _rows(Path(run) / "trace.jsonl"):
+        if "plan" not in row or row["plan"] is None:
+            continue
+        state = row["plan"] if isinstance(row["plan"], dict) else {}
+        nb = notebook_at(run, row.get("step", 0))
+        trigger = str(state.get("trigger", ""))
+        evidence, view = state.get("evidence"), state.get("view", "")
+        screen_text, recent = state.get("screen_text", []), state.get("recent", [])
+        capture = _Capture()
+        plan(capture, trigger, nb, view, screen_text, recent, evidence)
+        rendered = nb.render()
+        section_starts = (("last_ops", "Your last ops ("), ("last_why", "Your last why:"),
+                           ("open_quests", "Open quests (first is worked on now):"),
+                           ("closed", "Recently closed:"), ("held_beliefs", "Held beliefs:"),
+                           ("ruled_out", "Ruled out:"), ("game_text", "Game text:"))
+        lines = rendered.splitlines(keepends=True)
+        starts = [(next((i for i, line in enumerate(lines) if line.startswith(marker)), len(lines)), name)
+                  for name, marker in section_starts]
+        starts = sorted((i, name) for i, name in starts if i < len(lines))
+        internal = {name: len("".join(lines[i:starts[n + 1][0] if n + 1 < len(starts) else len(lines)]))
+                    for n, (i, name) in enumerate(starts)}
+        sections = {
+            "notebook_total": len(rendered), **{f"notebook_{key}": size for key, size in internal.items()},
+            "trigger": len(f"Trigger: {trigger}"),
+            "evidence": len(f"Evidence since last plan: {evidence or 'none'}"),
+            "map": len(f"Map and memory: {view or 'none'}"),
+            "screen_text": len(f"Text on screen now: {'; '.join(map(str, screen_text)) or 'none'}"),
+            "recent": len(f"Recent actions: {'; '.join(recent) or 'none'}"), "reply": len(REPLY),
+        }
+        sections["prompt_total"] = len(capture.prompt)
+        print(f"step {row.get('step')}: " + " ".join(f"{key}={size}" for key, size in sections.items()))
+        if sections["notebook_total"] > 3500:
+            failed = True
+            print(f"FAIL step {row.get('step')}: notebook render is over 3500 chars")
+    return 1 if failed else 0
 
 
-def _a3_pass(action, target, why):  # why is unused: P3 scores the action only
-    action = action or {}
-    go, buttons = action.get("go_to", ""), action.get("buttons") or []
-    return go == "unexplored" or bool(re.search(r"stair|exit|door", f"{go} {target}", re.I)) or any(b in ("UP", "RIGHT") for b in buttons)
+def _reply(raw):
+    if isinstance(raw, dict):
+        return raw
+    text = str(raw or "")
+    try:
+        return json.loads(text)
+    except ValueError:
+        match = re.search(r"\{.*\}", text, re.S)
+        return json.loads(match.group()) if match else {}
 
 
-P4_BAD, A4_BAD = re.compile(r"\b(enter|go into|back into)\b.*\b(house|home|building|room)\b|door ?mat|room edge|reach_room_edge"), re.compile(r"door|mat|house|entrance|home", re.I)
+def _cite(nb, value, candidates=()):
+    refs = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+    known = {row.get("key") for row in nb.data["text"]} | set(nb.data["beliefs"])
+    candidate_keys = {belief.get("key") for belief in candidates if isinstance(belief, dict)}
+    found = [key for key in refs if key in known | candidate_keys]
+    if found:
+        return found
+    return [belief.get("key") for belief in candidates if isinstance(belief, dict)
+            and belief.get("key") and any(ref in (belief.get("because") if isinstance(belief.get("because"), list)
+                                                  else [belief.get("because")]) for ref in refs)][:1]
 
 
-def _p4_pass(focus, goal, old, nb):  # after the bounce: a new focus, or the old one closed
-    text = f'{goal.get("text", "")} {goal.get("done_when", "")}'.casefold()
-    old_status = next((q.get("status") for q in nb.data.get("quests", [])
-                       if q.get("key") == old or q.get("id") == old), None)
-    return bool(focus) and not P4_BAD.search(text) and (focus != old or old_status in ("blocked", "dropped", "closed", "done"))
+def _ops(run):
+    world = _world(run)
+    failed = False
+    readds = 0
+    for call in _rows(Path(run) / "calls.jsonl"):
+        if call.get("role") != "plan":
+            continue
+        step = int(call.get("step", 0))
+        raw = call.get("response", "")
+        try:
+            reply = _reply(raw)
+        except (ValueError, TypeError):
+            reply = {}
+        prior = notebook_at(run, max(0, step - 1))
+        ops = reply.get("ops") if isinstance(reply.get("ops"), list) else None
+        if ops is None:
+            quests = [q for q in reply.get("quests", []) if isinstance(q, dict)]
+            beliefs = [b for b in reply.get("beliefs", []) if isinstance(b, dict)]
+            old = {q.get("key"): q for q in prior.data["quests"]}
+            returned = {v.get("key") for v in quests}
+            omissions = [q.get("key") for q in prior.data["quests"]
+                         if q.get("status") == "open" and q.get("key") not in returned]
+            ops = []
+            for belief in beliefs:
+                key, status = belief.get("key"), belief.get("status", "held")
+                existing = prior.data["beliefs"].get(key, {})
+                if key not in prior.data["beliefs"] and status in ("held", "refuted", "revised"):
+                    ops.append({"op": "believe", "key": key, "text": belief.get("text", ""),
+                                "because": _cite(prior, belief.get("because"))})
+                    existing = {"status": "held"}
+                if existing.get("status") == "held" and status in ("refuted", "revised"):
+                    ops.append({"op": "refute", "key": key,
+                                "reason": belief.get("reason") or "recorded belief was revised"})
+            for q in quests:
+                key = q.get("key") or q.get("id")
+                if key not in old:
+                    check = q.get("check")
+                    target = q.get("target") or (check.get("arg") if isinstance(check, dict) else None)
+                    target = world.ref(target) if target else None
+                    why = _cite(prior, q.get("why"), beliefs)
+                    if not why:
+                        print(f"ERROR step {step}: cannot map quest {key} source {q.get('why')!r} to a t-key or belief")
+                    ops.append({"op": "add", "key": key, "text": q.get("text", ""),
+                                "why": why, "target": target})
+                    if target and any(done.get("status") in ("done", "dropped") and done.get("target") == target
+                                      for done in prior.data["quests"]):
+                        readds += 1
+                elif old[key].get("status") == "open" and q.get("status") in ("done", "dropped"):
+                    status = "drop" if q["status"] == "dropped" else "done"
+                    ops.append({"op": status, "key": key,
+                                "reason": q.get("reason") or f"recorded status changed to {q['status']}"})
+            old_top = prior.focus
+            new_top = next((q.get("key") or q.get("id") for q in quests if q.get("status", "open") == "open"), None)
+            if new_top and new_top != old_top:
+                ops.append({"op": "top", "key": new_top})
+            if omissions:
+                print(f"step {step}: omitted quests are no-ops: {', '.join(omissions)}")
+        else:
+            closed = {q.get("target") for q in prior.data["quests"]
+                      if q.get("status") in ("done", "dropped") and q.get("target")}
+            readds += sum(1 for op in ops if isinstance(op, dict) and op.get("op") == "add" and
+                          world.ref(op.get("target")) in closed)
+        why = reply.get("why", "")
+        payload = {"ops": ops, "why": why}
+        nb = notebook_at(run, max(0, step - 1))
+        rows = nb.apply_ops(ops, step, why if isinstance(why, str) else "")
+        raw_chars = len(raw) if isinstance(raw, str) else len(json.dumps(raw, ensure_ascii=False))
+        chars = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        print(f"step {step}: source_reply_chars={raw_chars} ops_json_chars={chars}")
+        print(f"  ops={json.dumps(ops, ensure_ascii=False)}")
+        print(f"  results={json.dumps(rows, ensure_ascii=False)}")
+        if chars > 600:
+            failed = True
+            print(f"FAIL step {step}: transcribed reply is over 600 chars")
+        if len(rows) != len(ops):
+            failed = True
+            print(f"FAIL step {step}: an op has no result row")
+    print(f"re-adds of finished target: {readds}")
+    return 1 if failed else 0
 
 
-def _a4_pass(action, target, why):  # the house door is directly above the player: no walking back into it
-    action = action or {}
-    buttons = action.get("buttons") or []
-    if ("go_to" in action or action.get("verb") == "approach") and A4_BAD.search(target): return False
-    return not (buttons and buttons[0] == "UP")
+def _observe(run):
+    run = Path(run)
+    trace = _rows(run / "trace.jsonl")
+    relations = _rows(run / "memory" / "relations.jsonl")
+    places, seen = [], set()
+    for index, row in enumerate(trace):
+        place = row.get("place")
+        if index and place and place not in seen:
+            places.append({"target": f"place:{place}", "first": row.get("step"), "kind": "place"})
+        if place:
+            seen.add(place)
+    talks = []
+    for relation in relations:
+        if relation.get("p") == "says" and relation.get("s") and type(relation.get("step")) is int:
+            talks.append({"target": f"thing:{relation['s']}", "first": relation.get("step"), "kind": "talk"})
+    schedule = sorted(places + talks, key=lambda item: item["first"])
+    world = _world(run)
+    nb = notebook_at(run, 0)
+    by_open = {}
+    for n, item in enumerate(schedule):
+        by_open.setdefault(item["first"] - 1, []).append((n, item))
+    actual = {}
+    activated = set()
 
+    def activate(opened):
+        for n, item in by_open.get(opened, []):
+            target = world.ref(item["target"]) or item["target"]
+            nb.data["quests"].append({"key": f"observe_{item['kind']}_{n}",
+                "text": f"{item['kind']} {item['target']}", "why": [], "target": target,
+                "label": item["target"], "status": "open", "opened": opened,
+                "closed": None, "reason": None})
+            activated.add(n)
 
-PASSES = {"P1": (_p_pass, _a_pass), "P2": (_p_pass, _a_pass), "P3": (_p3_pass, _a3_pass), "P4": (_p4_pass, _a4_pass)}
-
-
-def _frame_per(case):
-    run, _, step = CASES[case]
-    frame = Image.open(ROOT / run / f"frames/{step:06d}.png").convert("RGB")
-    trace = next(r for r in (json.loads(line) for line in (ROOT / run / "trace.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()) if r["step"] == step)
-    per = {"screen": trace["screen"], "text": [], "entities": [{"name": e["name"], "kind": e["kind"], "at": e["at"]} for e in trace["entities"] if e.get("name")]}
-    return frame, per
-
-
-def _run_try(case, n, model, frame, per, results):
-    controls = "\n".join(_load(GAME).get("controls", []))
-    p_pass_fn, a_pass_fn = PASSES[case]
-    with tempfile.TemporaryDirectory(prefix=f"{case}_", dir=ROOT / ".tmp/qs/qs5") as tmp:
-        world, nb, trigger = _setup(Path(tmp), case)
-        route = None
-        quests = nb.data.get("quests", [])
-        goal_text = " ".join(q.get("text", "") for q in quests if isinstance(q, dict))
-        view = world.view(goal_text, world.current_place)
-        old_focus = nb.focus
-        p = plan(model, trigger, nb, view, [], [])
-        changed = nb.apply_plan(p, 81, buttons=())
-        quests = nb.data.get("quests", [])
-        top = next((q for q in quests if isinstance(q, dict) and not q.get("parent")), quests[0] if quests else {})
-        key = top.get("key") or top.get("id") or top.get("text", "")
-        goal = {**top, "done_when": (top.get("check") or {}).get("arg", top.get("done_when", ""))}
-        row = {"case": case, "try": n, "cached": n == 1, "focus": key, "focus_text": goal.get("text", ""),
-               "done_when": goal.get("done_when", ""), "p_pass": p_pass_fn(key, goal, old_focus, nb),
-               "goal_tree": nb.render(), "plan_why": p.why, "plan_ops": changed}
-        if case == "P3": row["unexplored_route"] = route
-        results.append(row)
-        a = act(model, frame, per, goal.get("text", ""), view, [], controls, defaults(GAME), BUTTONS, places=[])
-        target = _target(a.action, per["entities"])
-        row.update(act_action=a.action, act_target=target, act_why=a.why, act_ops=a.ops, a_pass=a_pass_fn(a.action, target, a.why))
+    for index, row in enumerate(trace):
+        step = row.get("step", 0)
+        if index == 0:
+            for opened in sorted(k for k in by_open if k < step):
+                activate(opened)
+        talked = [f"thing:{relation['s']}" for relation in relations
+                  if relation.get("p") == "says" and relation.get("step") == step and relation.get("s")]
+        closed = nb.observe(step, f"place:{row['place']}" if row.get("place") else None, talked)
+        for key in closed:
+            q = next(q for q in nb.data["quests"] if q.get("key") == key)
+            actual[q["text"].split(" ", 1)[1] + f"@{q['closed']}"] = q["closed"]
+        activate(step)
+    failed = False
+    for item in schedule:
+        key = item["target"] + f"@{item['first']}"
+        found = actual.get(key)
+        print(f"{item['kind']} {item['target']}: expected={item['first']} closed={found}")
+        if found != item["first"]:
+            failed = True
+    if failed:
+        print("FAIL: every target must close on its first entry or says step")
+    return 1 if failed else 0
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--tries", type=int, default=2)
-    ap.add_argument("--cap", type=int, default=16, help="max real model requests, charged to the m1 ledger")
-    ap.add_argument("--dry", action="store_true", help="stub model: no network, no ledger")
-    ap.add_argument("--cases", default="P1,P2,P3,P4", help="comma-separated subset of P1,P2,P3,P4")
-    a = ap.parse_args(argv)
-    cases = [c.strip() for c in a.cases.split(",") if c.strip()]
-    if not set(cases) <= set(CASES): ap.error(f"unknown case in --cases: {a.cases}")
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    attempts, results, status, error = [0], [], "ok", None
-    try:
-        for case in cases:
-            frame, per = _frame_per(case)
-            for n in range(1, a.tries + 1):
-                if a.dry:
-                    model = DryModel()
-                else:
-                    model = Ollama("gemma4:31b-cloud", cache_dir=ROOT / ".cache/model" if n == 1 else None)
-                    model._post = _guarded_post(model._post, attempts, charge=lambda _run, stage, cap: _ledger(RUN_NAME, stage, cap), cap=a.cap)
-                _run_try(case, n, model, frame, per, results)
-    except CallCap as exc:
-        status, error = "cap", str(exc)
-    except ModelUnavailable as exc:
-        status, error = "unavailable", str(exc)
-    for r in results:
-        print(f"\n## {r['case']} try {r['try']} (cached={r['cached']})\n{r.get('goal_tree', '')}\nplan why: {r.get('plan_why', '')}\nact why: {r.get('act_why', '')}")
-    print("\n| case | try | focus | focus text | done_when | P pass | act action | act target | A pass |\n|---|---|---|---|---|---|---|---|---|")
-    for r in results:
-        print(f"| {r['case']} | {r['try']} | {r['focus']} | {r['focus_text']} | {r['done_when']} | {r['p_pass']} | "
-              f"{json.dumps(r.get('act_action'))} | {r.get('act_target', '')} | {r.get('a_pass', '')} |")
-    OUT.write_text(json.dumps({"status": status, "error": error, "requests": attempts[0], "results": results}, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"\nstatus={status} requests={attempts[0]} wrote {OUT}")
-    return {"ok": 0, "cap": 3, "unavailable": 4}[status]
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run", type=Path, required=True)
+    parser.add_argument("--check", choices=("size", "ops", "observe", "all"), required=True)
+    args = parser.parse_args(argv)
+    checks = {"size": _size, "ops": _ops, "observe": _observe}
+    selected = checks if args.check == "all" else {args.check: checks[args.check]}
+    return int(any([check(args.run) for check in selected.values()]))
 
 
 if __name__ == "__main__":
