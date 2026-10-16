@@ -156,7 +156,7 @@ Net: about **-210** lines.
 
 # Phase B: implementation packet (R1)
 
-Status: offline gate passed 10-15 after Unblock 2; post-R1 live run next · Branch: feat/lean-agent · Approved: coordinator 10-15 (rulings in MASTER §10)
+Status: offline gate passed 10-15 after Unblock 2; final live retry completed at the user's 80-step cap · Branch: feat/lean-agent · Approved: coordinator 10-15 (rulings in MASTER §10)
 
 ## Paste block
 
@@ -423,7 +423,21 @@ Rewrite `Memory.observe(perception, place, step, tiles=None, tracks=None) -> {in
 - **Golden review PASS:** the R1.8 gpt-6-luna/high worker independently reviewed the actual diff. Exactly **4 memory files** change (`crossings`, `entities`, `mints`, `places`): departure-only crossings, aliases/kinds, removal of self records/mints, removal of landmarks/edges. **The golden trace is unchanged**, satisfying the field whitelist. The orchestrator's full suite above independently accepts the fixture.
 - **Live-view preservation:** no additional edits were made to protected files during finalization. Prior R1 hunks in `agent/loop.py`, `tests/agent/test_loop.py`, `tests/agent/test_track.py` remain unstaged; all original live-view additions and live test functions are preserved as verified below. The user's frozen env/model/observer/track/runner/viewer files are not staged. `contracts.md` remains unchanged; the contract proposal below is now gate-approved for coordinator review.
 - **Tier/history:** all spawns used explicit gpt-6-luna/high. The interrupted same-tier repairs were allowed to finish by the user; no alternative model was used. The former acceptance failures and exact same-tier retry history below remain as evidence. Unblock 2 supplied the test/golden/harness corrections; this finalization introduced no new agent behavior.
-- **Post-R1 live run:** pre-approved, clean boot, `runs/rcr_r1_live`, 150 steps / 400 requests / decide mode; pending execution and scoring. Viewer `/state` is HTTP **200**. The frozen runner treats names without `m1` as a 50-call smoke bucket (48 already spent), so temporary `.tmp/rcr1/live_launcher.py` invokes the same `main`/options and charges the approved M1 bucket, with unchanged TOTAL **4815**, M1 **4765**, and invocation **400** caps. The manifest records this routing; the runner source and output path are unchanged. Ledger before: total **3756**, M1 **3708**, smoke **48**.
+- **First post-R1 live attempt, completed:** `runs/rcr_r1_live`, clean boot, **150 rows / 6 HTTP requests**, runner and `PY scripts/eval_run.py runs/rcr_r1_live` both exit **0**. **0 world rows**, **147 unobservable verdicts**, **145 stale scene_cut rows**. S1/S2 unavailable; S3 proxy **0** with **0 tile groups**; S4/S7 unmeasured. This stalled run does not establish live identity improvement. Viewer HTTP **200**. Temporary `.tmp/rcr1/live_launcher.py` routed the existing runner to its approved M1 bucket because the requested name otherwise uses smoke; caps and runner source were unchanged, routing was recorded in manifest notes (provenance marked incomplete). Ledger total/M1/smoke **3756/3708/48 → 3762/3714/48**. Evidence: `.tmp/rcr1/live-run.log`, `.tmp/rcr1/live-eval.log`, run `summary.json`.
+
+### Final live retry, 10-15 — completed at the user's 80-step cap
+
+- **Authorization/history:** after stopping finalization, the user requested a retry and reduced the limit to **80 steps**. `runs/m1_rcr_r1_live_retry` was stopped on request after **5 rows** and preserved. The user then explicitly requested another 80-step attempt. No earlier output was overwritten.
+- **Command, orchestrator-run:** `.venv-agent/Scripts/python.exe -B scripts/run_agent.py --run runs/m1_rcr_r1_live_retry2 --steps 80 --max-calls 400 --decide` — **80 rows**, exit **0** (`.tmp/rcr1/live-retry2.log`). Viewer HTTP **200** before launch. Direct runner invocation uses the approved M1 bucket by its run name; no temporary launcher or source modification. Manifest: clean boot, no checkpoint, decide true, headless false, provenance **complete**.
+- **Scoring, orchestrator-run:** `PY scripts/eval_run.py runs/m1_rcr_r1_live_retry2` — exit **0**, writes `runs/m1_rcr_r1_live_retry2/summary.json` (`.tmp/rcr1/live-retry2-eval.log`). **22 world rows**, first world frame **S49**, **80/80 settled**, **0 pending/timed-out/stale**. Verdicts **73 hit / 5 miss / 2 surprise**. These are observation/execution reports, not proof every selected action made progress.
+- **S1:** unavailable, **0 NPC truth sprite rows**, no confirmed actor matches; no Mom or Pallet NPC was reached.
+- **S2:** unavailable; the run never reached Pallet. Valid-dimension truth rows stayed on map **38**, with one mapped place **p_place**.
+- **S3:** evaluator reports **0 duplicate records / 0 duplicate groups / 0 tile groups**. This name/tile history proxy has no eligible tile groups and does not establish live duplicate elimination.
+- **S4:** unmeasured by this evaluator; it does not emit the failed-option re-pick metric or test whether an untried alternative was offered. Its separate `repeated_mistakes` is **3/80**, reported only as that proxy, not substituted for S4.
+- **S7:** unmeasured: neither bedroom-to-1F nor 1F-to-Pallet transition occurred within the user's 80-step cap. Do not report missing transitions as zero-step travel.
+- **Cost:** **142 HTTP requests**, **212 total asks**, **70 cache hits**, **0 retries**. Ledger total/M1/smoke **3786/3736/50 → 3928/3878/50**, matching **+142**. TOTAL/M1/invocation caps remain **4815/4765/400**; **887** requests remain in each persistent funded allowance. The pre-retry ledger includes activity outside this invocation; it is not attributed to R1.
+- **Source/preservation:** the manifest fingerprints user runtime fixes made after the earlier offline gate. The reported **658-pass** suite belongs to that earlier gate snapshot, not a rerun against those subsequent fixes. All **18 protected files** remain byte-identical to `.tmp/rcr1/retry2-protected-before.json` after this invocation; no runtime steering, repair, staging of shared files or push. R1 hunks in `agent/loop.py`, `tests/agent/test_loop.py`, `tests/agent/test_track.py` remain unstaged with live-view edits. No further live run is started.
+
 
 ### Earlier resumed result, 10-15 — failed snapshot, superseded by finalization above
 
