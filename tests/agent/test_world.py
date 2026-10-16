@@ -103,54 +103,143 @@ def test_motion_self_spot_locks_persists_and_unlocks_after_two_contradictions(tm
     assert world.self_spot is None
 
 
-def test_merge_shifts_unions_redirects_and_collapses(tmp_path):
+def test_merge_uses_pixel_offset_and_class_not_names(tmp_path):
     mem = Memory(tmp_path); place(mem, "src", "room"); place(mem, "dst", "Hall"); place(mem, "from", "Start")
-    entity(mem, "s1", "Oak", "src", [1, 1]); entity(mem, "s2", "Oak", "src", [1, 2], 3)
-    entity(mem, "s3", "Pine", "src", [2, 1]); entity(mem, "d1", "Oak", "dst", [5, 6], 4)
-    entity(mem, "d2", "Pine", "dst", [6, 6])
+    entity(mem, "s1", "Different label", "src", [1, 1]); entity(mem, "s2", "Far thing", "src", [20, 20], 3)
+    entity(mem, "d1", "Oak", "dst", [5, 6], 4)
     mem.upsert("tiles", {"id": "src@1,1", "place": "src", "x": 1, "y": 1, "floor": True, "blocked": ["UP"], "pushed": [], "exit": None, "step": 1})
     mem.upsert("tiles", {"id": "dst@5,6", "place": "dst", "x": 5, "y": 6, "floor": False, "blocked": [], "pushed": ["LEFT"], "exit": {"dir": "UP", "to": "from", "arrive": [0, 0]}, "step": 1})
     mem.upsert("tiles", {"id": "from@0,0", "place": "from", "x": 0, "y": 0, "floor": True, "blocked": [], "pushed": [], "exit": {"dir": "DOWN", "to": "src", "arrive": [1, 1]}, "step": 1})
-    mem.upsert("places", {**mem.get("places", "from"), "edges": [{"verb": "enter", "via": "door", "to": "src"}]})
     mem.upsert("relations", {"id": "r1", "s": "src", "p": "leads_to", "o": "from", "state": "live"})
     world = World(mem, 16); world.current_place, world.pos = "src", (3, 4)
-    assert world.merge("src", "dst", 8)
+    assert world.merge("src", "dst", 8, (4, 5))
     assert mem.get("places", "src")["offset"] == [4, 5] and world.pos == (7, 9)
     tile = mem.get("tiles", "dst@5,6")
     assert tile["floor"] is True and tile["blocked"] == ["UP"] and tile["pushed"] == ["LEFT"]
     assert mem.get("tiles", "from@0,0")["exit"]["to"] == "dst" and mem.get("tiles", "from@0,0")["exit"]["arrive"] == [5, 6]
-    assert mem.get("places", "from")["edges"][0]["to"] == "dst" and mem.get("relations", "r1")["s"] == "dst"
-    assert mem.get("entities", "d1")["seen"] == 9 and mem.get("entities", "s2")["place"] == "src"
+    assert mem.get("relations", "r1")["s"] == "dst"
+    assert mem.get("entities", "d1")["seen"] == 6
+    assert mem.get("entities", "s1")["state"] == "merged" and mem.get("entities", "s1")["into"] == "d1"
+    assert mem.get("entities", "s2")["place"] == "dst" and mem.get("entities", "s2")["tile"] == [24, 25]
     replay = Memory(tmp_path)
     assert replay.get("places", "src")["state"] == "merged" and replay.get("places", "src")["into"] == "dst"
-    assert replay.resolve("Oak", "dst", (5, 6)) == "d1"
-    assert replay.observe({"entities": [{"name": "Oak", "kind": "object"}]}, "dst", 9, {0: (5, 6)}) == {0: "d1"}
+    assert world.canon("thing:s1") == "thing:d1"
 
 
-def test_name_refusal_alias_flag_and_new_arrival(tmp_path):
+def test_place_names_are_write_only_and_never_merge(tmp_path):
     mem = Memory(tmp_path); place(mem, "a", "Room", 1); place(mem, "b", "Room B", 1)
-    entity(mem, "a1", "Oak", "a", [0, 0]); entity(mem, "a2", "Oak#2", "a", [1, 0])
-    entity(mem, "b1", "Oak", "b", [4, 4]); entity(mem, "b2", "Oak#2", "b", [5, 4])
     world = World(mem, 16)
-    assert world.name("a", "room b", 3) == "a"
-    assert mem.get("places", "a")["aliases"] == ["room b"] and world.merge_pending == "room b"
-    place(mem, "new", "screen", 5); place(mem, "old", "Known", 1)
-    assert world.name("new", "known", 5) == "old" and mem.get("places", "new")["into"] == "old"
+    assert world.name("a", "room b", 3) is None
+    assert mem.get("places", "a")["aliases"] == ["room b"] and mem.get("places", "a").get("state") != "merged"
+    place(mem, "new", "", 5); place(mem, "old", "Known", 1)
+    world.name("new", "known", 5)
+    assert mem.get("places", "new")["aliases"] == ["known"] and mem.get("places", "new").get("state") != "merged"
+    assert world.name("new", "Known", 6) is None
+    assert mem.get("places", "old").get("state") != "merged"
 
 
-def test_cut_arrival_name_cannot_merge_back_to_departed_place(tmp_path):
-    mem = Memory(tmp_path); place(mem, "left", "Left"); place(mem, "arrival", "world", 5)
-    entity(mem, "left_oak", "Oak", "left", [0, 0]); entity(mem, "left_key", "Key", "left", [1, 0])
-    entity(mem, "arrival_oak", "Oak", "arrival", [4, 4]); entity(mem, "arrival_key", "Key", "arrival", [5, 4])
-    world = World(mem, 16); skill = type("Skill", (), {"scroll": None})()
-    world._prepared = (skill, "left", 10, None, (0, 0))
-    world.after(skill, "left", "arrival", True, 10)
-    world.before({"screen": "world", "entities": [], "text": []},
-                 "arrival", "left", (160, 144), 11)
+def test_world_before_does_not_store_a_dialogue_place_name(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room")
+    world = World(mem, 16)
+    world.before({"screen": "dialogue", "place": "Professor Oak's lab", "entities": []}, "room", None, (160, 144), 2)
+    assert mem.get("places", "room").get("name") == "Room"
+    assert not mem.get("places", "room").get("aliases")
 
-    assert world.name("arrival", "Left", 11) == "arrival"
-    assert mem.get("places", "arrival")["aliases"] == ["Left"] and world.merge_pending == "Left"
-    assert world.name("arrival", "Left", 12) == "left"
+
+def test_player_label_off_self_spot_keeps_the_actor_id_and_kind(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room")
+    entity(mem, "npc", "Mom", "room", [2, 0])
+    mem.upsert("entities", {**mem.get("entities", "npc"), "kind": "npc", "aliases": [], "kinds": ["npc"]})
+    world = World(mem, 16); world.self_spot, world._self_from_motion = [.5, .5], True
+    per = {"screen": "world", "entities": [{"name": "player", "kind": "player", "at": [.7, .5]}]}
+
+    _, tiles, ids = world.before(per, "room", None, (160, 144), 3)
+
+    assert tiles == {0: (2, 0)} and ids == {0: "npc"}
+    assert mem.get("entities", "npc")["kind"] == "npc"
+
+
+def test_motion_locked_self_is_not_observed_even_when_mislabeled(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room")
+    world = World(mem, 16); world.self_spot, world._self_from_motion = [.5, .5], True
+    per = {"screen": "world", "entities": [
+        {"name": "Player", "kind": "npc", "at": [.5, .5]},
+        {"name": "Girl", "kind": "npc", "at": [.7, .5]}]}
+
+    _, tiles, ids = world.before(per, "room", None, (160, 144), 1)
+
+    assert tiles == {1: (2, 0)} and 0 not in ids and ids[1] == mem.rows("entities")[0]["id"]
+    assert [row["name"] for row in mem.rows("entities")] == ["Girl"]
+    assert per["entities"][0] == {"name": "Player", "kind": "npc", "at": [.5, .5]}
+    from PIL import Image
+    world.observe_after(per, Image.new("RGB", (160, 144)), False, "room", (160, 144), 2)  # the loop always passes the settled frame
+    assert 0 not in world.entity_ids and [row["name"] for row in mem.rows("entities")] == ["Girl"]
+
+
+def test_place_refs_round_trip_printed_labels(tmp_path):
+    mem = Memory(tmp_path); place(mem, "p_room", "Name"); place(mem, "p_x", "Name"); place(mem, "p_place_3", "", 3)
+    place(mem, "p_unique", "Only"); place(mem, "p_old", "Old")
+    mem.upsert("places", {**mem.get("places", "p_old"), "state": "merged", "into": "p_unique"})
+    world = World(mem, 16)
+
+    assert world.ref("name [p_x]") == "place:p_x"
+    assert world.ref("Only [p_unique]") == "place:p_unique"
+    assert world.ref("Old [p_old]") == "place:p_unique"
+    assert world.ref("place 3") == "place:p_place_3"
+    assert world.resolve("name [p_x]", {"entities": []}, "p_room")["id"] == "p_x"
+    assert world.resolve("place 3", {"entities": []}, "p_room")["id"] == "p_place_3"
+
+
+def test_history_reads_actor_dialogue_object_checks_and_exit_truth(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room"); place(mem, "hall", "Hall")
+    entity(mem, "mom", "Mom", "room", [0, 0]); entity(mem, "sign", "Sign", "room", [1, 0])
+    mem.upsert("entities", {**mem.get("entities", "mom"), "kind": "npc", "called": "MOM", "status": "seen", "last": 9})
+    for ident, text, steps in (("mom", "Hi Red", [4, 7]), ("sign", "The sign is old", [8])):
+        mem.upsert("relations", {"id": f"says-{ident}", "s": ident, "p": "says", "o": text, "ev": steps, "step": steps[-1]})
+    mem.upsert("relations", {"id": "walk", "s": "sign", "p": "does_nothing", "o": "", "con": 2, "ev": [5, 6]})
+    mem.upsert("tiles", {"id": "room@2,0", "place": "room", "x": 2, "y": 0, "floor": True, "blocked": ["UP"], "pushed": [],
+                         "exit": {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "observed"}, "step": 3})
+    world = World(mem, 16); world.current_place = "room"; world._count("room", (2, 0), "hall", 10)
+
+    assert world.history("thing:mom") == {"called": "MOM", "talked": {"steps": [4, 7], "text": "Hi Red"}, "checked": None,
+                                           "walked_into": 0, "status": "seen", "last": 9}
+    assert world.history("thing:sign")["checked"] == "The sign is old"
+    assert world.history("thing:sign")["walked_into"] == 2
+    assert world.history("exit:2,0") == {"status": "verified", "uses": 1, "dest": "hall", "blocked": ["UP"]}
+
+
+def test_inferred_exit_keeps_destination_and_is_routable_without_a_departure(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room"); place(mem, "bedroom", "Bedroom")
+    mem.upsert("tiles", {"id": "room@8,0", "place": "room", "x": 8, "y": 0, "floor": True,
+                         "blocked": [], "pushed": [], "exit": {"dir": "UP", "to": "bedroom", "arrive": [0, 0], "src": "inferred"}, "step": 3})
+    world = World(mem, 16); world.current_place = "room"
+    live = {"room", "bedroom"}
+
+    exit = next(row for row in world._exits("room", live) if row["tile"] == (8, 0))
+
+    assert exit["dest"] == "bedroom" and exit["status"] == "unverified" and exit["uses"] == 0
+    assert exit["label"] == "possible exit UP → Bedroom (unverified, never crossed)"
+    assert "bedroom" in world._paths("room")
+    assert "UP → Bedroom: possible exit, unverified (never crossed)" in world.view("", "room")
+
+
+def test_loop_closure_needs_two_consistent_view_hits(tmp_path, monkeypatch):
+    from PIL import Image
+
+    mem = Memory(tmp_path); place(mem, "older", "Older", 1); place(mem, "newer", "Newer", 2)
+    world = World(mem, 16); world.current_place = "newer"
+    monkeypatch.setattr(mem, "seen_view", lambda *_: ("older", (world.pos[0] + 4, world.pos[1] + 5)))
+    frame = Image.new("RGB", (160, 144), "white")
+    per = {"screen": "world", "entities": []}
+
+    world.pos = (0, 0); world.observe_after(per, frame, False, "newer", (160, 144), 3)
+    assert mem.get("places", "newer").get("state") != "merged"
+    world.pos = (1, 0); world.observe_after(per, frame, False, "newer", (160, 144), 4)
+
+    assert mem.get("places", "newer")["state"] == "merged"
+    assert mem.get("places", "newer")["into"] == "older"
+    assert mem.get("places", "newer")["offset"] == [4, 5]
+    assert world.current_place == "older" and world.pos == (5, 5)
 
 
 def test_resolve_and_plan_skip_merged_history_and_plan_entity_facing(tmp_path):
@@ -223,7 +312,7 @@ def test_travel_corrects_wrong_arrival_from_exact_trace_frame(tmp_path, monkeypa
     result = world.travel(Ctx(env, model, 16), [{"place": "source", "dirs": ["RIGHT"], "push": "RIGHT", "expect": "expected", "exit_tile": (1, 0)}], 3, trace)
     assert model.calls == 0 and result.reason == "travel: leg 1 arrival mismatch"
     assert world.current_place == "actual" and world.pos == (3, 4)
-    assert mem.get("crossings", "source@1,0>actual")["n"] == 1 and mem.get("crossings", "actual@3,4>source")["n"] == 1  # travel crossings count too
+    assert [r["id"] for r in mem.rows("crossings")] == ["source@1,0>actual"]  # travel counts only the departure
     assert {k: mem.get("tiles", row["id"])["exit"][k] for k in ("to", "arrive")} == {"to": "actual", "arrive": [3, 4]}
     modal = Trace(tmp_path / "modal.jsonl"); modal.write({"place": "source", "next_place": "actual", "tile": [3, 4]}); modal.write({"place": "actual", "screen": "dialogue", "frame_hash": digest})
     world2 = World(mem, 16); world2.current_place = "source"
@@ -345,8 +434,7 @@ def test_tiers_keep_landmarks_promote_interest_blockers_and_cap_is_not_deletion(
     assert mem.get("entities", oak)["tier"] == "landmark"
     assert mem.get("entities", guide)["tier"] == "interest"
     assert mem.get("entities", chest)["tier"] == "landmark" and mem.get("entities", sign)["tier"] == "interest"
-    mem.upsert("places", {**mem.get("places", "room"), "edges": [{"via": "exit: path south", "ok": 0}]})
-    mem.upsert("relations", {"id": "failed_exit", "s": exit_id, "p": "leads_to", "o": "other", "src": "observed", "sup": 1, "con": 2, "state": "refuted"})
+    mem.upsert("tiles", {"id": "room@-3,0", "place": "room", "x": -3, "y": 0, "floor": True, "blocked": ["RIGHT"], "pushed": [], "exit": None})
     world._tiers({"entities": [entities[3]], "text": []}, "room", {0: exit_id})
     assert mem.get("entities", exit_id)["tier"] == "landmark"
     world.prepare(SimpleNamespace(moves=[("RIGHT", -16), ("RIGHT", (0, 0))]), "room", False, 2)
@@ -402,7 +490,7 @@ def test_world_view_is_bounded_deterministic_promotes_goal_and_caps_landmark_map
     assert view == world.view("Find Chest near Maple", "here") and len(view) <= 2000
     assert view.startswith("Here: Atrium (0,0)  map: 2 walked, 2 seen,")
     assert "Map: . walked, , seen, # blocked side, E exit already used, @ you" in view
-    assert "E at (0,-1) UP -> Kitchen" in view and "Place: Kitchen" in view
+    assert "E at (0,-1) UP → Kitchen: possible exit, unverified (never crossed)" in view and "Place: Kitchen" in view
     assert "Thing A Chest (1, 0) object last seen (1, 0) step 4; may have moved" in view
     assert "Vanished" not in view and "Merged ghost" not in view
     assert mem.get("entities", "goal")["tier"] == "interest"
@@ -424,7 +512,7 @@ def test_compact_view_drops_what_the_options_say_and_draws_no_letters(tmp_path):
     default, compact = world.view("", "here"), world.view("", "here", compact=True)
     lines = compact.splitlines()
 
-    assert "Thing " in default and "E at (0,-1) UP -> Kitchen" in default and "Landmark " not in default
+    assert "Thing " in default and "E at (0,-1) UP → Kitchen: possible exit, unverified (never crossed)" in default and "Landmark " not in default
     assert lines[0].startswith("Here: Atrium (0,0)  map: ") and lines[16] == "Map: . walked, , seen, # blocked side, E exit already used, @ you"
     assert not [l for l in lines if l.lstrip().startswith(("Thing", "Landmark", "Everything", "Edges"))]
     assert "E at (0,-1) UP: possible, never crossed, 1 up" in lines and [l for l in lines if l.startswith("E at")] == ["E at (0,-1) UP: possible, never crossed, 1 up"]
@@ -516,7 +604,7 @@ def test_world_view_lists_all_place_exits_before_any_other_place_things(tmp_path
     view = world.view("", "here")
 
     headings = [view.index(f"Place: {name}") for name in ("North", "South", "West")]
-    exit_rows = [line for line in view.splitlines() if line == "  Exit DOWN -> Atrium: possible exit, unverified (never crossed)"]
+    exit_rows = [line for line in view.splitlines() if line == "  Exit DOWN → Atrium: possible exit, unverified (never crossed)"]
     exits = [view.index(line) for line in exit_rows]
     first_thing = min(i for i in (view.find("Thing "), view.find("Thing:"), view.find("Landmark ")) if i >= 0)
     assert len(set(headings)) == 3 and len(exits) == 3 and max(headings + exits) < first_thing and len(view) <= 2000
@@ -534,7 +622,7 @@ def test_world_view_labels_other_place_detail_bundle(tmp_path):
     view = world.view("", "here")
 
     lines = view.splitlines()
-    assert lines.index("Place: Hall") < lines.index("  Exit LEFT -> Atrium: possible exit, unverified (never crossed)") < lines.index("Things: Hall")
+    assert lines.index("Place: Hall") < lines.index("  Exit LEFT → Atrium: possible exit, unverified (never crossed)") < lines.index("Things: Hall")
     assert lines[lines.index("Things: Hall") + 1] == "  Thing: Chest remembered"
 
 
@@ -758,27 +846,30 @@ def test_boot_title_and_dialogues_leave_one_navigable_place_with_no_screen_label
     assert place == run_start and arrived != run_start
     assert [p["id"] for p in mem.rows("places") if p.get("screen") == "world"] == [arrived]
     assert not {world.place_label(p["id"]) for p in mem.rows("places")} & {"title", "dialogue", "menu", "world"}
-    assert world.name(run_start, "Hall", 2) == run_start and "name" not in mem.get("places", run_start)  # a run-start place is never named
-    assert world.name(arrived, "Hall", 8) == arrived and world.place_label(arrived) == "Hall"
+    world.name(run_start, "Hall", 2)
+    assert "name" not in mem.get("places", run_start)  # a run-start place is never named
+    world.name(arrived, "Hall", 8)
+    assert world.place_label(arrived) == "Hall"
 
 
-def test_model_screen_type_or_reference_is_never_a_name_or_alias(tmp_path):
+def test_model_screen_type_is_never_a_name_but_reference_labels_are_allowed(tmp_path):
     mem = Memory(tmp_path); world = World(mem, 16)
     arrived = mem.match_place({"screen": "world", "entities": [{"name": "npc", "kind": "npc"}]}, 1, prev=None, cut=True)
     for step, bad in enumerate(("world", "dialogue", "Menu", "Town [p_place]", "world [p_world]"), 2):
-        assert world.name(arrived, bad, step) == arrived
+        world.name(arrived, bad, step)
     row = mem.get("places", arrived)
-    assert "name" not in row and not row.get("aliases") and world.place_label(arrived) == "place 1"
-    assert world.name(arrived, "Hall", 8) == arrived and world.name(arrived, "Lake", 9) == arrived
-    assert mem.get("places", arrived)["name"] == "Hall" and mem.get("places", arrived)["aliases"] == ["Hall", "Lake"]  # the first real name sticks; later ones are aliases
+    assert row["name"] == "Town [p_place]" and row["aliases"] == ["Town [p_place]", "world [p_world]"]
+    world.name(arrived, "Hall", 8); world.name(arrived, "Lake", 9)
+    assert mem.get("places", arrived)["name"] == "Town [p_place]" and mem.get("places", arrived)["aliases"] == ["Town [p_place]", "world [p_world]", "Hall", "Lake"]
 
 
-def test_legacy_screen_type_alias_does_not_match_or_gain_a_new_alias(tmp_path):
+def test_legacy_screen_type_alias_does_not_match_but_bracketed_reference_is_allowed(tmp_path):
     mem = Memory(tmp_path); world = World(mem, 16)
     mem.upsert("places", {"id": "p_old", "name": "Hall", "screen": "world", "state": "place", "first": 1, "last": 1, "edges": [], "aliases": ["world", "world [p_old]"]})
     arrived = mem.match_place({"screen": "world", "entities": [{"name": "sign", "kind": "object"}]}, 2, prev=None, cut=True)
-    assert world.name(arrived, "world", 3) == arrived and world.name(arrived, "world [p_old]", 3) == arrived
-    assert mem.get("places", "p_old")["aliases"] == ["world", "world [p_old]"] and "name" not in mem.get("places", arrived)
+    world.name(arrived, "world", 3); world.name(arrived, "world [p_old]", 3)
+    assert mem.get("places", "p_old")["aliases"] == ["world", "world [p_old]"]
+    assert mem.get("places", arrived)["name"] == "world [p_old]"
 
 
 def test_refuted_thing_renders_evidence_and_is_never_deleted(tmp_path):
@@ -812,14 +903,14 @@ def test_view_exit_table_refuted_thing_and_run_start_place(tmp_path):
 
     view = world.view("", "here")
 
-    assert "E at (2,0) RIGHT -> Hall: possible exit, unverified (never crossed)" in view and "E at (0,-1) UP -> Garden: possible exit, unverified (never crossed)" in view  # edge counts per destination no longer count
-    assert "E at (-1,0) side door -> Shop used 1×" in view and "  Exit LEFT -> Atrium: possible exit, unverified (never crossed)" in view
+    assert "E at (2,0) RIGHT → Hall: possible exit, unverified (never crossed)" in view and "E at (0,-1) UP → Garden: possible exit, unverified (never crossed)" in view  # edge counts per destination no longer count
+    assert "E at (-1,0) side door: possible exit, unverified (never crossed)" in view and "  Exit LEFT → Atrium: possible exit, unverified (never crossed)" in view
     assert "Don't believe: sign (not working: walked into 3×, steps 104–107)" in view
     assert "Place: Hall" in view and "run_start" not in view and "Place: place" not in view and "place 1" not in view
     assert len(view) <= VIEW_TOKENS * 4
 
 
-def test_travel_leg_through_a_matching_exit_counts_the_crossing_both_ways(tmp_path, monkeypatch):
+def test_travel_leg_through_a_matching_exit_counts_the_departure(tmp_path, monkeypatch):
     from PIL import Image; from agent.skills import Ctx, SkillResult; from agent import world as world_module; from tests.agent.fakes import GridEnv, StubModel
 
     mem = Memory(tmp_path); place(mem, "source", "Source"); place(mem, "expected", "Expected")
@@ -830,7 +921,7 @@ def test_travel_leg_through_a_matching_exit_counts_the_crossing_both_ways(tmp_pa
     result = world.travel(Ctx(GridEnv(), StubModel([]), 16), [{"place": "source", "dirs": ["RIGHT"], "push": "RIGHT", "expect": "expected", "exit_tile": (1, 0)}], 5)
 
     assert result.status == "done" and world.current_place == "expected"
-    assert mem.get("crossings", "source@1,0>expected")["n"] == 1 and mem.get("crossings", "expected@0,0>source")["n"] == 1
+    assert [r["id"] for r in mem.rows("crossings")] == ["source@1,0>expected"]
 
 
 ROUTE_DIRS = [("RIGHT", 1, 0), ("LEFT", -1, 0), ("UP", 0, -1), ("DOWN", 0, 1)]

@@ -10,7 +10,8 @@ from PIL import Image
 
 TRANSIENT = frozenset({"player", "exit", "cursor", "dialogue_box", "ui_element", "icon", "text", "menu_item", "input_field", "keyboard", "logo"})  # not landmarks
 RECURRING = ("menu_item", "move", "item", "option")
-_BUDGETS = {"perceiver": 400, "chooser": 1200, "orchestrator": 3000}
+ACTOR_KINDS = {"person", "npc", "character", "enemy", "monster", "animal"}
+STATIC_GATE = 1
 THRESHOLDS = {"candidate": 2, "promote": 3, "contradiction_rate": .10,
               "demote_misses": 2, "use_window": 5}
 
@@ -19,6 +20,10 @@ def normalize_kind(kind: str) -> str:
     value = str(kind or "").casefold().split(":", 1)[0].strip()
     value = value[:-1] if value.endswith("s") else value
     return {"doorway": "door"}.get(value, value)
+
+
+def _actor(row: dict) -> bool:
+    return row.get("anchor") == "actor" or normalize_kind(row.get("kind")) in ACTOR_KINDS
 
 
 def _key(value: str) -> str:
@@ -31,20 +36,16 @@ def _base(value: str) -> str:
 
 # The perceiver's screen enum (agent/perceive.py): a place is never named or aliased with one of these.
 SCREEN_NAMES = frozenset({"world", "dialogue", "menu", "keyboard", "battle", "title", "other"})
-_REFERENCE = re.compile(r"\s\[[^\[\]]+\]$")  # "<label> [<place id>]": our own disambiguated label, a pointer and never a name
-_PLACE_LABEL = re.compile(r"place\s*\d+", re.IGNORECASE)  # "place <n>": our own unnamed label (World.place_label), echoed back by the model
-
-
-def _nameable(name: str, screen=None) -> bool:
-    key = name.casefold()
-    return bool(name) and key not in SCREEN_NAMES and key != str(screen or "").casefold() and not _REFERENCE.search(name) and not _PLACE_LABEL.fullmatch(name.strip())
+def _nameable(name: str) -> bool:
+    name = str(name or "").strip()
+    return bool(name) and name.casefold() not in SCREEN_NAMES
 
 
 def place_name(row: dict | None) -> str:
     """A place's model-given name; a screen type stored as a name by older runs does not count."""
     row = row or {}
     name = str(row.get("name") or "").strip()
-    return name if _nameable(name, row.get("screen")) else ""
+    return name if _nameable(name) else ""
 
 
 def place_aliases(row: dict | None) -> list[str]:
@@ -146,10 +147,13 @@ class Memory:
                 self.excursion = prev
                 return prev
             # ponytail: before the first navigable screen one unnamed run-start place stands in; it is never matched or named
-            return self.upsert("places", {"id": self._id("places", "place"), "state": "candidate", "visits": 1, "landmarks": [], "edges": [], "blocked": [], "first": step, "last": step})["id"]
+            return self.upsert("places", {"id": self._id("places", "place"), "state": "candidate", "visits": 1, "blocked": [], "first": step, "last": step})["id"]
         back = prev is not None and self.excursion == prev  # back from a dialogue/menu/battle to the place it left: that place may match again
         self.excursion = None
-        if not cut and prev is not None and (self.get("places", prev) or {}).get("screen") == "world":
+        if not cut and prev is not None:
+            row = self.get("places", prev)
+            if row and row.get("screen") != "world":
+                self.upsert("places", {**row, "screen": "world"})
             return prev
         exclude = None if back else prev
         if cut and frame is not None and (hit := self.seen_view(frame, screen, exclude, tile_px)):
@@ -164,24 +168,10 @@ class Memory:
         if cut and via_id:
             known = next((r["o"] for r in self.rows("relations") if r.get("s") == via_id and r.get("p") == "leads_to" and r.get("state") == "live" and r.get("o") != prev and self.get("places", r.get("o"))), None)
             if known: return known
-        landmarks = sorted({(str(e.get("name", "")).casefold(), str(e.get("kind", "")).casefold())
-                            for e in perception.get("entities", []) if e.get("name") and normalize_kind(e.get("kind")) not in TRANSIENT})
-        best, score = None, 0.0
-        current = set(landmarks)
-        for place in (p for p in self.rows("places") if p.get("state") != "merged" and (not cut or p.get("id") != exclude)):
-            known = {tuple(l) for l in place.get("landmarks", []) if normalize_kind(l[1]) not in TRANSIENT}  # rows saved before TRANSIENT
-            union = current | known
-            overlap = len(current & known) / len(union) if union else 1  # both empty (only transients seen): same screen
-            if place.get("screen") == screen and overlap >= .6 and overlap > score:
-                best, score = place, overlap
-        if best:
-            best["visits"] = best.get("visits", 0) + 1
-            best["last"] = step
-            return self.upsert("places", best)["id"]
         pid = self._id("places", "place")
         self.upsert("places", {"id": pid, "screen": "world",
                                "state": "candidate", "visits": 1,
-                               "landmarks": [list(x) for x in landmarks], "edges": [], "blocked": [],
+                               "blocked": [],
                                "first": step, "last": step})
         return pid
 
@@ -231,107 +221,98 @@ class Memory:
                     scores.append(_view_score(load(v), load(mine), dx * step, dy * step))
         return max(scores) >= VIEW_MATCH if scores else None
 
-    def name_place(self, place: str, name: str, step: int) -> str:
+    def name_place(self, place: str, name: str, step: int) -> None:
         name, row = str(name or "").strip(), self.get("places", place)
-        if not row or not _nameable(name): return place  # a screen type or our own "name [p_x]" reference is never a name or alias
+        if not row or not _nameable(name): return
         key = name.casefold()
-        target = next((r for r in self.rows("places") if r.get("state") != "merged" and r["id"] != place
-                       and any(str(v).casefold() == key for v in [place_name(r), *place_aliases(r)])), None)
-        if target and row.get("first") == step:
-            self.upsert("places", {**row, "state": "merged", "into": target["id"]})
-            for other in self.rows("places"):
-                if any(e.get("to") == place for e in other.get("edges", [])):
-                    self.upsert("places", {**other, "edges": [{**e, "to": target["id"]} if e.get("to") == place else e for e in other["edges"]]})
-            for tile in self.rows("tiles"):
-                if (tile.get("exit") or {}).get("to") == place: self.upsert("tiles", {**tile, "exit": {**tile["exit"], "to": target["id"]}})
-            for rel in self.rows("relations"):
-                if rel.get("o") == place: self.upsert("relations", {**rel, "o": target["id"]})
-            return target["id"]
-        if target: return place  # ponytail: two established places claimed equal; merge only new arrivals, full merge needs entity/tile re-keying
         aliases = row.get("aliases", [])
         if key not in {str(a).casefold() for a in aliases}: aliases = [*aliases, name]
         self.upsert("places", {**row, "name": place_name(row) or name, "aliases": aliases})  # the first name sticks; later names are aliases
-        return place
 
     def observe(self, perception: dict, place: str, step: int,
                 tiles: dict[int, tuple[int, int]] | None = None, tracks: dict[int, str] | None = None) -> dict[int, str]:
         """tracks: entity index -> id of the pixel track under it (agent/track.py). That record is the same thing whatever the model now calls it."""
-        result, used = {}, set(); actors = {"person", "npc", "character", "enemy", "monster", "animal"}
+        rows = self.rows("entities")
+        entities, result, used = [], {}, set()
         for i, entity in enumerate(perception.get("entities", [])):
             name, kind = str(entity.get("name", "")).strip(), str(entity.get("kind", "unknown"))
             if not name:
                 continue
-            global_key = kind in RECURRING
             nk, at = normalize_kind(kind), entity.get("at")
-            border = nk == "exit" and bool(at) and any(c <= .02 or c >= .98 for c in at[:2])  # screen-relative: tile moves with the player
-            tile = tiles.get(i) if tiles and not global_key and not border else None
-            all_candidates = [r for r in self.rows("entities")
-                          if (normalize_kind(r.get("kind")) == nk and _distance(r.get("name", ""), name) <= 1
-                              if global_key else r.get("place") == place and _distance(r.get("name", ""), name) <= 1)]
-            candidates = [r for r in all_candidates if r["id"] not in used and (not tile or not r.get("tile") or max(abs(tile[0] - r["tile"][0]), abs(tile[1] - r["tile"][1])) <= (min(4, 1 + max(0, step - r.get("last", step)) // 4) if nk in actors else 1))]
-            exact = [r for r in candidates if _base(r.get("name", "")) == _base(name)]
-            pool = exact or candidates
-            row = pool[0] if len(pool) == 1 else min(pool, key=lambda r: max(abs(tile[0] - r["tile"][0]), abs(tile[1] - r["tile"][1])) if r.get("tile") else 2) if tile and pool else max(exact, key=lambda r: r.get("seen", 0), default=None)  # several same-name: nearest tile, like resolve(); no tile = no evidence of a distinct object (fuzzy ties still mint)
+            if nk == "exit" and at and any(c <= .02 or c >= .98 for c in at[:2]):
+                continue
+            tile = tiles.get(i) if tiles and kind not in RECURRING else None
+            entities.append((i, entity, name, kind, nk, tile))
+
+        # Tile-less and recurring entities keep their name-based identity.
+        for i, entity, name, kind, nk, tile in entities:
+            if tile is not None:
+                continue
+            pool = [r for r in rows if r["id"] not in used and r.get("state") != "merged"
+                    and (normalize_kind(r.get("kind")) == nk if kind in RECURRING else r.get("place") == place)
+                    and _distance(r.get("name", ""), name) <= 1]
+            exact = [r for r in pool if _base(r.get("name", "")) == _base(name)]
+            row = max(exact, key=lambda r: r.get("seen", 0), default=None)
+            if row is None and len(pool) == 1:
+                row = pool[0]
+            if row:
+                result[i], _ = row["id"], used.add(row["id"])
+
+        # Position is the identity evidence for every positioned observation.
+        pairs = []
+        for i, entity, name, kind, nk, tile in entities:
+            if tile is None or i in result:
+                continue
+            is_actor = nk in ACTOR_KINDS or nk == "player"
             hit = self.get("entities", (tracks or {}).get(i))
-            if hit and hit.get("place") == place and hit["id"] not in used:
-                row = hit
-                if _base(name) != _base(row.get("name", "")) and name not in row.get("aliases", []): row["aliases"] = [*row.get("aliases", []), name]
-                kind = row.get("kind", kind)  # the track says which thing; the model's new name or kind is only an alias
+            if hit and hit.get("place") == place and hit.get("state") != "merged":
+                pairs.append(((-1,), i, hit))
+            for row in rows:
+                if row.get("place") != place or row.get("state") == "merged" or not row.get("tile"):
+                    continue
+                d = max(abs(tile[0] - row["tile"][0]), abs(tile[1] - row["tile"][1]))
+                gate = min(4, 1 + max(0, step - row.get("last", step)) // 4) if (
+                    row.get("anchor") == "actor" or normalize_kind(row.get("kind")) in ACTOR_KINDS
+                ) else STATIC_GATE
+                if d <= gate:
+                    pairs.append(((d, (_actor(row) != is_actor), _distance(row.get("name", ""), name), -row.get("seen", 0)), i, row))
+        for _, i, row in sorted(pairs, key=lambda pair: pair[0]):
+            if i not in result and row["id"] not in used:
+                result[i], _ = row["id"], used.add(row["id"])
+
+        for i, entity, name, kind, nk, tile in entities:
+            row = self.get("entities", result[i]) if i in result else None
             if row is None:
+                recurring = kind in RECURRING
                 eid = self._id("entities", name)
-                duplicate = bool(all_candidates) or any(
-                    normalize_kind(r.get("kind")) == nk and _base(r.get("name", "")) == _base(name)
-                    and (global_key or r.get("place") == place) for r in self.rows("entities"))
-                suffix = max(2, sum(1 for r in self.rows("entities") if _base(r.get("name", "")) == _base(name)) + 1)
-                label = f"{name}#{suffix}" if duplicate else name
-                row = {"id": eid, "kind": kind, "name": label, "place": None if global_key else place,
-                       "at": entity.get("at"), "attrs": {}, "first": step, "last": step,
-                       "seen": 0, "src": "observed"}
-                # why a new record: the track offered (if any) and every same-place record of this kind, with its name and tile distance
-                near = [{"id": r["id"], "name": r.get("name"), "tile": r.get("tile"), "last": r.get("last"), "used": r["id"] in used, "name_d": _distance(r.get("name", ""), name),
-                         "tile_d": max(abs(tile[0] - r["tile"][0]), abs(tile[1] - r["tile"][1])) if tile and r.get("tile") else None}
-                        for r in self.rows("entities") if r.get("place") == place and normalize_kind(r.get("kind")) == nk]
+                is_actor = nk in ACTOR_KINDS or nk == "player"
+                near = []
+                for other in self.rows("entities"):
+                    if other.get("place") != place or other.get("state") == "merged" or _actor(other) != is_actor:
+                        continue
+                    tile_d = max(abs(tile[0] - other["tile"][0]), abs(tile[1] - other["tile"][1])) if tile and other.get("tile") else None
+                    near.append({"id": other["id"], "name": other.get("name"), "tile": other.get("tile"),
+                                 "last": other.get("last"), "used": other["id"] in used,
+                                 "name_d": _distance(other.get("name", ""), name), "tile_d": tile_d})
+                near.sort(key=lambda r: r["tile_d"] if r["tile_d"] is not None else float("inf"))
+                row = {"id": eid, "kind": kind, "name": name, "place": None if recurring else place,
+                       "at": entity.get("at"), "attrs": {}, "aliases": [], "kinds": [kind],
+                       "first": step, "last": step, "seen": 0, "src": "observed"}
                 with (self.root / "mints.jsonl").open("a", encoding="utf-8") as f:
-                    f.write(json.dumps({"step": step, "id": eid, "name": label, "kind": kind, "place": place, "at": entity.get("at"), "tile": tile,
-                                        "track": (tracks or {}).get(i), "track_place": (hit or {}).get("place"), "near": near}) + "\n")
-            row.update(kind=kind, name=row.get("name", name), at=entity.get("at"), last=step,
-                       seen=row.get("seen", 0) + 1, status="seen", misses=0)
-            if tile:
+                    f.write(json.dumps({"step": step, "id": eid, "name": name, "kind": kind, "place": place,
+                                        "at": entity.get("at"), "tile": tile, "track": (tracks or {}).get(i),
+                                        "track_place": (self.get("entities", (tracks or {}).get(i)) or {}).get("place"),
+                                        "near": near}) + "\n")
+            elif name != row.get("name") and name not in row.get("aliases", []):
+                row["aliases"] = [*row.get("aliases", []), name]
+            if kind not in row.setdefault("kinds", [row.get("kind", kind)]):
+                row["kinds"] = [*row["kinds"], kind]
+            row.update(at=entity.get("at"), last=step, seen=row.get("seen", 0) + 1, status="seen", misses=0)
+            if tile is not None:
                 row["tile"] = list(tile)
-            eid = self.upsert("entities", row)["id"]
-            result[i], _ = eid, used.add(eid)
+            result[i] = self.upsert("entities", row)["id"]
+            used.add(result[i])
         return result
-
-    def resolve(self, name: str, place: str, tile=None) -> str | None:
-        candidates = [r for r in self.rows("entities")
-                      if (r.get("place") == place or r.get("kind") in RECURRING)
-                      and _distance(r.get("name", ""), name) <= 1]
-        exact = [r for r in candidates if _base(r.get("name", "")) == _base(name)]
-        pool = exact or candidates
-        if len(pool) == 1:
-            return pool[0]["id"]
-        if tile and pool:  # several records share the name: pick the one standing on this tile
-            d, eid = min(((max(abs(tile[0] - r["tile"][0]), abs(tile[1] - r["tile"][1])), r["id"]) for r in pool if r.get("tile")), default=(2, None))
-            if d <= 1: return eid
-        if not pool:
-            return self.upsert("entities", {"id": self._id("entities", name), "kind": "affordance",
-                "name": name, "place": place, "at": None, "attrs": {}, "first": 0, "last": 0,
-                "seen": 0, "src": "model"})["id"]
-        return None
-
-    def add_edge(self, src_place: str, verb: str, via: str, dst_place: str, ok: bool) -> None:
-        place = self.get("places", src_place)
-        if not place:
-            return
-        edges = place.setdefault("edges", [])
-        edge = next((e for e in edges if e.get("verb") == verb and e.get("via") == via
-                     and e.get("to") == dst_place), None)
-        if edge is None:
-            edge = {"verb": verb, "via": via, "to": dst_place, "n": 0, "ok": 0}
-            edges.append(edge)
-        edge["n"] += 1
-        edge["ok"] += int(ok)
-        self.upsert("places", place)
 
     def relate(self, s: str, p: str, o: str, *, src: str, step: int,
                hit: bool | None = None, verb: str | None = None,
@@ -419,86 +400,6 @@ class Memory:
         else:
             row.update(text=text, src=src, step=step)
         return self.upsert("knowledge", row)["id"]
-
-    def expire(self, step: int) -> None:
-        for row in self.rows("relations"):
-            if row.get("src") == "model" and row.get("state") != "expired" and step - row.get("step", step) >= 200:
-                row["state"] = "expired"
-                self.upsert("relations", row)
-
-    def view(self, caller: str, ctx: dict) -> tuple[str, list[str]]:
-        place, task = ctx.get("place"), ctx.get("task")
-        on_screen, recent = set(ctx.get("on_screen", [])), ctx.get("recent", [])[-5:]
-        lines, ids = [], []
-        def add(line: str, item_id: str | None = None, reserve: int = 0) -> bool:
-            text = "\n".join(lines + [line])
-            if len(text) / 4 + reserve / 4 > _BUDGETS.get(caller, 400):
-                return False
-            lines.append(line)
-            if item_id:
-                ids.append(item_id)
-            return True
-        current = self.get("places", place) if place else None
-        if current:
-            add(f"Place: {current.get('name', place)} [{place}]", place)
-            for edge in current.get("edges", []) if caller == "chooser" else []:
-                for label, yes in (("Known exit", edge.get("ok")), ("Failed test", edge.get("n", 0) > edge.get("ok", 0))):
-                    if yes: add(f"{label}: {edge.get('via')} → {edge.get('to')}")
-        if caller == "perceiver":
-            for row in sorted((r for r in self.rows("entities") if r.get("place") == place), key=lambda r: r["name"].casefold()):
-                if not add(f"Known here: {row['name']} ({row['kind']})", row["id"]):
-                    break
-            return "\n".join(lines), ids
-        if task:
-            add(f"Task: {task}", str(task))
-        if caller == "orchestrator":
-            for row in self.rows("patterns"):
-                if row.get("state") in ("candidate", "promoted"):
-                    add(f"Pattern: {row['name']} ({row.get('sup', 0)} hits, {row.get('con', 0)} misses)", row["id"])
-        history = []
-        if caller in ("chooser", "orchestrator"):
-            for row in recent:
-                choice = row.get("choice") or {}
-                history.append(f"Recent: {choice.get('verb', '')} {choice.get('target', '')[:60]} → {row.get('verdict') or 'pending'}")
-            history += [f"Failed here: {(r.get('choice') or {}).get('verb', '')} {((r.get('choice') or {}).get('target', ''))[:60]}"
-                        for r in recent if r.get("place") == place and r.get("verdict") in ("miss", "surprise")]
-            history += [f"Surprise at step {r.get('step')}: {str(r.get('outcome', {}))[:100]}"
-                        for r in recent if r.get("verdict") == "surprise"]
-        text_reserve = sum(len(r.get("text", "")) + 12 for r in self.rows("knowledge") if r.get("src") == "game_text") if caller == "orchestrator" else 0
-        reserve = sum(len(line) + 1 for line in history) + text_reserve
-        entities = self.rows("entities")
-        for row in sorted(entities, key=lambda r: (r["id"] not in on_screen, r.get("place") != place,
-                                                    -r.get("seen", 0), r["id"])):
-            if row["id"] not in on_screen and row.get("place") != place:
-                continue
-            add(f"{row['id']}: {row['name']} ({row['kind']})", row["id"], reserve)
-        for line in history:
-            add(line)
-        rels = sorted((r for r in self.rows("relations") if r.get("state") != "expired"),
-                      key=lambda r: (r.get("s") not in on_screen, -r.get("sup", 0), -r.get("step", 0)))
-        refuted = 0
-        for row in rels:
-            if row.get("s") not in on_screen and row.get("o") not in on_screen and caller != "orchestrator":
-                continue
-            claim = f"{row['s']} {row['p']} {row['o']}"
-            if row.get("src") == "model":
-                claim += " (unverified)"
-            if row.get("state") == "refuted":
-                if refuted == 2:
-                    continue
-                claim = "Don't believe: " + claim
-            if add(claim, row["id"], reserve):
-                refuted += row.get("state") == "refuted"
-        knowledge = self.rows("knowledge")
-        if caller == "orchestrator": knowledge.sort(key=lambda r: r.get("src") != "game_text")
-        if caller == "chooser":
-            knowledge = [r for i, r in enumerate(knowledge) if r.get("text") and not any(o.get("src") == r.get("src") and str(o.get("text", "")).casefold().startswith(str(r["text"]).casefold()) and (len(str(o.get("text", ""))) > len(str(r["text"])) or j > i) for j, o in enumerate(knowledge))][-8:]
-        for row in knowledge:
-            claim = f"Knowledge: {row['text']}" + (" (unverified)" if row.get("src") == "model" else "")
-            if not add(claim, row.get("id"), reserve - text_reserve):
-                break
-        return "\n".join(lines), ids
-
 
 def conf(rel: dict) -> float:
     sup, con = rel.get("sup", 0), rel.get("con", 0)

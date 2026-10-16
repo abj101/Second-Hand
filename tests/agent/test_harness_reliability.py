@@ -163,7 +163,7 @@ def test_duplicate_exit_records_pick_the_observed_door_and_the_failure_note_foll
     root = tmp_path / "memory"
     loop = loop_for(env, tmp_path, [no_action()])
     loop.step()  # the room is seen once with nothing to do
-    loop.mem.upsert("places", {"id": "hall", "name": "Hall", "screen": "world", "state": "place", "first": 1, "last": 1, "edges": []})
+    loop.mem.upsert("places", {"id": "hall", "name": "Hall", "screen": "world", "state": "place", "first": 1, "last": 1})
     loop.mem.upsert("tiles", {"id": f"{loop.place}@2,0", "place": loop.place, "x": 2, "y": 0, "floor": True, "blocked": [], "pushed": [], "step": 1,
                               "exit": {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "observed"}})  # the observed door
     loop.mem.upsert("tiles", {"id": f"{loop.place}@2,1", "place": loop.place, "x": 2, "y": 1, "floor": True, "blocked": [], "pushed": [], "step": 1,
@@ -279,13 +279,9 @@ def test_pending_crossing_resumed_from_a_checkpoint_matches_the_uninterrupted_ru
     assert resumed.fails == {} and straight.fails == {}  # no premature failure
     assert rows[-1]["execution"] == "done" and rows[-1]["verdict"] != "unobservable"
     counted = sorted((c["id"], c["n"]) for c in resumed.mem.rows("crossings"))
-    assert counted == sorted((c["id"], c["n"]) for c in straight.mem.rows("crossings")) and [n for _, n in counted] == [1, 1]  # one crossing, counted once per side
+    assert counted == sorted((c["id"], c["n"]) for c in straight.mem.rows("crossings")) and [n for _, n in counted] == [1]  # one departure crossing
     assert resumed.world.pos == straight.world.pos and resumed.place == straight.place and env.player == straight_env.player
-    assert _edges(resumed.mem) == _edges(straight.mem) and resumed.pending is None
-
-
-def _edges(mem):
-    return sorted((p["id"], e.get("verb"), e.get("via"), e.get("to"), bool(e.get("ok"))) for p in mem.rows("places") for e in p.get("edges", []))
+    assert resumed.pending is None
 
 
 # ---------------------------------------------------------------- case 6
@@ -316,7 +312,7 @@ def test_door_crossing_keeps_place_identity_heard_facts_and_the_top_quest_throug
     monkeypatch.setattr(loop_module, "act", pick(lambda o: False))  # no further action: the next observation is only read
     second = loop.step()
 
-    assert env.scene == 1 and first["place"] != second["place"] and [c["n"] for c in loop.mem.rows("crossings")] == [1, 1]  # one crossing, counted once per side
+    assert env.scene == 1 and first["place"] != second["place"] and [c["n"] for c in loop.mem.rows("crossings")] == [1]  # one departure crossing
     assert loop.notebook.focus == "g1" and loop.notebook.data["quests"][0]["key"] == "g1" and loop.notebook.data["quests"][0]["status"] == "open"
     saved = json.loads((root / "notebook.json").read_text(encoding="utf8"))
     assert saved["facts"]["find_person"]["source"] == "heard"

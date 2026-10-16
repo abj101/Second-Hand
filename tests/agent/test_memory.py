@@ -12,43 +12,75 @@ def test_upsert_restart_replay_and_unknown_store(tmp_path):
     assert restarted.rows("odd_store") == [{"id": "x", "value": 2}]
 
 
-def test_places_continuity_edge_landmark_candidate_and_promotion(tmp_path):
+def test_places_cut_mints_and_modal_keeps_place(tmp_path):
     mem = Memory(tmp_path)
     a = mem.match_place({"screen": "world", "entities": [{"name": "Oak", "kind": "npc"}]}, 1,
                         prev=None, cut=True)
     assert mem.get("places", a)["state"] == "candidate"
+    assert "landmarks" not in mem.get("places", a)
     assert mem.match_place({}, 2, prev=a, cut=False) == a
     b = mem.match_place({"screen": "world", "entities": []}, 3, prev=a, cut=True)
-    mem.add_edge(a, "approach", "door", b, True)
-    assert mem.match_place({"screen": "world", "entities": []}, 4, prev=a, cut=True, via="door") == b
-    same = mem.match_place({"screen": "world", "entities": [{"name": "Oak", "kind": "npc"}]}, 5,
-                           prev=b, cut=True)
-    assert same == a
+    assert b != a and "landmarks" not in mem.get("places", b)
+    moved = mem.match_place({"screen": "world", "entities": [{"name": "Oak", "kind": "npc"}]}, 4,
+                            prev=b, cut=True)
+    assert moved not in (a, b)
     # a battle is a state of the current place, not a place: no new place, no state change
     assert mem.match_place({"screen": "battle", "entities": [{"name": "Rival", "kind": "npc"}]}, 6,
-                           prev=a, cut=True) == a
-    assert len(mem.rows("places")) == 2
+                           prev=moved, cut=True) == moved
+    assert len(mem.rows("places")) == 3
     entity = mem.observe({"entities": [{"name": "Oak", "kind": "npc"}]}, a, 7)[0]
     mem.relate(entity, "moves_view", "", src="pixel", step=8, hit=True)
     assert mem.get("places", a)["state"] == "place"
 
 
-def test_identity_kind_drift_edit_distance_tie_recurring_and_resolve(tmp_path):
+def test_run_start_placeholder_becomes_world_place_without_cut(tmp_path):
+    mem = Memory(tmp_path)
+    placeholder = mem.match_place({"screen": "dialogue"}, 1, prev=None, cut=True)
+    assert mem.get("places", placeholder).get("screen") is None
+
+    place = mem.match_place({"screen": "world", "entities": []}, 2, prev=placeholder, cut=False)
+
+    assert place == placeholder
+    assert mem.get("places", place)["screen"] == "world"
+    assert len(mem.rows("places")) == 1
+
+
+def test_identity_kind_drift_edit_distance_tie_and_recurring(tmp_path):
     mem = Memory(tmp_path)
     one = mem.observe({"entities": [{"name": "mom", "kind": "npc"}]}, "p", 1)[0]
     assert mem.observe({"entities": [{"name": "Mom", "kind": "woman"}]}, "p", 2)[0] == one
+    assert mem.get("entities", one)["kind"] == "npc"
+    assert "Mom" in mem.get("entities", one)["aliases"]
     assert mem.observe({"entities": [{"name": "map", "kind": "npc"}]}, "p", 3)[0] != one
     pair = mem.observe({"entities": [{"name": "bug catcher", "kind": "npc"},
                                       {"name": "bug catcher", "kind": "npc"}]}, "p", 4)
     assert pair[0] != pair[1]
-    assert mem.get("entities", pair[1])["name"] == "bug catcher#2"
-    assert mem.resolve("bug catcher", "p") is None
+    assert mem.get("entities", pair[1])["name"] == "bug catcher"
     mem.observe({"entities": [{"name": "cat", "kind": "npc"}, {"name": "cut", "kind": "npc"}]}, "q", 5)
     tied = mem.observe({"entities": [{"name": "cot", "kind": "npc"}]}, "q", 6)[0]
-    assert mem.get("entities", tied)["name"] == "cot#2"
+    assert mem.get("entities", tied)["name"] == "cot"
     move = mem.observe({"entities": [{"name": "Thunderbolt", "kind": "move"}]}, "p1", 7)[0]
     assert mem.observe({"entities": [{"name": "Thunderbolts", "kind": "move"}]}, "p2", 8)[0] == move
-    assert mem.resolve("mom", "p") == one
+
+
+def test_position_identity_relabels_co_visible_things_and_keeps_tracks(tmp_path):
+    mem = Memory(tmp_path)
+    first = mem.observe({"entities": [{"name": "fence post", "kind": "object"}]}, "p", 1, {0: (2, 3)})[0]
+    assert mem.observe({"entities": [{"name": "pillar", "kind": "object"}]}, "p", 2, {0: (2, 3)})[0] == first
+    row = mem.get("entities", first)
+    assert row["name"] == "fence post" and row["kind"] == "object" and row["aliases"] == ["pillar"]
+
+    frame = {"entities": [{"name": "post", "kind": "object"}, {"name": "barrel", "kind": "object"}]}
+    pair = mem.observe(frame, "q", 1, {0: (4, 4), 1: (4, 4)})
+    assert pair[0] != pair[1]
+    assert mem.observe(frame, "q", 2, {0: (4, 4), 1: (4, 4)}) == pair
+
+    actor = mem.observe({"entities": [{"name": "guard", "kind": "npc"}]}, "r", 1, {0: (0, 0)})[0]
+    assert mem.observe({"entities": [{"name": "person", "kind": "npc"}]}, "r", 5, {0: (2, 0)})[0] == actor
+    track = mem.observe({"entities": [{"name": "mom", "kind": "npc"}]}, "s", 1, {0: (0, 0)})[0]
+    assert mem.observe({"entities": [{"name": "player", "kind": "player"}]}, "s", 2,
+                       {0: (8, 8)}, {0: track})[0] == track
+    assert mem.get("entities", track)["kind"] == "npc"
 
 
 def test_tile_identity_survives_scrolling_and_separates_same_name(tmp_path):
@@ -56,32 +88,38 @@ def test_tile_identity_survives_scrolling_and_separates_same_name(tmp_path):
     per = {"entities": [{"name": "sign", "kind": "object", "at": [.2, .3]}]}
     first = mem.observe(per, "room", 1, tiles={0: (4, 2)})[0]
     assert mem.observe(per, "room", 2, tiles={0: (5, 3)})[0] == first
-    other = mem.observe(per, "room", 3, tiles={0: (8, 2)})[0]
+    other = mem.observe(per, "room", 3, tiles={0: (7, 3)})[0]
     assert other != first
     assert len(mem.rows("entities")) == 2
-    assert mem.observe(per, "room", 4, tiles={0: (8, 2)})[0] == other
+    assert mem.observe(per, "room", 4, tiles={0: (7, 3)})[0] == other
     assert len(mem.rows("entities")) == 2
 
 
-def test_known_exit_precedes_via_edge_and_no_cut_keeps_previous_place(tmp_path):
+def test_known_exit_precedes_via_relation_and_no_cut_keeps_previous_place(tmp_path):
     mem = Memory(tmp_path)
     a = mem.match_place({"screen": "world", "entities": []}, 1, prev=None, cut=True)
     b = mem.match_place({"screen": "world", "entities": []}, 2, prev=a, cut=True)
     c = mem.match_place({"screen": "world", "entities": [{"name": "Sign", "kind": "object"}]}, 3, prev=b, cut=True)
-    mem.add_edge(a, "approach", "door", c, True)
+    mem.relate("e_door", "leads_to", c, src="inferred", step=3)
     mem.upsert("tiles", {"id": f"{a}@4,2", "place": a, "x": 4, "y": 2,
                           "exit": {"dir": "RIGHT", "to": b, "arrive": [0, 0], "src": "observed"}})
     drifted = {"screen": "world", "entities": [{"name": "different landmark", "kind": "npc"}]}
-    assert mem.match_place(drifted, 4, prev=a, cut=True, via="door", exit=(4, 2, "RIGHT")) == b
+    assert mem.match_place(drifted, 4, prev=a, cut=True, via="door", exit=(4, 2, "RIGHT"), via_id="e_door") == b
     assert mem.match_place(drifted, 5, prev=a, cut=False, via="door", exit=(4, 2, "RIGHT")) == a
 
 
-def test_cut_with_identical_landmarks_does_not_return_previous_place(tmp_path):
+def test_cut_without_view_or_exit_mints_despite_matching_landmarks(tmp_path):
     mem = Memory(tmp_path)
-    per = {"screen": "world", "entities": [{"name": "Oak", "kind": "npc"}]}
-    prev = mem.match_place(per, 1, prev=None, cut=True)
+    known = mem.match_place({"screen": "world", "entities": [{"name": "Oak", "kind": "npc"}]}, 1,
+                            prev=None, cut=True)
+    prev = mem.match_place({"screen": "world", "entities": [{"name": "Pine", "kind": "npc"}]}, 2,
+                           prev=known, cut=True)
 
-    assert mem.match_place(per, 2, prev=prev, cut=True) != prev
+    result = mem.match_place({"screen": "world", "entities": [{"name": "Oak", "kind": "npc"}]}, 3,
+                             prev=prev, cut=True)
+
+    assert result not in (known, prev)
+    assert "landmarks" not in mem.get("places", result)
 
 
 def test_cut_ignores_self_loop_exit_edges_and_relations(tmp_path):
@@ -103,7 +141,7 @@ def test_cut_ignores_self_loop_exit_edges_and_relations(tmp_path):
         assert matched != prev
 
 
-def test_relations_confidence_provenance_and_expiry(tmp_path):
+def test_relations_confidence_and_provenance(tmp_path):
     mem = Memory(tmp_path)
     rel = mem.relate("e_door", "leads_to", "p_lab", src="pixel", step=1, hit=True)
     mem.relate("e_door", "leads_to", "p_lab", src="pixel", step=2, hit=True)
@@ -118,72 +156,6 @@ def test_relations_confidence_provenance_and_expiry(tmp_path):
     assert mem.get("relations", rel["id"])["state"] == "live"
     model = mem.relate("e_npc", "opens", "battle", src="model", step=10, hit=True)
     assert model["src"] == "model" and model["sup"] == 0
-    mem.expire(210)
-    assert mem.get("relations", model["id"])["state"] == "expired"
-
-
-def test_view_budget_ids_and_recent_failed_affordances(tmp_path):
-    mem = Memory(tmp_path)
-    place = mem.match_place({"screen": "world", "entities": []}, 1, prev=None, cut=True)
-    entity = mem.observe({"entities": [{"name": "door", "kind": "door", "at": [.2, .3]}]}, place, 2)[0]
-    mem.relate(entity, "leads_to", "p_other", src="model", step=3)
-    recent = [{"step": 2, "place": place, "choice": {"verb": "interact", "target": "door"},
-               "verdict": "miss", "outcome": {"effects": ["no_change"]}}]
-    for caller, budget in (("perceiver", 400), ("chooser", 1200), ("orchestrator", 3000)):
-        text, ids = mem.view(caller, {"place": place, "task": "explore", "on_screen": [entity],
-                                      "recent": recent, "step": 3})
-        assert len(text) / 4 <= budget
-        assert entity in ids
-        if caller != "perceiver":
-            assert "(unverified)" in text
-        if caller == "chooser":
-            assert "Failed here: interact door" in text
-    mem.know("The sealed gate opens at dusk", src="model", step=4)
-    assert "The sealed gate opens at dusk (unverified)" in mem.view(
-        "chooser", {"place": place, "task": None, "on_screen": [], "recent": [], "step": 4}
-    )[0]
-
-def test_unresolved_exit_gets_place_identity_and_failed_view(tmp_path):
-    mem = Memory(tmp_path)
-    place = mem.match_place({"screen": "world", "entities": []}, 1, prev=None, cut=True)
-    target = "exit: door mat"
-    entity = mem.resolve(target, place)
-    assert entity and mem.resolve(target, place) == entity
-    recent = [{"step": 2, "place": place, "choice": {"verb": "approach", "target": target},
-               "verdict": "miss", "outcome": {"effects": ["no_change"]}}]
-    view, ids = mem.view("chooser", {"place": place, "task": None, "on_screen": [], "recent": recent})
-    assert entity in ids and "Failed here: approach exit: door mat" in view
-
-
-def test_refuted_view_cap_and_chooser_history_survives_crowded_memory(tmp_path):
-    mem = Memory(tmp_path)
-    place = mem.match_place({"screen": "world", "entities": []}, 1, prev=None, cut=True)
-    for i in range(3):
-        mem.relate(f"e_{i}", "leads_to", f"p_{i}", src="pixel", step=2, hit=False)
-        mem.relate(f"e_{i}", "leads_to", f"p_{i}", src="pixel", step=3, hit=False)
-    for i in range(30):
-        mem.upsert("entities", {"id": f"e_noise_{i}", "name": "noise" * 40, "kind": "npc",
-                                  "place": place, "seen": 1})
-        mem.upsert("knowledge", {"id": f"k_{i}", "text": "fact" * 40, "src": "model", "step": i})
-    recent = [{"step": 9, "place": place, "choice": {"verb": "interact", "target": "old target"},
-               "verdict": "surprise", "outcome": {"effects": ["screen_changes"]}}]
-    text, _ = mem.view("chooser", {"place": place, "task": "explore", "on_screen": [],
-                                    "recent": recent, "step": 10})
-    assert text.count("Don't believe:") <= 2
-    assert "Recent: interact old target → surprise" in text
-    assert "Failed here: interact old target" in text
-    assert "Surprise at step 9" in text
-    assert len(text) / 4 <= 1200
-
-
-def test_resolve_ambiguous_name_by_nearest_tile(tmp_path):
-    mem = Memory(tmp_path)
-    for i, tile in enumerate(([0, 0], [5, 5])):
-        mem.upsert("entities", {"id": f"e_{i}", "kind": "object", "name": f"shelf#{i + 2}", "place": "p", "tile": tile})
-    assert mem.resolve("shelf", "p") is None and mem.resolve("shelf", "p", (3, 3)) is None
-    assert mem.resolve("shelf", "p", (5, 6)) == "e_1"
-
-
 def test_match_place_ignores_exit_prefix_and_follows_leads_to(tmp_path):
     mem = Memory(tmp_path)
     mem.upsert("places", {"id": "p_1f", "name": "1f", "edges": [{"verb": "approach", "via": "stairs", "to": "p_2f", "n": 1, "ok": 1}]})
@@ -206,36 +178,28 @@ def test_observe_same_name_block_keeps_stable_ids(tmp_path):
     assert len(rows) == 4 and all(r["seen"] == 4 for r in rows)
 
 
-def test_border_exit_pools_across_kind_strings_resolves_and_places_ignore_transients(tmp_path):
+def test_border_exit_pools_across_kind_strings_and_places_ignore_transients(tmp_path):
     m = Memory(tmp_path)
     for step, (kind, tile) in enumerate([("exit", (1, 1)), ("exit: path south", (4, 2)), ("Exits", (7, 3)), ("exit: path south", (9, 5))]):
         m.observe({"entities": [{"name": "exit: path south", "kind": kind, "at": [.5, .99]}]}, "p", step, {0: tile})
-    exits = [r for r in m.rows("entities") if "path south" in r["name"]]
-    assert len(exits) == 1 and exits[0]["seen"] == 4 and "tile" not in exits[0]
-    assert m.resolve("path south", "p") == exits[0]["id"] and not [r for r in m.rows("entities") if r.get("src") == "model"]
+    assert not [r for r in m.rows("entities") if "path south" in r["name"]]
+    assert not [r for r in m.rows("entities") if r.get("src") == "model"]
     tree = {"name": "tree", "kind": "object"}
     first = m.match_place({"screen": "world", "entities": [tree, {"name": "red", "kind": "player"}]}, 1, prev=None, cut=True)
     again = m.match_place({"screen": "world", "entities": [tree, {"name": "hi", "kind": "dialogue_box"}, {"name": "x", "kind": "exit: east"}]}, 2, prev=None, cut=True)
-    assert first == again and len(m.rows("places")) == 1
+    assert first != again and len(m.rows("places")) == 2
 
 
-def test_name_place_merges_new_arrival_retargets_refs_and_keeps_established_places(tmp_path):
+def test_name_place_same_as_known_place_adds_alias_without_merging(tmp_path):
     mem = Memory(tmp_path)
-    mem.upsert("places", {"id": "new", "screen": "world", "state": "candidate", "first": 3, "landmarks": [["oak", "npc"]], "edges": []})
-    mem.upsert("places", {"id": "hall", "name": "Hall", "screen": "world", "state": "place", "first": 1, "landmarks": [["oak", "npc"]], "edges": []})
-    mem.upsert("places", {"id": "start", "name": "start", "screen": "world", "state": "place", "first": 1, "landmarks": [], "edges": [{"verb": "approach", "via": "door", "to": "new", "n": 1, "ok": 1}]})
-    mem.upsert("tiles", {"id": "t1", "place": "start", "x": 1, "y": 2, "exit": {"to": "new"}})
-    mem.upsert("relations", {"id": "r1", "s": "e1", "p": "leads_to", "o": "new", "state": "live"})
-    assert mem.name_place("new", "hall", 3) == "hall"
-    assert mem.get("places", "new")["state"] == "merged" and mem.get("places", "new")["into"] == "hall"
-    assert mem.get("places", "start")["edges"][0]["to"] == "hall"
-    assert mem.get("tiles", "t1")["exit"]["to"] == "hall" and mem.get("relations", "r1")["o"] == "hall"
-    assert mem.match_place({"screen": "world", "entities": [{"name": "Oak", "kind": "npc"}]}, 4, prev=None, cut=True) == "hall"
-    mem.upsert("places", {"id": "old", "name": "Cave", "screen": "world", "state": "place", "first": 1, "landmarks": [], "edges": []})
-    mem.upsert("places", {"id": "other", "name": "Lake", "screen": "world", "state": "place", "first": 5, "landmarks": [], "edges": []})
-    assert mem.name_place("other", "cave", 6) == "other" and mem.get("places", "other")["state"] == "place"
-    assert mem.name_place("other", "Lakeside", 6) == "other"
-    assert mem.get("places", "other")["name"] == "Lake" and mem.get("places", "other")["aliases"] == ["Lakeside"]  # the first name sticks
+    mem.upsert("places", {"id": "new", "screen": "world", "state": "candidate", "first": 3})
+    mem.upsert("places", {"id": "hall", "name": "Hall", "screen": "world", "state": "place", "first": 1})
+
+    assert mem.name_place("new", "hall", 3) is None
+    assert mem.get("places", "new")["state"] == "candidate"
+    assert mem.get("places", "new")["name"] == "hall"
+    assert mem.get("places", "new")["aliases"] == ["hall"]
+    assert mem.get("places", "hall")["state"] == "place"
 def test_base_removes_repeated_numeric_suffixes():
     from agent.memory import _base
 
@@ -318,21 +282,25 @@ def test_cut_back_from_dialogue_matches_the_place_left_not_a_new_one(tmp_path):
     assert mem.match_place(room, 6, prev=place, cut=True) != place  # a real move between navigable screens still excludes prev
 
 
-def test_name_place_refuses_screen_types_and_references(tmp_path):
+def test_name_place_refuses_screen_types_and_accepts_references(tmp_path):
     mem = Memory(tmp_path)
-    mem.upsert("places", {"id": "p", "screen": "world", "state": "candidate", "first": 1, "landmarks": [], "edges": []})
-    assert mem.name_place("p", "world", 2) == "p" and mem.name_place("p", "Town [p_x]", 2) == "p"
-    assert mem.get("places", "p").get("aliases") is None and "name" not in mem.get("places", "p")
-    assert mem.name_place("p", "Hall", 3) == "p" and mem.get("places", "p")["aliases"] == ["Hall"]
+    mem.upsert("places", {"id": "p", "screen": "world", "state": "candidate", "first": 1})
+    assert mem.name_place("p", "world", 2) is None
+    assert "name" not in mem.get("places", "p")
+    assert mem.name_place("p", "Town [p_x]", 2) is None
+    assert mem.get("places", "p")["name"] == "Town [p_x]"
 
 
-def test_place_label_echo_is_never_a_name_but_place_words_are(tmp_path):
+def test_nameable_rejects_screen_types_only(tmp_path):
     from agent.memory import _nameable, place_name
-    assert not _nameable("place 3") and not _nameable("Place  12") and not _nameable("PLACE7") and _nameable("place of rest") and _nameable("Placeholder 2")
-    assert place_name({"name": "place 3", "screen": "world"}) == ""
+    assert not _nameable("") and not _nameable("world") and not _nameable("Dialogue")
+    assert _nameable("place 3") and _nameable("Town [p_x]")
+    assert place_name({"name": "world"}) == ""
+    assert place_name({"name": "place 3"}) == "place 3"
     mem = Memory(tmp_path)
-    mem.upsert("places", {"id": "p", "screen": "world", "state": "candidate", "first": 1, "landmarks": [], "edges": []})
-    assert mem.name_place("p", "place 3", 2) == "p" and "name" not in mem.get("places", "p") and mem.get("places", "p").get("aliases") is None
+    mem.upsert("places", {"id": "p", "screen": "world", "state": "candidate", "first": 1})
+    mem.name_place("p", "place 3", 2)
+    assert mem.get("places", "p")["name"] == "place 3"
 
 
 def test_cut_arrival_uses_a_known_exit_within_one_tile_when_they_agree(tmp_path):
@@ -360,7 +328,7 @@ def test_never_crossed_door_with_a_crossed_doors_label_is_a_new_place_not_its_de
     mem = Memory(tmp_path)
     mem.upsert("places", {"id": "p_out", "screen": "world", "state": "place", "landmarks": [["sign", "object"]], "edges": []})
     mem.upsert("places", {"id": "p_house", "screen": "world", "state": "place", "landmarks": [["bed", "furniture"], ["tv", "object"]], "edges": []})
-    mem.add_edge("p_out", "approach", "exit: house door", "p_house", True)
+    mem.relate("e_house_door_1", "leads_to", "p_house", src="inferred", step=8)
     lab = {"screen": "world", "entities": [{"name": "machine", "kind": "object"}, {"name": "bookshelf", "kind": "furniture"}]}
     pid = mem.match_place(lab, 9, prev="p_out", cut=True, via="house door", exit=(-1, 6, "UP"), via_id="e_house_door_2")
     assert pid not in ("p_house", "p_out") and mem.get("places", pid)["state"] == "candidate"
@@ -371,5 +339,5 @@ def test_new_record_is_logged_with_the_records_it_did_not_match(tmp_path):
     mem.observe({"entities": [{"kind": "npc", "name": "girl", "at": [.5, .5]}]}, "p", 1, {0: (2, 2)})
     mem.observe({"entities": [{"kind": "npc", "name": "girl", "at": [.9, .5]}]}, "p", 2, {0: (9, 2)})  # too far for the same girl: a second record
     rows = [json.loads(line) for line in (tmp_path / "mints.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert [r["name"] for r in rows] == ["girl", "girl#2"]
+    assert [r["name"] for r in rows] == ["girl", "girl"]
     assert rows[1]["near"][0]["name"] == "girl" and rows[1]["near"][0]["tile_d"] == 7 and rows[1]["near"][0]["name_d"] == 0

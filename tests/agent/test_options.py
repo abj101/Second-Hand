@@ -19,8 +19,8 @@ def player(): return {"name": "player", "kind": "player", "at": at(0, 0)}
 
 
 def room(mem):
-    mem.upsert("places", {"id": "room", "name": "Room", "screen": "world", "state": "place", "first": 1, "last": 1, "edges": []})
-    for pid, name in (("hall", "Hall"), ("cave", "Cave")): mem.upsert("places", {"id": pid, "name": name, "screen": "world", "state": "place", "first": 1, "last": 1, "edges": []})
+    mem.upsert("places", {"id": "room", "name": "Room", "screen": "world", "state": "place", "first": 1, "last": 1})
+    for pid, name in (("hall", "Hall"), ("cave", "Cave")): mem.upsert("places", {"id": pid, "name": name, "screen": "world", "state": "place", "first": 1, "last": 1})
     for x in range(-2, 3):
         for y in range(-2, 3): tile(mem, x, y)
 
@@ -44,10 +44,11 @@ def scene(tmp_path):
     mem = Memory(tmp_path); room(mem)
     tile(mem, 2, 0, {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "observed"})
     tile(mem, 0, -2, {"dir": "UP", "to": "cave", "arrive": [0, 0], "src": "inferred"})
+    blocked = mem.get("tiles", "room@0,2")
+    mem.upsert("tiles", {**blocked, "blocked": ["RIGHT"]})
     world, per = setup(mem, [{"name": "exit: door", "kind": "exit", "at": at(2, 0)}, {"name": "npc", "kind": "npc", "at": at(-1, 0)},
                              {"name": "exit: fake", "kind": "exit", "at": at(1, 2)}])
     i = ids(world, per)
-    mem.upsert("places", {**mem.get("places", "room"), "edges": [{"verb": "approach", "via": "exit: door", "to": "hall", "n": 2, "ok": 2}]})
     mem.upsert("relations", {"id": "lt", "s": i["exit: door"], "p": "leads_to", "o": "hall", "src": "observed", "sup": 2, "con": 0, "ev": [30, 40], "state": "live", "step": 40})
     mem.upsert("relations", {"id": "dn", "s": i["exit: fake"], "p": "does_nothing", "o": "", "src": "observed", "sup": 0, "con": 3, "ev": [104, 105, 107], "state": "refuted", "verb": "buttons", "step": 107})
     mem.upsert("relations", {"id": "say", "s": i["npc"], "p": "says", "o": "Hi", "src": "model", "sup": 0, "con": 0, "ev": [], "state": "live", "why": "says the same as before (step 90)", "step": 91})
@@ -101,8 +102,8 @@ def test_room_lists_exits_things_explore_and_free_input_in_rule_order_with_notes
     mem, world, per = scene(tmp_path)
     opts = world.options(per, "room", {}, 120, inputs=INPUTS)
     assert [(o["n"], o["tool"], o["label"]) for o in opts] == [
-        (1, "go_to", "possible exit UP (unverified, never crossed)"),
-        (2, "approach", "exit door → Hall (used 2×, last step 40)"),
+        (1, "go_to", "possible exit UP → Cave (unverified, never crossed)"),
+        (2, "approach", "exit door → Hall (used 1×)"),
         (3, "approach", "not an exit: fake (walked into 3×, steps 104–107)"),
         (4, "approach", "approach npc"),
         (5, "interact", "interact with npc"),
@@ -132,7 +133,7 @@ def test_fifteen_remembered_things_share_one_row_and_stay_reachable(tmp_path):
     mem = Memory(tmp_path); room(mem)
     tile(mem, 2, 0, {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "observed"})
     tile(mem, 0, -2, {"dir": "UP", "to": "cave", "arrive": [0, 0], "src": "observed"})
-    for n in range(15): mem.upsert("entities", {"id": f"crate{n}", "name": f"crate {n}", "kind": "object", "place": "room", "tile": [-2, n % 5 - 2], "status": "remembered", "last": 1, "seen": 1})
+    for n, pos in enumerate(SPOTS): mem.upsert("entities", {"id": f"crate{n}", "name": f"crate {n}", "kind": "object", "place": "room", "tile": list(pos), "status": "remembered", "last": 1, "seen": 1})
     world, per = setup(mem, [{"name": "npc", "kind": "npc", "at": at(-1, 0)}])
     opts = world.options(per, "room", {}, 9, inputs=INPUTS)
     labels = [o["label"] for o in opts]
@@ -183,7 +184,7 @@ def test_known_places_over_the_cap_share_one_row_and_none_is_lost(tmp_path):
     mem = Memory(tmp_path); room(mem)
     mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
     for n in range(10):
-        mem.upsert("places", {"id": f"t{n}", "name": f"Town {n}", "screen": "world", "state": "place", "first": 1, "last": 1, "edges": []})
+        mem.upsert("places", {"id": f"t{n}", "name": f"Town {n}", "screen": "world", "state": "place", "first": 1, "last": 1})
         mem.upsert("tiles", {"id": f"t{n}@0,0", "place": f"t{n}", "x": 0, "y": 0, "floor": True, "blocked": [], "pushed": [], "exit": None, "step": 1})
         mark_exit(mem, "hall", (n, 0), "DOWN", f"t{n}", (0, 0), 1)
     world, per = setup(mem, [])
@@ -222,11 +223,11 @@ def test_fail_notes_use_the_loop_failure_key_and_mark_cycles(tmp_path):
     assert loop._fail_key("room", "approach", None, ref=f"thing:{i['npc']}") == fail_key("room", "approach", None, INPUTS, ref=f"thing:{i['npc']}")
     base = {o["label"]: o for o in world.options(per, "room", {}, 120, inputs=INPUTS)}
     fails = {base["approach npc"]["intent_key"]: {"n": 2, "why": "wall", "step": 50, "act": "approach npc"},
-             base["possible exit UP (unverified, never crossed)"]["intent_key"]: {"n": 2, "why": "leads back to Cave: cycle", "step": 60}}
+             base["possible exit UP → Cave (unverified, never crossed)"]["intent_key"]: {"n": 2, "why": "leads back to Cave: cycle", "step": 60}}
     by = {o["label"]: o for o in world.options(per, "room", fails, 120, inputs=INPUTS)}
     assert by["approach npc"]["notes"] == ["tried here 2×, last: wall", "talked; same text as before (step 90)"]
     assert by["interact with npc"]["notes"] == ["talked; same text as before (step 90)"]  # an interaction failure is not an approach failure
-    assert by["possible exit UP (unverified, never crossed)"]["notes"] == ["part of a back-and-forth cycle (step 60)"]
+    assert by["possible exit UP → Cave (unverified, never crossed)"]["notes"] == ["part of a back-and-forth cycle (step 60)"]
     assert by["not an exit: fake (walked into 3×, steps 104–107)"]["notes"][0].startswith("refuted: not working")
 
 
@@ -235,21 +236,23 @@ def walk(world, src, dst, direction, step):  # one crossing as the loop reports 
     world.current_place = src; world.prepare(skill, src, True, step); world.after(skill, src, dst, True, step); world.current_place = dst
 
 
-def test_two_room_exit_is_verified_on_both_sides_and_counts_every_crossing(tmp_path):
+def test_two_room_exit_counts_only_departure_crossings(tmp_path):
     mem = Memory(tmp_path); room(mem)
     mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)  # the first crossing writes both exits, as Loop does
     world, per = setup(mem, []); world.pos = (2, 0)  # standing on the exit tile
     walk(world, "room", "hall", "RIGHT", 1); walk(world, "hall", "room", "LEFT", 2); walk(world, "room", "hall", "RIGHT", 3)
     room_labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["tool"] != "buttons"]
     hall_labels = [o["label"] for o in world.options(per, "hall", {}, 3, inputs=INPUTS) if o["tool"] != "buttons"]
-    assert "exit RIGHT → Hall (used 3×, last step 3) (4 unexplored spots beyond)" in room_labels and "exit LEFT → Room (used 3×, last step 3) (19 unexplored spots beyond)" in hall_labels
+    assert "exit RIGHT → Hall (used 2×, last step 3) (4 unexplored spots beyond)" in room_labels and "exit LEFT → Room (used 1×, last step 2) (19 unexplored spots beyond)" in hall_labels
 
 
 def test_perceived_exit_never_crossed_is_unverified_then_refuted_after_two_failed_tries(tmp_path):
     mem = Memory(tmp_path); room(mem)
     world, per = setup(mem, [{"name": "exit: wall", "kind": "exit", "at": at(1, -2)}])  # a floor tile the agent never crossed
     assert "possible exit wall (unverified, never crossed)" in [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS)]
-    mem.add_edge("room", "approach", "exit: wall", "room", False); mem.add_edge("room", "approach", "exit: wall", "room", False)
+    for x, direction in ((0, "RIGHT"), (2, "LEFT")):
+        row = mem.get("tiles", f"room@{x},-2")
+        mem.upsert("tiles", {**row, "blocked": [direction]})
     assert "not an exit: wall (walked into 2×)" in [o["label"] for o in world.options(per, "room", {}, 4, inputs=INPUTS)]
 
 
@@ -264,7 +267,7 @@ def test_inferred_exit_next_to_a_verified_one_is_listed_once(tmp_path):
 def chain(mem):
     """Rooms A - B - C in a line. Every floor edge is blocked or an exit, so no place has untried edges of its own. C has an unused exit (north)."""
     for pid, name in (("a", "Room A"), ("b", "Room B"), ("c", "Room C")):
-        mem.upsert("places", {"id": pid, "name": name, "screen": "world", "state": "place", "first": 1, "last": 1, "edges": []})
+        mem.upsert("places", {"id": pid, "name": name, "screen": "world", "state": "place", "first": 1, "last": 1})
     def cell(place, x, y, blocked, exit=None): mem.upsert("tiles", {"id": f"{place}@{x},{y}", "place": place, "x": x, "y": y, "floor": True, "blocked": blocked, "pushed": [], "exit": exit, "step": 1})
     cell("a", 0, 0, ["UP", "DOWN", "LEFT"], {"dir": "RIGHT", "to": "b", "arrive": [0, 0], "src": "observed"})
     cell("b", 0, 0, ["UP", "DOWN"], {"dir": "LEFT", "to": "a", "arrive": [0, 0], "src": "observed"})
@@ -309,7 +312,7 @@ def two_rooms(tmp_path, seen):
     """Room A's only untried edge is UP (its exit RIGHT leads to Room B, which has unseen edges). seen: A's seen cells."""
     mem = Memory(tmp_path)
     for pid, name in (("a", "Room A"), ("b", "Room B")):
-        mem.upsert("places", {"id": pid, "name": name, "screen": "world", "state": "place", "first": 1, "last": 1, "edges": []})
+        mem.upsert("places", {"id": pid, "name": name, "screen": "world", "state": "place", "first": 1, "last": 1})
     def cell(place, x, y, blocked, exit=None): mem.upsert("tiles", {"id": f"{place}@{x},{y}", "place": place, "x": x, "y": y, "floor": True, "blocked": blocked, "pushed": [], "exit": exit, "step": 1})
     cell("a", 0, 0, ["DOWN", "LEFT"], {"dir": "RIGHT", "to": "b", "arrive": [0, 0], "src": "observed"})
     cell("b", 0, 0, ["UP"], {"dir": "LEFT", "to": "a", "arrive": [0, 0], "src": "observed"})

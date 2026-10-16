@@ -103,15 +103,6 @@ def test_predict_uses_promoted_pattern_only_without_matching_instance(tmp_path):
     assert predict(mem, {"verb": "approach"}, "d4", "home")["basis"] == "instance"
 
 
-def test_kind_normalization_and_orchestrator_lists_patterns(tmp_path):
+def test_kind_normalization():
     assert normalize_kind("doors") == normalize_kind("Door") == normalize_kind("doorways") == "door"
     assert normalize_kind("exit: door") == "exit"
-
-    mem = Memory(tmp_path)
-    _place(mem, "room")
-    for id in ("d1", "d2"):
-        _door(mem, id)
-        _hit(mem, id)
-    pattern, = mem.rows("patterns")
-    text, ids = mem.view("orchestrator", {})
-    assert "2 hits" in text and pattern["id"] in ids

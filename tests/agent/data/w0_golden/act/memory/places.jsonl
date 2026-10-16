@@ -1,4 +1,3 @@
-{"blocked":[],"edges":[],"first":1,"id":"p_place","landmarks":[],"last":1,"screen":"world","state":"candidate","visits":1}
-{"blocked":[],"edges":[],"first":1,"id":"p_place","landmarks":[],"last":1,"screen":"world","state":"place","visits":1}
-{"blocked":[],"edges":[{"n":1,"ok":1,"to":"p_place_2","verb":"approach","via":"door"}],"first":1,"id":"p_place","landmarks":[],"last":1,"screen":"world","state":"place","visits":1}
-{"blocked":[],"edges":[],"first":1,"id":"p_place_2","landmarks":[],"last":1,"screen":"world","state":"candidate","visits":1}
+{"blocked":[],"first":1,"id":"p_place","last":1,"screen":"world","state":"candidate","visits":1}
+{"blocked":[],"first":1,"id":"p_place","last":1,"screen":"world","state":"place","visits":1}
+{"blocked":[],"first":1,"id":"p_place_2","last":1,"screen":"world","state":"candidate","visits":1}
