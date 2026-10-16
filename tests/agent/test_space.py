@@ -31,7 +31,7 @@ def test_fold_walk_blocked_and_none(tmp_path):
 def test_actor_zero_motion_does_not_record_a_wall(tmp_path):
     from types import SimpleNamespace
 
-    mem = Memory(tmp_path)
+    mem = Memory(tmp_path); mem.upsert("places", {"id": "hall", "screen": "world", "state": "place"})  # the loop always has the place row (match_place mints it)
     world = World(mem, 16)
     per = {"screen": "world", "entities": [
         {"kind": "player", "at": [.45, .5]}, {"kind": "NPC: shopkeeper", "at": [.55, .5]},
