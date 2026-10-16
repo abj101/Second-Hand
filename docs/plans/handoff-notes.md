@@ -1,46 +1,61 @@
 # Handoff notes
 
-Last written: 2026-10-15. QS-R is built and gated, uncommitted on `feat/lean-agent`. Evidence: [QS-R Result](QS-R.md#9-result-filled-in-by-the-orchestrator). Earlier QS evidence: [QS Result](QS.md#9-result-filled-in-by-the-orchestrator).
+Last written: 2026-10-15. RCR R1 offline gate passed on feat/lean-agent; the final live retry completed at the user's 80-step cap. Evidence: R1-identity.md §9 and MASTER.md §8.
 
 ## State of the code
-- **Event queue.** `Loop.events` is a persisted list of `{kind T1..T5, text, step}`. Producers: T1 dialogue flushed or world-screen text, T2 first navigable place (`_moved`), T3 quest closed (planner or check), T4 `no_progress` stall, T5 no open quest (once while pending). `_plan_trigger` fires only when an event waits and `step - last_plan >= 3`, for every kind (T1 only on the world screen). One plan call consumes the queue whole; its trace row carries `events`. Old checkpoints convert their loose flags once (`_old_events`).
-- **Progress.** `Stuck.progress()` is called only for a first world place, a first verified edge or a quest closing. Text never resets the stall counter. Menu-screen text goes to knowledge only (no conversation buffer, no T1).
-- **Checks.** One matcher for `_check_passes` and `run_checks`. reach: current place entered after `quest.opened` and any name (`place_name` + `place_aliases`, ` [id]` stripped) within edit distance 1; speak: exact speaker after opened; text: arg >= 4 chars with a 3+ letter word, word-boundary match. `Loop.entered` (place -> step last entered) feeds `places()`.
-- **Whitelist and flags.** Planner can write only the whitelisted quest/belief/fact fields; `opened`, `closed`, `check_history`, belief `history` are code-owned. New flags: `needs check <key>`, `merged <new> into <old>`, `relapse <key>: ...`, refused check swaps. Parked quests auto-promote oldest first.
-- **Render budgets.** Planner `render()` keeps open and parked quests, held beliefs, last 5 notes, cited (transitive) plus 8 newest facts (`(+N older facts)`), one "ruled out:" heading; drops older notes, then chapters, closed quests, ruled-out beliefs. `render_focus()` adds up to 3 beliefs, the latest planner note (400 chars) and the facts cited by the top quest plus 4 newest, with the newest log lines that fit 4,000 chars. Migrated chapter 0 omits tactical and `try_` goals.
-- **Evidence packet.** 600 chars, whole entries newest first per section; labels `new text since last plan:` and `steps since last progress: N (stall at 20)`. Stall fallback reconciles only the fallback quest, once. A failed chapter call backs off until 6 more notes (`chapter_after`).
-- **Act.** `REPLY`/`SCHEMA` no longer ask for `notebook` edits; old replies still parse `Act.ops`. Planner SYSTEM is 14 sentences with the check instruction.
-- **Tools.** `eval_act.py --om act-size --run R --from-step N` (0 requests, exit 2 without perception). `eval_run.py --lifecycle` adds `truth_join` (place purity, reach-closure maps; trace S vs truth S+1), `quests_per_door`, `heard_leads.dropped`, plan calls from trace plan rows only, stall = `no_progress`/T4 only, replay under the event rules. Viewer FOCUS header reads the first open quest of notebook v2.
+- S0 landed at d83bd9a; eligible R1 files are committed at d787836.
+- R1 provides geometry/track identity with aliases/kinds, position-based self exclusion, departure-only crossings, blocked-push exit truth, refs/canon/known/history and pixel-offset place closure.
+- Names no longer merge places; Memory.view/resolve/expire/add_edge and name/landmark identity paths are removed.
+- Loop's R1 changes are applied but remain unstaged alongside the user's live-view edits.
+- The golden changes exactly four memory files; its trace is unchanged.
+- First live run completed 150 rows without gameplay; one retry stopped at 5 rows on request; final retry runs/m1_rcr_r1_live_retry2 completed 80 rows and was scored.
 
 ## Decisions in force
-- Ponytail Full, CodeGraph first, Headroom for large output. No game names in `agent/`. `docs/plans/contracts.md` is not edited here; the section 4 proposal (all implemented) is in the QS-R Result for the user to merge.
-- The golden `tests/agent/data/w0_golden/act/trace.jsonl` was regenerated twice, user-authorized, with only plan/flags/events/trigger fields changed. It is git-ignored but tracked: commit with `git add -f`.
-- No cap changes, no live game runs, no push. Workers were not used for the finish (one inline agent).
+- CLAUDE.md requires Ponytail full, CodeGraph before code reads/edits, Headroom for large output; the compression proxy is unreachable.
+- Every worker spawn explicitly used gpt-6-luna with reasoning high; all interrupted workers have finished.
+- Earlier bounded same-tier failure/retry history remains in R1 §9; no additional repair or runtime steering was introduced during finalization.
+- G8 was corrected by the user: inferred stairs remain unverified, retain destination/routability; the mat is verified by departure; phantom uses must be zero.
+- STATIC_GATE stays 1; no Q2 elimination logic, threshold tuning or perception prompt changes were needed.
+- Never stage files carrying live-view edits, never git add -A, never push.
+- The user authorized the final 80-step retry; it is complete. Do not start another live run or implement R4 as part of this R1 task.
 
 ## Measured numbers
-- Suite `.venv-agent/Scripts/python.exe -B -m pytest tests/agent -q -p no:cacheprovider -n auto`: **598 passed, 0 failed** (baseline 564).
-- Planner bound (e2e, 200 steps): **67 plan calls**, gaps >= 3, none of 258 events lost. End-to-end heard-quest chain with restore passes.
-- Act/decide prompt at m1_ip: step 100 **1,168.8 tokens**, step 125 **1,111.5** (len/4, cap 1,700).
-- Lifecycle replay calls: hf_checkpoint_1 10, decide3 13, gp5 12, m1_ip 11. Place purity: hf_checkpoint_1 **0.75** (`p_place_5` spans RAM maps 0x27 and 0x28), others 1.0. Quests-per-door: hf 6/15, decide3 0/11, gp5 0/11, m1_ip 5/16.
-- Live at m1_ip 100 (3 tries): **3/3**; each try 2 heard quests, both with valid checks, 0 rejected, no flags.
-- Live at m1_ip 125 (3 tries): harness **0/3**. Revise/refute **0**, belief-cited reorder **0**. By hand: 1 reorder with a reason (no belief cited), 2 new held beliefs with reasons. Literal gate wording ("order or beliefs change with a reason") would read 3/3.
-- Ledger: total 3222 -> **3228**, M1 3174 -> **3180** (+6). Caps 3265/3215, so 37/35 remain.
+- Earlier offline gate snapshot full suite: 658 passed, exit 0, 104.36 s; command PY -m pytest tests/agent -q -p no:cacheprovider -n auto.
+- Final replay: Mom/Pallet NPC 1/1 IDs, zero switches; corrected original-code comparator 3/1.
+- Pallet records/floor 39/69 (limit 86.25), zero unused same-class same-tile mints; original-code comparator 139/74 and 76.
+- Jitter p50/p95/max 0/2/3, distance-2 mints 11; replay diverges at 23 steps, first 76/85/86.
+- One place ID each for maps 38/37/0; phantom uses 0; mat 1 departure; stairs unverified to p_place_2; 2 bumped candidates refuted (2x/1x).
+- Agent delta: memory -99, world +95, R1-only loop -4, total -8; G10 prohibited-word scan clear.
+- Exact packet live-view acceptance: 47 passed before / 47 passed after, exit 0, 4.30 s.
+- Final live: 80 rows, 142 HTTP requests, 22 world rows from S49, 80/80 settled, zero stale/pending/timed-out; runner/scorer exit 0.
 
 ## Environment and gotchas
-- Every shell first: `New-Item -ItemType Directory -Force .tmp/qsr/tmp | Out-Null; $env:TEMP = "$PWD\.tmp\qsr\tmp"; $env:TMP = $env:TEMP`. Python `.venv-agent/Scripts/python.exe -B`. Scratch `.tmp/qsr/`.
-- Windows: Python text-mode writes turn LF into CRLF in files that are LF in git; write with `newline=""`. Heredocs through the shell can mangle `\n` inside Python string literals; use the Write/Edit tools for source edits.
-- Truth join: compare trace step S with truth step S+1. The m1_ip checkpoints predate the new progress counter, so `--om plan` evidence at 100/125 reads "steps since last progress" 3 and 12, not a faithful 20-step stall.
-- `GridEnv.screenshot` is slow (~0.9 s/step); long loop tests should use a cached-frame subclass (see `StillEnv` in `tests/agent/test_qs_e2e.py`).
+- PY is .venv-agent/Scripts/python.exe -B; TEMP/TMP use .tmp/rcr1/tmp.
+- Final live evidence: .tmp/rcr1/live-retry2.log, live-retry2-eval.log; runs/m1_rcr_r1_live_retry2/summary.json.
+- Final gate logs: .tmp/rcr1/finalize-suite.log, finalize-tracks.log, finalize-places.log, finalize-exits.log.
+- Corrected original-code replay uses .tmp/rcr1/before_replay.py without reverting working-tree files.
+- Only five baseline checkpoints exist (0/25/50/75/100); retain the 23-step replay divergence caveat.
+- The replay floor uses matched-record first kind, changing its denominator 74 to 69; it is not an independent perception floor.
+- Viewer /state on 127.0.0.1:8765 returned HTTP 200 before the live run.
+- The frozen runner classifies names without m1 into smoke; .tmp/rcr1/live_launcher.py routes this approved run to M1, preserving source/options/output path and caps 4815/4765/400.
+- First-run ledger 3756/3708/48 to 3762/3714/48; final direct-run retry ledger 3786/3736/50 to 3928/3878/50 (total/M1/smoke); 887 requests remain under unchanged caps.
+- eval_run.py does not emit S4 or S7; repeated_mistakes is not S4, and place/edge counts are not S7 transition steps.
 
 ## Deviations from plan and contracts
-- The first-place-is-not-T2 rule and the `_chapter_due` transient bool are choices of this build (see the Result). Row 8's live criterion was left unchanged; it measures strict revise/refute or belief-cited reorder only.
+- R1.5/R1.6 acceptance was combined to retire callee/caller together without compatibility code.
+- Root removed an obsolete Memory.view assertion and updated two old non-live track expectations; workers stayed inside owned files.
+- Root modified only MASTER §8 under the user's explicit request; contracts.md is untouched, with its gate-approved proposal in R1 §9.
+- R1 hunks left unstaged: agent/loop.py, tests/agent/test_loop.py, tests/agent/test_track.py; all original live-view additions and live test functions remain present.
+- All 18 protected hashes match the final retry baseline .tmp/rcr1/retry2-protected-before.json; subsequent user runtime fixes are preserved and fingerprinted.
+- No push occurred; MASTER and this handoff remain unstaged.
 
 ## Do not retry
-- Do not spend more live requests on the 100/125 checkpoints without first deciding what counts as a stall response.
-- Do not regenerate the golden again without a field-by-field diff (only plan fields may move).
-- Do not change caps, launch live games or push without the user.
+- Do not tune STATIC_GATE or weaken gates to hide the replay limitations.
+- Do not regenerate the golden beyond the reviewed memory-only changes.
+- Do not treat missing live samples or S3's zero duplicate proxy as proof of live identity improvement.
 
-## Open issues for the next phase (user decides)
-1. Row 8: decide whether a bare reorder or a new held belief with a reason counts; then re-run, or accept and fund the smoke.
-2. Place identity: re-measure `p_place_5`-style merges on a fresh run (the label-fallback fix `9a3b5ab` postdates hf_checkpoint_1); landmark-overlap interiors and moving NPCs remain unmeasured; reach-closure truth has no real data yet.
-3. Funding: **25-step clean-boot smoke first** (`scripts/run_agent.py --run runs/m1_qsr_smoke --steps 25 --decide`), then 150 steps; estimate ~250-330 requests per 150 steps, so 150 steps needs a cap decision (37/35 remain).
+## Open issues for R4
+- Preserve R1's departure-only exit invariant and stable references when implementing the R4 packet.
+- Review replay divergence, actor coverage and the record-class-dependent floor before generalizing offline measurements.
+- Final live S1/S2/S7 are unmeasured: no NPCs, Pallet or inter-map transitions; map 38 has one place p_place. S3 proxy 0 over 0 tile groups is inconclusive.
+- Final live repeated_mistakes is 3/80, not S4; S4 requires failed-option/alternative evidence not emitted by eval_run.py.
