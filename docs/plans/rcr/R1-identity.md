@@ -439,6 +439,29 @@ Rewrite `Memory.observe(perception, place, step, tiles=None, tracks=None) -> {in
 - **Source/preservation:** the manifest fingerprints user runtime fixes made after the earlier offline gate. The reported **658-pass** suite belongs to that earlier gate snapshot, not a rerun against those subsequent fixes. All **18 protected files** remain byte-identical to `.tmp/rcr1/retry2-protected-before.json` after this invocation; no runtime steering, repair, staging of shared files or push. R1 hunks in `agent/loop.py`, `tests/agent/test_loop.py`, `tests/agent/test_track.py` remain unstaged with live-view edits. No further live run is started.
 
 
+### Review of the live retry, 10-15 (R1 planning session): R1 regression found and fixed
+
+**Cause of the bedroom stall in `m1_rcr_r1_live_retry2` (S49-S80).** Every world step offered only "free buttons" (1 option). The agent bounced between tiles (1,1) and (1,2).
+- The bedroom's furniture had taken the ids of title-screen things. At S52 the cabinet was `e_red_version` (title text, `anchor: screen`), the wardrobe was `e_totodile` (an intro creature) and the plant was `e_potted_plant`. TRANSIENT and screen-anchored records drop out of the menu.
+- Mechanism: R1.3 promotes the run-start placeholder to the first map (no cut means the same place, as designed). But `World._tiles` also gave tiles to title/intro screen positions. Once the placeholder was the bedroom, position association matched bedroom things to those intro records on the same tiles.
+- The offline gate missed it because its replay starts at step 51, after the intro, and creates no placeholder.
+
+**Fix.** `World._tiles(per, anchor, size, place)` returns no tiles unless the place row has `screen == "world"`. A title or menu screen before any map has no world positions, so its things keep text identity (the §2 table's "tile-less" row). This is +2 lines in `agent/world.py`.
+
+**Tests:**
+- New: `test_title_screen_things_get_no_tiles_so_the_first_map_does_not_inherit_them`.
+- One fixture fix: `test_anchor_stand_in_applies_only_while_anchor_unknown` now creates its place row, as `match_place` always does.
+- `test_world`, `test_memory`, `test_exits`, `test_options`, `test_world_golden`, `test_harness_reliability`, `test_loop`, `test_track`, `test_eval_act` and `test_qs_e2e` all pass (257 + 184). The full suite was not rerun.
+
+**Harness.** `check_tracks.py` now creates each recorded place row before `World.before`, mirroring `match_place`. The gate replay is unchanged:
+- Mom 1 id and Pallet NPC 1 id, with 0 switches;
+- 39 records against a floor of 69;
+- S3 0;
+- jitter 0/2/3;
+- exits: phantom 0, mat verified, stairs unverified with its destination kept, 2 refuted.
+
+**Not yet shown live.** The fix is uncommitted. R1 hunks in `loop.py`, `test_loop.py` and `test_track.py` stay unstaged alongside the live-view edits.
+
 ### Earlier resumed result, 10-15 — failed snapshot, superseded by finalization above
 
 - **Decision:** do not commit or launch `runs/rcr_r1_live`. G2 reports two proximity-matched IDs for Mom against the required one, and the final WP acceptance is not green. `STATIC_GATE` remains **1**. G3 reaches the Pallet target of one, so no Q2 elimination logic was added. No thresholds, gates or perception prompts were tuned to make these results pass.

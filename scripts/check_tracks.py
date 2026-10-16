@@ -54,6 +54,7 @@ def _default(run, steps, baseline, first):
     seq, owner, errs, static_tiles, floor, map0_places = defaultdict(list), {}, [], defaultdict(list), {}, set()
     def on_step(s, row, per, truth, env, world):
         if not row or row.get("screen") != "world": return
+        if not world.mem.get("places", row["place"]): world.mem.upsert("places", {"id": row["place"], "screen": "world", "state": "place", "first": s, "last": s, "visits": 1})  # match_place mints it in the live loop
         pos = (truth["x"], truth["y"]); world.pos = pos; seen_at = world._seen_at; world._seen_at = lambda place: pos
         try: world.before(per, row["place"], on_step.prior, (160, 144), s)
         finally: world._seen_at = seen_at

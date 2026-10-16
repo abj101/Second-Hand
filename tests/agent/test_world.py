@@ -176,6 +176,18 @@ def test_motion_locked_self_is_not_observed_even_when_mislabeled(tmp_path):
     assert 0 not in world.entity_ids and [row["name"] for row in mem.rows("entities")] == ["Girl"]
 
 
+def test_title_screen_things_get_no_tiles_so_the_first_map_does_not_inherit_them(tmp_path):
+    mem = Memory(tmp_path); mem.upsert("places", {"id": "p_start", "state": "candidate", "visits": 1, "first": 1, "last": 1})  # run-start place, no screen yet
+    world = World(mem, 16); world.self_spot, world._self_from_motion = [.5, .5], True
+    title = {"screen": "title", "entities": [{"name": "logo text", "kind": "text", "at": [.7, .5]}]}
+    _, tiles, ids = world.before(title, "p_start", None, (160, 144), 1)
+    assert tiles == {} and "tile" not in mem.get("entities", ids[0])
+    mem.upsert("places", {**mem.get("places", "p_start"), "screen": "world"})  # the first map frame promotes the placeholder (no cut)
+    room = {"screen": "world", "entities": [{"name": "cabinet", "kind": "object", "at": [.7, .5]}]}
+    _, tiles, room_ids = world.before(room, "p_start", "p_start", (160, 144), 2)
+    assert tiles == {0: (2, 0)} and room_ids[0] != ids[0]
+
+
 def test_place_refs_round_trip_printed_labels(tmp_path):
     mem = Memory(tmp_path); place(mem, "p_room", "Name"); place(mem, "p_x", "Name"); place(mem, "p_place_3", "", 3)
     place(mem, "p_unique", "Only"); place(mem, "p_old", "Old")
@@ -781,7 +793,7 @@ def test_old_anchor_checkpoint_keys_are_ignored_and_motion_spot_restores(tmp_pat
     assert replay.self_spot == world.self_spot and replay._self_from_motion
 
 def test_anchor_stand_in_applies_only_while_anchor_unknown(tmp_path):
-    mem = Memory(tmp_path); world = World(mem, 16)
+    mem = Memory(tmp_path); place(mem, "room", "Room"); world = World(mem, 16)  # the loop always has the place row (match_place mints it)
     per = {"screen": "world", "text": [], "entities": [
         {"name": "player", "kind": "player", "at": [.5, .5]},
         {"name": "guard", "kind": "npc", "at": [.3, .5]}, {"name": "bard", "kind": "npc", "at": [.7, .5]}]}

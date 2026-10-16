@@ -97,7 +97,8 @@ class World:
     def _observation(self, per, size):
         self_i = self._self_index(per, size)
         return {**per, "entities": [{"name": ""} if i == self_i else e for i, e in enumerate(per.get("entities", []))]}
-    def _tiles(self, per, anchor, size):
+    def _tiles(self, per, anchor, size, place):
+        if (self.mem.get("places", place) or {}).get("screen") != "world": return {}  # a title or menu screen before any map has no world tiles: its things keep text identity
         entities = per.get("entities", [])
         self_i = self._self_index(per, size)
         valid = lambda e: isinstance(e.get("at"), list) and len(e["at"]) == 2
@@ -152,7 +153,7 @@ class World:
         self.tracker.phase = (round(pa[0] * size[0]) % self.tile_px, round(pa[1] * size[1]) % self.tile_px) if pa and self._self_from_motion and self.tile_px else None  # sprites rest on the player's grid
         px, py = (pa[0] * size[0], pa[1] * size[1]) if pa else (0, 0); self.tracker.ignore = [(max(0, int(px) - 10), max(0, int(py) - 10), int(px) + 10, int(py) + 10)] if pa else []  # the player animates in place: not a thing that moved
         proj = lambda at: tile_of(at, pa, self.pos, size, self.tile_px) if pa and self.tile_px and isinstance(at, list) and len(at) == 2 else None
-        tiles = self._tiles(per, pa, size)
+        tiles = self._tiles(per, pa, size, place)
         observed = self._observation(per, size)
         ids = self.entity_ids if per is self._observed_per else self.mem.observe(observed, place, step, tiles, self._hits(observed))
         self._observed_per = per; self._follow(per, ids)
@@ -432,7 +433,7 @@ class World:
                 self._self_contradictions = 0
         player = next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         aa = self.self_spot if self._self_from_motion else self._anchor(per, size) if player else None
-        tiles = self._tiles(per, aa, size)
+        tiles = self._tiles(per, aa, size, place)
         drift_fix, ids = None, self.entity_ids
         observed = self._observation(per, size)
         if not reused: ids = self.mem.observe(observed, place, step, tiles, self._hits(observed))
