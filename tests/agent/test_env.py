@@ -75,6 +75,10 @@ def test_pyboy_smoke_round_trip(tmp_path):
                 self.pyboy.button_release(button)
                 self.held.discard(button)
 
+        seen = []; env.frame_sink = seen.append
+        env.tick(5); env.press("B", frames=2)
+        assert len(seen) == 5 + 2 + 8
+        env.frame_sink = None
         env.pyboy = ButtonSpy(env.pyboy)
         env.press("B", frames=1)
         assert not env.pyboy.held

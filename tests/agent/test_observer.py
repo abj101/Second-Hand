@@ -1,4 +1,5 @@
 import numpy as np
+from types import SimpleNamespace
 from PIL import Image
 
 from agent.observer import _residual, changed, cut, for_model, snap, scroll, wait_settled
@@ -73,6 +74,105 @@ def test_wait_settled_does_not_settle_while_text_keeps_gaining_pixels():
     assert not result.settled and result.waited == 5
 
 
+class LiveStub:
+    def __init__(self, frames):
+        self.frames, self.index = frames, 0
+    def _snapshot(self, index):
+        return SimpleNamespace(generation="g", frame_seq=index, captured_monotonic=1.0, image=self.frames[index])
+    def snapshot(self): return self._snapshot(self.index)
+    def wait_frame(self, after, *, timeout):
+        if self.index + 1 >= len(self.frames): raise TimeoutError
+        self.index += 1
+        return self._snapshot(self.index)
+
+
+def test_live_wait_settled_counts_distinct_frames_and_returns_stamp():
+    image = texture()
+    result = wait_settled(LiveStub([image.copy() for _ in range(5)]), quiet=3, max_frames=4)
+    assert result.settled and result.waited == 3
+    assert result.frame_stamp == {"generation": "g", "frame_seq": 3, "captured_monotonic": 1.0}
+
+
+def test_live_wait_settled_is_bounded_on_animation():
+    frames = [Image.new("RGB", (32, 32), (i * 40, 20, 30)) for i in range(5)]
+    result = wait_settled(LiveStub(frames), quiet=3, max_frames=3)
+    assert not result.settled and result.waited == 3
+    assert result.frame_stamp["frame_seq"] == 3
+
+
+def test_live_wait_settled_restarts_after_generation_change():
+    class FrameGenerationChanged(Exception): pass
+    image, blank = texture(), Image.new("RGB", (64, 64))
+    class Live:
+        def __init__(self): self.index = 0
+        def snapshot(self):
+            generation, frame, seq = ("old", image, 8) if self.index == 0 else ("new", blank if self.index == 1 else image, self.index - 1)
+            return SimpleNamespace(generation=generation, frame_seq=seq, captured_monotonic=2.0, image=frame)
+        def wait_frame(self, after, *, timeout):
+            if after.generation == "old":
+                self.index = 1
+                raise FrameGenerationChanged
+            self.index += 1
+            return self.snapshot()
+
+    result = wait_settled(Live(), quiet=2, max_frames=8)
+    assert result.settled and result.frame_stamp["generation"] == "new"
+    assert result.frame_stamp["frame_seq"] == 3
+
+
+class CyclingEnv:
+    def __init__(self):
+        self.index = 0
+        rng = np.random.default_rng(4)
+        self.frames = [Image.fromarray(rng.integers(0, 256, (32, 32, 3), dtype=np.uint8)) for _ in range(8)]
+
+    def image(self):
+        return self.frames[self.index // 21 % 8]
+
+
+class SteppedCyclingEnv(CyclingEnv):
+    def screenshot(self): return self.image()
+    def tick(self): self.index += 1
+
+
+class LiveCyclingEnv(CyclingEnv):
+    def snapshot(self):
+        return SimpleNamespace(generation="g", frame_seq=self.index, captured_monotonic=1.0, image=self.image())
+
+    def wait_frame(self, after, *, timeout):
+        self.index += 1
+        return self.snapshot()
+
+
+def test_wait_settled_keeps_long_cycle_memory_on_both_paths():
+    for env_type in (SteppedCyclingEnv, LiveCyclingEnv):
+        assert wait_settled(env_type(), max_frames=300).settled
+        assert not wait_settled(env_type(), max_frames=300, memory=24).settled
+
+
+def test_wait_settled_on_bedroom_water_rom():
+    from pathlib import Path
+    import pytest
+    from agent.env_pyboy import PyBoyEnv, find_rom
+
+    checkpoint = Path("runs/m1_bedroom_live/checkpoint/000100/pyboy.state")
+    if not checkpoint.is_file():
+        pytest.skip("Bedroom checkpoint is missing")
+    try:
+        rom = find_rom()
+    except FileNotFoundError:
+        pytest.skip("No Pokémon Red ROM found")
+
+    env = PyBoyEnv(rom, state=str(checkpoint))
+    try:
+        for _ in range(3):
+            env.press("DOWN")
+        assert env.ram(0xD361) >= 10
+        assert wait_settled(env).settled
+    finally:
+        env.close()
+
+
 def test_changed_model_scaling_and_tile_snap():
     image = texture()
     assert changed(image, image.copy()) == 0
@@ -90,3 +190,10 @@ def test_residual_finds_compact_screen_anchored_motion():
     assert accepted
     spot = ((box[0] + box[2] + 16) / 320, (box[1] + box[3]) / 288)  # box centre plus the camera shift
     assert abs(spot[0] - .5) <= 8 / 160 and abs(spot[1] - 72 / 144) <= 8 / 144
+
+
+def test_mostly_white_menu_is_not_blank():
+    from PIL import Image
+    from agent.observer import _blank
+    menu = Image.new("RGB", (160, 144), "white"); menu.paste((0, 0, 0), (0, 0, 64, 18))  # ~95% white, like the NEW GAME menu
+    assert not _blank(menu) and _blank(Image.new("RGB", (160, 144), "white"))

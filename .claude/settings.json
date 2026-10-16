@@ -1,0 +1,16 @@
+{
+  "env": { "PONYTAIL_DEFAULT_MODE": "full" },
+  "permissions": { "allow": ["mcp__codegraph__*", "mcp__headroom__*"] },
+  "enabledPlugins": { "ponytail@ponytail": true },
+  "extraKnownMarketplaces": {
+    "ponytail": { "source": { "source": "github", "repo": "DietrichGebert/ponytail" } }
+  },
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "[ -d .codegraph ] || codegraph init", "timeout": 120 }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "codegraph prompt-hook" }] }
+    ]
+  }
+}

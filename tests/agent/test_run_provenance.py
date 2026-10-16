@@ -224,12 +224,12 @@ def test_resume_hands_the_checkpoint_modes_to_the_loop_and_records_them(tmp_path
     run = tmp_path / "run"
     run_agent._checkpoint(Saved(), Loop(GridEnv(), StubModel([]), Memory(run / "memory"), "grid", decide=True), run)
 
-    assert run_agent.main(["--resume", "--steps", "1", "--max-calls", "5", "--run", str(run)]) == 0
+    assert run_agent.main(["--headless", "--resume", "--steps", "1", "--max-calls", "5", "--run", str(run)]) == 0
 
     kwargs, loop = built[-1]
     assert kwargs == {"decide": True} and loop.provenance_incomplete is False and loop.invocation == 1
     manifest = json.loads((run / "manifest.jsonl").read_text(encoding="utf-8").splitlines()[-1])
-    assert manifest["modes"] == {"decide": True, "act_text": False} and manifest["provenance"] == "complete"
+    assert manifest["modes"] == {"decide": True, "act_text": False, "headless": True} and manifest["provenance"] == "complete"
 
 
 def test_resume_from_a_checkpoint_without_modes_is_incomplete_everywhere(tmp_path, monkeypatch):
@@ -239,7 +239,7 @@ def test_resume_from_a_checkpoint_without_modes_is_incomplete_everywhere(tmp_pat
     state = json.loads((root / "harness.json").read_text(encoding="utf-8")); state.pop("modes")
     (root / "harness.json").write_text(json.dumps(state), encoding="utf-8")
 
-    assert run_agent.main(["--resume", "--steps", "1", "--max-calls", "5", "--run", str(run)]) == 0
+    assert run_agent.main(["--headless", "--resume", "--steps", "1", "--max-calls", "5", "--run", str(run)]) == 0
 
     _, loop = built[-1]
     assert loop.provenance_incomplete is True
@@ -247,3 +247,97 @@ def test_resume_from_a_checkpoint_without_modes_is_incomplete_everywhere(tmp_pat
     assert manifest["provenance"] == "incomplete" and any("no modes" in note for note in manifest["notes"])
     harness = json.loads((run / "checkpoint" / "000001" / "harness.json").read_text(encoding="utf-8"))
     assert "modes" not in harness and harness["provenance"]["incomplete"] is True
+
+
+def test_live_checkpoint_records_state_and_observation_frames_separately(tmp_path):
+    from types import SimpleNamespace
+    frame = SimpleNamespace(generation="new", frame_seq=70, captured_monotonic=12.0)
+    class Saved(GridEnv):
+        def save_snapshot(self): return SimpleNamespace(frame=frame, state=b"serialized")
+        def save(self, path): raise AssertionError("live capture must be one atomic request")
+    run = tmp_path / "run"; env = Saved()
+    loop = Loop(env, StubModel([]), Memory(run / "memory"), "grid")
+    loop.observation_stamp = {"generation": "new", "frame_seq": 40, "captured_monotonic": 11.5}
+    root = run_agent._checkpoint(env, loop, run)
+    state = json.loads((root / "harness.json").read_text())
+    assert (root / "pyboy.state").read_bytes() == b"serialized"
+    assert state["runtime"]["state_frame_seq"] == 70
+    assert state["runtime"]["observation"]["frame_seq"] == 40
+
+
+def test_truth_uses_one_coherent_ram_batch():
+    from types import SimpleNamespace
+    from scripts.truth_pokered import read
+    batches = []
+    class Env:
+        def ram(self, address): raise AssertionError("must not read a moving emulator byte by byte")
+        def read_ram(self, addresses):
+            batches.append(addresses)
+            return SimpleNamespace(values=dict.fromkeys(addresses, 0), frame=SimpleNamespace(generation="g", frame_seq=17, captured_monotonic=1.0))
+    truth = read(Env())
+    assert len(batches) == 1 and truth["frame_seq"] == 17 and truth["generation"] == "g"
+    assert truth["x"] == 0 and len(truth["sprites"]) == 0
+
+
+def test_continuous_runner_keeps_owner_on_caller_and_work_on_worker():
+    from threading import Event, get_ident
+    from types import SimpleNamespace
+    owner_id, calls = get_ident(), []
+    class Host:
+        env = SimpleNamespace()
+        def __init__(self): self.stopped = Event()
+        def run(self, publish):
+            calls.append(("owner", get_ident())); self.stopped.wait(2)
+        def stop(self): self.stopped.set()
+    class Publisher:
+        def publish(self, frame): pass
+        def close(self, **kwargs): calls.append(("closed", get_ident()))
+    def work(env, cancel): calls.append(("work", get_ident())); return 3
+    assert run_agent.run_continuous(Host(), Publisher(), work) == 3
+    assert dict(calls)["owner"] == dict(calls)["closed"] == owner_id
+    assert dict(calls)["work"] != owner_id
+
+
+def test_continuous_runner_cancels_waiting_model_on_window_close():
+    from threading import Event
+    entered, ended = Event(), Event()
+    class Host:
+        env = object()
+        def run(self, publish): assert entered.wait(1)  # native close
+        def stop(self): pass
+    class Publisher:
+        def publish(self, frame): pass
+        def close(self, **kwargs): pass
+    def work(env, cancel):
+        entered.set(); assert cancel.wait(2); ended.set(); return 0
+    assert run_agent.run_continuous(Host(), Publisher(), work) == 0
+    assert ended.is_set()
+
+
+def test_normal_runner_selects_visible_owner_and_records_runtime_mode(tmp_path, monkeypatch):
+    from threading import Event, get_ident
+    from types import SimpleNamespace
+    import agent.env_pyboy as env_module
+    import scripts.watch_run as viewer
+    main_thread, calls = get_ident(), []
+    class Host:
+        def __init__(self, *args, **kwargs):
+            calls.append(("constructed", get_ident())); self.env = SimpleNamespace(); self.stopped = Event()
+        def run(self, publish):
+            calls.append(("owner", get_ident())); assert self.stopped.wait(2)
+        def stop(self): self.stopped.set()
+    class Publisher:
+        def __init__(self, run): pass
+        def publish(self, frame): pass
+        def close(self, **kwargs): pass
+    def play(*args): calls.append(("agent", get_ident())); return 0
+    monkeypatch.setattr(env_module, "LivePyBoyHost", Host)
+    monkeypatch.setattr(viewer, "FramePublisher", Publisher)
+    monkeypatch.setattr(run_agent, "find_rom", lambda: "rom")
+    monkeypatch.setattr(run_agent, "_play", play)
+    monkeypatch.setattr(run_agent, "PyBoyEnv", lambda *a, **k: pytest.fail("normal runner must be visible"))
+    run = tmp_path / "run"
+    assert run_agent.main(["--steps", "1", "--max-calls", "1", "--run", str(run)]) == 0
+    assert dict(calls)["constructed"] == dict(calls)["owner"] == main_thread
+    assert dict(calls)["agent"] != main_thread
+    assert json.loads((run / "manifest.jsonl").read_text())["modes"]["headless"] is False

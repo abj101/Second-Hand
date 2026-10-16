@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from threading import Event
 import httpx
 from PIL import Image, UnidentifiedImageError
 
@@ -17,10 +18,12 @@ class ModelUnavailable(RuntimeError):
     def __init__(self, message: str, retries: int = 0):
         super().__init__(message); self.retries = retries
 
+class ModelCancelled(RuntimeError): pass
+
 class Ollama:
     def __init__(self, model: str, *, temperature: float = 0.2, max_tokens: int = 4096,
                  num_ctx: int = 16384, timeout_s: float | None = None, log: Callable[[dict], None] | None = None,
-                 cache_dir: Path | None = None, image_dir: Path | None = None) -> None:
+                 cache_dir: Path | None = None, image_dir: Path | None = None, cancel_event: Event | None = None) -> None:
         self.model = model
         self.base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
         self.options = {"temperature": temperature, "num_predict": max_tokens, "num_ctx": num_ctx}
@@ -28,8 +31,12 @@ class Ollama:
         self.log, self.cache_dir, self.calls = log, Path(cache_dir) if cache_dir else None, 0
         self.image_dir = Path(image_dir) if image_dir else None
         self.seq, self.log_failed, self._posted = 0, False, 0  # seq: asks started; _posted: _post attempts
+        self.cancel_event = cancel_event
+    def _check_cancel(self) -> None:
+        if self.cancel_event is not None and self.cancel_event.is_set(): raise ModelCancelled("model request cancelled")
     def ask(self, system: str, user: str, images: list[Image.Image] = (), schema: dict | None = None,
             *, role: str = "") -> Reply:
+        self._check_cancel()
         started, posted = time.perf_counter(), self._posted
         self.seq += 1
         key = self._key(system, user, images, schema)
@@ -59,8 +66,11 @@ class Ollama:
             body = response.json(); text = str((body.get("message") or {}).get("content") or "")
             reply = Reply(text, parse_json(text), (time.perf_counter() - started) * 1000,
                           body.get("prompt_eval_count"), body.get("eval_count"))
+            self._check_cancel()
             self.calls += 1
             if cache and reply.data is not None: self._store(cache, reply)
+        except ModelCancelled:
+            raise
         except BaseException as error:
             self._log(call, started=started, posted=posted, retries=getattr(error, "retries", retries),
                       reply=None, ok=False, cached=False, error=_error(error))
@@ -71,12 +81,15 @@ class Ollama:
     def _retry(self, payload: dict) -> tuple[httpx.Response, int]:
         waited = retries = 0
         while True:
+            self._check_cancel()
             self._posted += 1
             try: response = self._post(payload)
             except (httpx.ConnectError, httpx.TimeoutException) as error: response, error_text = None, str(error)
             else:
+                self._check_cancel()
                 error_text = ""
                 if response.status_code != 429 and response.status_code < 500: return response, retries
+            self._check_cancel()
             if waited >= MAX_WAIT_S: raise ModelUnavailable(f"ollama unavailable after {waited}s: {error_text}", retries)
             after = response.headers.get("Retry-After") if response else None
             backoff = min(5 * 2 ** min(retries, 6), 300)
@@ -84,9 +97,12 @@ class Ollama:
             except ValueError:
                 try: delay = max(backoff, parsedate_to_datetime(after).timestamp() - time.time())
                 except (TypeError, ValueError, OverflowError): delay = backoff
-            delay = min(max(delay, 0), 300, MAX_WAIT_S - waited); time.sleep(delay)
+            delay = min(max(delay, 0), 300, MAX_WAIT_S - waited)
+            if self.cancel_event is None: time.sleep(delay)
+            else: self.cancel_event.wait(delay); self._check_cancel()
             waited += delay; retries += 1
     def _post(self, payload: dict) -> httpx.Response:
+        self._check_cancel()
         return httpx.post(f"{self.base_url}/api/chat", json=payload,
                           timeout=httpx.Timeout(self.timeout_s, connect=10.0))
     def _key(self, system: str, user: str, images: list[Image.Image], schema: dict | None) -> str:
@@ -98,14 +114,17 @@ class Ollama:
                 digest.update(len(raw).to_bytes(8, "big")); digest.update(raw)
         return digest.hexdigest()
     def _store(self, path: Path, reply: Reply) -> None:
+        self._check_cancel()
         path.parent.mkdir(parents=True, exist_ok=True); fd, temp = tempfile.mkstemp(dir=path.parent)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as stream: json.dump(reply.__dict__, stream)
+            self._check_cancel()
             os.replace(temp, path)
         finally:
             if os.path.exists(temp): os.unlink(temp)
     def _log(self, call: dict, *, started: float, posted: int, retries: int, reply: Reply | None,
              ok: bool, cached: bool, error: dict | None = None) -> None:
+        self._check_cancel()
         if self.log is None: return
         ms = (time.perf_counter() - started) * 1000
         try:
@@ -123,6 +142,7 @@ class Ollama:
                 print(f"ollama: call log write failed ({failure}); run provenance is incomplete", file=sys.stderr, flush=True)
             self.log_failed = True
     def _image_ref(self, image: Image.Image) -> dict:
+        self._check_cancel()
         sha = _image_sha(image)
         ref = {"sha": sha, "mode": image.mode, "size": list(image.size)}
         if self.image_dir is not None:

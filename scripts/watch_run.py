@@ -4,19 +4,129 @@
     python scripts/watch_run.py --run runs/m1_gp     # pin one run
 Keep the page open: when a new run starts writing trace.jsonl, the page switches to it.
 """
-import argparse, json, re, sys, time, webbrowser
+import argparse, io, json, math, re, sys, threading, time, webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent.memory import Memory
+from PIL import Image
 
 FRAME = re.compile(r"\d{6}(_after\.png|_motion\.gif|\.png)")
+STREAM_CHUNK = 4 << 20
+LIVE_FILE, LIVE_TEMP = "live-frame.bin", ".live-frame.tmp"
+LIVE_HEADER_MAX, LIVE_PNG_MAX, LIVE_MAX = 4096, 256 << 10, 4 + (4096) + (256 << 10)
+LIVE_SIZE = (160, 144)
+
+
+class FramePublisher:
+    """Publish the newest duck-typed RGB snapshot through one bounded atomic artifact."""
+    def __init__(self, run: Path) -> None:
+        self.run = Path(run)
+        self.run.mkdir(parents=True, exist_ok=True)
+        self.path, self.temp = self.run / LIVE_FILE, self.run / LIVE_TEMP
+        self._cv, self._pending = threading.Condition(), None
+        self._closed = False
+        self._thread = threading.Thread(target=self._work, name="frame-publisher", daemon=True)
+        self._thread.start()
+
+    def publish(self, snapshot) -> None:
+        """Replace the one pending slot; the caller never encodes or writes pixels."""
+        with self._cv:
+            if not self._closed:
+                self._pending = snapshot
+                self._cv.notify()
+
+    def close(self, timeout: float = 1) -> None:
+        with self._cv:
+            self._closed = True
+            self._pending = None
+            self._cv.notify_all()
+        self._thread.join(timeout)
+        if not self._thread.is_alive():
+            try: self.temp.unlink()
+            except OSError: pass
+
+    def _work(self) -> None:
+        last_pixels = last_png = None
+        while True:
+            with self._cv:
+                self._cv.wait_for(lambda: self._pending is not None or self._closed)
+                if self._closed: return
+                snap, self._pending = self._pending, None
+            try:
+                image = snap.image
+                if image.mode != "RGB" or image.size != LIVE_SIZE: continue
+                pixels = image.tobytes()
+                if pixels != last_pixels:
+                    buf = io.BytesIO(); image.save(buf, "PNG", compress_level=1); png = buf.getvalue()
+                    if len(png) > LIVE_PNG_MAX: continue
+                    last_pixels, last_png = pixels, png
+                header = json.dumps({"run": self.run.name, "generation": str(snap.generation),
+                                     "frame_seq": int(snap.frame_seq), "captured_monotonic": float(snap.captured_monotonic),
+                                     "width": LIVE_SIZE[0], "height": LIVE_SIZE[1],
+                                     "published_monotonic": time.monotonic()}, separators=(",", ":")).encode()
+                if len(header) > LIVE_HEADER_MAX or not last_png: continue
+                record = len(header).to_bytes(4, "little") + header + last_png
+                with self.temp.open("wb") as f:
+                    f.write(record); f.flush()
+                for delay in (0, .025, .05, .1):
+                    if delay: time.sleep(delay)
+                    try:
+                        self.temp.replace(self.path)
+                        break
+                    except OSError: pass
+            except Exception:
+                continue
+
+
+def read_live_frame(run: Path) -> tuple[dict, bytes] | None:
+    """Read and validate one coherent, bounded artifact; malformed data is unavailable."""
+    try:
+        path = Path(run) / LIVE_FILE
+        if path.stat().st_size > LIVE_MAX: return None
+        with path.open("rb") as f:
+            nbytes = f.read(4)
+            if len(nbytes) != 4: return None
+            n = int.from_bytes(nbytes, "little")
+            if not 0 < n <= LIVE_HEADER_MAX: return None
+            raw = f.read(n)
+            if len(raw) != n: return None
+            header = json.loads(raw.decode("utf-8"))
+            png = f.read(LIVE_PNG_MAX + 1)
+            if not png or len(png) > LIVE_PNG_MAX or f.read(1): return None
+        if not isinstance(header, dict) or header.get("width") != LIVE_SIZE[0] or header.get("height") != LIVE_SIZE[1]: return None
+        if not isinstance(header.get("run"), str) or not isinstance(header.get("generation"), str): return None
+        if type(header.get("frame_seq")) is not int or header["frame_seq"] < 0: return None
+        for key in ("captured_monotonic", "published_monotonic"):
+            if not isinstance(header.get(key), (int, float)) or not math.isfinite(header[key]): return None
+        with Image.open(io.BytesIO(png)) as image:
+            if image.format != "PNG" or image.size != LIVE_SIZE: return None
+            image.verify()
+        return header, png
+    except (OSError, ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
+def stream_writer(path: Path):
+    """Sink for PyBoyEnv.frame_sink: appends every emulated frame to stream.bin as [u32 len][png]; len 0 = same as the last frame.
+    Write errors are swallowed: the viewer must never stop or alter the game."""
+    try: file = path.open("wb", buffering=0)  # truncate, not unlink: Windows refuses to delete a file the viewer has open
+    except OSError: return None
+    last = [None]
+    # ponytail: stream.bin grows per changed frame for one invocation (reset on start); rotate if runs get long enough to matter
+    def write(image):
+        try:
+            raw = image.tobytes(); data = b""
+            if raw != last[0]: last[0] = raw; buf = io.BytesIO(); image.save(buf, "PNG", compress_level=1); data = buf.getvalue()
+            file.write(len(data).to_bytes(4, "little") + data)
+        except OSError: pass
+    return write
 
 
 class RunState:
     def __init__(self, run: Path) -> None:
-        self.run, self.offset, self.rows, self.notebook = Path(run), 0, [], {}
+        self.run, self.offset, self.rows, self.notebook, self.generation = Path(run), 0, [], {}, None
 
     def _tail(self):
         path = self.run / "trace.jsonl"
@@ -31,14 +141,21 @@ class RunState:
                 except json.JSONDecodeError: continue
 
     def state(self, since: int) -> dict:
+        live = read_live_frame(self.run)
+        header = live[0] if live else None
+        if header and header["generation"] != self.generation:
+            self.generation, self.offset, self.rows, self.notebook, since = header["generation"], 0, [], {}, 0
         self._tail()
         try: self.notebook = json.loads((self.run / "memory" / "notebook.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError): pass  # rewritten mid-run; keep last good copy
         trace, calls = self.run / "trace.jsonl", self.run / "calls.jsonl"
         # ponytail: re-reads all memory jsonl per poll; switch to an offset tail if polls get slow on long runs.
         mem = Memory(self.run / "memory") if (self.run / "memory").exists() else None
-        return {"run": self.run.name,
-                "live": time.time() - max(_mtime(trace), _mtime(self.run / "live.json")) < 3,
+        age = max(0.0, (time.monotonic() - header["captured_monotonic"]) * 1000) if header else None
+        return {"run": self.run.name, "generation": header["generation"] if header else self.generation,
+                "frame_seq": header["frame_seq"] if header else None, "frame_age_ms": age,
+                "publisher_age_ms": max(0.0, (time.monotonic() - header["published_monotonic"]) * 1000) if header and "published_monotonic" in header else None,
+                "frame_live": age is not None and age < 250, "live": age is not None and age < 250,
                 "pending": self._pending(),
                 "rows": [r for r in self.rows if int(r.get("step", 0)) > since],
                 "presses": self._by_step("presses.jsonl", lambda row: row["keys"]),
@@ -68,6 +185,20 @@ class RunState:
         path = self.run / "frames" / name
         return path.read_bytes() if FRAME.fullmatch(name) and path.exists() else None
 
+    def stream(self, start: int) -> tuple[int, int, bytes]:
+        """(offset, file size, bytes of stream.bin from offset); start < 0 joins at the newest whole frame, so a fresh page starts live.
+        The page keeps only whole records and resets when size < its offset."""
+        try:
+            with (self.run / "stream.bin").open("rb") as f:
+                size = f.seek(0, 2)
+                if start < 0:  # ponytail: walks every record header on join; keep a last-frame offset in the writer if joins get slow
+                    at = start = 0; f.seek(0)
+                    while len(head := f.read(4)) == 4 and (at := at + 4 + (n := int.from_bytes(head, "little"))) <= size:
+                        if n: start = at - 4 - n
+                        f.seek(at)
+                f.seek(min(start, size)); return min(start, size), size, f.read(STREAM_CHUNK)
+        except OSError: return 0, 0, b""
+
 
 def _mtime(path: Path) -> float:
     try: return path.stat().st_mtime
@@ -75,21 +206,41 @@ def _mtime(path: Path) -> float:
 
 
 class Follow:
-    """The pinned run, or else the run under `root` whose trace.jsonl changed last."""
+    """Pinned run or most recently active run, considering trace and source-frame progress."""
     def __init__(self, run: Path | None, root: Path) -> None:
-        self.pinned, self.root, self.states = run, Path(root), {}
+        self.pinned, self.root, self.states, self.activity, self.observed = run, Path(root), {}, {}, {}
+        self._selection, self._rescan_at = None, 0
 
     def current(self) -> RunState:
-        traces = [] if self.pinned else sorted(self.root.glob("*/trace.jsonl"), key=_mtime)
-        run = self.pinned or (traces[-1].parent if traces else self.root)
+        if self.pinned: run = self.pinned
+        else:
+            mono_now = time.monotonic()
+            if self._selection is not None and mono_now < self._rescan_at:
+                return self.states.setdefault(self._selection.resolve(), RunState(self._selection))
+            candidates, wall_now = set(), time.time()
+            if self.root.exists(): candidates.update(p.parent for p in self.root.glob("*/trace.jsonl"))
+            if self.root.exists(): candidates.update(p.parent for p in self.root.glob(f"*/{LIVE_FILE}"))
+            for path in candidates:
+                key, trace = path.resolve(), _mtime(path / "trace.jsonl")
+                live = read_live_frame(path)
+                marker = (live[0].get("generation"), live[0].get("frame_seq")) if live else None
+                old_trace, old_marker = self.observed.get(key, (None, None))
+                source_time = (wall_now - max(0, mono_now - live[0]["captured_monotonic"])) if live else 0
+                if key not in self.observed: self.activity[key] = max(trace, source_time)
+                elif trace != old_trace: self.activity[key] = max(self.activity.get(key, 0), trace)
+                if marker and marker != old_marker: self.activity[key] = max(self.activity.get(key, 0), source_time)
+                self.observed[key] = trace, marker
+            run = max(candidates, key=lambda p: self.activity.get(p.resolve(), 0)) if candidates else self.root
+            self._selection, self._rescan_at = run, mono_now + .25
         return self.states.setdefault(run.resolve(), RunState(run))
 
 
 def handler(follow: Follow):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
-        def _send(self, code, body, kind):
+        def _send(self, code, body, kind, headers=()):
             self.send_response(code); self.send_header("Content-Type", kind); self.send_header("Cache-Control", "no-store")
+            for k, v in headers: self.send_header(k, v)
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
         def do_GET(self):
             url = urlparse(self.path)
@@ -98,6 +249,18 @@ def handler(follow: Follow):
                 query, run_state = parse_qs(url.query), follow.current()
                 since = int((query.get("since") or ["0"])[0] or 0) if (query.get("run") or [""])[0] == run_state.run.name else 0
                 return self._send(200, json.dumps(run_state.state(since), default=str).encode(), "application/json")
+            if url.path == "/stream":
+                run_state = follow.current(); at, size, data = run_state.stream(int((parse_qs(url.query).get("from") or ["0"])[0] or 0))
+                return self._send(200, data, "application/octet-stream", (("X-Run", run_state.run.name), ("X-From", str(at)), ("X-Size", str(size))))
+            if url.path == "/live-frame":
+                run_state = follow.current(); live = read_live_frame(run_state.run)
+                if live is None: return self._send(503, b"live frame unavailable", "text/plain")
+                header, png = live
+                age = max(0, int((time.monotonic() - float(header["captured_monotonic"])) * 1000))
+                run_name = re.sub(r"[^A-Za-z0-9_.-]", "_", run_state.run.name)
+                return self._send(200, png, "image/png", (("X-Run", run_name), ("X-Generation", header["generation"]),
+                    ("X-Frame-Seq", str(header["frame_seq"])), ("X-Captured-Monotonic", str(header["captured_monotonic"])),
+                    ("X-Frame-Age-Ms", str(age))))
             if url.path.startswith("/frames/") and (data := follow.current().frame(url.path[8:])) is not None:
                 return self._send(200, data, "image/gif" if url.path.endswith(".gif") else "image/png")
             self._send(404, b"not found", "text/plain")
@@ -120,7 +283,7 @@ main{flex:1;min-height:0;display:grid;grid-template-rows:minmax(0,1.5fr) minmax(
 .grow{flex:1 1 0;min-height:0;display:flex;flex-direction:column}.grow>:last-child{flex:1 1 0;min-height:0;overflow:auto}
 h3{display:flex;justify-content:space-between;margin:0 0 10px;padding-bottom:5px;border-bottom:1px solid var(--dim);font-size:11px;color:var(--muted);letter-spacing:.04em}
 h3 span{font-weight:normal;font-size:10px}
-#frame{width:100%;object-fit:contain;image-rendering:pixelated;background:#000;border:1px solid var(--dim)}
+#frame,#live{width:100%;object-fit:contain;image-rendering:pixelated;background:#000;border:1px solid var(--dim)}
 .out{position:relative;flex:none;background:var(--panel);border:1px solid var(--fg);padding:7px 12px 7px 18px}
 .out:before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--fg)}
 .out .k{font-size:10px;color:var(--muted);font-weight:bold}.out .big{font-size:16px;font-weight:bold;margin:2px 0;word-break:break-word}
@@ -145,7 +308,7 @@ footer{display:flex;justify-content:space-between;border-top:1px solid var(--fg)
 <button id="follow">FOLLOW LIVE</button><span id="badge" class="badge"><i></i><span>IDLE</span></span></header>
 <main>
 <!-- row-major 3x2 grid: top-row panels share one bottom seam -->
-<section class="grow"><h3>FRAME <span><span id="lcount"></span> <button id="after">BEFORE</button> <button id="overlay">OVERLAY OFF</button> <span id="fstep"></span></span></h3><div class="stage"><img id="frame" alt=""><canvas id="lens" hidden></canvas></div></section>
+<section class="grow"><h3>FRAME <span><span id="lcount"></span> <button id="after">LIVE</button> <button id="overlay">OVERLAY OFF</button> <span id="fstep"></span></span></h3><div class="stage"><canvas id="live" width="160" height="144"></canvas><img id="frame" alt="" hidden><canvas id="lens" hidden></canvas></div></section>
 <section class="grow"><div id="card" class="out"><div class="k">MODEL OUTPUT</div><div class="big">WAITING FOR TRACE</div><div class="muted">start scripts/run_agent.py on this run</div></div><div id="detail" class="kv"></div></section>
 <section class="grow"><h3>MAP <select id="place"></select></h3><canvas id="map"></canvas></section>
 <div class="col"><section><h3>CONTROLS <span id="ckind"></span></h3><div id="controls"></div></section>
@@ -158,13 +321,41 @@ footer{display:flex;justify-content:space-between;border-top:1px solid var(--fg)
 const $=id=>document.getElementById(id), rows=[], esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const PAD=["UP","DOWN","LEFT","RIGHT","A","B","START","SELECT"], DIR={UP:"↑",DOWN:"↓",LEFT:"←",RIGHT:"→"};
 let pinned=null, chosenPlace=null, last={};
-const VIEWS=["BEFORE","AFTER","MOTION"]; let after=0; $("after").onclick=()=>{after=(after+1)%3; $("after").textContent=VIEWS[after]; render()};  // MOTION: the step's presses frame by frame (run_agent.py)
-let overlay=false; $("overlay").onclick=()=>{overlay=!overlay; $("overlay").textContent=overlay?"OVERLAY ON":"OVERLAY OFF"; $("frame").hidden=overlay; $("lens").hidden=!overlay; render()};
-$("follow").onclick=()=>{pinned=null;chosenPlace=null;render()};
+// LIVE: newest current source frame; MOTION: the step's presses frame by frame (run_agent.py)
+const VIEWS=["LIVE","BEFORE","AFTER","MOTION"]; let after=0; const setView=v=>{after=v; $("after").textContent=VIEWS[v]; render()}; $("after").onclick=()=>setView((after+1)%4);
+let overlay=false; $("overlay").onclick=()=>{overlay=!overlay; $("overlay").textContent=overlay?"OVERLAY ON":"OVERLAY OFF"; render()};
+let frameEpoch=0, frameAbort=null, frameConnected=false, displayedSeq=-1, visible=true, frameBusy=false, frameWake=false;
+function resetFrames(){frameEpoch++; if(frameAbort) frameAbort.abort(); frameAbort=null; frameConnected=false; displayedSeq=-1; $("live").dataset.frameSeq=""; $("live").dataset.capturedMonotonic=""; $("fstep").textContent=""; $("live").getContext("2d").clearRect(0,0,160,144)}
+async function pullFrame(){
+  if(frameBusy){frameWake=true;return}
+  if(!visible||document.hidden){setTimeout(pullFrame,250);return}
+  frameBusy=true;
+  const epoch=frameEpoch, expectedRun=last.run, expectedGeneration=last.generation, controller=new AbortController(); frameAbort=controller;
+  try{
+    const res=await fetch("/live-frame",{cache:"no-store",signal:controller.signal});
+    if(!res.ok) throw Error("frame unavailable");
+    const run=res.headers.get("X-Run"), generation=res.headers.get("X-Generation"), seq=+res.headers.get("X-Frame-Seq"), captured=res.headers.get("X-Captured-Monotonic"), age=res.headers.get("X-Frame-Age-Ms");
+    const bitmap=await createImageBitmap(await res.blob());
+    try{
+      if(epoch===frameEpoch&&run===expectedRun&&generation===expectedGeneration&&run===last.run&&generation===last.generation&&seq>displayedSeq){
+        $("live").getContext("2d").drawImage(bitmap,0,0); displayedSeq=seq;
+        $("live").dataset.frameSeq=String(seq); $("live").dataset.capturedMonotonic=captured;
+        if(after===0) $("fstep").textContent=`LIVE / FRAME ${seq} / ${age} MS`;
+      }
+    }finally{bitmap.close()}
+    if(epoch===frameEpoch&&run===expectedRun&&generation===expectedGeneration&&run===last.run&&generation===last.generation) frameConnected=true;
+  }catch(e){if(!controller.signal.aborted&&frameConnected){resetFrames()}}
+  if(frameAbort===controller) frameAbort=null;
+  frameBusy=false;
+  if(frameWake){frameWake=false;queueMicrotask(pullFrame)}else if(frameConnected) requestAnimationFrame(pullFrame); else setTimeout(pullFrame,250);
+}
+document.addEventListener("visibilitychange",()=>{visible=!document.hidden;resetFrames();if(visible)pullFrame()});
+pullFrame();
+$("follow").onclick=()=>{pinned=null;chosenPlace=null;setView(0)};
 $("place").onchange=e=>{chosenPlace=e.target.value;render()};
 async function poll(){
   try{const since=rows.length?rows[rows.length-1].step:0, s=await (await fetch(`/state?since=${since}&run=${encodeURIComponent(last.run||"")}`)).json();
-    if(s.run!==last.run){pinned=null;chosenPlace=null;rows.length=0} else if(s.rows.length&&rows.length&&s.rows[0].step<=since) rows.length=0; rows.push(...s.rows); last=s; render();}catch(e){}
+    if(s.run!==last.run||s.generation!==last.generation){pinned=null;chosenPlace=null;rows.length=0;resetFrames()} else if(s.rows.length&&rows.length&&s.rows[0].step<=since) rows.length=0; rows.push(...s.rows); last=s; render();}catch(e){}
   setTimeout(poll,500);
 }
 // the decided-but-unfinished step from live.json, shown until its trace row lands; stale files from an older run are ignored
@@ -179,7 +370,8 @@ function render(){
   const r=sel(), live=rows[rows.length-1];
   $("run").textContent=last.run||""; $("badge").className="badge"+(last.live?" live":""); $("badge").lastChild.textContent=last.live?"LIVE":"IDLE";
   $("fstat").textContent=live?`STEP ${String(live.step).padStart(5,"0")} / ${label(live.place).toUpperCase()}`:"STEP —"; $("fcalls").textContent=`${last.calls||0} MODEL CALLS`;
-  if(r){ const src="/"+(after===2&&r.frame?r.frame.replace(".png","_motion.gif"):after===1&&r.after?r.after:r.frame); if(!$("frame").src.endsWith(src)) $("frame").src=src; $("fstep").textContent="STEP "+r.step+(pinned!=null?" / PINNED":"");
+  $("live").hidden=overlay||after!==0; $("frame").hidden=overlay||after===0; $("lens").hidden=!overlay;
+  if(r){ const src="/"+(after===3&&r.frame?r.frame.replace(".png","_motion.gif"):after===2&&r.after?r.after:r.frame); if(after&&!$("frame").src.endsWith(src)) $("frame").src=src; if(after) $("fstep").textContent="STEP "+r.step+(pinned!=null?" / PINNED":"");
     const c=r.choice||{}, sk=r.skill||{}, p=r.plan, o=r.outcome||{}, a=r.act||{}, pr=r.pred||{}, j=v=>v==null?"":typeof v==="object"?JSON.stringify(v):String(v);
     const ents=r.entities||[];
     const groups=[  // only what the vision and act calls returned, plus the outcome and any replan
@@ -198,7 +390,7 @@ function render(){
   $("feed").innerHTML=(pend?`<div class="${r===pend||r&&r.pending?"sel":""}">${r&&r.pending?">":" "} ${String(pend.step).padStart(4,"0")}  ${esc(label(pend.place))}  ${esc(pc.verb||"")} ${esc(pc.target||"")} -> acting...</div>`:"")+rows.slice(-300).reverse().map(x=>{const c=x.choice||{};return `<div data-s="${x.step}" class="${x.step===(r&&r.step)?"sel":""}">${x.step===(r&&r.step)?">":" "} ${String(x.step).padStart(4,"0")}  ${esc(label(x.place))}  ${esc(c.verb||"")} ${esc(c.target||"")} -> <span class="v-${esc(x.verdict)}">${esc(x.verdict)}</span>${x.plan?"  [REPLAN]":""}</div>`}).join("");
   goals(); map(r&&r.pending?rows[rows.length-1]:r);  // the pending step has no tile until it lands
 }
-$("feed").onclick=e=>{const d=e.target.closest("[data-s]"); if(d){pinned=+d.dataset.s; chosenPlace=null; render();}};
+$("feed").onclick=e=>{const d=e.target.closest("[data-s]"); if(d){pinned=+d.dataset.s; chosenPlace=null; after===0?setView(1):render();}};  // a pinned step shows its own frames, not the live stream
 const img=new Image(); img.onload=()=>lens(sel());
 function lens(r){ // the perception layer over a small copy of the frame: detected entities, the self box, the player fix
   const cv=$("lens"), ctx=cv.getContext("2d"); if(cv.width!==cv.clientWidth||cv.height!==cv.clientHeight){cv.width=cv.clientWidth;cv.height=cv.clientHeight}

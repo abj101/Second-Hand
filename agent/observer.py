@@ -1,6 +1,7 @@
 from collections import deque
 from dataclasses import dataclass
 import hashlib
+import time
 
 import numpy as np
 from PIL import Image
@@ -12,11 +13,12 @@ class Settle:
     settled: bool
     waited: int
     blank_seen: bool
+    frame_stamp: dict | None = None
 
 def _blank(img: Image.Image) -> bool:
     a = np.asarray(img).astype(np.uint32)  # one int per pixel: a flat sort, not a row-wise one (~10 ms -> <1 ms per frame)
     v = (a[..., 0] << 16) | (a[..., 1] << 8) | a[..., 2] if a.ndim == 3 else a
-    return bool(np.unique(v.ravel(), return_counts=True)[1].max() >= 0.95 * a.shape[0] * a.shape[1])
+    return bool(np.unique(v.ravel(), return_counts=True)[1].max() >= 0.99 * a.shape[0] * a.shape[1])  # fades are uniform; the NEW GAME menu is 95% white and must still settle
 
 
 def changed(a: Image.Image, b: Image.Image, thresh: int = 16) -> float:
@@ -60,12 +62,52 @@ def _residual(frames: list[Image.Image], shifts: list[tuple[int, int]]):
     return (x0 + int(xs.min()), y0 + int(ys.min()), x0 + int(xs.max()) + 1, y0 + int(ys.max()) + 1), tile, coverage, True
 
 
-def wait_settled(env, *, quiet: int = 24, max_frames: int = 600) -> Settle:
+def wait_settled(env, *, quiet: int = 24, max_frames: int = 600, memory: int = 256) -> Settle:
     quiet = max(1, quiet)
+    snapshot = getattr(env, "snapshot", None)
+    wait_frame = getattr(env, "wait_frame", None)
+    if callable(snapshot) and callable(wait_frame):
+        current = snapshot()
+        frame = current.image
+        last = frame if not _blank(frame) else None
+        last_snapshot = current if last is not None else None
+        blank_seen = last is None
+        hashes = deque([hashlib.sha256(frame.tobytes()).digest()], maxlen=max(quiet, memory))
+        consecutive = waited = 0
+        deadline = time.monotonic() + max(0.05, max_frames / 60)
+        for _ in range(max_frames):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                current = wait_frame(current, timeout=remaining)
+            except TimeoutError:
+                break
+            except Exception as error:
+                if type(error).__name__ != "FrameGenerationChanged": raise
+                current = snapshot(); frame = current.image; is_blank = _blank(frame)
+                last, last_snapshot = (None, None) if is_blank else (frame, current)
+                blank_seen = is_blank
+                hashes = deque([hashlib.sha256(frame.tobytes()).digest()], maxlen=max(quiet, memory))
+                consecutive = 0
+                continue
+            waited += 1
+            frame = current.image
+            is_blank = _blank(frame)
+            blank_seen = blank_seen or is_blank
+            if not is_blank:
+                last, last_snapshot = frame, current
+            key = hashlib.sha256(frame.tobytes()).digest()
+            is_quiet = key in hashes and not is_blank
+            consecutive = consecutive + 1 if is_quiet else 0
+            hashes.append(key)
+            if consecutive >= quiet:
+                return Settle(frame, True, waited, blank_seen, _frame_stamp(current))
+        return Settle(last if last is not None else frame, False, waited, blank_seen, _frame_stamp(last_snapshot or current))
     frame = env.screenshot()
     last = frame if not _blank(frame) else None
     blank_seen = last is None
-    hashes = deque([hashlib.sha256(frame.tobytes()).digest()], maxlen=quiet)
+    hashes = deque([hashlib.sha256(frame.tobytes()).digest()], maxlen=max(quiet, memory))
     consecutive = waited = 0
     for waited in range(1, max_frames + 1):
         env.tick()
@@ -81,6 +123,10 @@ def wait_settled(env, *, quiet: int = 24, max_frames: int = 600) -> Settle:
         if consecutive >= quiet:
             return Settle(frame, True, waited, blank_seen)
     return Settle(last if last is not None else frame, False, waited, blank_seen)
+
+
+def _frame_stamp(snapshot) -> dict:
+    return {key: getattr(snapshot, key) for key in ("generation", "frame_seq", "captured_monotonic")}
 
 def scroll(a: Image.Image, b: Image.Image, max_shift: int = 4) -> tuple[int, int] | None:
     a, b = np.asarray(a), np.asarray(b)

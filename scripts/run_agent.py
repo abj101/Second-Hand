@@ -1,12 +1,13 @@
 """Checkpointed Pokémon Red runner for the E3 agent loop."""
 import argparse, hashlib, json, shutil, subprocess, sys, time
+from threading import Event, Thread
 from datetime import datetime, timezone
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent.env_pyboy import PyBoyEnv, find_rom
 from agent.loop import Loop
 from agent.memory import Memory
-from agent.model import ModelUnavailable, Ollama
+from agent.model import ModelCancelled, ModelUnavailable, Ollama
 from agent.observer import wait_settled
 from scripts.truth_pokered import read
 class CallCap(RuntimeError): pass
@@ -102,10 +103,41 @@ def _provenance_block(loop, run) -> dict:
     incomplete = bool(getattr(loop, "provenance_incomplete", False) or _manifest_flagged(run, invocation) or getattr(model, "log_failed", False))
     return {"invocation": invocation, "manifest": "manifest.jsonl", "last_call": getattr(model, "seq", None), "incomplete": incomplete}
 def _checkpoint(env, loop, run):
+    saved = env.save_snapshot() if callable(getattr(env, "save_snapshot", None)) else None
     root = run / "checkpoint" / f"{loop.step_no:06d}"; root.mkdir(parents=True, exist_ok=True)
-    env.save(str(root / "pyboy.state")); shutil.copytree(loop.mem.root, root / "memory", dirs_exist_ok=True)
-    (root / "harness.json").write_text(json.dumps({**loop.state(), "provenance": _provenance_block(loop, run)}, default=str))
+    if saved is None: env.save(str(root / "pyboy.state"))
+    else: (root / "pyboy.state").write_bytes(saved.state)
+    shutil.copytree(loop.mem.root, root / "memory", dirs_exist_ok=True)
+    state = {**loop.state(), "provenance": _provenance_block(loop, run)}
+    if saved is not None:
+        state["runtime"] = {"mode": "continuous", "generation": saved.frame.generation,
+                            "state_frame_seq": saved.frame.frame_seq, "captured_monotonic": saved.frame.captured_monotonic,
+                            "observation": getattr(loop, "observation_stamp", None)}
+    (root / "harness.json").write_text(json.dumps(state, default=str))
     return root
+
+def run_continuous(host, publisher, work) -> int:
+    """SDL stays on this thread; work(env, cancellation) never owns the emulator."""
+    cancelled, finished, result = Event(), Event(), []
+    def worker():
+        try: result.append(work(host.env, cancelled))
+        except BaseException as error: result.append(error)
+        finally: finished.set(); host.stop()
+    thread = Thread(target=worker, name="agent", daemon=True)
+    thread.start()
+    try:
+        host.run(publisher.publish)
+    except KeyboardInterrupt:
+        print("interrupted; retaining the last completed checkpoint", flush=True)
+    finally:
+        cancelled.set(); host.stop()
+        thread.join(timeout=1)
+        publisher.close(timeout=1)
+    if not finished.is_set():
+        print("window closed; interrupted step not checkpointed; retaining the last completed checkpoint", flush=True)
+        return 0
+    if result and isinstance(result[0], BaseException): raise result[0]
+    return result[0] if result else 0
 def _boot_reset(run, rewind):
     for p in (run / "memory").glob("*"): p.unlink()
     base=(run / "checkpoint").resolve()
@@ -120,6 +152,7 @@ def main(argv=None):
     ap.add_argument("--max-calls", type=int, required=True); ap.add_argument("--run", type=Path, required=True)
     ap.add_argument("--resume", action="store_true"); ap.add_argument("--act-text", action=argparse.BooleanOptionalAction, default=None); ap.add_argument("--decide", action=argparse.BooleanOptionalAction, default=None); ap.add_argument("--from-step", type=int); ap.add_argument("--stage", choices="abpqc")
     ap.add_argument("--stage-b-cap", type=int, choices=(180, 300), default=180)
+    ap.add_argument("--headless", action="store_true", help="deterministic offline stepping instead of the visible continuous runtime")
     a = ap.parse_args(argv); run = a.run
     if a.steps < 1 or a.max_calls < 1: ap.error("steps and max-calls must be positive")
     if "m1" in str(run).lower() and a.steps > 600: ap.error("m1 runs are limited to 600 cumulative steps")
@@ -143,39 +176,65 @@ def main(argv=None):
             shutil.copytree(cp / "memory", run / "memory", dirs_exist_ok=True)
     elif boot: _boot_reset(run, False)
     invocation_row = append_manifest(run, manifest_record(resume=a.resume, start_checkpoint=cp.name if cp else None, from_step=a.from_step,
-        steps=a.steps, max_calls=a.max_calls, stage=a.stage, stage_b_cap=a.stage_b_cap, model=MODEL, modes=modes,
+        steps=a.steps, max_calls=a.max_calls, stage=a.stage, stage_b_cap=a.stage_b_cap, model=MODEL, modes={**modes, "headless": a.headless},
         source=source_fingerprint(Path(__file__).resolve().parents[1]), notes=notes))
-    env = PyBoyEnv(find_rom(), state=str(cp / "pyboy.state") if cp else None); env.tile_px = 16; invocation = [0]; active_step = [1]; logged_requests = [0]
+    if a.headless:
+        env = PyBoyEnv(find_rom(), state=str(cp / "pyboy.state") if cp else None)
+        return _play(env, a, run, cp, state if cp else None, boot, modes, invocation_row)
+    from agent.env_pyboy import LivePyBoyHost
+    from scripts.watch_run import FramePublisher
+    publisher = FramePublisher(run)
+    try: host = LivePyBoyHost(find_rom(), state=str(cp / "pyboy.state") if cp else None)
+    except BaseException: publisher.close(); raise
+    return run_continuous(host, publisher, lambda env, cancel: _play(env, a, run, cp, state if cp else None, boot, modes, invocation_row, cancel))
+
+def _play(env, a, run, cp, state, boot, modes, invocation_row, cancelled=None):
+    from agent.env_pyboy import LiveEnvClosed, LiveEnvFailed
+    env.tile_px = 16
+    invocation = [0]; active_step = [1]; logged_requests = [0]
+    def check_cancel():
+        if cancelled is not None and cancelled.is_set(): raise ModelCancelled("run cancelled")
     def log(row):
+        check_cancel()
         n=invocation[0]-logged_requests[0]; logged_requests[0]=invocation[0]
         with (run / "calls.jsonl").open("a", encoding="utf8") as f: f.write(json.dumps({**row, "step": active_step[0], "requests":n})+"\n")
-    model = Ollama(MODEL, cache_dir=Path(".cache/model"), log=log, image_dir=run / "images"); post = model._post
+    model = Ollama(MODEL, cache_dir=Path(".cache/model"), log=log, image_dir=run / "images", cancel_event=cancelled); post = model._post
     def guarded(payload):
+        check_cancel()
         stage_cap={"a":180,"b":a.stage_b_cap,"p":30,"q":60,"c":546}.get(a.stage,a.max_calls)
         cap=min(a.max_calls,stage_cap)
         if invocation[0] >= cap: raise CallCap("invocation call cap")
-        _ledger(run, a.stage, stage_cap); invocation[0] += 1; return post(payload)
+        _ledger(run, a.stage, stage_cap); invocation[0] += 1
+        check_cancel()
+        return post(payload)
     model._post = guarded; loop = Loop(env, model, Memory(run / "memory"), a.game, **({"act_text": True} if modes["act_text"] else {}), **({"decide": True} if modes["decide"] else {}))
     loop.invocation = invocation_row["invocation"]
-    if cp: loop.restore(state)
+    if cp:
+        loop.restore(state)
+        if callable(getattr(env, "snapshot", None)): loop.invalidate_live_observation()
     press = env.press; failed = [False]; keys = []; clip = []  # clip: every emulated frame of this step's presses, for the viewer
     def guarded_press(key, frames=8, on_frame=None):
+        check_cancel()
         keys.append(key)
         def both(image): clip.append(image); on_frame and on_frame(image)
         try: return press(key, frames, on_frame=both)
         except BaseException: failed[0] = True; raise
     env.press = guarded_press
     try:
+        check_cancel()
         if boot: wait_settled(env); _checkpoint(env, loop, run)
         for _ in range(a.steps):
+            check_cancel()
             (run / "frames").mkdir(exist_ok=True); wait_settled(env); truth = {"step": loop.step_no+1, **read(env)}
             with (run / "truth.jsonl").open("a", encoding="utf8") as f: f.write(json.dumps(truth)+"\n")
             active_step[0]=loop.step_no+1; old_calls, old_requests = model.calls, invocation[0]
             keys.clear(); clip.clear()
             try: row = loop.step()
+            except (ModelCancelled, LiveEnvClosed, LiveEnvFailed): raise
             except Exception as e:
                 if failed[0]: loop.cached = loop.cached_hash = None; cp=_checkpoint(env, loop, run); print(f"input_error={e}; checkpoint={cp}",flush=True); return 0
                 raise
+            check_cancel()
             with (run / "presses.jsonl").open("a", encoding="utf8") as f: f.write(json.dumps({"step": row["step"], "keys": keys})+"\n")
             # ponytail: every 2nd frame at 33 ms = real time (GB is ~60 fps); browsers clamp GIF delays under 20 ms
             if len(clip) > 1: clip[0].save(run / "frames" / f"{row['step']:06d}_motion.gif", save_all=True, append_images=clip[2::2], duration=33, loop=0)
@@ -192,8 +251,10 @@ def main(argv=None):
         cp=_checkpoint(env, loop, run); print(f"interrupted; checkpoint={cp}",flush=True); return 0
     except CallCap as e: cp=_checkpoint(env, loop, run); print(f"call_cap={e}; checkpoint={cp}",flush=True); return 3
     except ModelUnavailable as e: cp=_checkpoint(env, loop, run); print(f"model_unavailable={e}; checkpoint={cp}",flush=True); return 4
+    except (ModelCancelled, LiveEnvClosed):
+        print("run cancelled; retaining the last completed checkpoint", flush=True); return 0
     finally:
-        if getattr(model, "log_failed", False): flag_manifest(run, invocation_row["invocation"], "calls.jsonl write failed; some call records are missing")
+        if getattr(model, "log_failed", False) and not (cancelled is not None and cancelled.is_set()): flag_manifest(run, invocation_row["invocation"], "calls.jsonl write failed; some call records are missing")
         env.close()
 
 if __name__ == "__main__": raise SystemExit(main())

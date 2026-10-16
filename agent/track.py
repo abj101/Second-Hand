@@ -1,6 +1,8 @@
 """Object tracks: pixels keep one id per thing between perceptions (0 requests). The vision model names things; this follows them.
 Every emulated frame goes through Tracker.update (wrap() hooks an env). A static track moves with the camera only; an actor track also
 centres on the pixels that changed beyond the camera shift near it (its own motion); lost = still and its patch is gone."""
+from types import SimpleNamespace
+
 import numpy as np
 from agent.observer import changed, scroll
 
@@ -10,6 +12,7 @@ class Tracker:
     def __init__(self, tile_px: int = 16):
         self.tile_px, self.tracks, self.frame, self.arr, self.ignore = tile_px, {}, None, None, []  # ignore: boxes (x0, y0, x1, y1) of screen-fixed motion, set by World
         self.phase = None  # (px, py): pixel phase of sprite centres, set by World from the player's motion-locked spot; None = unknown
+        self.live_generation = self.live_seq = self.live_cursor = None
     def clear(self): self.tracks = {}; self.frame = self.arr = None
     def _snap(self, x, y):
         # ponytail: assumes sprites at rest sit on the player's tile grid (true for grid games like Pokemon); a free-moving game needs a pixel search instead.
@@ -67,14 +70,56 @@ class Tracker:
                 else: t["lost"] += 1  # gone from here: ride the camera until it turns up
             t["x"], t["y"] = px, py
             if not (0 <= px < w and 0 <= py < h): t["status"] = "offscreen"
+    def _consume_live(self, frame):
+        info = getattr(frame, "info", {})
+        generation, seq = info.get("generation"), info.get("frame_seq")
+        if generation is None or seq is None: return
+        if generation != self.live_generation:
+            self.clear(); self.live_generation, self.live_seq = generation, None
+        if self.live_seq is not None and seq <= self.live_seq: return
+        if self.live_seq is not None and seq != self.live_seq + 1: self.clear()
+        self.update(frame)
+        self.live_seq = seq
+        self.live_cursor = SimpleNamespace(generation=generation, frame_seq=seq,
+            captured_monotonic=info.get("captured_monotonic"), image=frame)
+    def _catch_up(self, frames_after, through=None):
+        if self.live_cursor is None: return through
+        batch = frames_after(self.live_cursor)
+        target = through or batch.latest
+        if batch.dropped:
+            self.clear(); self.live_generation, self.live_seq = target.generation, None
+            self._consume_live(target.image)
+            return target
+        for item in batch.frames:
+            if item.generation == target.generation and item.frame_seq <= target.frame_seq:
+                self._consume_live(item.image)
+        if self.live_generation != target.generation or self.live_seq is None or self.live_seq < target.frame_seq:
+            self._consume_live(target.image)
+        return target
     def wrap(self, env):
         """Feed every emulated frame to update(): press via on_frame, tick via a screenshot. Composes with later press wrappers."""
         press, tick = env.press, env.tick
+        snapshot, wait_frame, frames_after = (getattr(env, name, None) for name in ("snapshot", "wait_frame", "frames_after"))
+        live = all(callable(method) for method in (snapshot, wait_frame, frames_after))
+        if live:
+            self.live_cursor = snapshot()
+            self.live_generation, self.live_seq = self.live_cursor.generation, self.live_cursor.frame_seq
+            def tracked_snapshot():
+                return self._catch_up(frames_after) or snapshot()
+            def tracked_wait_frame(after, *, timeout):
+                item = wait_frame(after, timeout=timeout)
+                self._catch_up(frames_after, through=item)
+                return item
+            env.snapshot, env.wait_frame = tracked_snapshot, tracked_wait_frame
         def tracked_press(key, frames=8, on_frame=None):
-            def both(image): self.update(image); on_frame and on_frame(image)
+            def both(image):
+                if live: self._consume_live(image)
+                else: self.update(image)
+                on_frame and on_frame(image)
             return press(key, frames, on_frame=both)
         def tracked_tick(frames=1):
             tick(frames)
-            self.update(env.screenshot())
+            if live: self._catch_up(frames_after)
+            else: self.update(env.screenshot())
         env.press, env.tick = tracked_press, tracked_tick
         return env

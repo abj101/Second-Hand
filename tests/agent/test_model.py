@@ -4,7 +4,7 @@ import pytest
 from PIL import Image
 
 import agent.model as model_module
-from agent.model import ModelUnavailable, Ollama, _b64, load_image_ref
+from agent.model import ModelCancelled, ModelUnavailable, Ollama, _b64, load_image_ref
 
 
 class StubResponse:
@@ -13,6 +13,41 @@ class StubResponse:
 
     def json(self):
         return {"message": {"content": self.text}, "prompt_eval_count": 3, "eval_count": 2}
+
+
+def test_cancelled_model_drops_late_response_and_has_no_side_effects(tmp_path, monkeypatch):
+    from threading import Event
+    cancelled, logs, posts = Event(), [], []
+    client = Ollama("stub", cancel_event=cancelled, cache_dir=tmp_path / "cache", image_dir=tmp_path / "images", log=logs.append)
+    def post(payload):
+        posts.append(payload); cancelled.set()
+        return StubResponse()
+    monkeypatch.setattr(client, "_post", post)
+    with pytest.raises(ModelCancelled): client.ask("s", "u", [Image.new("RGB", (2, 2))])
+    with pytest.raises(ModelCancelled): client.ask("s", "u2")
+    assert len(posts) == 1 and client.calls == 0 and not logs
+    assert not list(tmp_path.iterdir())
+
+
+def test_cancel_interrupts_retry_backoff_without_another_request(monkeypatch):
+    from threading import Event, Thread
+    cancelled, waiting, stopped, errors = Event(), Event(), Event(), []
+    class ObservedEvent:
+        def is_set(self): return cancelled.is_set()
+        def wait(self, seconds): waiting.set(); return cancelled.wait(seconds)
+    client = Ollama("stub", cancel_event=ObservedEvent())
+    posts = []
+    monkeypatch.setattr(client, "_post", lambda p: (posts.append(p) or StubResponse(429)))
+    def ask():
+        try: client.ask("s", "u")
+        except ModelCancelled as error: errors.append(error)
+        finally: stopped.set()
+    worker = Thread(target=ask, daemon=True); worker.start()
+    assert waiting.wait(1)
+    cancelled.set()
+    assert stopped.wait(1)
+    worker.join(1)
+    assert len(posts) == 1 and len(errors) == 1
 
 
 def test_retry_logging_and_small_png(monkeypatch):
