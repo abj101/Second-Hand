@@ -715,6 +715,11 @@ def _lifecycle(run):
                 final_quest_states[key] = str(q.get("status", "active")).casefold()
     still_open = {k for k, status in final_quest_states.items()
                   if status not in {"closed", "done", "completed", "dropped", "parked", "paused", "suspended"}}
+    final_statuses = {quest_key(q, fallback): str(q.get("status", "active")).casefold()
+                      for q, fallback in final_quest_rows if isinstance(q, dict) and quest_key(q, fallback)}
+    final_open = {k for k, status in final_statuses.items()
+                  if status not in {"closed", "done", "completed", "dropped", "parked", "paused", "suspended"}}
+    final_closed = {k for k, status in final_statuses.items() if status in {"closed", "done", "completed"}}
     dropped = {k for k, status in final_quest_states.items() if status == "dropped"}
     closed |= {k for k, status in final_quest_states.items() if status in {"closed", "done", "completed"}}
     parked |= {k for k, status in final_quest_states.items() if status in {"parked", "paused", "suspended"}}
@@ -742,6 +747,61 @@ def _lifecycle(run):
     created.update({quest_key(q): str(q.get("text", "")) for q in quests if isinstance(q, dict) and quest_key(q)})
     door = sorted(k for k, text in created.items() if _TACTICAL.search(text) or button_re and button_re.search(text))
     per_door = {"count": len(door), "of": len(created), "keys": door}
+
+    # A quest is a false closure only when a history snapshot marks it closed
+    # and the final notebook still leaves that same quest open.
+    closed_in_history = set()
+    note_closed = set()
+    notes = notebook.get("notes", [])
+    note_rows = [(str(n.get("text", "")), n.get("step")) for n in notes if isinstance(n, dict)]
+    note_rows += [(str((r.get("value") or {}).get("text", "")), r.get("step"))
+                  for r in history if r.get("op") == "planner_note" and isinstance(r.get("value"), dict)]
+    for r in history:
+        value = r.get("quest") if r.get("op") == "migrate_quest" else r.get("value")
+        for q in value if isinstance(value, list) else [value]:
+            if isinstance(q, dict) and str(q.get("status", "")).casefold() in {"closed", "done", "completed"}:
+                key = quest_key(q, r.get("key") if r.get("op") == "set" else None)
+                if key: closed_in_history.add(key)
+    for note, _ in note_rows:
+        if re.search(r"\b(?:clos(?:e|ed)|done|complet(?:e|ed)|finish(?:ed)?|fulfill(?:ed)?|drop(?:ped)?|obsolete)\b", note, re.I):
+            note_closed.update(key for key in final_statuses if re.search(rf"\b{re.escape(key)}\b", note, re.I))
+    said_closed = closed_in_history | note_closed
+    said_closed_open = sorted(said_closed & final_open)
+    actually_closed = sorted(final_closed)
+
+    # S14 requires explicit add operations and an explicit target (or check arg).
+    def target(q):
+        if not isinstance(q, dict): return None
+        check = q.get("check") if isinstance(q.get("check"), dict) else {}
+        value = q.get("target") or check.get("arg")
+        return str(value).strip().casefold() if value else None
+
+    targets_by_key, closed_targets, readds = {}, set(), []
+    add_rows = [r for r in history if r.get("op") == "add"]
+    for r in sorted(history, key=lambda row: row.get("step", 0)):
+        value = r.get("quest") if r.get("op") == "migrate_quest" else r.get("value")
+        quests = value if isinstance(value, list) else [value]
+        for q in quests:
+            if not isinstance(q, dict): continue
+            key, qtarget = quest_key(q), target(q)
+            if key and qtarget: targets_by_key[key] = qtarget
+            status = str(q.get("status", "")).casefold()
+            if status in {"closed", "done", "completed"} and qtarget:
+                closed_targets.add(qtarget)
+        if r.get("op") == "check" and r.get("key") in targets_by_key:
+            closed_targets.add(targets_by_key[r["key"]])
+        if r.get("op") == "add":
+            q = r.get("quest") if isinstance(r.get("quest"), dict) else value
+            qtarget = target(q)
+            if qtarget and qtarget in closed_targets:
+                readds.append({"step": r.get("step"), "target": qtarget})
+    final_target_rows = [q for q, _ in final_quest_rows]
+    target_rows = sum(target(q) is not None for q in final_target_rows)
+    history_targets = 0
+    for r in history:
+        value = r.get("quest") if r.get("op") == "migrate_quest" else r.get("value")
+        for q in value if isinstance(value, list) else [value]:
+            history_targets += isinstance(q, dict) and target(q) is not None
 
     belief_revisions = []
     seen_revisions = set()
@@ -802,8 +862,193 @@ def _lifecycle(run):
                                                 "parked": len(parked), "still_open": len(still_open),
                                                 "dropped": len(dropped), "silently_lost": len(lost)},
                                 "quests_per_door": per_door,
+                                "said_closed_but_open": {"count": len(said_closed_open),
+                                                         "keys": said_closed_open,
+                                                         "actually_closed": len(actually_closed)},
+                                "finished_target_readds": {"count": len(readds), "rows": readds,
+                                                           "available": bool(add_rows and (target_rows or history_targets))},
                                 "rule4_quest_matches": matches, "belief_revisions": belief_revisions,
                                 "stall_calls_changed_nothing": stall_no_change}}
+
+
+def _scorecard(run, trace, truth_rows, entity_rows, calls, lifecycle):
+    """Offline RCR scorecard. Null values mean the recorded run lacks evidence."""
+    from agent.memory import normalize_kind
+    from agent.world import ACTOR_KINDS
+
+    truth = {r.get("step"): r for r in truth_rows}
+    actor_evidence = {str(r["id"]) for r in entity_rows if r.get("id") and
+                      normalize_kind(r.get("kind")) in ACTOR_KINDS}
+    actor_ids, ambiguous_ids = defaultdict(set), defaultdict(set)
+    actor_observations, sprite_rows, joined_frames, proximity_frames = Counter(), 0, 0, 0
+    actor_ids_seen = set()
+    for row in trace:
+        actual = truth.get(row.get("step"), {})
+        sprites = actual.get("sprites")
+        if row.get("screen") != "world" or not isinstance(sprites, list) or not sprites:
+            continue
+        if any(isinstance(sprite, dict) and isinstance(sprite.get("slot"), int) and sprite["slot"] != 0
+               for sprite in sprites):
+            sprite_rows += 1
+        matched = proximity_matched = False
+        size = _frame_size(run, row)
+        if not size or size[0] <= 0 or size[1] <= 0:
+            continue
+        for entity in row.get("entities") or []:
+            if not isinstance(entity, dict) or not entity.get("id"):
+                continue
+            entity_id = str(entity["id"])
+            is_actor = normalize_kind(entity.get("kind")) in ACTOR_KINDS or entity_id in actor_evidence
+            if is_actor: actor_ids_seen.add(entity_id)
+            at = entity.get("at")
+            if not (isinstance(at, (list, tuple)) and len(at) == 2):
+                continue
+            try: point = (float(at[0]) * size[0], float(at[1]) * size[1])
+            except (TypeError, ValueError): continue
+            candidates = []
+            for sprite in sprites:
+                if not isinstance(sprite, dict): continue
+                try:
+                    slot = int(sprite["slot"])
+                    xy = (float(sprite["x"]) + 8, float(sprite["y"]) + 8)
+                except (KeyError, TypeError, ValueError): continue
+                distance = max(abs(point[0] - xy[0]), abs(point[1] - xy[1]))
+                if distance <= 12: candidates.append((distance, slot))
+            if candidates:
+                _, slot = min(candidates)
+                if slot == 0 or actual.get("map") is None: continue
+                sprite_key = (map_id(actual["map"]), slot)
+                proximity_matched = True
+                if is_actor:
+                    actor_ids[sprite_key].add(entity_id)
+                    actor_observations[sprite_key] += 1
+                    matched = True
+                else:
+                    ambiguous_ids[sprite_key].add(entity_id)
+        joined_frames += matched
+        proximity_frames += proximity_matched
+    s1_available = bool(actor_ids)
+    matched_actor_ids = set().union(*actor_ids.values()) if actor_ids else set()
+    s1 = {"available": s1_available,
+          "ids_per_sprite": {f"{mid}:slot-{slot}": {"ids": sorted(ids), "count": len(ids),
+                                                      "matched_observations": actor_observations[(mid, slot)]}
+                             for (mid, slot), ids in sorted(actor_ids.items())} if s1_available else None,
+          "ambiguous_proximity_ids_per_sprite": {
+              f"{mid}:slot-{slot}": sorted(ids)
+              for (mid, slot), ids in sorted(ambiguous_ids.items())} or None,
+          "unmatched_actor_ids": sorted(actor_ids_seen - matched_actor_ids),
+          "max_ids": max((len(ids) for ids in actor_ids.values()), default=None),
+          "truth_sprite_rows": sprite_rows,
+          "actor_matched_trace_rows": joined_frames,
+          "proximity_matched_trace_rows": proximity_frames,
+          "coverage": rate(proximity_frames, sprite_rows),
+          "definition": "Same-step truth sprites joined to trace entities within 12 px Chebyshev distance. Only ACTOR_KINDS or IDs historically observed as actors count as confirmed; nearby other entities remain ambiguous. Truth slot 0 is excluded after nearest-sprite matching."}
+
+    target_truth = sorted((r for r in truth_rows if map_id(r.get("map")) == "0x00" and
+                           isinstance(r.get("map_h"), int) and r["map_h"] > 0 and
+                           isinstance(r.get("map_w"), int) and r["map_w"] > 0),
+                          key=lambda r: r.get("step", 0))[:30]
+    first_target_step = target_truth[0].get("step") if target_truth else None
+    last_target_step = target_truth[-1].get("step") if target_truth else None
+    arrival_step = first_target_step - 1 if isinstance(first_target_step, int) else None
+    incoming = next((r for r in trace if r.get("step") == arrival_step), None)
+    target_place = ((incoming.get("next_place") or incoming.get("place")) if incoming else None)
+    if not target_place and isinstance(first_target_step, int):
+        first_row = next((r for r in trace if r.get("step") == first_target_step), None)
+        target_place = (first_row.get("place") or first_row.get("next_place")) if first_row else None
+    entities = replay_rows(entity_rows)
+    minted = [r for r in entities if target_place and r.get("place") == target_place and
+              isinstance(r.get("first"), int) and arrival_step <= r["first"] <= last_target_step]
+    s2_available = bool(len(target_truth) == 30 and target_place and (run / "memory" / "entities.jsonl").exists())
+    s2 = {"available": s2_available, "world_steps": len(target_truth) if s2_available else None,
+          "records": len(minted) if s2_available else None,
+          "target_place": target_place if s2_available else None,
+          "birth_window": [arrival_step, last_target_step] if s2_available else None,
+          "incoming_observation_included": bool(s2_available and incoming and incoming.get("next_place") == target_place),
+          "definition": "Distinct entity IDs first seen in the place mapped to map 0, from the incoming action through the 30th valid map-0 truth row. Uses truth after-state S+1; map-0 rows without dimensions are excluded, and pending trace rows count."}
+
+    duplicate_count, deduped = _entity_duplicates(entity_rows)
+    same_tile = Counter()
+    for row in deduped:
+        tile = row.get("tile")
+        if not (isinstance(tile, (list, tuple)) and len(tile) == 2): continue
+        name = re.sub(r"(?:#\d+)+$", "", str(row.get("name", "")).casefold()).strip()
+        if name and str(row.get("kind", "")).casefold() != "player":
+            same_tile[(row.get("place"), name, tuple(tile))] += 1
+    duplicate_groups = {key: count for key, count in same_tile.items() if count > 1}
+    s3_available = any(isinstance(r.get("tile"), (list, tuple)) and len(r["tile"]) == 2 for r in deduped)
+    s3 = {"available": s3_available,
+          "duplicate_records": sum(n - 1 for n in duplicate_groups.values()) if s3_available else None,
+          "duplicate_groups": len(duplicate_groups) if s3_available else None,
+          "tiles": len({(key[0], key[2]) for key in duplicate_groups}) if s3_available else None,
+          "entity_duplicate_proxy": duplicate_count if s3_available else None,
+          "manual_reference": "MASTER §5 records 2 duplicate tiles ×2; this name/tile history proxy may differ from that inspected count.",
+          "definition": "Final entity history proxy grouped by place, normalized name, and exact stored tile; repeated rows beyond the first are duplicates. This may differ from manually identified duplicate tiles."}
+
+    history_metrics = lifecycle["history_metrics"]
+    s5 = history_metrics["said_closed_but_open"]
+    s5 = {"available": (run / "memory" / "notebook.history").exists() and
+                       (run / "memory" / "notebook.json").exists(),
+          **s5, "definition": "Explicit planner notes or history snapshots name a quest as closed/dropped, compared with all final notebook quest statuses. Note matches are a lower bound requiring the exact quest key."}
+
+    truth_by_step = {r.get("step"): r for r in truth_rows}
+    action_failures = [r for r in trace if r.get("execution") in {"failed", "blocked"} or
+                       isinstance(r.get("skill"), dict) and r["skill"].get("status") in {"failed", "blocked"}]
+    no_movement = []
+    unknown_unsettled = 0
+    for row in action_failures:
+        before, after = truth_by_step.get(row.get("step")), truth_by_step.get((row.get("step") or 0) + 1)
+        if before is None or after is None or any(before.get(k) is None or after.get(k) is None for k in ("map", "x", "y")):
+            continue
+        if (before["map"], before["x"], before["y"]) == (after["map"], after["x"], after["y"]):
+            no_movement.append(row)
+    for row in trace:
+        failed = row.get("execution") in {"failed", "blocked"} or isinstance(row.get("skill"), dict) and row["skill"].get("status") in {"failed", "blocked"}
+        if not failed and (row.get("observation_status") == "timed_out" or isinstance(row.get("skill"), dict) and row["skill"].get("settled") is False):
+            before, after = truth_by_step.get(row.get("step")), truth_by_step.get((row.get("step") or 0) + 1)
+            if before is not None and after is not None and all(before.get(k) is not None and after.get(k) is not None for k in ("map", "x", "y")) and (before["map"], before["x"], before["y"]) == (after["map"], after["x"], after["y"]):
+                unknown_unsettled += 1
+    truth_joined = [r for r in action_failures
+                    if all(truth_by_step.get(step) is not None and
+                           all(truth_by_step[step].get(k) is not None for k in ("map", "x", "y"))
+                           for step in (r.get("step"), (r.get("step") or 0) + 1))]
+    s6_available = bool(truth_rows and any("execution" in r or isinstance(r.get("skill"), dict) for r in trace) and
+                        (not action_failures or truth_joined))
+    s6 = {"available": s6_available,
+          "action_failures": len(action_failures) if truth_rows else None,
+          "truth_joined_failures": len(truth_joined) if s6_available else None,
+          "real_failures_no_movement": len(no_movement) if s6_available else None,
+          "not_scored_failed": sum(r.get("verdict") not in {"failed", "miss"} for r in no_movement) if s6_available else None,
+          "unsettled_no_movement_unknown": unknown_unsettled,
+          "steps": [r.get("step") for r in no_movement],
+          "definition": "Action/skill failed or blocked, and truth map/x/y are unchanged from step S to S+1; verdict failed or legacy miss counts as scored failed. Unsettled no-movement rows are reported separately."}
+
+    act_calls = [c for c in calls if c.get("role") == "act"]
+    plan_calls = [c for c in calls if c.get("role") in {"plan", "planner"}]
+    act_users = [len(str(c["user"])) for c in act_calls if isinstance(c.get("user"), str)]
+    plan_users = [len(str(c["user"])) for c in plan_calls if isinstance(c.get("user"), str)]
+    act_combined = [len(str(c.get("system", ""))) + len(str(c.get("user", ""))) for c in act_calls
+                    if "system" in c or "user" in c]
+    plan_combined = [len(str(c.get("system", ""))) + len(str(c.get("user", ""))) for c in plan_calls
+                     if "system" in c or "user" in c]
+    s8 = {"act_user_max_chars": max(act_users, default=None),
+          "planner_user_max_chars": max(plan_users, default=None),
+          "act_system_plus_user_max_chars": max(act_combined, default=None),
+          "planner_system_plus_user_max_chars": max(plan_combined, default=None),
+          "available": bool(act_users or plan_users),
+          "definition": "Primary values count recorded user prompt text; combined system plus user maxima are also reported."}
+
+    unsettled = [r for r in trace if r.get("observation_status") in {"pending", "timed_out", "unsettled"} or
+                 isinstance(r.get("skill"), dict) and r["skill"].get("settled") is False]
+    s11 = {"available": bool(trace), "rows": len(unsettled) if trace else None,
+           "pending": sum(r.get("observation_status") == "pending" for r in unsettled) if trace else None,
+           "timed_out": sum(r.get("observation_status") == "timed_out" for r in unsettled) if trace else None,
+           "definition": "Trace rows pending, timed out, explicitly unsettled, or whose skill settlement flag is false."}
+    s14 = history_metrics["finished_target_readds"]
+    return {"S1_ids_per_real_npc": s1, "S2_pallet_records_first_30": s2,
+            "S3_same_tile_duplicates": s3, "S5_false_closures": s5,
+            "S6_failures_not_scored_failed": s6, "S8_prompt_max_chars": s8,
+            "S11_unsettled_rows": s11, "S14_finished_target_readds": s14}
 
 
 def _repredict(run, trace, hide_memory=False):
@@ -1014,6 +1259,9 @@ def evaluate(run, *, repredict=False, hide_memory=False, from_step=None):
             "probe_unmeasured_world_steps": sum(r.get("screen") == "world" and
                 (r.get("probe") or {}).get("presses", 0) > 0 for r in trace),
             "no_effect_streak_max": _no_effect_streak(trace) if (run / "trace.jsonl").exists() and trace else None}
+    lifecycle = _lifecycle(run)
+    result["rcr_scorecard"] = _scorecard(run, full_trace, truth_rows, entity_rows,
+                                        read(run / "calls.jsonl"), lifecycle)
     if repredict:
         result.update(_repredict(run, trace, hide_memory))
     world_maps = {map_id(actual["map"]) for row in trace if row.get("screen") == "world" and

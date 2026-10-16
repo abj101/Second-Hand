@@ -67,6 +67,78 @@ def test_eval_run_metrics_and_excludes_candidates(tmp_path):
     assert result["m1_gate_pass"] is True
 
 
+def test_rcr_scorecard_uses_recorded_sprite_history_prompts_and_settlement(tmp_path):
+    run = tmp_path / "scorecard"
+    trace = [{"step": step, "screen": "world", "place": "p", "frame": "frames/one.png", "entities": []}
+             for step in range(1, 31)]
+    trace[0]["next_place"] = "p"
+    trace[0]["entities"] = [
+        {"id": "npc-a", "kind": "player", "at": [0.3, 56 / 144]},
+        {"id": "fence", "kind": "object", "at": [0.3, 56 / 144]},
+    ]
+    trace[-1]["observation_status"] = "pending"
+    trace.extend([
+        {"step": 31, "result": "failed", "execution": "blocked", "verdict": "surprise"},
+        {"step": 32, "result": "failed", "execution": "done"},
+        {"step": 33, "observation_status": "pending"},
+        {"step": 34, "observation_status": "timed_out", "skill": {"settled": False}},
+    ])
+    truth = [{"step": step, "map": 0, "x": 1, "y": 1,
+              "map_h": 0 if step == 1 else 7, "map_w": 0 if step == 1 else 10,
+              "sprites": [{"slot": 0, "x": 10, "y": 10}, {"slot": 2, "x": 40, "y": 48}]}
+             for step in range(1, 33)]
+    entities = [
+        {"id": "npc-a", "kind": "character", "name": "Person", "place": "p", "tile": [3, 4], "first": 1},
+        {"id": "npc-b", "kind": "character", "name": "Person", "place": "p", "tile": [3, 4], "first": 2},
+        {"id": "thing", "kind": "object", "name": "Box", "place": "p", "tile": [8, 9], "first": 30},
+        {"id": "fence", "kind": "object", "name": "Fence post", "place": "p", "tile": [3, 4], "first": 0},
+        {"id": "title", "kind": "object", "name": "Title mark", "place": "p", "tile": [9, 9], "first": 0},
+    ]
+    closed = {"key": "q0", "text": "Reach the exit", "target": "exit", "status": "done"}
+    reopened = {"key": "q1", "text": "Reach the exit", "target": "exit", "source": "heard", "status": "open"}
+    write(run / "trace.jsonl", trace)
+    write(run / "truth.jsonl", truth)
+    frame = run / "frames" / "one.png"
+    frame.parent.mkdir(parents=True)
+    frame.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + (160).to_bytes(4, "big") + (144).to_bytes(4, "big"))
+    write(run / "memory" / "entities.jsonl", entities)
+    write(run / "memory" / "notebook.history", [
+        {"step": 1, "op": "quests", "value": [closed]},
+        {"step": 2, "op": "add", "quest": {"key": "q2", "target": "exit", "status": "open"}},
+    ])
+    (run / "memory" / "notebook.json").write_text(json.dumps({
+        "quests": [reopened], "facts": {}, "beliefs": {},
+        "notes": [{"step": 3, "text": "I dropped the q1 quest."}]
+    }), encoding="utf-8")
+    write(run / "calls.jsonl", [
+        {"role": "act", "system": "abc", "user": "1234"},
+        {"role": "plan", "system": "p", "user": "123456"},
+    ])
+
+    card = evaluate(run)["rcr_scorecard"]
+
+    assert card["S1_ids_per_real_npc"]["ids_per_sprite"] == {
+        "0x00:slot-2": {"ids": ["npc-a"], "count": 1, "matched_observations": 1}}
+    assert card["S1_ids_per_real_npc"]["ambiguous_proximity_ids_per_sprite"] == {
+        "0x00:slot-2": ["fence"]}
+    assert card["S2_pallet_records_first_30"]["records"] == 3
+    assert card["S2_pallet_records_first_30"]["world_steps"] == 30
+    assert card["S2_pallet_records_first_30"]["birth_window"] == [1, 31]
+    assert card["S2_pallet_records_first_30"]["incoming_observation_included"] is True
+    assert card["S3_same_tile_duplicates"]["duplicate_records"] == 1
+    assert card["S3_same_tile_duplicates"]["tiles"] == 1
+    assert card["S5_false_closures"]["count"] == 1
+    assert card["S5_false_closures"]["actually_closed"] == 0
+    assert card["S6_failures_not_scored_failed"]["not_scored_failed"] == 1
+    assert card["S8_prompt_max_chars"]["act_user_max_chars"] == 4
+    assert card["S8_prompt_max_chars"]["planner_user_max_chars"] == 6
+    assert card["S8_prompt_max_chars"]["act_system_plus_user_max_chars"] == 7
+    assert card["S11_unsettled_rows"]["rows"] == 3
+    assert card["S11_unsettled_rows"]["pending"] == 2
+    assert card["S11_unsettled_rows"]["timed_out"] == 1
+    assert card["S14_finished_target_readds"]["count"] == 1
+
+
 def gate_run(run, steps, acquired_after):
     places = [{"id": pid, "state": "place", "edges": edges} for pid, edges in (
         ("p26", [{"to": "p25", "ok": 1}]), ("p25", [{"to": "p00", "ok": 1}]),

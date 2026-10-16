@@ -1,0 +1,4 @@
+{"at":[0.7,0.5],"id":"e_door","kind":"exit","name":"door","near":[],"place":"p_place","step":1,"tile":[2,0],"track":null,"track_place":null}
+{"at":[0.7,0.5],"id":"e_door_2","kind":"exit","name":"door","near":[],"place":"p_place_2","step":1,"tile":[2,0],"track":null,"track_place":null}
+{"at":[0.5,0.5],"id":"e_player","kind":"player","name":"player","near":[],"place":"p_place","step":1,"tile":null,"track":null,"track_place":null}
+{"at":[0.5,0.5],"id":"e_player_2","kind":"player","name":"player","near":[],"place":"p_place_2","step":1,"tile":null,"track":null,"track_place":null}
