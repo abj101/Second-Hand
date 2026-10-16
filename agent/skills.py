@@ -133,15 +133,11 @@ def approach(ctx: Ctx, target_at: list[float], player_at: list[float] | None, *,
             blocked.clear()
             if move[axis]: axis_dirs[axis] = direction
         before, last_dir = end.frame, direction
-    if route is not None and exit_target is not None and inputs < ctx.max_inputs and route.get("push"): last_dir = route["push"]
-    if exit_target is not None and inputs < ctx.max_inputs and last_dir:
-        side = ("UP", "DOWN") if last_dir in ("LEFT", "RIGHT") else ("LEFT", "RIGHT")
-        for direction in ((last_dir,) if route is not None and route.get("push") else ()) + (side[0], last_dir, side[1], side[1], last_dir):
-            if inputs >= ctx.max_inputs: break
-            old = before; end, move, saw_blank = step(direction, old); inputs += 1
-            if cut(old, end.frame, saw_blank): return result("done", "scene cut", inputs, calls, initial, end.frame, total, blank or saw_blank)
-            if move is not None: total[:] = [total[j] + move[j] for j in (0, 1)]
-            blank |= saw_blank; before = end.frame
+    if route is not None and exit_target is not None and inputs < ctx.max_inputs and route.get("push"):
+        old = before; end, move, saw_blank = step(route["push"], old); inputs += 1
+        if cut(old, end.frame, saw_blank): return result("done", "scene cut", inputs, calls, initial, end.frame, total, blank or saw_blank)
+        if move is not None: total[:] = [total[j] + move[j] for j in (0, 1)]
+        blank |= saw_blank; before = end.frame
     return result("done" if route is not None and exit_target is None and len(route.get("dirs", [])) <= inputs else "blocked", "" if route is not None and exit_target is None and len(route.get("dirs", [])) <= inputs else "exit not crossed" if exit_target is not None else "input limit", inputs, calls, initial, before, total, blank, failure=_crossing(exit_target))
 @_tracked
 def interact(ctx: Ctx, target_at: list[float], player_at: list[float] | None) -> SkillResult:

@@ -1,8 +1,10 @@
+import json
+from pathlib import Path
+
 from PIL import Image
 
-from agent.memory import Memory
 from agent.observer import cut
-from agent.predict import EFFECTS, PRED, effects, predict, verdict
+from agent.predict import EFFECTS, effects, result as classify
 from agent.skills import SkillResult
 
 
@@ -18,54 +20,37 @@ def test_effect_basis_uses_pixels_or_model_lists():
     before = Image.new("RGB", (32, 32), "black")
     after = before.copy(); after.putpixel((2, 2), (255, 0, 0))
     out = effects(old, new, result(before, after, (4, 0), True), "town", "house")
-    assert out["effects"] == ["place_changes", "text_appears", "screen_changes",
-                              "entity_appears", "view_scrolled"]
+    assert out["effects"] == ["place_changes", "text_appears", "screen_changes", "view_scrolled"]
     assert out["basis"] == {"place_changes": "pixel", "text_appears": "model",
-                             "screen_changes": "pixel", "entity_appears": "model",
-                             "view_scrolled": "pixel"}
+                             "screen_changes": "pixel", "view_scrolled": "pixel"}
     assert out["to"] == "house" and EFFECTS[-1] == "no_change"
 
 
-def test_verdict_hit_partial_surprise_miss_and_unobservable():
-    pred = {"effect": "place_changes", "detail": "house"}
-    assert verdict(pred, {"effects": ["place_changes"], "to": "house"}) == "hit"
-    assert verdict(pred, {"effects": ["place_changes"], "to": "cave"}) == "partial"
-    assert verdict(pred, {"effects": ["text_appears"]}) == "surprise"
-    assert verdict(pred, {"effects": ["no_change"]}) == "miss"
-    assert verdict(pred, {}) == "unobservable"
+def test_result_prioritizes_novelty_then_failure_then_no_change():
+    assert classify("blocked", ["no_change"], True) == "progress"
+    assert classify("failed", ["screen_changes"], False) == "failed"
+    assert classify("done", ["no_change"], False) == "no_change"
+    assert classify("done", ["screen_changes"], False) == "changed"
 
 
-def test_zero_input_skill_cannot_hit_unless_no_change_was_predicted():
-    outcome = {"effects": ["place_changes"], "to": "house"}
-    assert verdict({"effect": "place_changes"}, outcome, inputs=0) == "miss"
-    assert verdict({"effect": "place_changes"}, outcome, inputs=1) == "hit"
-    assert verdict({"effect": "no_change"}, {"effects": ["no_change"]}, inputs=0) == "hit"
-
-
-def test_blocked_exit_walk_misses_even_with_incidental_movement_effects():
-    pred = {"effect": "place_changes"}
-    assert verdict(pred, {"effects": ["screen_changes", "view_scrolled"]}, blocked=True) == "miss"
-    assert verdict(pred, {"effects": ["place_changes"]}, blocked=True) == "miss"
-    assert verdict(pred, {"effects": ["entity_appears"]}, blocked=True) == "surprise"
-
-
-def test_predict_ignores_model_claims_and_picks_highest_confidence(tmp_path):
-    mem = Memory(tmp_path)
-    mem.upsert("relations", {"id": "r_model", "s": "e_door", "p": "leads_to", "o": "p_fake",
-                              "src": "model", "sup": 100, "con": 0, "state": "live"})
-    mem.upsert("relations", {"id": "r_low", "s": "e_door", "p": "opens", "o": "menu",
-                              "src": "observed", "sup": 1, "con": 0, "state": "live"})
-    mem.upsert("relations", {"id": "r_high", "s": "e_door", "p": "leads_to", "o": "p_house",
-                              "src": "observed", "sup": 5, "con": 0, "state": "live"})
-    mem.upsert("relations", {"id": "r_refuted", "s": "e_door", "p": "says", "o": "hello",
-                              "src": "observed", "sup": 10, "con": 11, "state": "refuted"})
-
-    pred = predict(mem, {"verb": "approach", "target": "door"}, "e_door", "p_town")
-    assert pred == {"basis": "instance", "id": "r_high", "effect": "place_changes",
-                    "detail": "p_house", "conf": 6 / 7}
-    assert PRED == {"place_changes": "leads_to", "text_appears": "says", "screen_changes": "opens",
-                    "entity_appears": "reveals", "entity_disappears": "removes",
-                    "view_scrolled": "moves_view", "no_change": "does_nothing"}
+def test_m1_surprises_score_novelty_without_entity_churn():
+    path = Path(__file__).parent / "data" / "r4_m1_rows.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf8").splitlines()]
+    surprises = [r for r in rows if r["verdict"] == "surprise"]
+    assert len(surprises) == 23
+    outcomes = {}
+    for row in surprises:
+        effects = [e for e in row["outcome"]["effects"] if not e.startswith("entity_")]
+        novel = tuple(row["scroll"]) != (0, 0) or row["next_place"] != row["place"]
+        outcomes[row["step"]] = classify(row["skill"]["status"], effects, novel)
+    unmoved = [r for r in surprises if r["moved"] is False]
+    assert len(unmoved) == 13
+    assert all(outcomes[r["step"]] == "failed" for r in unmoved)
+    assert outcomes[100] == "progress"
+    step_105 = next(r for r in surprises if r["step"] == 105)
+    assert step_105["moved"] is True and step_105["skill"]["status"] == "done"
+    assert tuple(step_105["scroll"]) != (0, 0) and outcomes[105] == "progress"
+    assert set(outcomes.values()) <= {"failed", "progress", "changed", "no_change"}
 
 
 def test_cut_into_candidate_is_screen_change():

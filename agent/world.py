@@ -78,6 +78,7 @@ class World:
         self.entity_tiles, self.entity_ids, self.actor_tiles = {}, {}, frozenset()
         self.entities, self.pa, self._prepared = [], None, None
         self._observed_per = None
+        self.novel = 0
         self.current_place = None
         self._travelled = None
         self._last_miss_hash = {}
@@ -254,6 +255,7 @@ class World:
         x0, y0 = self.pos[0] - ax, self.pos[1] - ay
         return (x0, y0, x0 + width - 1, y0 + height - 1)
     def _record_view(self, per, frame, reused, place, size, step, anchor, ids):
+        self.novel = 0
         live = {r["id"] for r in self.mem.rows("places") if r.get("state") != "merged"}
         rect = self._view_rect(anchor, size) if place in live else None
         world_screen = per.get("screen") == "world"
@@ -263,6 +265,7 @@ class World:
             x0, y0, x1, y1 = rect
             seen = self.mem.get("seen", place) or {"id": place, "cells": [], "step": step}
             cells = set(seen.get("cells", [])); added = {f"{x},{y}" for x in range(x0, x1 + 1) for y in range(y0, y1 + 1)} - cells
+            self.novel = len(added)
             past = {"LEFT": lambda i: (x0 - 1, y0 + i), "RIGHT": lambda i: (x1 + 1, y0 + i), "UP": lambda i: (x0 + i, y0 - 1), "DOWN": lambda i: (x0 + i, y1 + 1)}
             edge = _open_edge(frame, self.tile_px) if frame is not None and not modal else {}
             was = set(seen.get("open", [])); opened = {"%d,%d" % past[d](i) for d, idx in edge.items() for i in idx} - was
@@ -1020,6 +1023,22 @@ class World:
         return [{"n": n, **row[1]} for n, row in enumerate(rows, 1)]
     def occupied(self, place):  # actors hold tiles of the current place only; another place's actors are stale
         return self.actor_tiles if place == self.current_place else frozenset()
+    def explore_dirs(self, place):
+        if not self.tile_px: return {}
+        span = [max(1, self.size[i] // self.tile_px // 2) for i in (0, 1)] if self.size else [4, 4]
+        candidates = {tuple(map(int, cell.split(","))) for cell in open_cells(self.mem, place)}
+        candidates.update((tile[0] + DIRS[d][0], tile[1] + DIRS[d][1]) for tile, d in unseen_edges(self.mem, place))
+        routes = {}
+        for target in sorted(candidates):
+            dx, dy = target[0] - self.pos[0], target[1] - self.pos[1]
+            if not dx and not dy: continue
+            axis = 0 if abs(dx) >= abs(dy) else 1
+            direction = ("RIGHT" if dx > 0 else "LEFT") if axis == 0 else ("DOWN" if dy > 0 else "UP")
+            dirs = route(self.mem, place, self.pos, target, occupied=self.occupied(place))
+            if dirs is not None and (direction not in routes or (len(dirs), target) < (len(routes[direction][0]), routes[direction][1])):
+                routes[direction] = (dirs, target)
+        return {d: {"dirs": dirs + [d] * span[0 if d in ("LEFT", "RIGHT") else 1], "to": target}
+                for d, (dirs, target) in routes.items()}
     def beside(self, place, pos, tile):  # nearest reachable free tile beside tile and the direction that faces it: (stand, facing, dirs)
         rows = {(r["x"], r["y"]): r for r in self.mem.rows("tiles") if r.get("place") == place}; occupied = self.occupied(place); near = []
         for d, (dx, dy) in DIRS.items():

@@ -19,7 +19,7 @@ def test_eval_run_metrics_and_excludes_candidates(tmp_path):
     ]
     trace = [
         {"step": 1, "place": "p26", "frame": "same.png", "frame_hash": "h1", "choice": {"verb": "approach", "target": "door"}, "verdict": "miss"},
-        {"step": 2, "place": "p26", "frame": "same.png", "frame_hash": "h1", "choice": {"verb": "approach", "target": "door"}, "verdict": "miss",
+        {"step": 2, "place": "p26", "frame": "same.png", "frame_hash": "h1", "choice": {"verb": "approach", "target": "door"}, "verdict": "surprise",
          "scene_cut": True, "next_place": "p25",
          "outcome": {"effects": ["screen_changes"], "basis": {"screen_changes": "pixel"}}},
         {"step": 3, "place": "p25", "frame": "next.png", "frame_hash": "h2", "choice": {"verb": "advance", "target": "text"}, "verdict": "hit",
@@ -29,7 +29,9 @@ def test_eval_run_metrics_and_excludes_candidates(tmp_path):
          "scene_cut": True, "next_place": "p28",
          "outcome": {"effects": ["screen_changes"], "basis": {"screen_changes": "pixel"}}},
         {"step": 5, "place": "p28", "frame": "lab.png", "choice": {"verb": "interact", "target": "Oak"}, "verdict": "hit"},
-        {"step": 6, "place": "candidate", "frame": "candidate.png", "choice": {"verb": "wait", "target": ""}, "verdict": "hit"},
+        {"step": 6, "place": "candidate", "frame": "candidate.png", "frame_hash": "h4", "choice": {"verb": "wait", "target": ""}, "verdict": "failed"},
+        {"step": 7, "place": "candidate", "frame": "candidate.png", "frame_hash": "h4", "choice": {"verb": "wait", "target": ""}, "verdict": "no_change"},
+        {"step": 8, "place": "candidate", "frame": "candidate.png", "frame_hash": "h4", "choice": {"verb": "wait", "target": ""}, "verdict": "hit"},
     ]
     truth = [
         {"step": 1, "map": "0x26", "party": 0}, {"step": 2, "map": "0x26", "party": 0},
@@ -58,8 +60,7 @@ def test_eval_run_metrics_and_excludes_candidates(tmp_path):
     assert result["places_matched"] is True
     assert result["place_mapping"]["Red's house 2F"]["place"] == "p26"
     assert result["m1_starter"] is True and result["steps_to_starter"] == 4
-    assert result["prediction_accuracy"]["overall"] == 0.5
-    assert result["repeated_mistakes"]["count"] == 1
+    assert result["repeated_mistakes"]["count"] == 3
     assert all(result["edges_found"].values())
     assert result["knowledge_game_text"] == 10
     assert result["poison_rate"] == {"refuted_model_claims": 1, "model_claims": 2, "rate": 0.5}
@@ -407,7 +408,7 @@ def test_from_step_scopes_battles_and_calls_but_keeps_starter_progress(tmp_path)
     assert resumed["steps_to_starter"] == 0
 
 
-def test_e4_metrics_and_offline_repredict_preserve_chooser_guess(tmp_path):
+def test_e4_metrics_preserve_other_evaluator_results(tmp_path):
     run = tmp_path / "e4"
     trace = [
         {"step": 1, "place": "p", "frame_hash": "same", "wake": "periodic", "task": "goal",
@@ -415,7 +416,6 @@ def test_e4_metrics_and_offline_repredict_preserve_chooser_guess(tmp_path):
          "outcome": {"effects": ["place_changes"], "basis": {"place_changes": "pixel"}, "to": "p2"}},
         {"step": 2, "place": "p", "frame_hash": "same", "task": "goal",
          "choice": {"verb": "approach", "target": "door", "id": "door1"},
-         "pred": {"basis": "instance", "id": "future", "effect": "screen_changes", "detail": None},
          "skill": {"status": "done"},
          "outcome": {"effects": ["place_changes"], "basis": {"place_changes": "pixel"}, "to": "p2"}},
         {"step": 3, "place": "p2", "frame_hash": "other",
@@ -441,13 +441,9 @@ def test_e4_metrics_and_offline_repredict_preserve_chooser_guess(tmp_path):
         {"id": "table1", "kind": "furniture", "name": "Table", "place": "p", "first": 3, "last": 3}])
     write(run / "memory" / "tasks.jsonl", [{"id": "planned-goal", "plan_step": 1, "status": "active"}])
     write(run / "memory" / "patterns.jsonl", [{"id": "pat1", "state": "promoted"}])
-    write(run / "chooser.jsonl", [{"step": 2, "choice": {"effect": "no_change", "detail": None}},
-                                   {"step": 5, "choice": {"effect": "screen_changes", "detail": None}}])
-
     before_done = evaluate(run)
     write(run / "memory" / "tasks.jsonl", [{"id": "planned-goal", "plan_step": 1, "status": "done"}])
-    full = evaluate(run, repredict=True)
-    hidden = evaluate(run, repredict=True, hide_memory=True)
+    full = evaluate(run)
 
     assert full["doors_verified"] == 1
     assert full["patterns_promoted"] == 1
@@ -455,9 +451,6 @@ def test_e4_metrics_and_offline_repredict_preserve_chooser_guess(tmp_path):
     assert before_done["reflection_usefulness"]["goals_completed"] == 0
     assert full["repeat_sequences"] == {"length": 2, "count": 0}
     assert full["reflection_usefulness"] == {"plan_calls": 1, "goals_completed": 1}
-    assert (full["acc_first"], full["acc_repeat"], full["n_first"], full["n_repeat"]) == (None, 1.0, 0, 1)
-    assert hidden["acc_repeat"] == 0.0 and hidden["n_repeat"] == full["n_repeat"]
-    assert hidden["n"] == full["n"] == 1 and full["excluded"] == 5
 
 
 def test_repeat_sequences_count_repeated_verified_action_pairs(tmp_path):

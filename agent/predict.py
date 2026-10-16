@@ -1,7 +1,6 @@
-"""Game-neutral effect labels and prediction verdicts."""
+"""Game-neutral effect labels and action results."""
 
 from agent.observer import changed, cut
-from agent.memory import conf, normalize_kind
 
 EFFECTS = ("place_changes", "text_appears", "screen_changes", "entity_appears",
            "entity_disappears", "view_scrolled", "no_change")
@@ -10,29 +9,11 @@ PRED = {"place_changes": "leads_to", "text_appears": "says", "screen_changes": "
         "view_scrolled": "moves_view", "no_change": "does_nothing"}
 
 
-def predict(mem, aff: dict, target_id: str | None, place: str) -> dict | None:
-    """Use the strongest live, observed relation attached to this target."""
-    if not target_id:
-        return None
-    effects_by_pred = {predicate: effect for effect, predicate in PRED.items()}
-    verb = str(aff.get("verb") or "").casefold()
-    matches = [row for row in mem.rows("relations")
-               if row.get("s") == target_id and row.get("p") in effects_by_pred
-               and (not verb or not row.get("verb") or row.get("verb") == verb)
-               and row.get("src") == "observed" and row.get("state") == "live"]
-    if matches:
-        row = max(matches, key=conf)
-        return {"basis": "instance", "id": row["id"], "effect": effects_by_pred[row["p"]],
-                "detail": row["o"], "conf": conf(row)}
-    kind = normalize_kind((mem.get("entities", target_id) or {}).get("kind", ""))
-    patterns = [row for row in mem.rows("patterns") if row.get("state") == "promoted"
-                and row.get("s") == kind and row.get("verb") == verb
-                and row.get("p") in effects_by_pred]
-    if patterns:
-        row = max(patterns, key=conf)
-        return {"basis": "pattern", "id": row["id"],
-                "effect": effects_by_pred[row["p"]], "detail": None, "conf": conf(row)}
-    return None
+def result(status: str, effects: list[str], novel: bool) -> str:
+    if novel: return "progress"
+    if status in ("blocked", "failed"): return "failed"
+    if effects == ["no_change"]: return "no_change"
+    return "changed"
 
 
 def effects(before: dict, after: dict, res, place_before: str, place_after: str,
@@ -51,14 +32,6 @@ def effects(before: dict, after: dict, res, place_before: str, place_after: str,
     if frame_changed or (scene_cut and place_after_candidate):
         found.append("screen_changes")
         basis["screen_changes"] = "pixel"
-    old = {(e.get("kind"), e.get("name")) for e in before.get("entities", [])}
-    new = {(e.get("kind"), e.get("name")) for e in after.get("entities", [])}
-    if new - old:
-        found.append("entity_appears")
-        basis["entity_appears"] = "model"
-    if old - new:
-        found.append("entity_disappears")
-        basis["entity_disappears"] = "model"
     if tuple(res.scroll) != (0, 0):
         found.append("view_scrolled")
         basis["view_scrolled"] = "pixel"
@@ -67,24 +40,3 @@ def effects(before: dict, after: dict, res, place_before: str, place_after: str,
         basis["no_change"] = "pixel"
     return {"effects": found, "basis": basis,
             "to": place_after if scene_cut and not place_after_candidate else None}
-
-
-def verdict(pred: dict | None, outcome: dict | None, *, blocked: bool = False, inputs: int | None = None) -> str:
-    if not outcome or not outcome.get("effects"):
-        return "unobservable"
-    actual = outcome["effects"]
-    if not pred or not pred.get("effect"):
-        return "unobservable"
-    expected = pred["effect"]
-    if blocked:
-        unexpected = set(actual) - {expected, "no_change", "screen_changes", "view_scrolled"}
-        return "surprise" if unexpected else "miss"
-    if expected in actual:
-        if inputs == 0 and expected != "no_change": return "miss"
-        detail = pred.get("detail")
-        if detail is not None and expected == "place_changes" and outcome.get("to") != detail:
-            return "partial"
-        return "hit"
-    if actual == ["no_change"]:
-        return "miss"
-    return "surprise"

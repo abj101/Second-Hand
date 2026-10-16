@@ -1,108 +1,79 @@
+import json
+from pathlib import Path
+
+from agent import tasks
+from agent.predict import result
 from agent.tasks import Stuck
 
 
-def test_stuck_counts_zero_affordance_and_eight_no_change_steps():
+def test_stuck_tracks_only_novel_places_edges_and_progress():
     stuck = Stuck()
-    assert [stuck.update({"options": 0}) for _ in range(7)] == [None] * 7
-    assert stuck.update({"options": 0}) == "no_change"
-    assert stuck.n == 8
-
-
-def test_stuck_fires_on_third_same_action_on_same_frame_and_roundtrips():
-    stuck = Stuck()
-    stuck.update({"screen": "world", "place": "p_a", "next_place": "p_b", "verified_edge": True})
-    row = {"choice": {"verb": "approach", "target": "door"}, "frame_hash": "abc"}
+    row = {"screen": "world", "place": "p_a", "next_place": "p_b"}
     assert stuck.update(row) is None
-    assert stuck.update(row) is None
-    assert stuck.update(row) == "same_action"
-
-    restored = Stuck()
-    restored.restore(stuck.state())
-    assert restored.action == stuck.action
-    assert restored.hash == "abc"
-    assert restored.seen_edges == {"p_a>p_b"}
-
-    legacy = Stuck()
-    legacy.restore({"n": 2, "action": ["approach", "door", None],
-                   "hash": "abc", "same_action": 2})
-    assert legacy.seen_edges == set()
-    assert legacy.update(row) == "same_action"
-
-
-def test_stuck_counts_nonconsecutive_action_frame_repeats_across_restore():
-    stuck = Stuck()
-    repeat = {"choice": {"verb": "interact", "target": "console"}, "frame_hash": "abc"}
-    other = {"choice": {"verb": "wait"}, "frame_hash": "abc"}
-    assert stuck.update(repeat) is None
-    assert stuck.update(other) is None
-
-    restored = Stuck()
-    restored.restore(stuck.state())
-    assert restored.update(repeat) is None
-    assert restored.update(repeat) == "same_action"
-    assert restored.update(repeat) is None
-
-
-def test_stuck_escalates_after_20_world_steps_without_new_place_or_edge():
-    stuck = Stuck()
-    row = {"screen": "world", "place": "p_start", "next_place": "p_start"}
-    assert stuck.update(row) is None  # first place visit is progress
-    assert all(stuck.update(row) is None for _ in range(19))
-    assert stuck.update({**row, "screen": "menu"}) is None
-    assert stuck.update(row) == "no_progress"
-
-
-def test_stuck_new_place_resets_counter_and_restores_visited_places():
-    stuck = Stuck()
-    row = {"screen": "world", "place": "p_start", "next_place": "p_start"}
-    assert stuck.update(row) is None
-    assert all(stuck.update(row) is None for _ in range(19))
-
-    resumed = Stuck()
-    resumed.restore(stuck.state())
-    assert resumed.progress_n == 19
-    assert resumed.seen_places == {"p_start"}
-    new_place = {**row, "place": "p_new", "next_place": "p_new"}
-    assert resumed.update(new_place) is None
-    assert resumed.progress_n == 0
-
-    backtrack = {**row, "place": "p_new", "next_place": "p_start",
-                 "outcome": {"effects": ["place_changes"], "basis": {"place_changes": "pixel"}}}
-    assert resumed.update(backtrack) is None
-    assert resumed.progress_n == 1
-    assert resumed.seen_places == {"p_start", "p_new"}
-
-
-def test_stuck_new_verified_edge_resets_no_progress_counter():
-    stuck = Stuck()
-    row = {"screen": "world", "place": "p_start", "next_place": "p_next"}
-    assert stuck.update(row) is None
-    assert all(stuck.update(row) is None for _ in range(19))
+    assert stuck.progress_n == 0
     assert stuck.update({**row, "verified_edge": True}) is None
+    assert stuck.seen_edges == {"p_a>p_b"}
     assert stuck.progress_n == 0
-    assert stuck.seen_edges == {"p_start>p_next"}
-
-
-def test_stuck_repeat_edge_is_not_progress():
-    stuck = Stuck()
-    row = {"screen": "world", "place": "p_start", "next_place": "p_next"}
-    assert stuck.update(row) is None
-    edge = {**row, "verified_edge": True}
-    assert stuck.update(edge) is None
-    assert stuck.progress_n == 0
-    assert stuck.update(edge) is None
+    assert stuck.update({**row, "verified_edge": True}) is None
     assert stuck.progress_n == 1
-    assert stuck.seen_edges == {"p_start>p_next"}
+    assert stuck.update({**row, "verdict": "progress"}) is None
+    assert stuck.progress_n == 0
 
 
-def test_repeated_dialogue_counts_toward_stall():
+def test_stuck_offworld_only_counts_repeated_text():
     stuck = Stuck()
-    reasons = [stuck.update({"screen": "dialogue", "fresh_text": False}) for _ in range(20)]
-    assert reasons[:19] == [None] * 19 and reasons[19] == "no_progress"
+    assert stuck.update({"screen": "dialogue", "fresh_text": False}) is None
+    assert stuck.progress_n == 1
+    assert stuck.update({"screen": "dialogue", "fresh_text": True}) is None
+    assert stuck.progress_n == 1
 
 
-def test_fresh_intro_dialogue_neither_counts_nor_resets_stall():
+def test_stuck_backoff_caps_and_progress_resets_it():
     stuck = Stuck()
-    stuck.progress_n = 5
-    for _ in range(30): assert stuck.update({"screen": "dialogue", "fresh_text": True}) is None
-    assert stuck.progress_n == 5
+    stuck.replanned(False)
+    stuck.replanned(False)
+    stuck.replanned(False)
+    stuck.replanned(False)
+    assert stuck.u == 3
+    stuck.progress_n = 1
+    stuck.replanned(True)
+    assert stuck.u == 0
+    stuck.progress()
+    assert (stuck.progress_n, stuck.u) == (0, 0)
+
+
+def test_stuck_roundtrips_only_current_state_keys():
+    stuck = Stuck()
+    stuck.progress_n, stuck.seen_places, stuck.seen_edges, stuck.u = 4, {"p_a"}, {"p_a>p_b"}, 2
+    state = stuck.state()
+    assert set(state) == {"progress_n", "seen_places", "seen_edges", "u"}
+    restored = Stuck()
+    restored.restore(state)
+    assert restored.state() == state
+    restored.restore({"n": 7, "action": ["old"], "same_action": 3})
+    assert restored.state() == {"progress_n": 0, "seen_places": [], "seen_edges": [], "u": 0}
+
+
+def _m1_replay(rows, k):
+    old = tasks.STALL
+    tasks.STALL = k
+    try:
+        stuck, fires = Stuck(), []
+        for row in rows:
+            effects = [e for e in row["outcome"]["effects"] if not e.startswith("entity_")]
+            novel = tuple(row.get("scroll") or (0, 0)) != (0, 0) or row["next_place"] != row["place"]
+            verdict = result(row["skill"]["status"], effects, novel)
+            if stuck.update({**row, "verdict": verdict}) == "no_progress":
+                fires.append(row["step"])
+        return fires
+    finally:
+        tasks.STALL = old
+
+
+def test_m1_replay_backoff_thresholds_and_chosen_k():
+    path = Path(__file__).parent / "data" / "r4_m1_rows.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf8").splitlines()]
+    fires = {k: _m1_replay(rows, k) for k in (6, 8, 10, 12)}
+    chosen = max(k for k, steps in fires.items() if any(64 <= step <= 73 for step in steps))
+    assert chosen == tasks.STALL
+    assert fires[chosen] == [72]

@@ -135,7 +135,7 @@ Rulings (coordinator, 10-15):
 
 ## 7. Phase B packet: R4 implementation
 
-Status: not started · Branch: `feat/lean-agent` · Orchestrator: Sonnet; every WP worker: Haiku (set `model` explicitly; never Opus). Cloud calls: **0** (StubModel, cached frames, ROM-only probes).
+Status: **gate passed in the working tree (648 tests)** · Branch: `feat/lean-agent` · Orchestrator: this session; every worker explicitly `gpt-6-luna`, reasoning **HIGH** (user override). Cloud calls: **0** (StubModel, cached frames, ROM-only probes). LIVE files stay unstaged; final evidence is in §7.9.
 
 ### Paste block
 
@@ -174,7 +174,7 @@ Status: not started · Branch: `feat/lean-agent` · Orchestrator: Sonnet; every 
 ### 7.2 Gate
 | Metric | Pass | Command |
 |---|---|---|
-| S6 real failures not scored failed | 0 of 14; S100 = `progress`; 0 `surprise` | `pytest tests/agent/test_predict.py -k m1` |
+| S6 real failures not scored failed | 0 of 13 (23 surprises; `moved` from the before-frame step); S100, S105 = `progress`; 0 `surprise` | `pytest tests/agent/test_predict.py -k m1` |
 | S11 settle | synthetic 8-state/21-frame cycle settles on both env paths; ROM probe at y≥10 settles (must run, not skip) | `pytest tests/agent/test_observer.py -rs` (no `SKIPPED` line) |
 | K | fire steps for K∈{6,8,10,12} recorded in §7.9; chosen K = largest that fires inside S64-73 | `pytest tests/agent/test_tasks.py -k replay` |
 | Explore granularity | one decision walks ≥ 4 tiles and adds ≥ one view row of seen cells | `pytest tests/agent/test_loop.py -k explore` |
@@ -226,7 +226,7 @@ Status: not started · Branch: `feat/lean-agent` · Orchestrator: Sonnet; every 
 1. R4.1 ‖ R4.2 ‖ R4.3
 2. R4.4
 3. R4.5a → R4.5b → R4.5c → R4.5d. The `loop.py` WPs run one at a time.
-4. R4.6
+4. R4.6s → R4.6
 5. R4.7
 
 R2's `loop.py` wiring WP may start once R4.5d lands; its slot is `_after_outcome` and the `stuck:` branch after `_apply_plan` (MASTER §3).
@@ -260,10 +260,10 @@ R2's `loop.py` wiring WP may start once R4.5d lands; its slot is `_after_outcome
   - State keys: `progress_n`, `seen_places`, `seen_edges`, `u`.
 - **Fixture:** `tests/agent/data/r4_m1_rows.jsonl`, one line per trace row of `runs/m1_bedroom_live`.
   - Fields: `step`, `screen`, `place`, `next_place`, `verified_edge`, `scroll`, `skill.status`, `outcome.effects`, `verdict`.
-  - Plus `moved` (truth S vs S+1), which is eval-only and never read by agent code.
+  - Plus `moved`, which is eval-only and never read by agent code: truth at the row's before-frame step (the number in `frame`, e.g. `frames/000103.png` → 103) vs truth at S+1. A resolved-hold row (S105, before-frame 103) scores the S103 action, not S105.
   - Record the one-off extraction command in §7.9.
 - **Tests:**
-  - S6: for the 18 `surprise` rows, compute `result(status, effects − entity_*, novel = scroll ≠ 0 or next_place ≠ place)`. The 14 unmoved rows give `failed`, S100 gives `progress`, and no row gives `surprise`.
+  - S6: for all 23 `surprise` rows, compute `result(status, effects − entity_*, novel = scroll ≠ 0 or next_place ≠ place)`. The 13 unmoved rows give `failed`, S100 and S105 give `progress`, and no row gives `surprise`. (Amended 10-15 after the first attempt: the packet's "18/14" counted from S55 and scored S105 by its own step; S105 resolves the held S103 action, LEFT DOWN, which moved (3,9)→(2,10).)
   - Replay: run `Stuck` over every row with that result. Record the fire steps for K∈{6,8,10,12} and assert the chosen K's list.
   - Unit tests: backoff, cap, reset on progress.
 - **Acceptance:** `pytest tests/agent/test_predict.py tests/agent/test_tasks.py -q -p no:cacheprovider -n auto`; `LIVE`.
@@ -298,6 +298,7 @@ R2's `loop.py` wiring WP may start once R4.5d lands; its slot is `_after_outcome
   - `step()` always calls `_settle` with the latest frame. The row keeps `observation_status` as `settled` or `timed_out`.
   - Keep every live-view line (`observation_stamp`, `observation_age_ms`, `frame_stamp`, the `"observation_stamp"` key in the action state, `_observation_fields` in rows). If a live-view hunk calls a deleted symbol, stop and report.
 - **Tests:** replace the ~10 pending/unsettled tests (`test_loop.py` ~1743-2068, plus `test_live_resume_invalidation_clears_pending...`) with one test: an unsettled after-frame gives one row, `timed_out`, with a normal tail.
+- **Also owns (added 10-15):** `tests/agent/test_harness_reliability.py`, case 5 only (`crossing_run` and its test). With no hold, step 1 is the whole action row. Checkpoint after that row, restore into a new Loop, and drop the `while loop.pending` loop. Assert one row with `observation_status` in (`settled`, `timed_out`) and `execution: done`. Keep the checks that the keys are `["RIGHT", "RIGHT"]` in both runs with no replay, that `fails == {}`, that the crossings are equal and `[1]`, and that pos/place/player are equal after restore. Delete `resumed.pending is None` and rename the test to drop "pending".
 - **Acceptance:** `pytest tests/agent/test_loop.py tests/agent/test_harness_reliability.py tests/agent/test_run_provenance.py -q -p no:cacheprovider -n auto`; `LIVE`.
 
 #### R4.5b Delete relook, `reported`, cycle detection and migrations
@@ -324,6 +325,10 @@ R2's `loop.py` wiring WP may start once R4.5d lands; its slot is `_after_outcome
   - An explore row with `dir` walks that direction's route (`explore_dirs(place)[dir]["dirs"]` equals the pressed keys).
   - The appended straight presses stop at the first blocked press (`approach` with a route already returns `route blocked` on the first `(0, 0)`). An extension that hits a wall after 1 tile sends at most route + 2 inputs.
   - Update the `test_go_to_unexplored_*` tests.
+- **Repair (added 10-15, planner, verified offline):**
+  - **Cause:** `space.route` never crosses a recorded exit edge. A routed approach to an on-screen exit label therefore detours away from the very exit it was used to cross. In `test_grid_loop_reuses_two_spatial_exits_between_floors`, the 2F label sits 2 tiles past the departure tile (8,9)↓. The current "label exactly 1 tile beyond the departure tile" match misses it, so the third decision walks to (0,4) and comes back `blocked`.
+  - **Fix:** in `_approach_route`'s recorded-exit loop, replace `if (vx, vy) != (dx, dy): continue` with `if direction not in DIRS or max(abs(vx - dx), abs(vy - dy)) > 1: continue`. A recorded exit matches when its crossed tile is within 1 tile of the label, the same tolerance as `unseen_cross`. The `direction not in DIRS` guard skips tiles with no exit.
+  - **Evidence:** with only this change patched in memory (scratch `r45c_patch.py`), the test passes: 4 decisions alternate p_place_2/p_place and `progress_n == 2`. The full suite gives 654 passed, 1 failed; the one failure is `test_world_golden`, which also fails without the patch and is regenerated in R4.5d.
 - **Acceptance:** `pytest tests/agent/test_loop.py tests/agent/test_world.py -q -p no:cacheprovider -n auto`; `LIVE`.
 
 #### R4.5d Result and Stuck wiring
@@ -337,12 +342,22 @@ R2's `loop.py` wiring WP may start once R4.5d lands; its slot is `_after_outcome
 - **Golden:** regenerate `w0_golden/act/trace.jsonl` (authorized). A field-by-field diff may change only `verdict`, `pred`, `used` and `observation_status`. Commit it with `git add -f`.
 - **Acceptance:** the full suite, `pytest tests/agent -q -p no:cacheprovider -n auto` (includes `LIVE`).
 
+#### R4.6s S0 cleanup of retired prediction metrics (added 10-15; S0 never landed it)
+- **Owns:** `scripts/eval_run.py`, `tests/agent/test_eval_run.py`. Haiku. Runs right before R4.6.
+- **Change `eval_run.py`:**
+  - Delete `_repredict`, the `repredict`/`hide_memory` parameters of `evaluate`, the `--repredict`/`--hide-memory` flags and their usage text.
+  - Delete `verdict_rows`, `accuracy`, the 50-step `buckets` and the `prediction_accuracy` key.
+  - The repeated-failure key (`row.get("verdict") in ("miss", "surprise")`) also accepts the new domain: `("miss", "surprise", "failed", "no_change")`.
+  - Keep the S6 scorer and every other scorecard metric unchanged.
+- **Tests:** delete `test_e4_metrics_and_offline_repredict_preserve_chooser_guess` and the `prediction_accuracy` assertion; keep the rest.
+- **Acceptance:** `pytest tests/agent/test_eval_run.py -q -p no:cacheprovider -n auto`; `grep -n "agent.predict import" scripts` finds nothing that imports `predict` or `verdict`.
+
 #### R4.6 Delete prediction
 - **Change:**
   - `predict.py` keeps `EFFECTS` (R3 still imports it until its WP), `PRED`, `effects()` without `entity_appears`/`entity_disappears`, and `result()`. Delete `predict` and `verdict`.
   - `memory.py`: delete `relate()`'s `pattern_id` parameter, the pattern accounting, the `patterns` rows, and `conf` if no caller is left.
   - Delete `test_patterns.py`. Keep `test_predict.py` for `effects` and `result`.
-- **Precondition:** S0 has removed `eval_run._repredict`/`prediction_accuracy`. Check that `grep -n "predict import\|verdict(" scripts agent` finds only users of `result`.
+- **Precondition:** R4.6s has removed `eval_run._repredict`/`prediction_accuracy`. Check that `grep -n "predict import\|verdict(" scripts agent` finds only users of `result`.
 - **Acceptance:** the full suite (includes `LIVE`).
 
 ### 7.6 Test layers
@@ -367,6 +382,8 @@ R2's `loop.py` wiring WP may start once R4.5d lands; its slot is `_after_outcome
 - Live-mode settle cost near water (143-480 frames is 2-8 s of real time per press at normal speed; today it times out at 10 s). Report it in §7.9; a shorter per-press settle in `skills._step` is a follow-up, not R4.
 
 ### 7.9 Result (filled in by the orchestrator)
+**Current result: PASS — 648 tests, exit 0.** The final completion entry below supersedes the historical stopped attempts; shared LIVE changes remain unstaged.
+
 - Gate numbers for each §7.2 row; the K fire lists for 6/8/10/12; the chosen K.
 - Net lines per file; deviations; the fixture extraction command.
 - S6 caveat: the fixture test uses a proxy for novelty (`scroll ≠ 0 or next_place ≠ place`), because the baseline run has no `world.novel`. The coordinator re-checks S6 on the real wiring with S0.
@@ -379,5 +396,190 @@ R2's `loop.py` wiring WP may start once R4.5d lands; its slot is `_after_outcome
   - exit push = one press;
   - `World.explore_dirs`.
 - **Commit list** (gate): commit R4-only files freely. Files marked LIVE still carry the user's live-view hunks; never `git add` them unless the coordinator has asked the user.
-  - R4-only: `agent/tasks.py`, `agent/predict.py`, `agent/skills.py`, `agent/world.py` (after R1's commit), `agent/memory.py` (after R1's commit), `tests/agent/test_predict.py`, `test_tasks.py`, `test_skills.py`, `test_world.py`, `test_options.py`, `test_exits.py`, `test_space.py`, `test_notebook.py`, `test_om_eval.py`, `test_harness_reliability.py`, deleted `test_patterns.py`, `tests/agent/data/r4_m1_rows.jsonl`, `tests/agent/data/w0_golden/act/trace.jsonl` (`-f`).
+  - R4-only: `agent/tasks.py`, `agent/predict.py`, `agent/skills.py`, `agent/world.py` (after R1's commit), `agent/memory.py` (after R1's commit), `tests/agent/test_predict.py`, `test_tasks.py`, `test_skills.py`, `test_world.py`, `test_options.py`, `test_exits.py`, `test_space.py`, `test_notebook.py`, `test_om_eval.py`, `test_harness_reliability.py`, deleted `test_patterns.py`, `scripts/eval_run.py`, `test_eval_run.py`, `tests/agent/data/r4_m1_rows.jsonl`, `tests/agent/data/w0_golden/act/trace.jsonl` (`-f`).
   - LIVE: `agent/loop.py`, `agent/observer.py`, `tests/agent/test_loop.py`, `tests/agent/test_observer.py`, `tests/agent/test_run_provenance.py`.
+
+#### Attempt result — 2026-10-15: STOPPED, gate not passed
+
+Entry criteria passed on `feat/lean-agent`, HEAD `4c755cb`: S0 `d83bd9a` and R1 `d787836` plus subsequent R1 fixes are present; the venv, ROM, trace/truth and checkpoint 000100 exist. Root ran all acceptance commands reported below, using `.venv-agent/Scripts/python.exe -B -m pytest` and the TEMP/TMP setup in §7.1. No cloud model calls or live game run were made. The ROM test is an emulator-only probe.
+
+Only R4.1–R4.3 were attempted. Each worker was explicitly spawned as **gpt-6-luna, reasoning high**, with the CLAUDE rules and its WP card. R4.4–R4.6 did not start. §7.2 requires stopping when S6 fails, so no thresholds, novelty rules or replay cohorts were changed to force a pass. The full gate and runtime integration are incomplete: in particular, the new `Stuck` no longer provides the fields still read by the not-yet-updated loop. This working tree is a partial implementation, not a runnable completed R4.
+
+Acceptance and repair history:
+
+- **R4.1:** `test_observer.py test_skills.py test_type_text.py -rs -q -p no:cacheprovider -n auto` initially exited 1: **61 passed, 1 failed**. The synthetic eight-state fixture was uniform and therefore blank. One same-tier repair changed only that fixture to seeded textured frames, keeping its eight states and 21-frame cadence. Root's rerun exited 0: **62 passed**, no skips, 19.79 s. Logs: `.tmp/r4/R4.1-accept.log`, `R4.1-repair-accept.log`.
+- **R4.2:** `test_predict.py test_tasks.py -q -p no:cacheprovider -n auto` exited 1: **13 passed, 1 failed**, 2.16 s. The S6 test requires 18 surprise rows; the raw trace and 105-row fixture both contain **23**. One same-tier repair investigation found no extraction defect and made no further edits. Among all 23 surprises there are 14 truth-confirmed unmoved rows, but only 13 score `failed`; S105 scores `progress`. The 18 surprises from S55 onward have the same 14/13 discrepancy. No arbitrary S55 cutoff was added. Logs: `.tmp/r4/R4.2-accept.log`, `replay-evidence.log`.
+- **R4.3:** `test_skills.py test_exits.py test_space.py -q -p no:cacheprovider -n auto` exited 1: **77 passed, 1 failed**, 15.70 s. Failure: `test_space.py::test_actor_zero_motion_does_not_record_a_wall`, expected `actor_tiles == {(1, 0)}`, actual empty. One same-tier repair investigation found the test constructs its move directly, never calling the changed skill. It omits a world-screen `hall` place record, so `World._tiles` returns no tiles. Repair would require files outside R4.3's card; none were edited. Log: `.tmp/r4/R4.3-accept.log`.
+- **LIVE:** both commands were run at entry and after each WP: **11 realtime tests passed**, **12 live-filtered tests passed**, every command exit 0. R4.1 uses the `batch1-live[-realtime].log` pair; R4.2 and R4.3 have their named `*-live[-realtime].log` pairs in `.tmp/r4`. No serial flaky-test exception was needed.
+- No WP reached two failed acceptance runs; the user-authorized extra same-tier attempt was therefore not triggered. No tier escalation or layered fixes were used.
+
+Gate rows (§7.2):
+
+- **S6 — FAIL:** one of 14 unmoved rows is not scored failed. S100 is `progress`; the result classifier emits no `surprise` labels. S105 is truth-unmoved, `skill.status = done`, `scroll = [16, -16]`; the specified proxy sets `novel = True`, so the prescribed priority returns `progress`. The separate 23-versus-18 cohort mismatch fails acceptance before its 14-failed assertion. This does not establish that S105 was a real tactical failure; its status/scroll and truth disagree. Coordinator ruling is required; do not relabel it from truth in agent code.
+- **S11 — PASS:** root additionally ran `test_observer.py -rs -q -p no:cacheprovider -n auto`: **13 passed**, exit 0, 2.18 s, **no skips** (`.tmp/r4/gate-S11.log`). The synthetic cycle passes both env paths with memory 256 and fails to settle with memory 24. The ROM probe loads checkpoint 100, presses DOWN three times, asserts RAM y ≥ 10 for eval only, and settles.
+- **K — PASS, provisional until wiring:** `test_tasks.py -k replay -q -p no:cacheprovider -n auto`: **1 passed**, exit 0, 2.09 s (`gate-K.log`). Root's direct replay printed K=6 **[70]**, K=8 **[72]**, K=10 **[]**, K=12 **[]** (`replay-evidence.log`). Chosen **K=8**, the largest firing inside S64–73. These lists use the packet's proxy, not future `world.novel`.
+- **Explore granularity — NOT RUN:** R4.4/R4.5c not started.
+- **One walker — INCOMPLETE:** R4.3's single routed push and blocked-move tests pass inside the 62-test R4.1 run; the full R4.3 acceptance fails as above, and loop routing/fold integration in R4.5c has not been implemented or measured.
+- **Hold removed — NOT RUN:** R4.5a not started.
+- **Full suite — NOT RUN:** stopped on S6 and the out-of-scope R4.3 acceptance failure; no green suite is claimed.
+- **Lines — partial only:** agent hunks net **−31**; all attempted code/tests/fixture hunks net **+227**; this Result adds **69** documentation lines, total **+296**. No R4 commits exist.
+
+R4-only line deltas against the saved entry working tree (additions/deletions/net; excludes the user's edits):
+
+- `agent/observer.py`: +4/−4/**0** (signature plus three deque sites).
+- `agent/predict.py`: +7/−0/**+7**.
+- `agent/tasks.py`: +16/−50/**−34**.
+- `agent/skills.py`: +5/−9/**−4**.
+- `tests/agent/test_observer.py`: +53/−0/**+53**.
+- `tests/agent/test_predict.py`: +28/−1/**+27**.
+- `tests/agent/test_tasks.py`: +62/−91/**−29**.
+- `tests/agent/test_skills.py`: +10/−8/**+2**.
+- `tests/agent/data/r4_m1_rows.jsonl`: +105/−0/**+105** (ignored by `data/`; remains on disk, unstaged).
+
+Preservation: `.tmp/r4/starting.diff` and `live-R4.1.diff` through `live-R4.4.diff` contain entry diffs (R4.4 was not started). Root reconstructed the original working-tree lines from HEAD plus `starting.diff`: all **17** pre-existing modified tracked files match their entry contents, except the four authorized R4.1 observer replacements and inserted observer test coverage. Every original observer-test line remains in order. See `.tmp/r4/preservation-lines.log`. `contracts.md` is untouched. Headroom compression was used; its local proxy was unreachable, with local compression/storage still available.
+
+Fixture extraction command (105 projected rows; truth is eval-only):
+
+```powershell
+New-Item -ItemType Directory -Force .tmp/r4/tmp | Out-Null
+$env:TEMP = "$PWD\.tmp\r4\tmp"; $env:TMP = $env:TEMP
+@'
+import json
+from pathlib import Path
+run = Path("runs/m1_bedroom_live")
+trace = [json.loads(s) for s in (run / "trace.jsonl").read_text(encoding="utf8").splitlines()]
+truth = {r["step"]: r for r in (json.loads(s) for s in (run / "truth.jsonl").read_text(encoding="utf8").splitlines())}
+out = []
+for r in trace:
+    a, b = truth.get(r["step"]), truth.get(r["step"] + 1)
+    moved = None if not a or not b else (a["map"], a["x"], a["y"]) != (b["map"], b["x"], b["y"])
+    out.append({"step": r["step"], "screen": r.get("screen"), "place": r.get("place"),
+                "next_place": r.get("next_place"), "verified_edge": r.get("verified_edge", False),
+                "scroll": r.get("scroll", [0, 0]), "skill": {"status": (r.get("skill") or {}).get("status")},
+                "outcome": {"effects": (r.get("outcome") or {}).get("effects", [])},
+                "verdict": r.get("verdict"), "moved": moved})
+Path("tests/agent/data/r4_m1_rows.jsonl").write_text(
+    "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in out), encoding="utf8")
+print(f"wrote {len(out)} rows; surprises={sum(r['verdict'] == 'surprise' for r in out)}")
+'@ | .venv-agent/Scripts/python.exe -B -
+```
+
+**Contract proposal:** keep the §7.4/§7.9 proposal pending; this attempt provides only the tested `wait_settled(memory=256)`, standalone `predict.result`, standalone `Stuck.replanned`/backoff, and the single routed push. Do not approve a completed trace/HF-5/`World.explore_dirs` contract yet: those changes are unimplemented. Final proposed `used` is `[]`, `pred` is null. The S6 proxy caveat above must be resolved and then rechecked on real wiring with S0.
+
+**Commit/staging result:** no files staged, no commit, no push. Gate failed. All R4 changes remain reviewable in the working tree. LIVE files remain unstaged: `agent/loop.py`, `agent/observer.py`, `tests/agent/test_loop.py`, `tests/agent/test_observer.py`, `tests/agent/test_run_provenance.py`; all other user live-view edits likewise remain unstaged. Only observer and its test received R4 edits in that LIVE list. Follow-up F1 remains: the larger window still costs about 2–8 seconds per press near water in real-time mode; this attempt did not measure live wall-clock cost or change the per-press settle policy.
+
+#### Resumed attempt — user rulings and acceptance history
+
+The user requested continuation and explicitly ruled: **use 13 confirmed failures for S6; report S105 separately**. The corrected replay test keeps all 105 rows, covers all 23 surprises, checks the 13 truth-unmoved blocked/failed rows, S100 progress, and the S105 disagreement. Root acceptance: **14 passed**, exit 0 (`.tmp/r4/R4.2-resume-accept.log`). The coordinator separately landed `c560dc6`, seeding the world place in `test_space.py`; root R4.3 acceptance then passed **78 tests**, exit 0 (`R4.3-resume-accept.log`).
+
+The user also explicitly authorized two narrow scope amendments: (1) an **S0 cleanup WP** owning `scripts/eval_run.py` and `tests/agent/test_eval_run.py`, removing the retired prediction replay/metric and CLI flags; root acceptance **43 passed**, exit 0, and the baseline evaluator with `--no-write` exited 0; (2) **R4.5a's final same-tier repair** may edit `tests/agent/test_harness_reliability.py`, preserving its checkpoint/no-duplicate-input checks while replacing pending-resolution expectations with one normal timed-out row. No other WP file boundary is relaxed.
+
+Intermediate dependency acceptance is recorded rather than hidden: R4.4 initially **134 passed / 2 failed**, R4.5a initially **64 passed / 79 failed**, all failures at the removed `Stuck.n` interface. The prescribed R4.5b deletions resolve that dependency without compatibility code; R4.4 then passed **136 tests**. R4.5b initially **207 passed / 3 failed** on call counts retaining the deleted relook; one same-tier repair corrected only those obsolete counts, retaining malformed-JSON repair behavior checks, and root acceptance passed **210 tests**. R4.5a's second acceptance was **140 passed / 1 failed**, the obsolete harness pending assertion. Its third attempt is the user-authorized final same-tier repair, with both failure outputs supplied to the worker. Logs are `.tmp/r4/R4.4-accept.log`, `R4.4-wired-accept.log`, `R4.5a-accept.log`, `R4.5a-wired-accept.log`, `R4.5b-accept.log`, and `R4.5b-repair-accept.log`.
+
+#### Final resumed Result — STOPPED after R4.5c's final allowed attempt
+
+**Gate remains failed. No staging, commit or push.** R4.5d and R4.6 were not started; no golden was regenerated. Result scoring/backoff are still not wired into the loop, and prediction/pattern deletion is incomplete. The S0 prerequisite cleanup is applied and tested in the working tree, but is not committed. The previous attempt's partial-runtime warning still applies.
+
+**R4.5c acceptance history (all run by root, same original command):**
+
+- Initial: **186 passed / 38 failed**, exit 1, 87.09 s (`.tmp/r4/R4.5c-accept.log`). Most failures were a removed but still-used `DIRS` import; six approach stubs lacked the new route keyword; the new four-press explore fixture also encountered its default door after two presses.
+- One repair restored `DIRS`, updated the stubs, and moved the fixture door out of the path while retaining the four-tile/new-row assertions. Acceptance: **223 passed / 1 failed**, exit 1, 79.51 s (`R4.5c-repair-accept.log`).
+- **User-authorized extra final attempt: gpt-6-luna, reasoning HIGH**, with failure output supplied. The worker diagnosed recorded-exit avoidance in the shared router and added a narrow loop-only route to the recorded departure tile plus its single recorded push when the visible target is exactly one tile beyond it. Normal route exit avoidance and R1 identity code were not changed. **This candidate did not resolve the regression.** Final acceptance: **223 passed / 1 failed**, exit 1, **56.29 s** (`R4.5c-final-accept.log`).
+- The remaining failure is `tests/agent/test_loop.py::test_grid_loop_reuses_two_spatial_exits_between_floors`, line 329: the four decisions must alternate the same two place IDs, but `ids[0]` is `p_place_2` and `ids[2]` is `p_place`. The reuse assertion was not weakened. No further fix, threshold change or attempt followed.
+
+R4.5a's user-authorized final harness repair preserves the uninterrupted/restored input sequence, one counted crossing and matching identity checks, and now asserts one normal `timed_out`/`done` action row. Its final acceptance and revalidation were affected by R4.5c: **103 passed / 41 failed** before the `DIRS` repair, then **143 passed / 1 failed**, exit 1, 79.93 s (`R4.5a-final-accept.log`, `R4.5a-final-revalidation.log`). The sole latter failure is the same two-floor loop test above; the repaired harness test passed. No additional R4.5a repair was made. Its full acceptance is therefore not claimed green.
+
+**Latest gate evidence:**
+
+- **S6:** the user-approved 13-failure test passed in the recorded 14-test acceptance. **Not yet validated against the coordinator's later before-frame join amendment:** the fixture still joins truth S/S+1 and the test still asserts S105 unmoved. The amended packet joins S105's before-frame S103 to S106 and identifies real movement. The old S105-disagreement claim above is historical, not the corrected interpretation. Regenerate the fixture and update that assertion under the current packet before claiming S6. Real `world.novel` loop wiring is also unimplemented.
+- **S11:** 13 observer tests passed with the synthetic cycle on both paths and the ROM y ≥ 10 probe executed, no skips. Observer code is unchanged since that result.
+- **K:** 6 → [70], 8 → [72], 10 → [], 12 → []; chosen **8**. Replay test passed; loop backoff wiring is unimplemented.
+- **Explore:** the final R4.5c acceptance passes its directed GridEnv test asserting exactly four presses, four tiles walked, the direction's route, and at least one view row of newly seen cells; extension/block stopping tests also pass. These tests are among the 223 passes, not a claim that the whole WP passed.
+- **One walker:** routed wall-exit test passes with its push recorded as blocked and inputs bounded by route plus one. The two-floor reuse regression above keeps the WP/gate failed.
+- **Hold removal:** the normal timed-out-tail test and the repaired checkpoint/no-duplicate-input harness test pass in the recorded acceptances. Full harness acceptance remains blocked by the two-floor regression.
+- **Suite:** not run after the final failure; no completed R4/full-suite claim. R4.5d/R4.6 remain pending.
+- **LIVE:** every executed WP's live commands passed. Latest post-final-fix commands: realtime **11 passed**, live-filtered **12 passed**, both exit 0 (`R4.5c-final-live-realtime.log`, `R4.5c-final-live.log`). No flaky-test serial exception was needed.
+
+**Final line deltas, excluding the user's entry edits** (net; additions/deletions in `.tmp/r4/resume-final-lines.json`): `agent/observer.py` **0**, `predict.py` **+7**, `tasks.py` **−34**, `skills.py` **−4**, `world.py` **+19**, `loop.py` **−76** — agent subtotal **−88**. Tests: `test_observer.py` **+53**, `test_predict.py` **+31**, `test_tasks.py` **−29**, `test_skills.py` **+2**, `test_world.py` **+44**, `test_loop.py` **−210**, `test_options.py` **−2**, `test_harness_reliability.py` **−4**, fixture **+105**. Authorized S0 cleanup: `scripts/eval_run.py` **−67**, `tests/agent/test_eval_run.py` **−9**. All listed code/test/fixture changes total **−174**. This document's Result block adds **108 lines**, for an orchestrator subtotal **−66**, excluding concurrent coordinator packet amendments. There are no R4 commits to diff.
+
+**Preservation and commit list:** all ten saved live functions/tests compare exactly to `.tmp/r4/protected-live-functions.json`; the live additions in the loop remain apart from the explicitly scheduled legacy migration/cycle deletions. Other pre-existing modified tracked files match the original entry snapshot except the coordinator's independently updated MASTER R1 status row, which was retained untouched. The coordinator's `c560dc6` test-space fix is also retained. `contracts.md` is unchanged; the Git index is empty. Root ran `git diff --check` successfully. The fixture remains ignored/on disk and unstaged. All LIVE files remain unstaged, including `agent/loop.py`, `agent/observer.py`, `tests/agent/test_loop.py`, `tests/agent/test_observer.py`, and `tests/agent/test_run_provenance.py`; every other user live-view file is also unstaged. The user-authorized S0 cleanup adds only its two files to the eligible future commit list. No file is staged while the gate is red.
+
+**Contract proposal:** still pending, with the same proposed domains/interfaces above; only implemented/tested pieces can be reviewed. Do not treat the trace/result/backoff integration, prediction deletion or complete R4 contract as landed. Cloud model calls **0**; no live game run. The real-time water-settle cost remains the unmeasured F1 follow-up, not a change in this attempt.
+
+**Concurrent packet amendments retained:** the final diff audit found coordinator changes outside this Result: S6 before-frame truth attribution, the harness ownership addition, and the new R4.6s card. They were not overwritten. Besides the corrected fixture/S105 assertion above, R4.6s's newly specified repeated-failure metric support for `failed`/`no_change` is still pending; the already-tested S0 cleanup removed only the retired prediction features. No further code edits were made after the final allowed R4.5c attempt failed. Future work must read the current packet rather than the original card text. The historical fixture extraction command above describes what was actually run and must be amended for before-frame attribution on continuation.
+
+#### Gate completion after the coordinator repair — PASS
+
+The user resumed the task after the coordinator supplied the verified R4.5c repair. It was documented but not applied on disk: the first recheck still reported **223 passed / 1 failed** (`.tmp/r4/R4.5c-patched-accept.log`, pre-patch despite its filename). A worker applied the packet's exact direction guard and Chebyshev-1 match around the crossed tile. Root then ran R4.5c acceptance: **224 passed**, exit 0, 53.25 s (`R4.5c-packetfix-accept.log`). The same worker tier was retained throughout: each new spawn explicitly selected **gpt-6-luna / HIGH**; no tier escalation occurred.
+
+R4.5d, R4.6s and R4.6 are now implemented. The loop scores the action's post-observation novelty, uses one result domain, records null predictions/empty used lists, and reports stall-plan changes to backoff. The settled before-frame is recorded **after the live stale guard, before input**, using the existing recorder, so already-visible cells cannot make a blocked action look like progress. The positive observed relations remain; prediction calls, contradictions, entity-list effects and pattern accounting are removed. `conf` remains because `test_memory.py` directly imports and tests relation confidence. No shim for retired `predict` or `verdict` was added. R4.6s retains legacy repeated-failure labels and also accepts `failed`/`no_change`.
+
+**Root-run acceptance and repair evidence:**
+
+- R4.2's before-frame amendment: `test_predict.py test_tasks.py -q -p no:cacheprovider -n auto` — **14 passed**, exit 0, 2.69 s (`R4.2-before-frame-accept.log`).
+- R4.5d first full suite: **639 passed / 19 failed**, exit 1, 82.10 s (`R4.5d-accept.log`). Most failures exposed the before-view novelty baseline bug; three new backoff assertions also exposed list-valued change results. One same-tier repair primed the before-view recorder and passed `bool(quests_changed or beliefs_changed)` to backoff.
+- Repair-focused loop/harness run: **124 passed / 4 failed**, exit 1, 51.38 s (`R4.5d-repair-focused.log`). The four remaining expectations were obsolete: a no-novelty blocked action expected progress, a tried packet expected `miss`, dialogue advancement expected `hit`, and the exit-history harness counted the first discovery walk as a failure. The **extra final gpt-6-luna / HIGH attempt** received both failure outputs and corrected the two owned loop assertions. The user separately authorized the two harness-case updates: preserve the first discovery as progress, repeat the stationary blocked attempt before checking failure notes, and retain rename/checkpoint/input assertions. No further production fix was layered on that final attempt.
+- R4.6s: `test_eval_run.py -q -p no:cacheprovider -n auto` — **43 passed**, exit 0, 12.46 s (`R4.6s-final-accept.log`); `scripts/eval_run.py runs/m1_bedroom_live --no-write` — **exit 0** (`R4.6s-final-baseline.log`).
+- **Final joint R4.5d/R4.6 acceptance and suite gate:** `.venv-agent/Scripts/python.exe -B -m pytest tests/agent -q -p no:cacheprovider -n auto` — **648 passed**, **exit 0**, **76.13 s**, no skips (`.tmp/r4/R4.5d-R4.6-final-accept.log`). This also covers the repaired R4.5a harness, all earlier WP components and the golden comparison. A whitespace-only R4.6 diff-check repair removed an extra trailing blank line; no semantic changes followed the final suite.
+- **Latest explicit LIVE commands:** realtime **11 passed**, exit 0, 3.94 s; live-filtered **12 passed**, exit 0, 3.77 s (`R4.6-live-realtime.log`, `R4.6-live.log`). Earlier WP live commands also passed as recorded above. No flaky-test serial exception was needed.
+
+**Final §7.2 gate rows (all commands run by root):**
+
+- **S6 PASS:** **0 of 13** unmoved failures misclassified, **23** surprise inputs, S100 **progress**, S105 **progress**, **0 surprise outputs**. `test_predict.py -k m1` passed **1 test**, exit 0 (`gate-final-S6.log`). The fixture uses truth at the trace's before-frame step through truth at row S+1: S105 resolves S103's action and moved `(3,9) → (2,10)`. The original S105 discrepancy is resolved, not filtered out.
+- **S11 PASS:** `test_observer.py -rs` with the standard flags passed **13 tests**, exit 0, **no skips** (`gate-final-S11.log`). The 8-state/21-frame cycle settles on both paths with memory 256 and does not with 24; the ROM/checkpoint probe presses DOWN three times, asserts y ≥ 10 for eval only, and settles. The larger recurrence window leaves `quiet=24` unchanged.
+- **K PASS:** K=6 **[70]**, K=8 **[72]**, K=10 **[]**, K=12 **[]**; chosen **8**, the largest firing inside S64–73. `test_tasks.py -k replay` passed **1 test**, exit 0 (`gate-final-K.log`); root independently printed the complete lists in `gate-final-replay-evidence.log`.
+- **Explore PASS:** `test_loop.py -k explore` passed **4 tests**, exit 0 (`gate-final-explore.log`), including four directed presses/four tiles and at least one view row of newly seen cells; extension presses stop at the first block.
+- **One walker PASS:** `test_skills.py test_loop.py -k "walker or push"` passed **6 tests**, exit 0 (`gate-final-walker.log`); wall-exit inputs are bounded by route plus one, and the push direction is recorded in blocked evidence. The two-floor identity regression also passes in the final suite.
+- **Hold removed PASS:** `test_loop.py -k timed_out` passed **1 test**, exit 0 (`gate-final-timed_out.log`): one normal timed-out row/tail, no pending action row. The live-only stale row writer and inert invalidation attributes remain by design.
+- **Suite PASS:** **648 passed**, exit 0, as above.
+- **Lines PASS:** agent hunks net **−193** against the saved entry working tree, excluding the original live-view edits. All listed code/test/data changes net **−412**, excluding this document. This is the actual partial-sharing footprint, not the planned −250 estimate.
+
+The S6 fixture still uses the approved **novelty proxy** (scroll or place change); it is not a live-run measurement of `world.novel`. Actual loop novelty is exercised by the GridEnv and failure-counter tests, including the before-frame baseline correction. S9 live model-call savings and real-time water-settle wall-clock cost were not measured. No live game run or cloud model call was made. F1 (2–8 seconds per water-view press in real-time mode) remains a follow-up; no per-press settle policy was added.
+
+**User-approved golden deviations:** the user explicitly expanded the original four-trace-field limit to the expected relook-removal changes: remove the old `recent: no effect xN;` act-flag prefix, set S5 `perception_reused` true, and retire the extra `e_door_2` relook observation (latest `last` 5→2, `seen` 3→2). The user then approved one source-view baseline row in `memory/seen.jsonl` at step 1 (90 cells, 38 open-edge cells). Root compared the candidate field by field and wrote **only** `w0_golden/act/trace.jsonl`, `memory/entities.jsonl`, and `memory/seen.jsonl`; other golden files remained unchanged (`R4.5d-golden-approved.log`). These two memory files are explicit additions to the eligible gate commit list.
+
+**Final net lines per file**, excluding original user live edits (`.tmp/r4/gate-final-lines.json` records additions/deletions):
+
+- Agent: `observer.py` **0**, `predict.py` **−48**, `tasks.py` **−34**, `skills.py` **−4**, `world.py` **+19**, `loop.py` **−80**, `memory.py` **−46**.
+- Tests: `test_observer.py` **+53**, `test_predict.py` **−15**, `test_tasks.py` **−29**, `test_skills.py` **+2**, `test_world.py` **+44**, `test_loop.py` **−194**, `test_options.py` **−2**, `test_harness_reliability.py` **−1**, deleted `test_patterns.py` **−108**, `test_eval_run.py` **−7**.
+- Eval/data: `scripts/eval_run.py` **−67**, `r4_m1_rows.jsonl` **+105**, golden trace **0**, golden entities **−1**, golden seen **+1**. This packet is **+202 net lines**, including concurrent coordinator amendments and the attempt history; the combined code/test/data/document net is **−210**. LIVE-shared deletions remain outside the commit as required.
+
+**Current fixture extraction command** (supersedes the historical S/S+1 command):
+
+```powershell
+New-Item -ItemType Directory -Force .tmp/r4/tmp | Out-Null
+$env:TEMP = "$PWD\.tmp\r4\tmp"; $env:TMP = $env:TEMP
+@'
+import json
+from pathlib import Path
+run = Path('runs/m1_bedroom_live')
+trace = [json.loads(s) for s in (run / 'trace.jsonl').read_text(encoding='utf8').splitlines()]
+truth = {r['step']: r for r in (json.loads(s) for s in (run / 'truth.jsonl').read_text(encoding='utf8').splitlines())}
+out = []
+for r in trace:
+    before, after = truth.get(int(Path(r['frame']).stem)), truth.get(r['step'] + 1)
+    moved = None if not before or not after else (before['map'], before['x'], before['y']) != (after['map'], after['x'], after['y'])
+    out.append({'step': r['step'], 'screen': r.get('screen'), 'place': r.get('place'),
+                'next_place': r.get('next_place'), 'verified_edge': r.get('verified_edge', False),
+                'scroll': r.get('scroll', [0, 0]), 'skill': {'status': (r.get('skill') or {}).get('status')},
+                'outcome': {'effects': (r.get('outcome') or {}).get('effects', [])},
+                'verdict': r.get('verdict'), 'moved': moved})
+Path('tests/agent/data/r4_m1_rows.jsonl').write_text(
+    ''.join(json.dumps(r, separators=(',', ':')) + '\n' for r in out), encoding='utf8')
+print(f'wrote {len(out)} rows; surprises={sum(r["verdict"] == "surprise" for r in out)}')
+'@ | .venv-agent/Scripts/python.exe -B -
+```
+
+**Contract proposal for the coordinator (contracts.md is unchanged):**
+
+- Trace `verdict`: `progress | changed | no_change | failed | unobservable`; `pred = null`, `used = []`. Novelty wins over skill failure; otherwise blocked/failed wins, then pixel no-change, then changed. Entity-list churn does not enter result scoring.
+- Normal action `observation_status`: `settled | timed_out`; HF-5 pending action/resolve rows are retired. The existing live stale-observation no-input row still uses `stale`; its writer/invalidation contract is retained separately.
+- `predict.result(status, effects, novel) -> str` replaces the removed prediction/verdict functions. `effects` no longer emits entity appearance/disappearance. `EFFECTS`/`PRED` remain for the pending R3 schema and observed relations.
+- `Stuck`: only `progress_n`, `seen_places`, `seen_edges`, `u`; stall at `8 * 2**u` decisions, capped u=3, reset by progress; `replanned(changed)` controls backoff. Until R2, the call uses today's quests/beliefs change result. R2 must replace that with zero/nonzero successful `apply_ops` results and remove the old stall fallback.
+- `wait_settled(..., memory=256)` decouples recurrence history from `quiet=24` on all three deque sites.
+- Routed exits get one push, with every press recorded; on-screen approaches share the tile router. Recorded departure edges are matched with the coordinator's crossed-tile tolerance.
+- `World.explore_dirs(place) -> {direction: {dirs, to}}`; the before-action view establishes the seen baseline, and `_record_view` supplies the post-action novelty count.
+
+**Preservation and gate commit scope:** all ten protected live function/test snapshots match exactly; the other original modified tracked files are unchanged apart from the independently updated MASTER R1 row, which was retained (`gate-final-audit.log`). The Git index was empty before gate staging. Live-view functions and observation fields are preserved; the packet's separate legacy migration/cycle code is retired. The latest suite validates cancellation/stamps/staleness. Files with live work **must remain unstaged**: `agent/loop.py`, `agent/observer.py`, `tests/agent/test_loop.py`, `tests/agent/test_observer.py`, `tests/agent/test_run_provenance.py`, plus all other original live-view files. MASTER, handoff notes and live-view documentation are not part of this commit.
+
+Eligible changed files for gate commit `R4: gate PASS (648 tests)`: `agent/tasks.py`, `agent/predict.py`, `agent/skills.py`, `agent/world.py`, `agent/memory.py`; `tests/agent/test_predict.py`, `test_tasks.py`, `test_skills.py`, `test_world.py`, `test_options.py`, `test_harness_reliability.py`, deleted `test_patterns.py`; the user-authorized `scripts/eval_run.py` and `tests/agent/test_eval_run.py`; the fixture and three approved golden files named above (force-add exact paths); and this packet. The gate validates the **combined working tree**; the eligible commit alone deliberately excludes the LIVE-shared implementation and cannot be advertised as a clean-checkout suite result. No push is authorized or performed. Stop after the commit and this Result; R2/R3 and a live run are not started.

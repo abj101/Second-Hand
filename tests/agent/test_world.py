@@ -1057,6 +1057,50 @@ def test_open_screen_edges_count_unseen_cells_past_them_until_seen(tmp_path):
     assert open_cells(mem, "p") == {"5,1"}
 
 
+def test_explore_dirs_routes_to_open_cells_and_extends_half_a_view(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    mem.upsert("seen", {"id": "room", "cells": [], "open": ["2,0", "0,-3"]})
+    world = World(mem, 16); world.current_place, world.pos, world.size = "room", (0, 0), (160, 144)
+
+    routes = world.explore_dirs("room")
+
+    assert routes == {"UP": {"dirs": ["UP"] * 7, "to": (0, -3)},
+                      "RIGHT": {"dirs": ["RIGHT"] * 7, "to": (2, 0)}}
+    assert World(mem, None).explore_dirs("room") == {}
+
+
+def test_explore_dirs_routes_to_seen_boundary_and_extends(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    floor = {(0, 0), (1, 0), (2, 0)}
+    walls = {(x + dx, y + dy) for x, y in floor for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0))} - floor - {(3, 0)}
+    for x, y in floor | walls:
+        mem.upsert("tiles", {"id": f"room@{x},{y}", "place": "room", "x": x, "y": y,
+                             "floor": (x, y) in floor, "blocked": [], "pushed": [], "exit": None, "step": 1})
+    world = World(mem, 16); world.current_place, world.pos, world.size = "room", (0, 0), (160, 144)
+
+    routes = world.explore_dirs("room")
+
+    assert routes == {"RIGHT": {"dirs": ["RIGHT"] * 8, "to": (3, 0)}}
+
+
+def test_record_view_counts_only_new_seen_cells(tmp_path):
+    from PIL import Image
+
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    world = World(mem, 16); frame = Image.new("RGB", (160, 144), "black")
+    per = {"screen": "world", "entities": []}
+
+    world._record_view(per, frame, False, "room", (160, 144), 1, [.5, .5], {})
+    assert world.novel == 90
+    world._record_view(per, frame, False, "room", (160, 144), 2, [.5, .5], {})
+    assert world.novel == 0
+    world.pos = (1, 0)
+    world._record_view(per, frame, False, "room", (160, 144), 3, [.5, .5], {})
+    assert world.novel == 9
+    world._record_view({"screen": "menu", "entities": []}, frame, False, "room", (160, 144), 4, [.5, .5], {})
+    assert world.novel == 0
+
+
 SYMMETRIES = [lambda x, y: (x, y), lambda x, y: (y, x), lambda x, y: (-x, y), lambda x, y: (x, -y),
               lambda x, y: (-x, -y), lambda x, y: (-y, x), lambda x, y: (y, -x), lambda x, y: (-y, -x)]
 

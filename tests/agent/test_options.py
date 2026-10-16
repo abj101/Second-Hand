@@ -216,18 +216,16 @@ def test_free_input_carries_this_places_button_failures_only(tmp_path):
     assert opts[-1]["label"] == BUTTONS and opts[-1]["notes"] == ["failed here: UP A x4, DOWN x2"]  # one note, newest first; other place and approach rows excluded
 
 
-def test_fail_notes_use_the_loop_failure_key_and_mark_cycles(tmp_path):
+def test_fail_notes_use_the_loop_failure_key(tmp_path):
     mem, world, per = scene(tmp_path)
     loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "loop"), "grid")
     i = ids(world, per)
     assert loop._fail_key("room", "approach", None, ref=f"thing:{i['npc']}") == fail_key("room", "approach", None, INPUTS, ref=f"thing:{i['npc']}")
     base = {o["label"]: o for o in world.options(per, "room", {}, 120, inputs=INPUTS)}
-    fails = {base["approach npc"]["intent_key"]: {"n": 2, "why": "wall", "step": 50, "act": "approach npc"},
-             base["possible exit UP → Cave (unverified, never crossed)"]["intent_key"]: {"n": 2, "why": "leads back to Cave: cycle", "step": 60}}
+    fails = {base["approach npc"]["intent_key"]: {"n": 2, "why": "wall", "step": 50, "act": "approach npc"}}
     by = {o["label"]: o for o in world.options(per, "room", fails, 120, inputs=INPUTS)}
     assert by["approach npc"]["notes"] == ["tried here 2×, last: wall", "talked; same text as before (step 90)"]
     assert by["interact with npc"]["notes"] == ["talked; same text as before (step 90)"]  # an interaction failure is not an approach failure
-    assert by["possible exit UP → Cave (unverified, never crossed)"]["notes"] == ["part of a back-and-forth cycle (step 60)"]
     assert by["not an exit: fake (walked into 3×, steps 104–107)"]["notes"][0].startswith("refuted: not working")
 
 

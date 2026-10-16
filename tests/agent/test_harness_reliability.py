@@ -174,7 +174,10 @@ def test_duplicate_exit_records_pick_the_observed_door_and_the_failure_note_foll
 
     key = first["choice"]["intent"]
     assert ("RIGHT", (10, 8)) in env.presses and all(p[1] != (10, 9) for p in env.presses)  # crossed from the observed door only
-    assert "failed at crossing" in loop.cause and loop.fails[key]["n"] == 1
+    assert first["verdict"] == "progress" and key not in loop.fails
+
+    retry = loop.step()  # repeat the same blocked crossing after its first view exposed new rows
+    assert retry["choice"]["intent"] == key and retry["verdict"] == "failed" and loop.fails[key]["n"] == 1
 
     loop.mem.upsert("places", {**loop.mem.get("places", "hall"), "name": "Hallway"})  # the destination is renamed
     second = loop.step()
@@ -208,7 +211,7 @@ def test_dialogue_over_room_objects_offers_no_select_and_advance_progresses_the_
     assert [o["tool"] for o in shown[0]][:2] == ["advance", "cancel"] and not [o for o in shown[0] if o["tool"] == "select"]
     assert "select television" not in [o["label"] for o in shown[0]]  # furniture is never a choice on a modal screen
     assert [p[0] for p in env.presses] == ["A"] and row["execution"] == "done"  # one press: the text moves on
-    assert row["choice"]["verb"] == "advance" and row["verdict"] == "hit"
+    assert row["choice"]["verb"] == "advance" and row["verdict"] == "progress"
 
 
 def test_flagged_menu_choice_is_selected_by_its_own_name_and_the_menu_is_read_once(tmp_path, monkeypatch):
@@ -255,8 +258,8 @@ class TrackBusy(Busy):
 
 
 def crossing_run(tmp_path, name, monkeypatch, *, checkpoint):
-    """Two presses: the first walks, the second steps onto the door and the scene keeps changing for 20 ticks after it.
-    With checkpoint, the run is saved while the action is pending and resumed in a new Loop on the same memory root."""
+    """Two presses cross the door while the scene keeps changing for 20 ticks after the second press.
+    With checkpoint, save and restore after the timed-out action row."""
     short_settle(monkeypatch)
     env = TrackBusy(plan=[0, 20]); grid_perception(monkeypatch, env)
     loop = loop_for(env, tmp_path, [act_reply({"buttons": ["RIGHT", "RIGHT"]})], root=f"{name}/memory")
@@ -264,24 +267,20 @@ def crossing_run(tmp_path, name, monkeypatch, *, checkpoint):
     if checkpoint:
         state = json.loads(json.dumps(loop.state()))
         loop = Loop(env, StubModel([]), Memory(tmp_path / name / "memory"), "grid"); loop.restore(state)
-    while loop.pending is not None and len(rows) < 30: rows.append(loop.step())
     return loop, env, rows
 
 
-def test_pending_crossing_resumed_from_a_checkpoint_matches_the_uninterrupted_run_with_one_input_sequence(tmp_path, monkeypatch):
+def test_timed_out_crossing_checkpoint_matches_without_replaying_inputs(tmp_path, monkeypatch):
     straight, straight_env, _ = crossing_run(tmp_path, "straight", monkeypatch, checkpoint=False)
     resumed, env, rows = crossing_run(tmp_path, "resumed", monkeypatch, checkpoint=True)
 
-    assert rows[0]["observation_status"] == "pending" and rows[0]["execution"] == "done"  # the inputs were sent before the checkpoint
-    assert len(rows) >= 2 and rows[-1]["observation_status"] == "settled" and rows[-1]["action_step"] == rows[0]["step"]
-    assert [r["observation_status"] for r in rows].count("settled") == 1  # resolved once
+    assert len(rows) == 1 and rows[0]["observation_status"] == "timed_out" and rows[0]["execution"] == "done"
     assert env.keys == ["RIGHT", "RIGHT"] == straight_env.keys  # one input sequence, never replayed after the checkpoint
     assert resumed.fails == {} and straight.fails == {}  # no premature failure
-    assert rows[-1]["execution"] == "done" and rows[-1]["verdict"] != "unobservable"
+    assert rows[0]["verdict"] != "unobservable"
     counted = sorted((c["id"], c["n"]) for c in resumed.mem.rows("crossings"))
     assert counted == sorted((c["id"], c["n"]) for c in straight.mem.rows("crossings")) and [n for _, n in counted] == [1]  # one departure crossing
     assert resumed.world.pos == straight.world.pos and resumed.place == straight.place and env.player == straight_env.player
-    assert resumed.pending is None
 
 
 # ---------------------------------------------------------------- case 6

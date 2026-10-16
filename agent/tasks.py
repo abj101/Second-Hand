@@ -1,60 +1,26 @@
 """Small no-progress monitor for the act loop."""
 
+# ponytail: set from one run (m1_bedroom_live: the largest K that still fires inside S64-73); a knob, not re-tuned per run
+STALL = 8
+
 
 class Stuck:
-    def __init__(self) -> None:
-        self.n, self.action, self.hash, self.same_action = 0, None, None, 0
-        self.repetitions, self.progress_n, self.seen_places, self.seen_edges = [], 0, set(), set()
-
-    def state(self) -> dict:
-        return {"n": self.n, "action": self.action, "hash": self.hash,
-                "same_action": self.same_action, "repetitions": self.repetitions,
-                "progress_n": self.progress_n, "seen_places": sorted(self.seen_places),
-                "seen_edges": sorted(self.seen_edges)}
-
+    def __init__(self) -> None: self.progress_n, self.seen_places, self.seen_edges, self.u = 0, set(), set(), 0
+    def state(self) -> dict: return {"progress_n": self.progress_n, "seen_places": sorted(self.seen_places), "seen_edges": sorted(self.seen_edges), "u": self.u}
     def restore(self, state: dict) -> None:
-        self.n, action, self.hash = int(state.get("n", 0)), state.get("action"), state.get("hash")
-        self.action = tuple(action) if isinstance(action, list) else action
-        self.same_action, self.progress_n, self.seen_places = int(state.get("same_action", 0)), int(state.get("progress_n", 0)), set(state.get("seen_places", []))
-        self.seen_edges = set(state.get("seen_edges", []))
-        self.repetitions = [[tuple(a), frame, int(count)] for a, frame, count
-                            in state.get("repetitions", [])][-32:]
-        if not self.repetitions and self.action and self.hash and self.same_action:
-            self.repetitions = [[self.action, self.hash, self.same_action]]
-
+        self.progress_n, self.seen_places = int(state.get("progress_n", 0)), set(state.get("seen_places", []))
+        self.seen_edges, self.u = set(state.get("seen_edges", [])), int(state.get("u", 0))
     def update(self, row: dict) -> str | None:
-        outcome = row.get("outcome") or {}
-        no_change = "no_change" in outcome.get("effects", []) or row.get("options") == 0
-        self.n = self.n + 1 if no_change else 0
         if row.get("screen") == "world":
             place, nxt = row.get("place"), row.get("next_place")
-            current_new = bool(place and place not in self.seen_places)
+            edge = f"{place}>{nxt}" if place and nxt and row.get("verified_edge") else None
+            progress = bool(place and place not in self.seen_places) or bool(edge and edge not in self.seen_edges) or row.get("verdict") == "progress"
             if place: self.seen_places.add(place)
-            edge = f"{place}>{nxt}" if place and nxt else None
-            new_edge = bool(row.get("verified_edge") and edge and edge not in self.seen_edges)
-            if new_edge: self.seen_edges.add(edge)
-            if current_new or new_edge: self.progress()
+            if edge: self.seen_edges.add(edge)
+            if progress: self.progress()
             else: self.progress_n += 1
-        elif row.get("fresh_text") is False: self.progress_n += 1  # repeated dialogue/menu text is a stall; fresh text neither counts nor resets
-        choice = row.get("choice") or {}
-        action = (choice.get("verb"), choice.get("target"), choice.get("id")) if choice else None
-        frame = row.get("frame_hash") or (row.get("frame") if not no_change else None)
-        match = next((item for item in self.repetitions
-                      if item[0] == action and item[1] == frame), None)
-        if action and frame is not None:
-            if match:
-                match[2] += 1
-            else:
-                match = [action, frame, 1]; self.repetitions.append(match)
-            self.repetitions = self.repetitions[-32:]
-        self.same_action = match[2] if match else 0
-        self.action = action
-        if frame is not None: self.hash = frame
-        if self.same_action >= 3:
-            self.repetitions.remove(match); self.same_action = 0
-            return "same_action"
-        if self.progress_n >= 20: self.progress_n = 0; return "no_progress"
-        return "no_change" if self.n >= 8 else None
-
-    def progress(self) -> None:
-        self.progress_n = 0
+        elif row.get("fresh_text") is False: self.progress_n += 1
+        if self.progress_n >= STALL * 2**self.u: self.progress_n = 0; return "no_progress"
+        return None
+    def progress(self) -> None: self.progress_n, self.u = 0, 0
+    def replanned(self, changed: bool) -> None: self.u = 0 if changed else min(self.u + 1, 3)

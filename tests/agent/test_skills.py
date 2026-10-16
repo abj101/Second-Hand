@@ -176,21 +176,23 @@ def test_exit_not_crossed_reports_crossing_failure():
     assert result.failure == {"stage": "crossing", "reason": "exit not crossed"}
 
 
-def test_exit_route_pushes_before_side_steps():
+def test_exit_route_pushes_once():
     env = RecordingEnv(); env.player = (9, 8); env.door = (10, 8); env.npc = (-5, -5)
     result = run_affordance(ctx(env), {"verb": "approach", "at": point(env, (10, 8))},
                             {"entities": [{"kind": "player", "at": [.5, .5]}]}, exit=True,
                             route={"dirs": [], "push": "RIGHT"})
-    assert result.status == "done" and env.keys[0] == "RIGHT" and result.moves[0]["dir"] == "RIGHT"
+    assert result.status == "done" and env.keys == ["RIGHT"]
+    assert result.inputs == 1 and result.moves[0]["dir"] == "RIGHT"
 
 
-def test_blocked_exit_push_continues_into_side_steps():
-    env = RecordingEnv(); env.walls.add((9, 8)); env.door = (-5, -5); env.npc = (-6, -6)
+def test_blocked_exit_route_push_is_one_recorded_press():
+    env = RecordingEnv(); env.player = (9, 8); env.walls.add((10, 8)); env.door = (-5, -5); env.npc = (-6, -6)
     result = run_affordance(ctx(env), {"verb": "approach", "at": point(env, (10, 8))},
                             {"entities": [{"kind": "player", "at": [.5, .5]}]}, exit=True,
-                            route={"dirs": [], "push": "RIGHT"})
+                            route={"dirs": ["UP", "DOWN"], "push": "RIGHT"})
     assert result.status == "blocked" and result.reason == "exit not crossed"
-    assert env.keys[:2] == ["RIGHT", "UP"]
+    assert result.inputs == 3 and env.keys == ["UP", "DOWN", "RIGHT"]
+    assert result.moves[-1] == {"dir": "RIGHT", "shift": (0, 0), "self_at": None}
 
 
 def test_interact_and_directional_press_preserve_move_records():

@@ -1051,62 +1051,7 @@ def _scorecard(run, trace, truth_rows, entity_rows, calls, lifecycle):
             "S11_unsettled_rows": s11, "S14_finished_target_readds": s14}
 
 
-def _repredict(run, trace, hide_memory=False):
-    from tempfile import TemporaryDirectory
-    from agent.memory import Memory, normalize_kind
-    from agent.predict import PRED, predict, verdict
-
-    history = read(run / "memory" / "entities.jsonl")
-    chooser = {r.get("step"): r.get("choice") or {} for r in read(run / "chooser.jsonl")}
-    counts, verified, excluded = {"repeat": [0, 0, 0], "first": [0, 0, 0]}, set(), 0
-    with TemporaryDirectory() as temp:
-        mem = Memory(Path(temp))
-        for row in sorted(trace, key=lambda x: x.get("step", 0)):
-            step, choice = row.get("step", 0), row.get("choice") or {}
-            for entity in history:
-                if entity.get("last", entity.get("first", 0)) <= step:
-                    mem.upsert("entities", entity)
-            eid, verb = choice.get("id"), str(choice.get("verb") or "").casefold()
-            entity = mem.get("entities", eid) or {}
-            key = (normalize_kind(entity.get("kind")), verb)
-            was_repeat = key in verified
-            learned = predict(mem, {"verb": verb}, eid, row.get("place")) if eid else None
-            logged = row.get("pred") or {}
-            saved = chooser.get(step, {})
-            guess = logged if logged.get("basis") == "guess" else (
-                {"basis": "guess", "effect": saved.get("effect"), "detail": saved.get("detail")} if saved.get("effect") else None)
-            outcome = row.get("outcome") or {}
-            pixel = [e for e in outcome.get("effects", [])
-                     if (outcome.get("basis") or {}).get(e) == "pixel"]
-            pred = learned or guess
-            actual = {"effects": pixel, "to": outcome.get("to")}
-            if not key[0] or not verb or not guess or not guess.get("effect") or not pixel: excluded += 1
-            else:
-                selected = guess if hide_memory else pred
-                result, baseline = verdict(selected, actual), verdict(guess, actual)
-                slot = counts["repeat" if was_repeat else "first"]
-                slot[0] += result == "hit"; slot[1] += baseline == "hit"; slot[2] += 1
-            if eid and key[0] and verb and pixel: verified.add(key)
-            if eid:
-                for effect in pixel:
-                    detail = outcome.get("to") if effect == "place_changes" else outcome.get("detail") or ""
-                    if effect == "place_changes" and detail: mem.upsert("places", {"id": detail, "state": "place"})
-                    if effect in PRED:
-                        mem.relate(eid, PRED[effect], str(detail or ""), src="observed", step=step,
-                                   hit=True, verb=verb, pattern_id=pred.get("id") if pred and pred.get("effect") == effect and pred.get("basis") == "pattern" else None)
-            effect = (pred or {}).get("effect")
-            if eid and effect in PRED and pixel and verdict(pred, actual) != "hit":
-                mem.relate(eid, PRED[effect], str(pred.get("detail") or ""), src="observed", step=step,
-                           hit=False, verb=verb, pattern_id=pred.get("id") if pred.get("basis") == "pattern" else None)
-    first, repeat = counts["first"], counts["repeat"]
-    n = repeat[2] + first[2]
-    return {"acc_repeat": rate(repeat[1] if hide_memory else repeat[0], repeat[2]),
-            "acc_first": rate(first[1] if hide_memory else first[0], first[2]),
-            "n": n, "n_repeat": repeat[2], "n_first": first[2],
-            "excluded": excluded, "coverage": rate(n, len(trace))}
-
-
-def evaluate(run, *, repredict=False, hide_memory=False, from_step=None):
+def evaluate(run, *, from_step=None):
     run = Path(run)
     full_trace, truth_rows = read(run / "trace.jsonl"), read(run / "truth.jsonl")
     trace = [row for row in full_trace if from_step is None or row.get("step", 0) >= from_step]
@@ -1149,13 +1094,6 @@ def evaluate(run, *, repredict=False, hide_memory=False, from_step=None):
     edges_found = {f"{a}->{b}": ((a, b) in valid_edges or (b, a) in valid_edges)
                    for a, b in EDGES}
 
-    verdict_rows = [r for r in trace if r.get("verdict") in {"hit", "partial", "surprise", "miss"}]
-    def accuracy(rows):
-        return rate(sum(r.get("verdict") == "hit" for r in rows), len(rows))
-    buckets = {}
-    for row in verdict_rows:
-        start = ((int(row.get("step", 1)) - 1) // 50) * 50 + 1
-        buckets.setdefault(start, []).append(row)
     elapsed = [float(r["ms"]) for r in trace if isinstance(r.get("ms"), (int, float))]
     calls_path = run / "calls.jsonl"
     calls = read(calls_path)
@@ -1186,7 +1124,7 @@ def evaluate(run, *, repredict=False, hide_memory=False, from_step=None):
                str(choice.get("target", "")).casefold())
         if key[1] and key in failed:
             repeated += 1
-        if key[1] and row.get("verdict") in ("miss", "surprise"):
+        if key[1] and row.get("verdict") in ("miss", "surprise", "failed", "no_change"):
             failed.add(key)
     chooser = read(run / "chooser.jsonl")
     shown = used = 0
@@ -1231,8 +1169,6 @@ def evaluate(run, *, repredict=False, hide_memory=False, from_step=None):
                            m1["player_name_match"] and m1["rival_name_match"])
     result = {**m1,
             "execution_success": _execution(trace),
-            "prediction_accuracy": {"overall": accuracy(verdict_rows),
-                                    "by_50_steps": {f"{k}-{k+49}": accuracy(v) for k, v in sorted(buckets.items())}},
             "coverage": {"confirmed_places": len(mapping), "affordance_types": sorted({
                 (r.get("choice") or {}).get("verb") for r in trace if (r.get("choice") or {}).get("verb")})},
             "cost": {"total_asks": call_count, "calls_per_step": rate(call_count, len(trace)),
@@ -1262,8 +1198,6 @@ def evaluate(run, *, repredict=False, hide_memory=False, from_step=None):
     lifecycle = _lifecycle(run)
     result["rcr_scorecard"] = _scorecard(run, full_trace, truth_rows, entity_rows,
                                         read(run / "calls.jsonl"), lifecycle)
-    if repredict:
-        result.update(_repredict(run, trace, hide_memory))
     world_maps = {map_id(actual["map"]) for row in trace if row.get("screen") == "world" and
                   not (row.get("probe") or {}).get("presses", 0)
                   if (actual := truth.get(row.get("step"), {})).get("map") is not None}
@@ -1293,10 +1227,9 @@ if __name__ == "__main__":
         else:
             paths.append(arg)
         i += 1
-    if len(paths) != 1 or flags - {"--repredict", "--hide-memory", "--no-write", "--health"} or ("--hide-memory" in flags and "--repredict" not in flags):
-        raise SystemExit("usage: eval_run.py runs/<id> [--repredict [--hide-memory]] [--no-write] [--health] [--from-step N]")
-    result = evaluate(paths[0], repredict="--repredict" in flags, hide_memory="--hide-memory" in flags,
-                      from_step=from_step)
+    if len(paths) != 1 or flags - {"--no-write", "--health"}:
+        raise SystemExit("usage: eval_run.py runs/<id> [--no-write] [--health] [--from-step N]")
+    result = evaluate(paths[0], from_step=from_step)
     if "--no-write" not in flags:
         (Path(paths[0]) / "summary.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     if "--health" in flags:
