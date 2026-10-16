@@ -63,6 +63,7 @@ The user's uncommitted work is not part of RCR: the live-view edits in `env_pybo
    - **S0** first: the scorecard in `eval_run.py`, with a baseline from `m1_bedroom_live` (0 cloud calls).
    - **Sections:** R1, then R4, then R2, then R3, all in the main tree.
    - Inside a section, WPs on disjoint files may run in parallel. R4.1-R4.3 (observer, predict/tasks, skills) may also run alongside R1.
+   - **10-16 (user):** the live-view edits and the R1/R4/R2 loop hunks are committed (8fbe5eb). The "never stage LV files" rule is lifted: R3 commits `loop.py`, `test_loop.py` and any other file it edits with its gate, still preserving every live-view hunk (`LV` green).
    - R2 runs only after R4's gate. R2.1 removes symbols that `loop.py` imports, so a parallel run would turn R4's suite red. This corrects an earlier draft of this item.
 4. **Gates:** each section commits at its own gate (tests green, offline scorecard). No push.
 
