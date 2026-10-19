@@ -6,14 +6,14 @@ SYSTEM = (
     "You are the strategist in an unfamiliar game; quests are outcomes in the game world, never buttons, directions, or coordinates, and another model chooses the moves. "
     "Reply with operations that change your notebook, or with no operations when nothing should change. "
     "Each operation is applied in order or answered with an error; you see the results next time. "
-    "A quest's why cites the game-text line (a t-key) or belief it comes from. "
+    "A quest's why cites the game-text lines (t-keys) it comes from; put your reading of them in the quest text. "
     "Give a quest a target when it means being in a place or talking to someone the map names; it then closes by itself when that happens. "
     "Close a quest with done or drop and a reason; the first open quest is worked on now, and top changes it. Return only JSON."
 )
 REPLY = (
-    'Reply JSON: {"ops":[{"op":"add|done|drop|top|target|believe|refute","key":"id",'
-    '"text":"text","why":["t-key or belief-key"],"target":"place-id or thing-id",'
-    '"because":["key"],"reason":"reason"}],"why":"why this plan"}. '
+    'Reply JSON: {"ops":[{"op":"add|done|drop|reopen|top|target","key":"id",'
+    '"text":"text","why":["t-key"],"target":"place-id or thing-id",'
+    '"reason":"reason"}],"why":"why this plan"}. '
     "Use only fields needed by each operation; include at most 8 operations."
 )
 SCHEMA = {
@@ -25,7 +25,7 @@ SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "op": {"type": "string", "enum": ["add", "done", "drop", "top", "target", "believe", "refute"]},
+                    "op": {"type": "string", "enum": ["add", "done", "drop", "reopen", "top", "target"]},
                     "key": {"type": "string", "maxLength": 40},
                     "text": {"type": "string"},
                     "why": {"oneOf": [
@@ -33,7 +33,6 @@ SCHEMA = {
                         {"type": "array", "items": {"type": "string"}},
                     ]},
                     "target": {"type": "string"},
-                    "because": {"type": "array", "items": {"type": "string"}},
                     "reason": {"type": "string"},
                 },
             },

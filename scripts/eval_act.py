@@ -6,7 +6,7 @@ from PIL import Image, ImageChops
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import agent.loop as loop_mod
 from agent.act import act
-from agent.brief import GENERAL, defaults, load_brief
+from agent.brief import GENERAL, load_brief
 from agent.env_pyboy import PyBoyEnv, _INPUTS, find_rom
 from agent.loop import Loop
 from agent.memory import Memory
@@ -61,46 +61,25 @@ def report(summary, rows, steps, status, out):
     save({**summary,**m,"status":status},out)
 
 def main(argv=None):
-    ap=argparse.ArgumentParser(); ap.add_argument("--frames",default=",".join(map(str,FRAMES))); ap.add_argument("--max-calls",type=int); ap.add_argument("--out",type=Path,default=OUT)
-    ap.add_argument("--run",default="m1_decide",help="--om truth/talk: the recorded run"); ap.add_argument("--exact-exit",action="store_true",help="--om truth: ablate fix 2 (exact exit lookup)"); ap.add_argument("--strip-place",action="store_true",help="--om truth: a run recorded before the perceiver's place field"); ap.add_argument("--from-step",type=int,help="--om branch/reliability/act-size: checkpoint step"); ap.add_argument("--pick",help="--om branch: text of the option label to pick"); ap.add_argument("--om",choices=("places","cases","outcomes","truth","branch","talk","reliability","act-size"),help="OM replay eval (no --max-calls needed); reliability: HF5 primitive + continuation check of --run at --from-step"); ap.add_argument("--live",action="store_true",help="--om cases: spend the requests"); ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)"); ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)"); ap.add_argument("--fresh",action="store_true",help="--om cases/outcomes: rebuild the replay snapshots"); ap.add_argument("--arm",choices=("options","decide"),default="options",help="--om cases: decide = text-only act that answers {why, i}")
+    ap=argparse.ArgumentParser()
+    ap.add_argument("--run",default="m1_decide",help="--om truth/talk: the recorded run")
+    ap.add_argument("--exact-exit",action="store_true",help="--om truth: ablate fix 2 (exact exit lookup)")
+    ap.add_argument("--strip-place",action="store_true",help="--om truth: a run recorded before the perceiver's place field")
+    ap.add_argument("--from-step",type=int,help="--om branch/reliability/act-size: checkpoint step")
+    ap.add_argument("--pick",help="--om branch: text of the option label to pick")
+    ap.add_argument("--om",choices=("places","cases","outcomes","truth","branch","talk","reliability","act-size"),help="OM replay eval; reliability: HF5 primitive + continuation check of --run at --from-step")
+    ap.add_argument("--live",action="store_true",help="--om cases: spend the requests")
+    ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)")
+    ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)")
+    ap.add_argument("--fresh",action="store_true",help="--om cases/outcomes: rebuild the replay snapshots")
     a=ap.parse_args(argv)
-    if a.om: return om_main(a, ap)
-    if a.max_calls is None: ap.error("the following arguments are required: --max-calls")
-    if a.max_calls<1: ap.error("--max-calls must be positive")
-    steps=[int(s) for s in a.frames.split(",") if s.strip()]
-    if not steps: ap.error("--frames must contain a step")
-    out=a.out; out.mkdir(parents=True,exist_ok=True); rp=out/"rows.jsonl"; sp=out/"summary.json"
-    rows=[json.loads(x) for x in rp.read_text(encoding="utf-8").splitlines() if x.strip()] if rp.exists() else []
-    summary=json.loads(sp.read_text(encoding="utf-8")) if sp.exists() else {"requests":0}; done={r["step"] for r in rows if r.get("complete")}
-    truth={r["step"]:r for r in (json.loads(x) for x in TRUTH.read_text(encoding="utf-8").splitlines())}; brief=load_brief("pokemon_red"); prefs=defaults("pokemon_red")
-    ctx=GENERAL+"\n"+brief+"\n"+NOTE; notebook=Notebook(out/"notebook"); model=Ollama("gemma4:31b-cloud",cache_dir=Path(".cache/model")); invocation=[0]; raw=[None]; post,ask=model._post,model.ask
-    def guarded(payload):
-        if invocation[0]>=a.max_calls or int(summary.get("requests",0))>=40: raise run_agent.CallCap("P2 request cap")
-        run_agent._ledger(Path("runs/m1_p2"),None,40); invocation[0]+=1; summary["requests"]=int(summary.get("requests",0))+1; save(summary,out); return post(payload)
-    def capture(*args,**kwargs):
-        reply=ask(*args,**kwargs)
-        if kwargs.get("role")=="act": raw[0]={"text":reply.text,"data":reply.data}
-        return reply
-    model._post,model.ask=guarded,capture; status="complete"
-    try:
-        for step in steps:
-            if step in done: continue
-            with Image.open(FRAME_DIR/f"{step:06d}.png") as im: frame=for_model(im); per,preply=perceive(model,frame,ctx)
-            raw[0]=None; result=act(model,frame,per,notebook.render(),"none",[],brief,prefs,list(_INPUTS))
-            r={"step":step,"screen":per["screen"],"text":per["text"],"entities_count":len(per["entities"]),"perceive_raw":{"text":preply.text,"data":preply.data},"act_reply":{"raw":raw[0],"parsed":result.__dict__},"act_parsed":result.__dict__,"notebook_ops":result.ops,"truth_map":truth.get(step,{}).get("map"),"complete":True}
-            rows.append(r)
-            with rp.open("a",encoding="utf-8") as f: f.write(json.dumps(r,ensure_ascii=False)+"\n")
-            done.add(step); report(summary,rows,steps,status,out)
-    except run_agent.CallCap: status="capped"
-    except ModelUnavailable: status="unavailable"
-    report(summary,rows,steps,status,out); table(rows,out)
-    return 3 if status=="capped" else 4 if status=="unavailable" else 0
+    if not a.om: ap.error("choose an --om replay mode")
+    return om_main(a, ap)
 
 # ---- OM.6 replay eval: replays runs/m1_gp5 and runs/m1_gp2 with the current agent code, from boot (memory must be rebuilt
 # by the new code, so the recorded checkpoint memory is not used). Recorded plan and act replies keep the emulator on the
 # recorded path; perceiver replies come from .cache/model only. RAM truth (truth.jsonl) is read here, never by agent/.
 OM_CASES, OM_CAP, OM_MODEL = Path("scripts/om_cases.json"), 10, "gemma4:31b-cloud"  # OM2 section 7: one live measure, at most 10 requests
-DECIDE = False  # --arm decide: case steps use the text-only {why, i} act (act.py _decide); its retries and follow-ups raise the cap to 16
 MODEL_CACHE, BUDGET = Path(".cache/model"), Path("runs/e3_budget.json")
 SCREEN_TYPES = ("world", "dialogue", "menu", "keyboard", "battle", "title", "other")
 PERCEIVER_MISSES = 3  # more cache misses than this and the replay no longer matches the recording
@@ -196,9 +175,23 @@ class Replay:
                 self.found[self.step]["prompt"] = system + "\n" + user
                 d = Path(".tmp/om/prompts_om3_1"); d.mkdir(parents=True, exist_ok=True)
                 (d / f"{self.step}_system.txt").write_text(system, encoding="utf-8"); (d / f"{self.step}_user.txt").write_text(user, encoding="utf-8")
-            if self.script and self.script[0] == self.step: self.armed = True; self.before = truth_read(self.env); return Reply("", self.script[1], 0.0, None, None)
+            if self.script and self.script[0] == self.step:
+                self.armed = True; self.before = truth_read(self.env)
+                scripted, props = self.script[1], (schema or {}).get("properties", {})
+                action = scripted.get("action") or {}
+                if "i" in props:
+                    n = scripted.get("i", action.get("i"))
+                    if n is None:
+                        option = next((o for o in getattr(self, "options_now", []) if o.get("action") == action or (o.get("tool") == "buttons" and "buttons" in action)), None)
+                        n = option["n"] if option else None
+                    scripted = {"i": n, "why": scripted.get("why") or ""}
+                elif "buttons" in props:
+                    scripted = {"buttons": scripted.get("buttons") or action.get("buttons") or [props["buttons"]["items"]["enum"][0]]}
+                else:
+                    scripted = {"text": scripted.get("text") or ((self.rec.trace.get(self.step, {}).get("choice") or {}).get("text")) or "Ash"}
+                return Reply("", scripted, 0.0, None, None)
             if self.live_step == self.step: return self.real.ask(system, user, images, schema, role=role)
-            rec = self.rec.trace.get(self.step, {}); recorded = rec.get("act") or {}; pred = rec.get("pred") or {}
+            rec = self.rec.trace.get(self.step, {}); recorded = rec.get("act") or {}
             was = rec.get("option") or {}; action = recorded.get("action") or {}
             head = lambda o: (o.get("tool"), str(o.get("label", "")).split(" (")[0])  # counts in labels change; the head names the option
             options = getattr(self, "options_now", None) or []
@@ -209,23 +202,27 @@ class Replay:
             if not matches and getattr(self, "by_option", False) and was and isinstance(action.get("thing"), int):
                 matches = [o for o in options if o.get("tool") == was.get("tool") and (o.get("action") or {}).get("thing") == action["thing"]]
             picked = matches[0]["n"] if len(matches) == 1 else None
-            return Reply("", {"place": recorded.get("place") or "", "notebook": self.rec.act_ops.get(self.step, []), "action": {**(recorded.get("action") or {}), "i": picked} if picked else recorded.get("action"),  # a row with no ready action (free buttons, name lists) falls back to the recorded shape
-                              "text": (rec.get("choice") or {}).get("text"), "expect": pred.get("effect") if pred.get("basis") == "guess" and pred.get("effect") else "screen_changes",
-                              "why": recorded.get("why") or ""}, 0.0, None, None)
+            props = (schema or {}).get("properties", {})
+            if "i" in props:
+                data = {"i": picked, "why": recorded.get("why") or ""}
+            elif "buttons" in props:
+                data = {"buttons": action.get("buttons") or ["A"]}
+            else:
+                data = {"text": (rec.get("choice") or {}).get("text") or ""}
+            return Reply("", data, 0.0, None, None)
         raise OmAbort(f"unexpected model role {role!r}")
-    def _act(self, model, image, perception, notebook, facts, flags, controls, prefs, buttons, places=(), options=None, decide=False):
+    def _act(self, model, perception, focus, options, buttons, controls):
         """Stands in for agent.loop.act. At a case step the options are recorded; a live case step also makes the real act
         call (network only for that call), and then the step continues on the recorded reply, so the loop executes the recorded action.
         act() writes nothing, so the extra call leaves memory as the recording has it."""
-        args = (model, image, perception, notebook, facts, flags, controls, prefs, buttons); self.options_now = options
+        self.options_now = options
         if self.step in self.cases:
             found = self.found[self.step] = {"options": options, "perception": perception, "act": None, "prompt": "", "exits": self._exits_now(perception)}
             if self.step in self.live_steps:
                 self.live_step = self.step
-                try: found["act"] = act(*args, places=places, options=options, decide=DECIDE)
+                try: found["act"] = act(model, perception, focus, options, buttons, controls)
                 finally: self.live_step = None
-            elif DECIDE: act(*args, places=places, options=options, decide=True)  # dry: records the decide prompt (the recorded reply has no "i")
-        return act(*args, places=places, options=options)
+        return act(model, perception, focus, options, buttons, controls)
     def _exits_now(self, perception):
         """Exit records of the current place from the inputs World.options gives _exits (for the dry exit-truth gate)."""
         world, live = self.loop.world, {p["id"] for p in self.loop.mem.rows("places") if p.get("state") != "merged"}
@@ -249,7 +246,6 @@ class Replay:
     def branch(self, d, s, script=None):
         """Run step s alone from the snapshot d. script (step, act reply data): execute that reply, stop when its presses are done."""
         self.restore(d); self.step, self.script, self.armed, self.before, self.after, self.misses = s, script, False, None, None, 0; self.found.pop(s, None)
-        self.loop.decide = DECIDE  # the decide arm's loop drops the image and the red-box flag
         real, loop_mod.act = loop_mod.act, self._act
         try:
             try: self.loop.step()
@@ -420,7 +416,7 @@ def live_cases(cases, counter, before, old_right, fresh=False):
         new_ok = is_right(c, tool, label); new_right += new_ok
         print(f"\ncase {c['run']} step {s} new arm: option {res.option} {tool} {label!r} -> {'right' if new_ok else 'wrong'}  why: {res.why[:120]}")
     n = len(cases)
-    print(f"\nDECISION POINTS: {'decide' if DECIDE else 'options'} arm right {new_right}/{n} (gate >= {DECISION_GATE})")
+    print(f"\nDECISION POINTS: options arm right {new_right}/{n} (gate >= {DECISION_GATE})")
     print(f"OLD ARM right {old_right}/{n} (gate <= {OLD_GATE})")
     print(f"requests={counter['requests']} (cap {OM_CAP}); ledger before total={before.get('total')} m1={before.get('m1')} after total={_budget().get('total')} m1={_budget().get('m1')}")
     ok = new_right >= DECISION_GATE and old_right <= OLD_GATE and counter["requests"] <= OM_CAP
@@ -473,7 +469,7 @@ def om_outcomes(steps=None, fresh=False):
         rep.branch(rep.base / str(s), s); opts = rep.found[s]["options"]  # the options this step offers
         right = next((o["n"] for o in opts if is_right(c, o["tool"], o["label"])), None)
         todo = [(src, json.loads((next(MODEL_CACHE.glob(f"{p[s]}*.json"))).read_text(encoding="utf-8"))["data"]) for src, p in LIVE_REPLIES.items() if s in p]
-        todo.append((f"right option {right}", {"action": {"i": right}, "why": "", "expect": "screen_changes"}))
+        todo.append((f"right option {right}", {"i": right, "why": ""}))
         for src, data in todo:
             rep.branch(rep.base / str(s), s, (s, data))
             b, a = rep.before, rep.after
@@ -535,14 +531,18 @@ def om_branch(run, step, pick):
                 if role == "perceiver": raise OmStop()
                 return Reply("", None, 0.0, None, None)
             if role == "plan": return Reply("", {"goals": [], "focus": "", "why": "", "lesson": None}, 0.0, None, None)
+            props = (schema or {}).get("properties", {})
+            if "buttons" in props: return Reply("", {"buttons": [props["buttons"]["items"]["enum"][0]]}, 0.0, None, None)
+            if "text" in props: return Reply("", {"text": "Ash"}, 0.0, None, None)
             opts, want = shown["options"], picks[len(shown["log"])]
             for o in opts: print(f"  option {o['n']}: {o['tool']} {o['label']!r} -> {o['action']}" + (f" — {'; '.join(o['notes'])}" if o["notes"] else ""))
             o = next((o for o in opts if want and want.casefold() in o["label"].casefold()), None)
             if o is None: raise OmStop()
-            shown["log"].append(o["label"]); return Reply("", {"place": "", "notebook": [], "action": {"i": o["n"]}, "why": "branch", "expect": "place_changes"}, 0.0, None, None)
+            shown["log"].append(o["label"])
+            return Reply("", {"i": o["n"], "why": "branch"}, 0.0, None, None)
     loop = Loop(env, Stub(), Memory(out / "memory"), "pokemon_red"); loop.restore(json.loads((cp / "harness.json").read_text()))
     real_act = loop_mod.act
-    def act(*args, options=None, **kw): shown["options"] = options; return real_act(*args, options=options, **kw)
+    def act(*args, **kw): shown["options"] = args[3] if len(args) > 3 else []; return real_act(*args, **kw)
     loop_mod.act = act; first = truth_read(env)
     try:
         for n in range(len(picks)):
@@ -619,7 +619,7 @@ def _plan_checkpoint(run, step):
     return loop, env
 
 def om_act_size(run, step):
-    """The decide prompt act would send at a checkpoint (0 requests: a capturing stub, never HTTP): characters and len/4 tokens."""
+    """The act prompt at a checkpoint (0 requests: a capturing stub, never HTTP): characters and len/4 tokens."""
     loop, env = _plan_checkpoint(run, step)
     try:
         per, place = loop.prev, loop.place
@@ -631,10 +631,10 @@ def om_act_size(run, step):
             def ask(self, system, user, images=(), schema=None, *, role=""):
                 sent.append((system, user)); return Reply("", {"why": "size", "i": options[0]["n"]}, 0.0, None, None)
         before = _budget()
-        act(Capture(), None, per, loop.notebook.render_focus(), loop.world.view(loop._goal_text(), place, compact=True), [loop.world.here_flag(loop.fails)],
-            "\n".join(loop_mod._load(loop.game).get("controls", [])), defaults(loop.game), list(env.inputs()), places=[], options=options, decide=True)
+        focus = f"{loop.notebook.render_focus(loop.world.label)}\nHere: {loop.world.place_label(place)}"
+        act(Capture(), per, focus, options, list(env.inputs()), "\n".join(loop_mod._load(loop.game).get("controls", [])))
         system, user = sent[0]
-        print(f"decide prompt chars={len(system) + len(user)} (system {len(system)} + user {len(user)}); tokens~{(len(system) + len(user)) / 4:.1f} (len/4); options={len(options)}")
+        print(f"act prompt chars={len(system) + len(user)} (system {len(system)} + user {len(user)}); tokens~{(len(system) + len(user)) / 4:.1f} (len/4); options={len(options)}")
         print(f"requests=0; ledger unchanged={before == _budget()}")
         return 0
     finally: env.close()
@@ -725,12 +725,12 @@ def om_reliability(run, step):
             if st["phase"] == "primitive" and role == "act":  # the recorded choice, by its action on the offered options
                 n = next((o["n"] for o in st["options"] if o.get("action") == rec_action), None)
                 if n is None: raise Unexecuted(f"the recorded choice {rec_action} is not offered at step {first}")
-                return Reply("", {"place": "", "notebook": [], "action": {"i": n}, "text": None, "expect": "screen_changes", "why": "reliability: the recorded choice"}, 0.0, None, None)
+                return Reply("", {"i": n, "why": "reliability: the recorded choice"}, 0.0, None, None)
             if not cached(system, user, images, schema): raise CacheMiss(role, st["loop"].step_no + 1)
             return real.ask(system, user, images, schema, role=role)
     real_act = loop_mod.act
-    def act(*args, options=None, **kwargs):
-        st["options"] = options or []; return real_act(*args, options=options, **kwargs)
+    def act(*args, **kwargs):
+        st["options"] = args[3] if len(args) > 3 else []; return real_act(*args, **kwargs)
     loop_mod.act = act
     env_press = env.press
     def logged_press(key, *args, **kwargs): st["keys"].append(key); return env_press(key, *args, **kwargs)
@@ -779,9 +779,7 @@ def om_reliability(run, step):
     return _rel_finish(primitive, continuation, counter, before)
 
 def om_main(a, ap):
-    global DECIDE, OM_CAP
     sys.stdout.reconfigure(encoding="utf-8")  # option labels carry arrows; a redirected cp1252 stdout cannot print them
-    if a.arm == "decide": DECIDE, OM_CAP = True, 16
     if a.live and a.dry: ap.error("--live and --dry are exclusive")
     if a.om in ("talk", "act-size") and not re.fullmatch(r"[A-Za-z0-9_-]+", a.run): ap.error("--run must be a run name")
     if a.om == "talk":

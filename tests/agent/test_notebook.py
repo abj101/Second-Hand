@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from agent.notebook import MAX_HELD, MAX_OPEN, Notebook
+from agent.notebook import MAX_OPEN, Notebook
 
 
 def notebook(tmp_path, **kwargs):
@@ -28,10 +28,12 @@ CASES = [
     ("add-ok", [], add("q"), None),
     ("add-key-used", closed_setup(), add("q"), "key is already used"),
     ("add-empty-text", [], {**add("q"), "text": "  "}, "text is empty"),
-    ("add-empty-why", [], {**add("q"), "why": []}, "why must cite text or a belief"),
-    ("add-unknown-why", [], {**add("q"), "why": ["missing"]}, "why must cite text or a belief"),
+    ("add-empty-why", [], {**add("q"), "why": []}, "why must cite game-text keys, newest: t1"),
+    ("add-unknown-why", [], {**add("q"), "why": ["missing"]}, "why must cite game-text keys, newest: t1"),
     ("add-open-cap", [add(f"q{i}") for i in range(MAX_OPEN)], add("extra"), "maximum open quests reached"),
-    ("add-unresolved-target", [], {**add("q"), "target": "unknown"}, "target must resolve to a place or thing"),
+    ("add-unresolved-target", [], {**add("q"), "target": "unknown"}, 'target "unknown" matches no known place or thing; no known places or things yet'),
+    ("reopen-not-closed", [add("q")], {"op": "reopen", "key": "q", "reason": "Needed again"}, "key is not closed"),
+    ("reopen-ok", closed_setup(), {"op": "reopen", "key": "q", "reason": "Needed again"}, None),
     ("done-not-open", [], {"op": "done", "key": "q", "reason": "Finished"}, "key is not open"),
     ("done-ok", [add("q")], {"op": "done", "key": "q", "reason": "Found the archive"}, None),
     ("done-empty-reason", [add("q")], {"op": "done", "key": "q", "reason": " "}, "reason is empty"),
@@ -41,19 +43,11 @@ CASES = [
     ("top-not-open", [], {"op": "top", "key": "q"}, "key is not open"),
     ("top-ok", [add("q"), add("next")], {"op": "top", "key": "q"}, None),
     ("target-not-open", [], {"op": "target", "key": "q", "target": "place:room"}, "key is not open"),
-    ("target-missing", [add("q")], {"op": "target", "key": "q"}, "target must resolve to a place or thing"),
-    ("target-unresolved", [add("q")], {"op": "target", "key": "q", "target": "unknown"}, "target must resolve to a place or thing"),
+    ("target-missing", [add("q")], {"op": "target", "key": "q"}, "target is missing"),
+    ("target-unresolved", [add("q")], {"op": "target", "key": "q", "target": "unknown"}, 'target "unknown" matches no known place or thing; no known places or things yet'),
     ("target-ok", [add("q")], {"op": "target", "key": "q", "target": "place:room"}, None),
-    ("target-outside-kind", [add("q")], {"op": "target", "key": "q", "target": "exit:door"}, "target must resolve to a place or thing"),
+    ("target-outside-kind", [add("q")], {"op": "target", "key": "q", "target": "exit:door"}, 'target "exit:door" matches no known place or thing; no known places or things yet'),
     ("target-kind-may-change", [add("q", target="place:room")], {"op": "target", "key": "q", "target": "thing:guide"}, None),
-    ("believe-ok", [], {"op": "believe", "key": "b", "text": "A lead exists", "because": ["t1"]}, None),
-    ("believe-key-used", [{"op": "believe", "key": "b", "text": "A lead exists"}], {"op": "believe", "key": "b", "text": "Another lead"}, "key is already used"),
-    ("believe-empty-text", [], {"op": "believe", "key": "b", "text": " "}, "text is empty"),
-    ("believe-held-cap", [{"op": "believe", "key": f"b{i}", "text": "A lead"} for i in range(MAX_HELD)], {"op": "believe", "key": "extra", "text": "Another lead"}, "maximum held beliefs reached"),
-    ("believe-unknown-because", [], {"op": "believe", "key": "b", "text": "A lead", "because": ["missing"]}, "because cites an unknown key"),
-    ("refute-not-held", [], {"op": "refute", "key": "b", "reason": "Evidence changed"}, "key is not held"),
-    ("refute-ok", [{"op": "believe", "key": "b", "text": "A lead"}], {"op": "refute", "key": "b", "reason": "Evidence changed"}, None),
-    ("refute-empty-reason", [{"op": "believe", "key": "b", "text": "A lead"}], {"op": "refute", "key": "b", "reason": " "}, "reason is empty"),
 ]
 
 
@@ -73,8 +67,8 @@ def test_op_validation_table_folds_only_successful_ops(tmp_path, name, setup, ca
         assert expected.apply_ops([candidate], 3)[0]["result"] == "ok"
     else:
         assert result[0]["result"] == f"error: {error}"
-    assert {key: nb.data[key] for key in ("text", "quests", "beliefs")} == {
-        key: expected.data[key] for key in ("text", "quests", "beliefs")
+    assert {key: nb.data[key] for key in ("text", "quests")} == {
+        key: expected.data[key] for key in ("text", "quests")
     }
 
 
@@ -109,8 +103,8 @@ def test_heard_uses_sequential_keys_and_preserves_game_text(tmp_path):
     assert nb.heard(7, "Mira", "Old Tower", 'She said, "Leave now."') == "t1"
     assert nb.heard(8, None, "Old Tower", "  Keep every space.  ") == "t2"
     assert nb.data["text"] == [
-        {"key": "t1", "step": 7, "speaker": "Mira", "where": "Old Tower", "text": 'She said, "Leave now."'},
-        {"key": "t2", "step": 8, "speaker": None, "where": "Old Tower", "text": "  Keep every space.  "},
+        {"key": "t1", "step": 7, "speaker": "Mira", "where": "Old Tower", "text": 'She said, "Leave now."', "who": None},
+        {"key": "t2", "step": 8, "speaker": None, "where": "Old Tower", "text": "  Keep every space.  ", "who": None},
     ]
 
 
@@ -125,14 +119,12 @@ def test_observe_closes_canonical_place_and_thing_targets_only(tmp_path):
     ], 2))
     nb.data["quests"][0]["target"] = "place:new"
     nb.data["quests"][1]["target"] = "thing:mira"
-    nb.data["quests"][0]["label"] = "Library"
-    nb.data["quests"][1]["label"] = "Mira"
 
     assert nb.observe(1, "place:new", ["thing:merged"]) == []
     assert nb.observe(5, "place:new", ["thing:merged"]) == ["person"]
     assert nb.observe(6, "place:old", []) == []
     assert nb.data["quests"][0]["status"] == "dropped"
-    assert nb.data["quests"][1]["reason"] == "talked to Mira"
+    assert nb.data["quests"][1]["reason"] == "talked"
     assert nb.data["quests"][2]["status"] == "open"
 
 
@@ -144,35 +136,54 @@ def test_render_count_caps_cited_history_and_character_size(tmp_path):
             add(f"closed{i}"), {"op": "drop", "key": f"closed{i}", "reason": f"Reason {i}"}
         ], 30 + i * 2))
     assert nb.apply_ops([add("open", target="place:hall")], 50)[0]["result"] == "ok"
-    nb.data["beliefs"] = {
-        **{f"b{i}": {"key": f"b{i}", "text": f"Belief {i}", "because": ["t1"], "status": "refuted", "reason": f"Ruled {i}", "step": i} for i in range(7)},
-        **{f"h{i}": {"key": f"h{i}", "text": f"Held {i}", "because": ["t1"], "status": "held", "step": i} for i in range(7)},
-    }
-
     rendered = nb.render()
 
     assert len([q for q in nb.data["quests"] if q["status"] in ("done", "dropped")][-5:]) == 5
-    assert rendered.count("Recently closed:") == 1 and "closed0:" not in rendered and "closed6:" in rendered
-    assert rendered.count("Held beliefs:") == 1 and rendered.count("- h") == MAX_HELD
-    assert rendered.count("Ruled out:") == 1 and rendered.count("- b") == 5
+    assert rendered.count("Recently closed:") == 1 and '- closed0 "' not in rendered and '- closed6 "' in rendered
+    assert "Held beliefs:" not in rendered and "Ruled out:" not in rendered
     assert "t1 Guide at Hall: \"Line 0. " + "x" * 500 + "\"" in rendered
     assert "t12 Guide" not in rendered and all(f"t{i} Guide" in rendered for i in range(13, 21))
     assert len(rendered) <= 3500
 
 
-def test_render_focus_has_cited_text_and_no_belief_or_why(tmp_path):
+@pytest.mark.parametrize(("target", "condition", "name"), [
+    ("thing:person", "talked to", "Mira"),
+    ("place:hall", "in", "Hall"),
+])
+def test_render_focus_labels_target_and_limits_cited_text(tmp_path, target, condition, name):
+    nb = notebook(tmp_path, ref=lambda value: value)
+    cited = "Find the archive. " + "x" * 220
+    nb.heard(1, "Mira", "Hall", cited)
+    nb.heard(2, "Guide", "Hall", "Uncited text.")
+    nb.apply_ops([{**add("q", target=target), "why": ["t1"]}], 4, "Secret planner why")
+    nb.note(5, "Recent note")
+
+    rendered = nb.render_focus(lambda ref: name)
+    because = rendered.split("Because:\n", 1)[1].split("\nRecent:", 1)[0].splitlines()
+
+    assert f"Goal: Quest q (done when: {condition} {name})" in rendered
+    assert len(because) == 1 and len(because[0]) == 160
+    assert because[0].startswith('Mira, step 1: "Find the archive.')
+    assert "Uncited text" not in rendered
+    assert "Recent note" in rendered
+
+
+def test_render_focus_limits_recent_to_four_lines_of_120_chars(tmp_path):
     nb = notebook(tmp_path)
-    nb.heard(1, "Mira", "Hall", "Find the archive.")
-    nb.apply_ops([{"op": "believe", "key": "b", "text": "Secret belief", "because": ["t1"]}], 2)
-    nb.apply_ops([{**add("q"), "why": ["b"]}], 3, "Secret planner why")
-    nb.note(4, "Moved north")
+    for step in range(6): nb.note(step, f"note {step} " + "x" * 200)
 
-    rendered = nb.render_focus()
+    recent = nb.render_focus(lambda ref: ref).split("Recent:\n", 1)[1].splitlines()
 
-    assert "Focus:" in rendered and "Top quest: Quest q" in rendered
-    assert "Because:" in rendered and "t1 Mira at Hall: \"Find the archive.\"" in rendered
-    assert "Secret belief" not in rendered and "Secret planner why" not in rendered
-    assert "Moved north" in rendered
+    assert len(recent) == 4
+    assert all(len(line) <= 120 for line in recent)
+    assert recent[0].startswith("- step 2: note 2") and recent[-1].startswith("- step 5: note 5")
+    assert "note 0" not in "\n".join(recent) and "note 1" not in "\n".join(recent)
+
+
+def test_render_focus_empty_notebook_has_no_goal(tmp_path):
+    nb = notebook(tmp_path)
+
+    assert nb.render_focus(lambda ref: ref).startswith("Goal: (none)\nBecause:\nRecent:")
 
 
 def test_v2_file_loads_as_empty(tmp_path):
@@ -180,5 +191,32 @@ def test_v2_file_loads_as_empty(tmp_path):
 
     nb = notebook(tmp_path)
 
-    assert nb.data == {"text": [], "quests": [], "beliefs": {}, "last": {}}
+    assert nb.data == {"text": [], "quests": [], "last": {}}
     assert nb.log == []
+
+
+def test_why_error_names_newest_text_keys_and_closest_target_candidates(tmp_path):
+    labels = {"place:hall": "Hall", "thing:mom": "MOM", "thing:guide": "Guide"}
+    refs_by_label = {label: ref for ref, label in labels.items()}
+    nb = notebook(tmp_path, ref=refs_by_label.get, label=lambda ref: labels.get(ref, ref), refs=lambda: list(labels))
+    assert nb.apply_ops([add("q")], 1)[0]["result"] == "error: why must cite game-text keys, none heard yet"
+    for i in range(4): nb.heard(i, None, "Hall", f"Line {i}.")
+
+    assert nb.apply_ops([{**add("q"), "why": ["missing"]}], 5)[0]["result"] == \
+        "error: why must cite game-text keys, newest: t4, t3, t2"
+    assert nb.apply_ops([add("q", target="Hal")], 6)[0]["result"] == \
+        'error: target "Hal" matches no known place or thing; closest: Hall, MOM, Guide'
+
+
+def test_closed_thing_quest_shows_current_label_and_who_said(tmp_path):
+    nb = notebook(tmp_path, ref={"person": "thing:a"}.get, label=lambda ref: {"thing:a": "MOM"}.get(ref, ref))
+    nb.heard(1, "MOM", "kitchen", "Go find the professor.", who="thing:a")
+    assert nb.apply_ops([add("q", target="person")], 2)[0]["result"] == "ok"
+    assert nb.observe(39, None, talked=["thing:a"]) == ["q"]
+    nb.heard(44, "MOM", "room", "PROF next door is looking for you.", who="thing:a")
+
+    rendered = nb.render()
+
+    assert '- q "Quest q": done at step 39 — talked to MOM, who said t' in rendered
+    assert "PROF next door" in rendered
+    assert "talked to person" not in rendered

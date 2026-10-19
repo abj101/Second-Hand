@@ -27,11 +27,21 @@ def test_act_eight_steps(tmp_path, monkeypatch):
                "entities":[{"name":"player","kind":"player","at":[.5,.5]}, {"name":"door","kind":"exit","at":[.7,.5]}]}
         return per, SimpleNamespace(data=per)
     monkeypatch.setattr(module, "perceive", perceive)
-    replies = [{"action":{"go_to":"door"}}, {"action":{"buttons":["RIGHT"]}}, *([{"action":None}] * 6)]
-    model = StubModel([SimpleNamespace(data=r) for r in replies])
+    model = StubModel([])
+    real_act = module.act
+    def act(model, per, focus, options, buttons, controls):
+        if loop.step_no == 0:
+            replies = [{"i": next(o["n"] for o in options if o["tool"] == "approach"), "why": "cross"}]
+        elif loop.step_no == 1:
+            replies = [{"i": options[-1]["n"], "why": "walk"}, {"buttons": ["RIGHT"]}]
+        else:
+            replies = [{}, {}]  # two invalid replies leave these observation-only steps without an action
+        model._replies.extend(SimpleNamespace(data=r) for r in replies)
+        return real_act(model, per, focus, options, buttons, controls)
+    monkeypatch.setattr(module, "act", act)
     loop = Loop(env, model, Memory(tmp_path / "memory"), "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     rows = [loop.step() for _ in range(8)]
     assert rows[0]["choice"]["target"] == "door" and env.scene == 1 and rows[1]["choice"]["verb"] == "buttons" and env.player == (3, 8)
-    assert len(rows) == model.calls == 8
+    assert len(rows) == 8 and model.calls == 15
     golden(tmp_path, "act")

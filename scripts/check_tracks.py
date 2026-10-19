@@ -8,6 +8,9 @@ from agent.memory import Memory, normalize_kind
 from agent.observer import wait_settled
 from agent.world import ACTOR_KINDS, World
 from scripts.truth_pokered import read, sprites
+from agent.act import act as ask_act
+from scripts.eval_plan import notebook_at
+from types import SimpleNamespace
 
 CENTER = (8, 5)
 
@@ -135,11 +138,66 @@ def _exits(run):
         print(f"phantom verified exits without departure={phantom}")
         return exits
 
+def menu(run, steps=None, first=1, dump=None):
+    """Offline (0 requests): per recorded step, the act prompt and its option rows; checks duplicates, name lists, unacted rows, failed-before-new order."""
+    src = Path("runs") / run; trace = {r["step"]: r for r in _jsonl(src / "trace.jsonl")}
+    if dump: Path(dump).mkdir(parents=True, exist_ok=True)
+    last, per_step, fails, st = steps or max(trace), [], {}, {"prior": None}
+    def on_step(s, row, per, truth, env, world):
+        if not row: return
+        place = row.get("place")
+        if place and not world.mem.get("places", place): world.mem.upsert("places", {"id": place, "screen": row.get("screen"), "state": "place", "first": s, "last": s, "visits": 1})  # match_place mints it in the live loop
+        if place and row.get("screen") == "world" and world.mem.get("places", place).get("screen") != "world":  # a recorded id first seen on a title screen is a map once a map frame shows it
+            world.mem.upsert("places", {**world.mem.get("places", place), "screen": "world"})
+        pos = (truth["x"], truth["y"]); world.pos = pos; seen_at = world._seen_at; world._seen_at = lambda place: pos
+        try: world.before(per, place, st["prior"], (160, 144), s)
+        finally: world._seen_at = seen_at
+        world.pos = pos; st["prior"] = place
+        focus = f"{notebook_at(src, s).render_focus(world.label)}\nHere: {world.place_label(place)}"
+        try: options = world.options(per, place, fails, s, inputs=list(env.inputs()))
+        except TypeError as e:  # a crash in agent/world.py options is reported as a failure, never patched here
+            per_step.append({"step": s, "rows": 0, "dups": [], "names": [], "noaction": 0, "chars": 0, "order": 0, "crash": str(e)[:120]})
+            print(f"{s} CRASH options: {str(e)[:120]}"); return
+        sent = []
+        class Capture:
+            def ask(self, system, user, images=(), schema=None, *, role=""):
+                sent.append(system + user); return SimpleNamespace(data={"why": "x", "i": 1})
+        ask_act(Capture(), per, focus, options, list(env.inputs()), "")  # controls only reach the buttons follow-up, not this prompt
+        labels = [o["label"] for o in options]
+        dups = [l for l in labels if labels.count(l) > 1]
+        names = [l for l in labels if any(sep in l.partition(",")[0] for sep in (" or ", " and ", "/"))]
+        order_bad, failed_seen = False, False
+        for o in options:  # ponytail: rule as stated for R4 (free buttons excluded)
+            if o["tool"] == "buttons": continue
+            failed_seen |= o["state"] == "failed"; order_bad |= o["state"] == "new" and failed_seen
+        stat = {"step": s, "rows": len(options), "dups": dups, "names": names, "noaction": sum(o["tool"] != "buttons" and o["action"] is None for o in options),
+                "chars": len(sent[0]) if sent else 0, "order": int(order_bad)}
+        per_step.append(stat)
+        print(f"{s} {stat['rows']} {len(dups)} {len(names)} {stat['chars']} {stat['order']}")
+        if dump: (Path(dump) / f"{s}.txt").write_text(sent[0] if sent else "", encoding="utf8")
+        intent, result = (row.get("choice") or {}).get("intent"), row.get("verdict")
+        if intent and result in ("failed", "no_change"):  # ponytail: fails from trace verdicts only; Loop.fails also holds planner history
+            f = fails.setdefault(intent, {"n": 0}); f.update(n=f["n"] + 1, why=f"verdict {result}", step=s)
+        elif intent: fails.pop(intent, None)
+    _, _, _, first, last = replay(run, steps, first, callback=on_step)
+    in_range = [s for s in trace if first <= s <= last]
+    ok = [p for p in per_step if "crash" not in p]; rows = [p["rows"] for p in ok]; chars = max((p["chars"] for p in ok), default=0)
+    dup, name, noact = (sum(len(p[k]) if isinstance(p[k], list) else p[k] for p in ok) for k in ("dups", "names", "noaction"))
+    bad_order = [p["step"] for p in ok if p["order"]]; crashes = [p["step"] for p in per_step if "crash" in p]
+    for p in ok:
+        for l in p["dups"] + p["names"]: print(f"  offender step {p['step']}: {l}")
+    print(f"summary steps {len(per_step)}/{len(in_range)} rows max={max(rows, default=0)} mean={statistics.mean(rows) if rows else 0:.1f} max_chars={chars} dup={dup} namelist={name} noaction={noact} crashes={len(crashes)} {crashes[:10]} order_steps={len(bad_order)} {bad_order[:10]}")
+    code = int(chars > 2000 or bool(dup or name or noact or crashes or bad_order))
+    print(f"exit {code}")
+    return {"steps": per_step, "exit": code}
+
 def check(run, steps=None, baseline=False, first=51, places=False, exits=False):
     if exits: return _exits(run)
     if places: return _places(run, steps, first)
     return _default(run, steps, baseline, first)
 
 if __name__ == "__main__":
-    a = argparse.ArgumentParser(); a.add_argument("run"); a.add_argument("--steps", type=int); a.add_argument("--first", type=int, default=51, help="a checkpoint step + 1"); a.add_argument("--baseline", action="store_true"); a.add_argument("--places", action="store_true"); a.add_argument("--exits", action="store_true")
-    a = a.parse_args(); check(a.run, a.steps, a.baseline, a.first, a.places, a.exits)
+    a = argparse.ArgumentParser(); a.add_argument("run"); a.add_argument("--steps", type=int); a.add_argument("--first", type=int, default=51, help="a checkpoint step + 1"); a.add_argument("--baseline", action="store_true"); a.add_argument("--places", action="store_true"); a.add_argument("--exits", action="store_true"); a.add_argument("--menu", action="store_true", help="offline act-prompt check, 0 requests"); a.add_argument("--dump", help="write each step's act prompt to DIR/<step>.txt")
+    a = a.parse_args()
+    if a.menu: raise SystemExit(menu(a.run, a.steps, a.first, a.dump)["exit"])
+    check(a.run, a.steps, a.baseline, a.first, a.places, a.exits)

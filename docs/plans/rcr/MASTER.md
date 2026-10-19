@@ -1,6 +1,6 @@
 # RCR: Root-Cause Refactor (master tracker)
 
-Status: **Phase C: R1, R4, R2 gates passed offline (10-16); R3 next.** Loop.py wiring for all three was committed with the live-view edits in one commit. Earlier: **Phase B done: all four packets final (10-15).** Docs committed; the user starts implementation later (§11.4)  ·  Branch: `feat/lean-agent`  ·  Started 2026-10-15  ·  Source: [audit-2026-10-15.md](../audit-2026-10-15.md)
+Status: **R1/R4/R2 offline gates passed; R3 gate PASS 10-19 on m1_rcr_baseline (suite 612/1 skip, LV 20/20, menu max prompt 1,909, dup 0); R1/R2 amendments and R3 committed together. Phase D (R3.7) awaits the user's ledger cap.** Branch feat/lean-agent
 
 **Goal:** remove the four root mechanisms the audit found, and leave the agent *smaller* than before.
 **Not in scope:** new features, new gates, game- or label-specific fixes, or tuning the perceiver prompt per label.
@@ -12,7 +12,7 @@ Status: **Phase C: R1, R4, R2 gates passed offline (10-16); R3 next.** Loop.py w
 |---|---|---|---|---|---|
 | R1 | Identity and world truth | [R1-identity.md](R1-identity.md) | `rcr-r1-identity` | C done (offline) | **Offline gate passed**, committed d787836, fixes 4c755cb and c560dc6. Mom 1 id, Pallet NPC 1 id, S3 0, phantom exits 0. **Not yet shown live.** `rcr_r1_live` had 0 world rows (stale scene cuts, a runtime issue). `m1_rcr_r1_live_retry2` stalled in the bedroom because of an R1 regression (title-screen ids reused), fixed by 4c755cb but not re-run live. The first live evidence for R1 is now the post-R4 run |
 | R2 | Quest state and planner contract | [R2-quests.md](R2-quests.md) | `rcr-r2-quests` | C done (offline) | **Gate passed** 353f2fb (630 tests). S8 max 1,242 ≤ 3,500; S12 max 491 ≤ 600; S5b 7/7 targets close by id; re-adds 0; notebook −287, plan −100. Consumers migrated (eval_run keeps its own `_TACTICAL` copy). Not yet shown live |
-| R3 | Act prompt and option menu | [R3-decide.md](R3-decide.md) | `rcr-r3-decide` | B → C | **packet final** 10-15; the 5 edits (report-only lines, `--menu` mode of check_tracks, R2's `notebook_at`, explore `dir`, grep fix) were checked in the doc. Grouping allowed by the user. Lands last |
+| R3 | Act prompt and option menu | [R3-decide.md](R3-decide.md) | rcr-r3-decide | **gate passed 10-19** | On m1_rcr_baseline: suite **612/1 skip**, LV **20/20**, `check_tracks --menu` 74/74 steps, max prompt **1,909**, dup **0**, rows max 29. R3.6 grouping and off-screen name-grouping applied. Phase D (R3.7) awaits ledger cap |
 | R4 | Feedback and control loop | [R4-feedback.md](R4-feedback.md) | `rcr-r4-feedback` | C done (offline) | **Gate passed** 3f521e8 (648 tests). S6 0 of 13 mis-scored (novelty proxy; S105 resolved by before-frame join); S11 settles with memory 256; stall K=8 (knob from one run). Not yet shown live; S9 and F1 unmeasured |
 
 The phases run in this order:
@@ -196,13 +196,64 @@ S0 builds S1-S3, S5, S6, S8, S11 and S14 into `eval_run.py`, reusing `_entity_du
 - **Final live S1-S4/S7:** S1 unavailable (**0 NPC samples**); S2 unavailable (no Pallet); S3 proxy **0 duplicate records / 0 groups / 0 tile groups**, insufficient coverage for a live duplicate claim; S4 unmeasured (not emitted by evaluator; its **3/80 repeated_mistakes** is a different proxy); S7 unmeasured (neither transition reached). Valid-dimension truth remained map **38**, one place **p_place**. The 80-step cap was respected; no extra run.
 - Final retry ledger total/M1/smoke **3786/3736/50 → 3928/3878/50**, **+142** for this invocation, **887** remaining under unchanged persistent caps. User runtime fixes after the gate are fingerprinted in the run; **658 passes** remain evidence for the earlier gate snapshot. All **18** protected hashes are unchanged during the final retry. No runtime code edits, shared-file staging or push. Logs/limitations: [R1 §9](R1-identity.md#9-result-filled-in-by-the-orchestrator).
 
+### R3 partial attempt (10-16): stopped before gate
+
+- Every spawn explicitly used **gpt-6-luna, reasoning high**. R3.2 first acceptance: **100 passed / 3 failed / 2 collection errors**, exit 1, 8.12 s; Loop imported removed brief.defaults. R3.4's owned loop hunk repaired that dependency. Second acceptance: **136 passed / 12 failed**, exit 1, 11.63 s. The user-authorized extra same-tier attempt received measured failure output and ended at **143 passed / 5 failed**, exit 1, 12.55 s. Exact command: `.venv-agent/Scripts/python.exe -B -m pytest -q -p no:cacheprovider -n auto tests/agent/test_options.py tests/agent/test_exits.py tests/agent/test_world.py`. Logs: `.tmp/rcr/r3/r3_2.log`, `r3_2-after-wire.log`, `r3_2-final.log`. **No further source repair.**
+- Remaining failures: two tests call startswith on free-buttons ref=None (`test_exits.py:107`, `test_options.py:120`); `test_options.py:112` expects exit: but gets place:cave; `test_options.py:196` misses two-place crossed labels; `test_world.py:629` retains removed seen["places"]. Details: [R3 §9](R3-decide.md#9-result-filled-in-by-the-orchestrator).
+- R3.1 `PT tests/agent/test_act.py`: **6 passed**, exit 0, 1.83 s. R3.3 `PT tests/agent/test_notebook.py -k focus`: **4 passed**, exit 0, 1.85 s. Exact packet LV **20 passed** at entry and after each completed acceptance; final exit 0, 3.58 s (`.tmp/rcr/r3/r3_2-final-lv.log`). R3.4 interrupted; full suite/help/grep and offline menu replay were not run. No full-suite pass claimed.
+- **S1–S9 and S11–S14:** no post-R3 measurements. Replay coverage **0**; rows/max/mean, prompt maxima, duplicates, missing actions, follow-ups and ordering unmeasured. **S4 unmeasured; R3.6 never applied**, so no grouping keep/revert decision. **S10:** partial agent lines **4063 → 3988**, net **−75** (act −43, brief −7, loop −29, notebook +1, world +3), report-only, not a gate pass. Audit: `.tmp/rcr/r3/final-audit.log`.
+- **0 cloud calls; no R3.7 or post-R3 live run.** Pre-approved replay cap20/conditional+2/+20 and clean-boot **150 steps / 400 calls** were not exercised because gate failed. `runs/rcr_r3_live` does not exist. Baseline-only `PY scripts/eval_run.py runs/m1_bedroom_live --no-write` exited 0 (`.tmp/rcr/r3/baseline-eval.log`); it is not post-R3 evidence. Viewer /state HTTP **200**. Ledger unchanged **4027 total / 3977 M1 / 50 smoke**, **788** remaining under approved caps. Smoke exhausted; prior funded-M1 launcher approach would be needed for non-m1 output path; no launcher created or used.
+- Preservation: **10/10** protected SHA-256 hashes, **4/4** loop live methods, **2/2** test-loop live functions unchanged; **0** prohibited-word matches in added agent lines, env_pyboy excluded. Initial tree clean; live-view committed at **8fbe5eb**. No uncommitted user LV hunks were swept in. Every partial change including loop/test-loop stays **unstaged**; index empty, no gate commit/push.
+- Coordinator migrated additional test_loop/test_trace_brief/test_harness_reliability callers, without full-suite acceptance; worker files stayed in cards. Interrupted R3.4 script edits retain a DECIDE reference after deletion of its definition. R3.5 read-only prep only, check_tracks.py unchanged. `contracts.md` unchanged; provisional contracts and per-file deltas in R3 §9. Final-attempt allowance exhausted; no automatic continuation.
+
+### R3 resumed after overseer fixes (10-16): one assertion still blocks gate
+
+- User authorized continuation and resuming both interrupted workers; all workers retained explicit gpt-6-luna/high tier. Overseer's place-scoped World.label/assertion/DECIDE fixes independently passed **148 tests**, exit0, 11.96s: PT tests/agent/test_options.py tests/agent/test_exits.py tests/agent/test_world.py (.tmp/rcr/r3/resume-r3_2.log). Initial R3.2 failures above are superseded.
+- R3.4 fixed _live's removed a.place access with canonical world.place_label(place). Root PT tests/agent: **24 failed / 587 passed**, exit1,83.80s (resume-full-1.log). Coherent script/test migration: **1 failed / 608 passed**, exit1,73.29s (resume-full-2.log). User's extra final same-tier attempt/review received failure output; coordinator applied the recommended existing failure stub in its unowned test. Final full suite: **1 failed / 608 passed**, exit1,110.80s (resume-full-final.log). No further repair.
+- Remaining test_loop.py:1488 assertion rejects cause: anywhere in focus; it also matches the required **Because:** heading. Coordinator introduced this test assertion. Failed-row evidence assertion now passes. The suggested line-prefix correction was recorded, not applied.
+- Golden W0_REGEN=1 PT tests/agent/test_world_golden.py: **1 passed**, exit0,14.38s; **8 trace rows** changed for numbered replies/follow-ups, **memory unchanged**, eight steps/15 asks; regeneration env cleared. Both eval scripts --help exit0; loop legacy-call grep0matches. Extra root test migrations/removed two obsolete free/image CLI tests are detailed in R3 §9.
+- Last completed exact LV: **20 passed**, exit0,15.12s (resume-lv-1.log). Concurrent final LV rerun was interrupted after worker startup, exit1/no test result (resume-lv-final.log); no final exact LV pass claimed. Full suite's sole failure is unrelated to live-view tests.
+- **Gate FAIL; 0 cloud calls, no commit/push.** R3.5 read-only prep only; no grouping/model replay/fallback/live run. S1–S9/S11–S14 post-R3 unavailable, coverage0. S10 remains **4063 → 3988, −75 agent**. Current per-file deltas in R3 §9.
+- Audit resume-final-audit.log: protected hashes **10/10 unchanged**, loop live methods **3/4 unchanged** (_live canonical-label change required), test-loop live tests **2/2 unchanged**, prohibited words0. Ledger unchanged **4027/3977/50**, 788remaining; runs/rcr_r3_live absent. All changes unstaged/index empty; frozen files/contracts.md untouched. Final retry allowance exhausted; no automatic continuation.
+
+### Baseline live run, post R1/R4/R2 (10-17): `runs/m1_rcr_baseline`, stopped by the user at 74 of 150 steps
+
+- **Setup:** HEAD dc4113f code from a clean scratch worktree with no links, clean boot, `--decide`, using the original runner. 186 requests; ledger 4027 → 4144 (671 left). The ledger file was recreated at 4027/3977/50 after the 10-16 deletion.
+- **Holds:**
+  - Place identity: 1 place per map (38/37/0).
+  - S3: 0.
+  - S6: 0 of 4 real failures mis-scored.
+  - S11: 0 unsettled.
+  - S5: 0, with 1 quest really closed.
+  - S14: 0.
+- **Fails or open:**
+  - S1: Mom 2 ids live (`e_character`, `e_person`), so R1's offline 1 id is not reproduced.
+  - S8: act prompt 2,639 chars (R3 has not landed); planner 3,972.
+  - S2 and S7 unavailable: Pallet was entered at S51 for 1 step, then the agent walked back inside.
+  - Planner fired "no open quest" 6 times on the intro screens (S1-S16), out of 13 plan calls.
+  - Directive "Oak next door" heard at S45, not followed: the agent went back to 2F at S59, bounced between floors at S69-72, and repeated failed `approach` on furniture (computer ×3, shelving ×5, cabinet ×3).
+
+- **Plan and map analysis (10-17):**
+  - **Oak quest closed by talking to Mom:**
+    - The quest target first resolved to the title-screen "Professor Oak" record. Intro records live in the run-start place, which becomes the bedroom, so they are listed as bedroom things.
+    - At S39 the planner retargeted the quest to "person" (Mom) "to complete the quest", and `observe` closed it.
+    - The closed line says "talked to person", a stale label; the planner then believed it had spoken to Oak.
+  - **Directive lost:**
+    - Mom's "Oak, next door" (t2, S45) hit the belief cap, which 4 intro trivia beliefs had already filled. No quest was added for it.
+    - The planner retargeted 4 times to the nonexistent "desk", getting the same error each time with no valid names listed.
+  - **"Explore the tiled room":** "tiled room" is the bedroom's label. At S52 in Pallet, act picked "go to tiled room" and walked home.
+  - **Bedroom map shift (−4, +5) at S59:**
+    - `memory.py` matched the place through a within-1 exit, but the arrival tile was not carried over.
+    - `world.after` uses an exact-tile lookup, which missed; 1F's position had drifted 1 tile.
+    - `pos = arrive or (0, 0)` (world.py:375) then re-rooted the bedroom at the stairs. Result: computer ×3, desk ×2, and a wrong reverse exit written.
+
 ## 9. Deletion ledger
 
 | Section | Planned removals (Phase A) | Net lines | Commit |
 |---|---|---|---|
 | R1 | `Memory.view`/`resolve`, landmark and name merges, `#n` suffixes, `add_edge`/edges, arrival credit, `named_intents`; `locate.py` if it has no runtime caller | ≈ -200 | — |
 | R2 | `_EXPLORE`, `_TACTICAL`, the reconcile rules, chapters, checks, migrations, `_fit`; tests ~770 → ~250; `eval_plan.py` -155 | ≈ -490 agent | — |
-| R3 | free act path, name-list rows, `OPTION_CAP`, compact view, `here_flag`, act flags, brief prefs | ≈ -160 | — |
+| R3 | free act path, name-list rows, `OPTION_CAP`, compact view, `here_flag`, act flags, brief prefs | **−75 agent, partial / gate failed** (4063 → 3988); plan ≈ −160 | **none; unstaged, stopped 10-16** |
 | R4 | `predict`/`verdict`, the hold machinery, relook, cycle flags, `same_action`, the side-step push, migrations | ≈ -300 | — |
 
 ## 10. Decisions
@@ -248,6 +299,7 @@ S0 builds S1-S3, S5, S6, S8, S11 and S14 into `eval_run.py`, reusing `_entity_du
 - F1 (R4): in live mode, settling near water still costs 2-8 s of real time per press, down from a 10 s timeout. A shorter per-press settle is a follow-up after RCR.
 - F2 (R4): `_hold_row` and the inert `pending`, `unsettled` and `reperception_used` attributes stay, because live-view code reads them. Each has a `ponytail:` comment and is removed together with that live-view hunk.
 - F3: `skills.refine` (`locate.py`) is a cloud refine path, which conflicts with the cheap-spatial-memory decision. It is outside RCR; review it after RCR.
+- F4 (R1, 10-19): a reverse exit records the pressed-from tile as its arrival. A warp one tile further on lands re-entry 1 tile off (S59: (3,−5) vs truth (4,−5)) until a view match or crossing re-anchors. No game-shaped warp rule; revisit only if routes into exits fail live.
 
 ## 11. Waiting on the user
 

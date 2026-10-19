@@ -1,6 +1,6 @@
 """HF5 integrated regressions: the production Loop, World and skills on GridEnv, answered by StubModel.
 
-Only the model is faked (StubModel replies, or perceive patched to the env's own perception). Every test runs with the network
+Perception and choices are scripted; menu parser cases use StubModel replies. Every test runs with the network
 closed: any model POST or socket connect fails it at teardown."""
 import json
 import socket
@@ -48,11 +48,13 @@ def no_action(): return act_reply(None, expect="no_change", why="look")
 def pick(match, shown=None, text=None):
     """The chooser picks the first option matching `match` (none when nothing matches) and records the options it was shown;
     the real act parser and the real loop run on that choice."""
-    real = loop_module.act
-    def act(model, *args, options=None, **kwargs):
+    from agent.act import act as real
+    def act(model, per, focus, options, buttons, controls):
         if shown is not None: shown.append(options)
         n = next((o["n"] for o in options if match(o)), None)
-        return real(StubModel([act_reply({"i": n, "text": text} if n is not None else None, why="pick")]), *args, options=options, **kwargs)
+        replies = [reply({"i": n, "why": "pick"})] if n is not None else [reply({}), reply({})]
+        if text is not None: replies.append(reply({"text": text}))
+        return real(StubModel(replies), per, focus, options, buttons, controls)
     return act
 
 
@@ -92,8 +94,13 @@ def bfs(env, start, goal, avoid=()):
     return None
 
 
-def loop_for(env, tmp_path, replies, *, root="memory"):
-    loop = Loop(env, StubModel(replies), Memory(tmp_path / root), "grid")
+def loop_for(env, tmp_path, replies, monkeypatch, *, root="memory"):
+    actions = iter(replies)
+    def act(*args):
+        data = next(actions).data
+        return SimpleNamespace(action=data["action"], text=None, why=data["why"], option=None)
+    monkeypatch.setattr(loop_module, "act", act)
+    loop = Loop(env, StubModel([]), Memory(tmp_path / root), "grid")
     loop.world.self_spot, loop.world._self_from_motion = at(env, env.player), True  # no self-locating probe presses: every press is the action's
     return loop
 
@@ -115,7 +122,7 @@ def test_known_actor_between_player_and_goal_is_walked_around_within_a_shortest_
     env = Track(); env.npc, env.door = (6, 8), (-5, -5)  # the npc stands on the straight way to the sign, two tiles west of the player
     sign, npc = (4, 8), (6, 8)
     grid_perception(monkeypatch, env, [("sign", "object", sign)])
-    loop = loop_for(env, tmp_path, [go_to("sign")])
+    loop = loop_for(env, tmp_path, [go_to("sign")], monkeypatch)
 
     row = loop.step()
 
@@ -134,7 +141,7 @@ def test_actor_in_a_one_tile_corridor_is_a_route_failure_then_the_same_goal_succ
         env.walls.add((x, 9))
     env.npc = (6, 8); sign = (4, 8)
     grid_perception(monkeypatch, env, [("sign", "object", sign)])
-    loop = loop_for(env, tmp_path, [no_action(), go_to("sign"), go_to("sign")])
+    loop = loop_for(env, tmp_path, [no_action(), go_to("sign"), go_to("sign")], monkeypatch)
     loop.step()  # the first observation creates the place (nothing to do); the fixture grid is then the agent's map of it
     seed_known_grid(loop, env)
 
@@ -161,7 +168,7 @@ def test_duplicate_exit_records_pick_the_observed_door_and_the_failure_note_foll
     env = Track(); env.door = (-5, -5)  # the observed door leads nowhere: every crossing attempt fails
     grid_perception(monkeypatch, env)
     root = tmp_path / "memory"
-    loop = loop_for(env, tmp_path, [no_action()])
+    loop = loop_for(env, tmp_path, [no_action()], monkeypatch)
     loop.step()  # the room is seen once with nothing to do
     loop.mem.upsert("places", {"id": "hall", "name": "Hall", "screen": "world", "state": "place", "first": 1, "last": 1})
     loop.mem.upsert("tiles", {"id": f"{loop.place}@2,0", "place": loop.place, "x": 2, "y": 0, "floor": True, "blocked": [], "pushed": [], "step": 1,
@@ -190,7 +197,8 @@ def test_duplicate_exit_records_pick_the_observed_door_and_the_failure_note_foll
 
     assert third["choice"]["intent"] == key and resumed.fails[key]["n"] == 3 and resumed.place == loop.place
     noted = next(o for o in resumed.world.options(env.perception(), resumed.place, resumed.fails, 9, inputs=list(env.inputs())) if o.get("intent_key") == key)
-    assert noted["label"].startswith("exit RIGHT → Hallway") and noted["notes"] == ["tried here 3×, last: travel: leg 1 exit mismatch"]
+    assert noted["label"].startswith("go through RIGHT,") and noted["state"] == "failed"
+    assert "exit mismatch 3×" in "; ".join(noted["notes"])
 
 
 # ---------------------------------------------------------------- case 4
@@ -262,7 +270,7 @@ def crossing_run(tmp_path, name, monkeypatch, *, checkpoint):
     With checkpoint, save and restore after the timed-out action row."""
     short_settle(monkeypatch)
     env = TrackBusy(plan=[0, 20]); grid_perception(monkeypatch, env)
-    loop = loop_for(env, tmp_path, [act_reply({"buttons": ["RIGHT", "RIGHT"]})], root=f"{name}/memory")
+    loop = loop_for(env, tmp_path, [act_reply({"buttons": ["RIGHT", "RIGHT"]})], monkeypatch, root=f"{name}/memory")
     rows = [loop.step()]
     if checkpoint:
         state = json.loads(json.dumps(loop.state()))
@@ -301,10 +309,10 @@ def test_door_crossing_keeps_place_identity_heard_facts_and_the_top_quest_throug
                 self.calls += 1
                 return reply(plan)
             return super().ask(*args, **kwargs)
-    loop = loop_for(env, tmp_path, [])
+    loop = loop_for(env, tmp_path, [], monkeypatch)
     loop.model = LocalPlanModel([])
     assert loop.notebook.heard(0, "MOM", "room", "A person next door is looking for you.") == "t1"
-    monkeypatch.setattr(loop_module, "act", pick(lambda o: o["label"].startswith("possible exit door")))
+    monkeypatch.setattr(loop_module, "act", pick(lambda o: o["tool"] == "approach"))
 
     first = loop.step()
     monkeypatch.setattr(loop_module, "act", pick(lambda o: False))  # no further action: the next observation is only read
@@ -322,4 +330,4 @@ def test_door_crossing_keeps_place_identity_heard_facts_and_the_top_quest_throug
     assert again["place"] == second["place"] and resumed.place == loop.place  # the same room keeps its identity after the restore
     assert resumed.notebook.focus == "g1" and resumed.notebook.data["quests"][0]["key"] == "g1" and resumed.notebook.data["quests"][0]["status"] == "open"
     assert resumed.notebook.data["text"][0]["text"].startswith("A person next door")
-    assert "Top quest: Find the person next door" in resumed.notebook.render_focus()
+    assert "Goal: Find the person next door" in resumed.notebook.render_focus(resumed.world.label)

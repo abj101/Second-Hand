@@ -54,6 +54,8 @@ def test_prompt_sections_are_ordered_and_have_no_chapter_or_log_history():
 def test_system_is_bounded_and_uses_generic_game_language():
     assert SYSTEM.count(".") <= 7
     assert all(term not in SYSTEM.casefold() for term in ("door", "window", "rug", "stairs", "oak", "mom", "next door"))
+    assert "reopen" in SCHEMA["properties"]["ops"]["items"]["properties"]["op"]["enum"]
+    assert "belie" not in (SYSTEM + REPLY).casefold() and "because" not in SCHEMA["properties"]["ops"]["items"]["properties"]
     assert SCHEMA["required"] == ["ops", "why"]
     assert SCHEMA["properties"]["why"]["maxLength"] == 200
     assert SCHEMA["properties"]["ops"]["items"]["properties"]["target"] == {"type": "string"}

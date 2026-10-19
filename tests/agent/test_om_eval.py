@@ -98,8 +98,9 @@ def test_replay_maps_renamed_recorded_entity_by_its_cached_index():
                                     "act_ops": {}, "goal_ops": {}, "focus": {}})()
     rep.options_now = [{"n": 1, "tool": "approach", "label": "approach stranger", "action": {"thing": 4}},
                        {"n": 2, "tool": "approach", "label": "approach MOM", "action": {"thing": 2}}]
-    reply = rep.ask("", "", role="act")
-    assert reply.data["action"]["i"] == 2
+    schema = {"properties": {"i": {"enum": [1, 2]}}}
+    reply = rep.ask("", "", schema=schema, role="act")
+    assert reply.data["i"] == 2
 
 def test_om_talk_reports_conversation_called_entity_and_interact_options(monkeypatch, capsys, tmp_path):
     nb = type("Notebook", (), {"data": {"text": [{"step": 2, "speaker": "MOM", "where": "tiled room", "text": "PROF. OAK, next door, is looking for you."}]}})()
@@ -166,11 +167,11 @@ def test_classify_outcomes():
     assert eval_act.classify(b, at(38, 6, 1), 37, tiles) == "no_move"
 
 
-def test_om_act_size_measures_the_decide_prompt_with_a_capturing_stub_and_no_requests(monkeypatch, tmp_path, capsys):
+def test_om_act_size_measures_the_act_prompt_with_a_capturing_stub_and_no_requests(monkeypatch, tmp_path, capsys):
     nb = eval_act.Notebook(tmp_path / "memory")
     option = {"n": 1, "tool": "approach", "label": "approach door", "action": {"thing": 1}, "notes": []}
     world = type("World", (), {"options": lambda self, per, place, fails, step, inputs: [option],
-                               "view": lambda self, goal, place, compact=False: "memory view", "here_flag": lambda self, fails: "here"})()
+                               "label": lambda self, ref: str(ref), "place_label": lambda self, place: "Room"})()
     loop = type("Loop", (), {"prev": {"screen": "world", "text": ["hello"]}, "notebook": nb, "world": world, "place": "p1", "fails": {},
                               "step_no": 100, "game": "pokemon_red", "_goal_text": lambda self: "goal"})()
     env = type("Env", (), {"closed": False, "inputs": lambda self: eval_act._INPUTS, "close": lambda self: setattr(self, "closed", True)})()
@@ -179,7 +180,7 @@ def test_om_act_size_measures_the_decide_prompt_with_a_capturing_stub_and_no_req
     monkeypatch.setattr(eval_act.run_agent, "_ledger", lambda *args: pytest.fail("act-size touched the ledger"))
     assert eval_act.main(["--om", "act-size", "--run", "fixture", "--from-step", "100"]) == 0
     output = capsys.readouterr().out
-    assert "decide prompt chars=" in output and "tokens~" in output and "(len/4)" in output and "requests=0" in output and env.closed
+    assert "act prompt chars=" in output and "tokens~" in output and "(len/4)" in output and "requests=0" in output and env.closed
     loop.prev = None
     assert eval_act.om_act_size("fixture", 100) == 2
     assert "no cached perception" in capsys.readouterr().out

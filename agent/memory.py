@@ -86,7 +86,8 @@ def _distance(a: str, b: str) -> int:
 
 
 class Memory:
-    arrival = None  # (place, tile) when the last match_place recognised a stored view
+    arrival = None  # (place, tile you arrived on), set by whichever match_place path identified the place; (new place, (0, 0)) on a mint
+    unplaced = None  # a known place entered with no arrival evidence: where you are in it is unknown until a stored view matches
     excursion = None  # the place a dialogue/menu/battle screen was last seen in, until a navigable screen follows
 
     def __init__(self, root: Path) -> None:
@@ -148,21 +149,20 @@ class Memory:
             return self.upsert("places", {"id": self._id("places", "place"), "state": "candidate", "visits": 1, "blocked": [], "first": step, "last": step})["id"]
         back = prev is not None and self.excursion == prev  # back from a dialogue/menu/battle to the place it left: that place may match again
         self.excursion = None
-        if not cut and prev is not None:
-            row = self.get("places", prev)
-            if row and row.get("screen") != "world":
-                self.upsert("places", {**row, "screen": "world"})
-            return prev
+        if not cut and (self.get("places", prev) or {}).get("screen") == "world":
+            return prev  # the run-start place is never promoted: the first map is minted below, so pre-map screens stay out of it
         exclude = None if back else prev
         if cut and frame is not None and (hit := self.seen_view(frame, screen, exclude, tile_px)):
             self.arrival = hit  # (place, tile you arrived on)
             row = self.get("places", hit[0])
             return self.upsert("places", {**row, "visits": row.get("visits", 0) + 1, "last": step})["id"]
         if cut and prev and exit:  # the exact exit, else every known exit within one tile (position drifts) if they agree on where they lead
-            near = [(max(abs(r["x"] - exit[0]), abs(r["y"] - exit[1])), r["exit"].get("dir") != exit[2], r["exit"]["to"]) for r in self.rows("tiles")
+            near = [(max(abs(r["x"] - exit[0]), abs(r["y"] - exit[1])), r["exit"].get("dir") != exit[2], r["exit"]["to"], tuple(r["exit"].get("arrive") or ())) for r in self.rows("tiles")
                     if r.get("place") == prev and (r.get("exit") or {}).get("to") not in (None, prev) and max(abs(r["x"] - exit[0]), abs(r["y"] - exit[1])) <= 1]
             if near and (min(near)[:2] == (0, False) or len({n[2] for n in near}) == 1):
-                return min(near)[2]
+                best = min(near)
+                if best[3]: self.arrival = (best[2], best[3])  # the matched exit says where it lands
+                return best[2]
         if cut and via_id:
             known = next((r["o"] for r in self.rows("relations") if r.get("s") == via_id and r.get("p") == "leads_to" and r.get("state") == "live" and r.get("o") != prev and self.get("places", r.get("o"))), None)
             if known: return known
@@ -171,12 +171,13 @@ class Memory:
                                "state": "candidate", "visits": 1,
                                "blocked": [],
                                "first": step, "last": step})
+        self.arrival = (pid, (0, 0))  # a new place's frame starts where you stand
         return pid
 
     def remember_view(self, place: str, pos, frame) -> None:
         """One small greyscale view per (place, tile) so a later arrival can be recognised by pixels."""
         vid = f"{place}@{pos[0]},{pos[1]}"
-        if frame is None or self.get("views", vid): return
+        if frame is None or place == self.unplaced or self.get("views", vid): return  # an unknown position would file the view under a wrong tile
         q = _thumb(frame)
         self.upsert("views", {"id": vid, "place": place, "pos": list(pos), "shape": list(q.shape),
                               "q": base64.b64encode(q.tobytes()).decode()})
@@ -246,7 +247,7 @@ class Memory:
         for i, entity, name, kind, nk, tile in entities:
             if tile is not None:
                 continue
-            pool = [r for r in rows if r["id"] not in used and r.get("state") != "merged"
+            pool = [r for r in rows if (r["id"] not in used or _base(r.get("name", "")) == _base(name)) and r.get("state") != "merged"  # no position: the same text twice is one thing
                     and (normalize_kind(r.get("kind")) == nk if kind in RECURRING else r.get("place") == place)
                     and _distance(r.get("name", ""), name) <= 1]
             exact = [r for r in pool if _base(r.get("name", "")) == _base(name)]
@@ -257,11 +258,16 @@ class Memory:
                 result[i], _ = row["id"], used.add(row["id"])
 
         # Position is the identity evidence for every positioned observation.
+        lead = {}  # a tile holds one static thing: static perceptions projected onto one tile in one frame follow the first one
+        for i, entity, name, kind, nk, tile in entities:
+            if tile is not None and not (nk in ACTOR_KINDS or nk == "player"): lead.setdefault(tuple(tile), i)
         pairs = []
         for i, entity, name, kind, nk, tile in entities:
             if tile is None or i in result:
                 continue
             is_actor = nk in ACTOR_KINDS or nk == "player"
+            if not is_actor and lead[tuple(tile)] != i:
+                continue
             hit = self.get("entities", (tracks or {}).get(i))
             if hit and hit.get("place") == place and hit.get("state") != "merged":
                 pairs.append(((-1,), i, hit))
@@ -274,12 +280,18 @@ class Memory:
                 ) else STATIC_GATE
                 if d <= gate:
                     pairs.append(((d, (_actor(row) != is_actor), _distance(row.get("name", ""), name), -row.get("seen", 0)), i, row))
-        for _, i, row in sorted(pairs, key=lambda pair: pair[0]):
-            if i not in result and row["id"] not in used:
+        for cost, i, row in sorted(pairs, key=lambda pair: pair[0]):
+            same_tile_static = len(cost) > 1 and cost[0] == 0 and not cost[1] and not _actor(row)  # a tile holds one static thing: a second perception on it is the same thing
+            if i not in result and (row["id"] not in used or same_tile_static):
                 result[i], _ = row["id"], used.add(row["id"])
 
         for i, entity, name, kind, nk, tile in entities:
             row = self.get("entities", result[i]) if i in result else None
+            if row is None and tile is not None and lead.get(tuple(tile), i) != i:  # follows the first static perception on its tile, whatever that one matched or minted
+                row = self.get("entities", result.get(lead[tuple(tile)]))
+            if row is None and tile is not None and not (nk in ACTOR_KINDS or nk == "player"):  # a tile holds one static thing: a second perception on it in one frame is projection noise, not a new thing
+                row = next((r for r in self.rows("entities") if r.get("place") == place and r.get("state") != "merged" and not _actor(r)
+                            and r.get("tile") and tuple(r["tile"]) == tuple(tile)), None)
             if row is None:
                 recurring = kind in RECURRING
                 eid = self._id("entities", name)
@@ -306,7 +318,8 @@ class Memory:
             if kind not in row.setdefault("kinds", [row.get("kind", kind)]):
                 row["kinds"] = [*row["kinds"], kind]
             row.update(at=entity.get("at"), last=step, seen=row.get("seen", 0) + 1, status="seen", misses=0)
-            if tile is not None:
+            if tile is not None and (_actor(row) or not any(r["id"] != row["id"] and r.get("place") == place and r.get("state") != "merged" and not _actor(r)
+                                                             and r.get("tile") and tuple(r["tile"]) == tuple(tile) for r in self.rows("entities"))):  # one static record per tile: noise never drifts a record onto another's tile
                 row["tile"] = list(tile)
             result[i] = self.upsert("entities", row)["id"]
             used.add(result[i])

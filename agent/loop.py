@@ -1,7 +1,7 @@
 """One game-neutral perception, choice, action, and learning cycle."""
 import hashlib, json, os, re, time
 from agent.act import act
-from agent.brief import GENERAL, _load, defaults, load_brief
+from agent.brief import GENERAL, _load, load_brief
 from agent.decide import Choice
 from agent.memory import _key
 from agent.notebook import Notebook
@@ -41,7 +41,8 @@ class Loop:
         self.world = World(mem, self.tile_px); self.world.tracker.wrap(env)
         self.observation_stamp = self.observation_age_ms = None; self.live_invalidation_reason = None
         self.events = []
-        self.notebook = Notebook(mem.root, ref=self.world.ref, canon=self.world.canon)
+        self.notebook = Notebook(mem.root, ref=self.world.ref, canon=self.world.canon, label=self.world.label,
+                                 refs=lambda: [f"place:{p['id']}" for p in mem.rows("places") if p.get("state") != "merged"] + [f"thing:{e['id']}" for e in mem.rows("entities") if e.get("state") != "merged"])
         self.last_plan, self._plan_row = None, None
         self.conversation, self.text_for_trigger = {"place": None, "lines": []}, ""
         self.fails, self.moves = {}, []
@@ -104,7 +105,7 @@ class Loop:
         before_mark = bool(self.prev and self.prev.get("screen") == "world" and self.prev_frame is not None and not cut(self.prev_frame, before, before_set.blank_seen))
         if self.prev_frame is not None and hashlib.sha256(before.tobytes()).hexdigest() == hashlib.sha256(self.prev_frame.tobytes()).hexdigest() and self.prev_frame_mark_eligible is not None:
             before_mark = self.prev_frame_mark_eligible
-        per, frame_hash, reused, _ = self._see(before, prior, screen_was_world=before_mark); model_frame, marked = self.seen_image, self.seen_marked
+        per, frame_hash, reused, _ = self._see(before, prior, screen_was_world=before_mark); marked = self.seen_marked
         player_fix = self.world.fix_player(per, before.size); self.empty_streak = self.empty_streak + 1 if self.parse_failed else 0; self.repair_used = self.repair_used if self.parse_failed else False
         modal = self.prev and {self.prev.get("screen"), per.get("screen")} <= {"world", "dialogue", "menu"} and self.prev.get("screen") != per.get("screen") and "world" in (self.prev.get("screen"), per.get("screen")) and not (self.pending_cut or before_set.blank_seen)
         place = self.mem.match_place(per, self.step_no + 1, prev=prior, cut=bool((self.pending_cut or prior and cut(self.prev_frame, before, before_set.blank_seen)) and not modal), via=self.pending_via, frame=before, tile_px=self.tile_px)
@@ -126,7 +127,7 @@ class Loop:
                 probe_set = wait_settled(self.env); probe_frame = probe_set.frame
                 self.observation_stamp = dict(probe_set.frame_stamp) if probe_set.frame_stamp else None
                 self.observation_age_ms = None
-                probe_per, probe_hash, probe_reused, _ = self._see(probe_frame, place, force=True, screen_was_world=per.get("screen") == "world" and not probe["scene_cut"]); model_frame, marked = self.seen_image, self.seen_marked
+                probe_per, probe_hash, probe_reused, _ = self._see(probe_frame, place, force=True, screen_was_world=per.get("screen") == "world" and not probe["scene_cut"]); marked = self.seen_marked
                 probe_fix = self.world.fix_player(probe_per, probe_frame.size); player_fix = player_fix or probe_fix
                 if probe["scene_cut"]:
                     probe_place = self.mem.match_place(probe_per, self.step_no + 1, prev=place, cut=True, frame=probe_frame, tile_px=self.tile_px)
@@ -155,38 +156,9 @@ class Loop:
         affs, targets, intents = [], [], []  # intents: each affordance's intent key, resolved before input
         choice, player = None, next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         act_route = travel_legs = None; refused = False  # refused: no route to an on-screen target avoids the known blockers (occupied tiles, remembered avoid tile)
-        act_flags = list(self.flags)
-        if marked and not (self.act_text or self.decide): act_flags.append('the sprite inside the red box is you')
-        if self.recent:
-            runs = []
-            for recent in self.recent:
-                action = recent.get("choice") or {}; skill = recent.get("skill") or {}; outcome = recent.get("outcome") or {}
-                verb, target = str(action.get("verb") or "action"), str(action.get("target") or "")
-                status = str(skill.get("status") or recent.get("verdict") or "tried")[:12]
-                reason = str(skill.get("reason") or "")[:40]
-                unchanged = "no_change" in outcome.get("effects", [])
-                key, result = (verb, target), (status, reason)
-                if runs and runs[-1][0] == key:
-                    runs[-1][2] += 1; runs[-1][3] |= runs[-1][4] != result; runs[-1][4] = result; runs[-1][5] += unchanged
-                else:
-                    runs.append([key, recent.get("step", self.step_no), 1, False, result, int(unchanged)])
-            summaries = []
-            for (verb, target), step, count, mixed, (status, reason), unchanged in runs:
-                label = f"{verb[:16]} {target[:24]}".strip()
-                if status == "done" and unchanged == count: status, unchanged = "no effect", 0  # every run left the screen as it was
-                summary = (f"{label} x{count} since step {step}; last {status}" if mixed else
-                           f"{label} -> {status}" + (f" ({reason})" if reason else "") + f" x{count} since step {step}")
-                if mixed and reason: summary += f" ({reason})"
-                if unchanged: summary += f"; screen unchanged x{unchanged}"
-                summaries.append(summary)
-            recent_flag = "recent: " + "; ".join(summaries)
-            while len(recent_flag) > 200 and len(summaries) > 1:
-                summaries.pop(0); recent_flag = "recent: " + "; ".join(summaries)
-            act_flags.append(recent_flag[:197] + "..." if len(recent_flag) > 200 else recent_flag)
-        act_flags.append(self.world.here_flag(self.fails))
         options = self.world.options(per, place, self.fails, self.step_no + 1, inputs=list(self.env.inputs()))  # failure history is in the option notes
-        a = act(self.model, None if self.act_text or self.decide else model_frame, per, self.notebook.render_focus(), self.world.view(self._goal_text(), place, compact=True), act_flags, "\n".join(_load(self.game).get("controls", [])), defaults(self.game), list(self.env.inputs()), places=[self.world.place_label(p["id"]) for p in sorted((p for p in self.mem.rows("places") if p.get("state") != "merged" and p.get("screen") == "world"), key=lambda p: p.get("last", p.get("first", 0)), reverse=True)[:12]], options=options, **({"decide": True} if self.decide else {}))
-        applied = 0
+        focus = f"{self.notebook.render_focus(self.world.label)}\nHere: {self.world.place_label(place)}"
+        a = act(self.model, per, focus, options, list(self.env.inputs()), "\n".join(_load(self.game).get("controls", [])))
         picked = next((o for o in options if o["n"] == getattr(a, "option", None)), None)
         own_pick = picked if picked and picked.get("action") == a.action else None  # the option act picked, when its action is the one it answered with
         if per.get("screen") == "world" and not modal and self.tile_px: self.mem.remember_view(place, self.world.pos, before)
@@ -217,7 +189,7 @@ class Loop:
         if action and action.get("verb") in ("advance", "cancel", "type"):
             aff = {"verb": action["verb"], "target": "", "at": None}
             affs.append(aff); targets.append(None); intents.append(self._fail_key(place, action["verb"], "")); i = 0
-        if action: choice = Choice(i, a.expect, "", [], a.why, True, a.text)
+        if action: choice = Choice(i, "screen_changes", "", [], a.why, True, a.text)
         intent = ((own_pick or {}).get("intent_key") or intents[choice.i]) if choice else None  # captured before input: the same key execution, counters and trace use
         unknown = bool(choice and affs[choice.i].get("verb") in ("approach", "interact") and not self.env.pointer and
                        not any(e.get("kind", "").casefold() == "player" for e in per.get("entities", [])))
@@ -249,8 +221,8 @@ class Loop:
              "detail": choice.detail if choice else None, "intent": intent, "unknown": unknown, "scene_cut": scene_cut,
              "exit_key": list(exit_key) if exit_key else None, "unseen_crossing": unseen_crossing, "cut_dir": cut_dir, "travel": travel_legs is not None, "route_len": len(act_route["dirs"]) if act_route else None,
              "refused": refused, "pressed_from": list(pressed_from), "go_to": f'go_to "{a.action["go_to"]}": not in memory' if a.action and "go_to" in a.action and choice is None else None,
-             "no_action": not a.action, "act": {"place": a.place, "ops": applied, "why": a.why, "action": a.action, "flags": act_flags},
-             "option": {k: picked[k] for k in ("n", "tool", "label", "notes")} if picked else None, "plan": self._plan_row,
+             "no_action": not a.action, "act": {"place": self.world.place_label(place), "why": a.why, "action": a.action},
+             "option": {k: picked[k] for k in ("n", "tool", "label", "notes", "state")} if picked else None, "plan": self._plan_row,
              "probe": {"presses": probe["presses"], "locked": probe["locked"]} if probe is not None else None,
              "world": {"cut_dir": cut_dir, "pos": list(self.world.pos), "travelled": skill is self.world._travelled, "travel_open": self.world._travel_open, "current_place": self.world.current_place}}
         try: after_set = wait_settled(self.env)
@@ -288,7 +260,7 @@ class Loop:
                     verb=aff["verb"])
                 if said_step is not None: self.mem.upsert("relations", {**rel, "why": f"says the same as before (step {said_step})"})  # ponytail: a note on the says row, not a new relation kind
                 if effect == "text_appears":
-                    talked.add(f"thing:{tid}")
+                    talked.add(f"thing:{tid}"); self.conversation["who"] = f"thing:{tid}"  # the dialogue it starts is that thing's
                     entity = self.mem.get("entities", tid)
                     speaker = re.match(r"^([A-Z][A-Za-z.' -]{0,19}):\s*", new_text)
                     if entity and self.world._actor(tid, entity) and speaker and sum(c.isalpha() for c in speaker.group(1)) >= 2:
@@ -410,7 +382,7 @@ class Loop:
         if speaker: joined = joined[match.end():]
         place = self.conversation["place"]
         self.text_for_trigger = joined
-        self.notebook.heard(step, speaker, self.world.place_label(place) if place else "?", joined)
+        self.notebook.heard(step, speaker, self.world.place_label(place) if place else "?", joined, who=self.conversation.get("who"))
         self._event("T1", f"new game text: {joined[:200]}", step)
         self.conversation = {"place": None, "lines": []}
     def _screen_route(self, place, t, push, avoid=()):  # to an on-screen entity at tile t; an actor holds its tile, so stop beside it, facing it; avoid: tiles a route blocker held
@@ -446,7 +418,7 @@ class Loop:
         root = self.mem.root.parent; name = f"frames/{self.step_no+1:06d}.png"
         (root / "frames").mkdir(parents=True, exist_ok=True); frame.save(root / name)
         live = {"step": self.step_no + 1, "t": time.time(), "frame": name, "place": place, "screen": per.get("screen"), "entities": self.world.entities,
-                "choice": choice or None, "act": {"place": a.place, "why": a.why, "action": a.action}, "plan": self._plan_row, "self_spot": self.world.self_spot}
+                "choice": choice or None, "act": {"place": self.world.place_label(place), "why": a.why, "action": a.action}, "plan": self._plan_row, "self_spot": self.world.self_spot}
         try: (root / "live.tmp").write_text(json.dumps(live, default=str), encoding="utf-8"); os.replace(root / "live.tmp", root / "live.json")
         except OSError: pass  # a reader holding live.json on Windows; the trace row still lands
     def _fail_key(self, place, verb, target, ref=None):

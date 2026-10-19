@@ -29,6 +29,7 @@ def fold(mem, place, pos, moves, tile_px, step, actors: frozenset[tuple[int, int
         _save(mem, row, before)
     return here
 def mark_exit(mem, place, tile, direction, to, arrive, step):
+    # ponytail: the inferred way back's arrival is recorded as the pressed-from tile; a warp one tile further lands 1 off until re-anchored (view match or crossing)
     for src, at, way, dst, dest, source in ((place, tile, direction, to, arrive, "observed"), (to, arrive, _OPPOSITE[direction], place, tile, "inferred")):
         row = _get(mem, src, at) or _new(src, at, step)
         if source == "inferred" and (row.get("exit") or {}).get("src") == "observed": continue  # a guessed way back never replaces a crossed exit

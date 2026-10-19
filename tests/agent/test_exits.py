@@ -22,7 +22,8 @@ def test_inferred_duplicate_of_an_observed_door_is_one_exit_and_display_and_trav
     rec = world._exits("room", {"room", "hall"})
     assert len(rec) == 1 and (rec[0]["tile"], rec[0]["dir"]) == ((2, 0), "RIGHT")
     assert (rec[0]["arrive"], rec[0]["src"]) == ([0, 0], "observed")  # fails before: the record has no arrive or src
-    assert [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["label"].startswith("exit ")] == ["exit RIGHT → Hall (used 1×)"]
+    rows = [o for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["label"].startswith("go through")]
+    assert len(rows) == 1 and "crossed 1× → Hall" in " ".join(rows[0]["notes"])
     legs = world.plan(HALL)
     assert [(leg["exit_tile"], leg["push"], leg["arrive"], leg["expect"]) for leg in legs[:1]] == [((2, 0), "RIGHT", (0, 0), "hall")]
 
@@ -30,8 +31,8 @@ def test_inferred_duplicate_of_an_observed_door_is_one_exit_and_display_and_trav
 def test_two_doors_to_one_destination_far_apart_stay_two_exits_and_plan_uses_one_of_them(tmp_path):
     mem = Memory(tmp_path); rooms_with(mem, [(2, 0, OBSERVED[2]), (-2, -2, {"dir": "UP", "to": "hall", "arrive": [0, 1], "src": "observed"})])
     world, per = setup(mem, []); world.pos = (0, 0)
-    labels = [o["label"].split(" (")[0] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["label"].startswith("exit ")]
-    assert labels == ["exit UP → Hall", "exit RIGHT → Hall"]
+    labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["label"].startswith("go through")]
+    assert len(labels) == 2 and labels[0].startswith("go through UP,") and labels[1].startswith("go through RIGHT,")
     legs = world.plan(HALL)
     assert (legs[0]["exit_tile"], legs[0]["push"], legs[0]["arrive"]) in {((2, 0), "RIGHT", (0, 0)), ((-2, -2), "UP", (0, 1))}
 
@@ -49,7 +50,7 @@ def test_unverified_thing_next_to_a_verified_exit_is_that_exit_once(tmp_path):
     mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
     world, per = setup(mem, [{"name": "exit: door", "kind": "exit", "at": at(2, 0)}, {"name": "exit: stairs", "kind": "exit", "at": at(2, 1)}])
     labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS)]
-    assert [l.split(" (")[0] for l in labels if l.startswith("exit ")] == ["exit door → Hall"]
+    assert sum(l.startswith("go through") for l in labels) == 1
     assert not any("stairs" in l for l in labels)
     view = world.view("the stairs and the door", "room")
     assert "E at (2,0) door -> Hall used 1×" in view
@@ -61,7 +62,7 @@ def test_unverified_exit_three_tiles_away_stays_a_separate_possible_exit(tmp_pat
     mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
     world, per = setup(mem, [{"name": "exit: stairs", "kind": "exit", "at": at(-1, 0)}])
     labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS)]
-    assert any(l.startswith("exit RIGHT → Hall (used 1×") for l in labels) and "possible exit stairs (unverified, never crossed)" in labels
+    assert any(l.startswith("go through RIGHT,") for l in labels) and any(l.startswith("go to stairs,") for l in labels)
 
 
 def test_two_verified_exits_with_different_destinations_next_to_each_other_stay_two(tmp_path):
@@ -69,8 +70,18 @@ def test_two_verified_exits_with_different_destinations_next_to_each_other_stay_
     mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
     mark_exit(mem, "room", (2, 1), "DOWN", "cave", (0, 0), 1)
     world, per = setup(mem, [])
-    labels = [o["label"].split(" (")[0] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["label"].startswith("exit ")]
-    assert labels == ["exit RIGHT → Hall", "exit DOWN → Cave"]
+    labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["label"].startswith("go through")]
+    assert len(labels) == 2 and labels[0].startswith("go through RIGHT,") and labels[1].startswith("go through DOWN,")
+
+
+def test_same_name_exits_keep_distinct_location_labels(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    tile(mem, -2, 0, {"dir": "LEFT", "to": "hall", "arrive": [0, 0], "src": "observed"})
+    tile(mem, 2, 0, {"dir": "RIGHT", "to": "cave", "arrive": [0, 0], "src": "observed"})
+    world, per = setup(mem, [{"name": "exit: door", "kind": "exit", "at": at(-2, 0)}, {"name": "exit: door", "kind": "exit", "at": at(2, 0)}])
+    rows = [o for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["label"].startswith("go through")]
+    assert len(rows) == 2 and rows[0]["label"] != rows[1]["label"]
+    assert all(row["ref"].startswith("exit:") for row in rows)
 
 
 def test_crossing_counts_only_the_departure_tile_when_arrival_is_unknown(tmp_path):
@@ -93,8 +104,8 @@ def test_unverified_exit_with_another_known_destination_next_to_a_verified_one_s
     mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
     tile(mem, 2, -1, {"dir": "UP", "to": "cave", "arrive": [0, 0], "src": "inferred"})  # known to lead to Cave, never crossed
     world, per = setup(mem, [])
-    labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["label"].startswith(("exit ", "possible exit"))]
-    assert [l.split(" (")[0] for l in labels] == ["possible exit UP → Cave", "exit RIGHT → Hall"]  # sorted by tile row: UP (row -1) first
+    labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if (o["ref"] or "").startswith("exit:")]
+    assert labels[0].startswith("go to UP,") and labels[1].startswith("go through RIGHT,")  # unverified known destination stays a guess
 
 
 def test_unseen_cross_counts_nothing_when_no_exit_tile_is_within_one(tmp_path):

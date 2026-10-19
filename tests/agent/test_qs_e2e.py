@@ -25,7 +25,7 @@ class Scripted:
 
 def scene(monkeypatch):
     monkeypatch.setattr(module, "perceive", lambda *_: (SCENE, SimpleNamespace(data={})))
-    monkeypatch.setattr(module, "act", lambda *a, **k: SimpleNamespace(place="", ops=[], action=None, option=None, expect="screen_changes", why="idle", text=None))
+    monkeypatch.setattr(module, "act", lambda *a, **k: SimpleNamespace(action=None, option=None, why="idle", text=None))
 
 
 class StillEnv(GridEnv):  # nothing is ever pressed, so one rendered frame serves every step

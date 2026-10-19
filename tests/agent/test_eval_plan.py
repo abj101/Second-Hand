@@ -41,12 +41,10 @@ def _run(root):
     calls = []
     for step in range(1, 7):
         quests, beliefs = [], []
-        if step == 1:
-            quests = [{"key": "intro", "text": "Inspect the world", "why": "fact_intro", "status": "open"}]
-            beliefs = [{"key": "b_intro", "text": "The opening text is a clue", "because": ["fact_intro"], "status": "held"}]
         if step == 2:
-            quests = [{"key": "new_hall", "text": "Go to the hall", "why": "t1", "status": "open",
+            quests = [{"key": "new_hall", "text": "Go to the hall", "why": "b_hall", "status": "open",
                        "check": {"kind": "reach", "arg": "p2"}}]
+            beliefs = [{"key": "b_hall", "text": "The hall is next", "because": ["t1"], "status": "held"}]
         calls.append({"step": step, "role": "plan", "response": json.dumps({"quests": quests, "beliefs": beliefs, "why": "recorded"})})
     _jsonl(run / "calls.jsonl", calls)
     return run
@@ -57,10 +55,11 @@ def _check(run, check):
                           capture_output=True, text=True)
 
 
-def test_cite_accepts_same_reply_belief_key_without_fallback():
-    nb = SimpleNamespace(data={"text": [], "beliefs": {}})
-    belief = {"key": "b", "because": []}
-    assert _cite(nb, "b", [belief]) == ["b"] and _cite(nb, "unknown", [belief]) == []
+def test_cite_resolves_belief_keys_to_text_keys():
+    nb = SimpleNamespace(data={"text": [{"key": "t1"}]})
+    beliefs = [{"key": "b", "because": ["t1", "missing"]}, {"key": "c", "because": ["b"]}]
+    assert _cite(nb, "b", beliefs) == ["t1"] and _cite(nb, ["c", "unknown"], beliefs) == ["t1"]
+    assert _cite(nb, "unknown", beliefs) == []
 
 
 def test_replays_six_row_run_and_rebuilds_notebook(tmp_path):
@@ -78,8 +77,19 @@ def test_replays_six_row_run_and_rebuilds_notebook(tmp_path):
         assert result.returncode == 0, result.stdout + result.stderr
     result = _check(run, "ops")
     assert "re-adds of finished target: 1" in result.stdout
-    assert '"key": "b_intro"' in result.stdout
+    assert '"why": ["t1"]' in result.stdout
     assert "cannot map quest" not in result.stdout
+
+
+def test_v3_replay_skips_belief_ops(tmp_path):
+    run = _run(tmp_path)
+    calls = [json.loads(line) for line in (run / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+    calls[0]["response"] = json.dumps({"ops": [{"op": "believe", "key": "b1", "text": "A lead", "because": ["t1"]}], "why": "v3"})
+    _jsonl(run / "calls.jsonl", calls)
+    result = _check(run, "ops")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "step 1: skipped belief op b1" in result.stdout
+    assert '"op": "believe"' not in result.stdout
 
 
 def test_ops_fails_reply_over_600_chars_without_truncating_quest(tmp_path):

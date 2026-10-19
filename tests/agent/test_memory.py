@@ -33,16 +33,15 @@ def test_places_cut_mints_and_modal_keeps_place(tmp_path):
     assert mem.get("places", a)["state"] == "place"
 
 
-def test_run_start_placeholder_becomes_world_place_without_cut(tmp_path):
+def test_first_map_is_minted_and_the_run_start_place_keeps_only_pre_map_screens(tmp_path):
     mem = Memory(tmp_path)
     placeholder = mem.match_place({"screen": "dialogue"}, 1, prev=None, cut=True)
     assert mem.get("places", placeholder).get("screen") is None
 
     place = mem.match_place({"screen": "world", "entities": []}, 2, prev=placeholder, cut=False)
 
-    assert place == placeholder
-    assert mem.get("places", place)["screen"] == "world"
-    assert len(mem.rows("places")) == 1
+    assert place != placeholder and mem.get("places", place)["screen"] == "world" and mem.arrival == (place, (0, 0))
+    assert mem.get("places", placeholder).get("screen") is None  # title and intro records never become things of the first map
 
 
 def test_identity_kind_drift_edit_distance_tie_and_recurring(tmp_path):
@@ -72,8 +71,12 @@ def test_position_identity_relabels_co_visible_things_and_keeps_tracks(tmp_path)
 
     frame = {"entities": [{"name": "post", "kind": "object"}, {"name": "barrel", "kind": "object"}]}
     pair = mem.observe(frame, "q", 1, {0: (4, 4), 1: (4, 4)})
-    assert pair[0] != pair[1]
-    assert mem.observe(frame, "q", 2, {0: (4, 4), 1: (4, 4)}) == pair
+    assert pair[0] == pair[1] and len(mem.rows("entities")) == 2  # a tile holds one static thing: the co-visible second label is projection noise
+    assert mem.observe(frame, "q", 2, {0: (4, 4), 1: (4, 4)}) == pair and "barrel" in mem.get("entities", pair[0])["aliases"]
+    two = {"entities": [{"name": "post", "kind": "object"}, {"name": "sign", "kind": "object"}]}
+    sign = mem.observe(two, "q", 3, {0: (4, 4), 1: (5, 4)})[1]
+    assert mem.observe(two, "q", 4, {0: (4, 4), 1: (4, 4)}) == {0: pair[0], 1: pair[0]}  # both on one tile in one frame: one thing, not the neighbour's record
+    assert tuple(mem.get("entities", sign)["tile"]) == (5, 4)  # the neighbour keeps its tile
 
     actor = mem.observe({"entities": [{"name": "guard", "kind": "npc"}]}, "r", 1, {0: (0, 0)})[0]
     assert mem.observe({"entities": [{"name": "person", "kind": "npc"}]}, "r", 5, {0: (2, 0)})[0] == actor
@@ -217,7 +220,7 @@ def test_revisit_recognised_by_stored_view_with_tile_scroll(tmp_path):
     mem.remember_view(up, (0, 0), view(0, 0))
     down = mem.match_place({"screen": "world", "entities": [{"name": "table", "kind": "object"}]}, 2, prev=up, cut=True,
                            frame=Image.fromarray(rng.integers(1, 4, (144, 160), dtype=np.uint8) * 80), tile_px=16)
-    assert down != up and mem.arrival is None
+    assert down != up and mem.arrival == (down, (0, 0))  # a new place starts where you stand
     # back upstairs, one tile right of the stored view, perceiver names differ: pixels still say it's `up`
     back = mem.match_place({"screen": "world", "entities": [{"name": "machine", "kind": "object"}]}, 3, prev=down, cut=True,
                            frame=view(1, 0), tile_px=16)

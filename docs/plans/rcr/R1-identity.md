@@ -439,6 +439,49 @@ Rewrite `Memory.observe(perception, place, step, tiles=None, tracks=None) -> {in
 - **Source/preservation:** the manifest fingerprints user runtime fixes made after the earlier offline gate. The reported **658-pass** suite belongs to that earlier gate snapshot, not a rerun against those subsequent fixes. All **18 protected files** remain byte-identical to `.tmp/rcr1/retry2-protected-before.json` after this invocation; no runtime steering, repair, staging of shared files or push. R1 hunks in `agent/loop.py`, `tests/agent/test_loop.py`, `tests/agent/test_track.py` remain unstaged with live-view edits. No further live run is started.
 
 
+### Follow-up 10-19: R3 re-gate duplicates (steps 55 and 69 of m1_rcr_baseline)
+
+**Step 55** ("check shelf, 2 left, 3 up" ×2).
+- "dining table" and "bowl of food" projected onto one tile, (4,4). No record sat on that tile, so greedy assignment gave each perception a different neighbouring record 1 tile away (`e_shelf_6` at (5,3), `e_shelf_7` at (4,3)).
+- Fix in `Memory.observe`: static perceptions that project onto one tile in one frame are one thing. The first takes part in matching or minting, and the rest follow it.
+- Also fixed: a static perception exactly on a static record's tile keeps that record even if it is already used this frame.
+
+**Step 69** ("go to exit: door, here" ×2, everything "here").
+- The place was not unplaced. It was a replay-harness artifact: the old run's `p_place` id first appears on the title screen, so `--menu` registered it as a non-map place, which means no tiles.
+- Harness fix: a recorded id becomes a map once a map frame shows it, mirroring `match_place`.
+- The two tile-less "exit: door" perceptions minted two records. Fix: with no position, the same text twice in one frame is one thing (text path).
+
+**No invented distances.**
+- `World._where(tile)` prints a distance only for a known tile in a placed current place. Otherwise no distance is printed, instead of a fake "here".
+- Three tests were updated for that: label prefixes without the comma.
+
+**Results:**
+- `PY scripts/check_tracks.py m1_rcr_baseline --menu --first 1`: `dup=0`. The remaining exit 1 is R3's S8 check (`max_chars` 2075).
+- **Suite `-n auto`: 611 passed, 1 skipped, 0 failed.**
+
+### Amendment 10-19 (coordinator-approved): intro records and re-entry arrival
+
+Source: `runs/m1_rcr_baseline` (HEAD dc4113f, 74 steps), MASTER §8 "Plan and map analysis (10-17)". The changes are uncommitted; R3 commits the shared tree at its gate.
+
+1. **Intro records polluted the first map.**
+   - Fix: `Memory.match_place` never promotes the run-start place. With no cut it keeps `prev` only if `prev` is a map, so the first world frame mints the first map, and title/intro records stay in the screen-less start place.
+   - `World.ref`, `known` and `resolve` match things only in map places (`screen == "world"`).
+   - Replay `.tmp/rcr1/s39_view.py` (fresh memory from the S1-39 trace): one place per map (38 → `p_place_2`, 37 → `p_place_3`), and 34 pre-map records stay in `p_place`.
+   - The S39 planner view has none of ASH, JACK, NEW GAME, "man in lab coat", "Professor Oak". `ref("Professor Oak")` is None.
+   - This reverses R1.3's promotion; its only gain was cosmetic.
+2. **Re-entry fell back to (0,0).**
+   - Fix: every identifying path of `match_place` hands over the arrival tile through `Memory.arrival`: view match, the matched exit row's `arrive`, and `(new place, (0,0))` on a mint.
+   - `World._locate` is the one re-root, used in `before` and `after`. It takes the arrival, else `seen_view(only=place)`, else `Memory.unplaced`. While a place is unplaced there are no tiles, no fold and no new views, until a stored view matches in `observe_after` (ponytail comment).
+   - The exact-tile `exit_to` lookup no longer sets `pos`.
+   - Replay `.tmp/rcr1/s59_replay.py` (temp copy of the baseline memory as of S58): S59 arrives at (3,-5). Truth origin (3,6) puts the stairs at (4,-5), so it is 1 tile off, against (-4,+5) before.
+   - S60-74 bedroom perceptions mint only `vent 1` and `exit: door`, the same as with a perfect arrival, so there are 0 computer/desk duplicates. The old re-root reproduces computer ×2, desk, cabinet, plant and bed.
+3. **Deferred F4 (coordinator):** the inferred way back records the pressed-from tile, so a warp one tile further lands 1 off until re-anchored. A `ponytail:` comment sits at `space.mark_exit`. No game-specific "+1" rule.
+
+**Tests:**
+- New: `test_pre_map_things_are_no_refs_and_reentry_lands_on_the_matched_exit_arrival`, `test_known_place_without_arrival_evidence_is_unplaced_until_a_view_matches`.
+- Updated: `test_first_map_is_minted_and_the_run_start_place_keeps_only_pre_map_screens`; the revisit arrival assert; `test_options` `walk()` now calls `match_place` first, as the loop does.
+- **Suite `-n auto`: 611 passed, 1 skipped, 0 failed.**
+
 ### Review of the live retry, 10-15 (R1 planning session): R1 regression found and fixed
 
 **Cause of the bedroom stall in `m1_rcr_r1_live_retry2` (S49-S80).** Every world step offered only "free buttons" (1 option). The agent bounced between tiles (1,1) and (1,2).

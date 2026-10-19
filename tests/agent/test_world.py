@@ -188,6 +188,34 @@ def test_title_screen_things_get_no_tiles_so_the_first_map_does_not_inherit_them
     assert tiles == {0: (2, 0)} and room_ids[0] != ids[0]
 
 
+def test_pre_map_things_are_no_refs_and_reentry_lands_on_the_matched_exit_arrival(tmp_path):
+    mem = Memory(tmp_path); world = World(mem, 16)
+    start = mem.match_place({"screen": "title"}, 1, prev=None, cut=True)
+    mem.observe({"entities": [{"name": "Professor Oak", "kind": "character"}]}, start, 1)
+    room = mem.match_place({"screen": "world", "entities": []}, 2, prev=start, cut=False)
+    assert room != start and world.ref("Professor Oak") is None and world.resolve("Professor Oak", {"entities": []}, room) is None
+    hall = mem.match_place({"screen": "world", "entities": []}, 3, prev=room, cut=True)
+    mem.upsert("tiles", {"id": f"{hall}@3,0", "place": hall, "x": 3, "y": 0, "floor": True, "blocked": [], "pushed": [],
+                         "exit": {"dir": "UP", "to": room, "arrive": [4, -5], "src": "observed"}})
+    world.current_place, world.pos = hall, (2, 0)  # drifted one tile, pressed another way: the within-1 exit match still says room
+    skill = SimpleNamespace(moves=[{"dir": "LEFT"}], scroll=None, after=None)
+    world.prepare(skill, hall, True, 4)
+    assert mem.match_place({"screen": "world", "entities": []}, 4, prev=hall, cut=True, exit=(2, 0, "LEFT")) == room
+    world.after(skill, hall, room, True, 4)
+    assert world.pos == (4, -5) and mem.unplaced is None
+
+
+def test_known_place_without_arrival_evidence_is_unplaced_until_a_view_matches(tmp_path):
+    mem = Memory(tmp_path); place(mem, "a", "A"); place(mem, "b", "B")
+    world = World(mem, 16); world.self_spot, world._self_from_motion = [.5, .5], True
+    skill = SimpleNamespace(moves=[{"dir": "UP"}], scroll=None, after=None)
+    world.current_place, world.pos = "a", (3, 3); world.prepare(skill, "a", True, 1); mem.arrival = None
+    world.after(skill, "a", "b", True, 1)
+    assert mem.unplaced == "b"
+    _, tiles, _ = world.before({"screen": "world", "entities": [{"name": "desk", "kind": "object", "at": [.7, .5]}]}, "b", "b", (160, 144), 2)
+    assert tiles == {}  # no guessed tile: nothing is placed at a wrong position
+
+
 def test_place_refs_round_trip_printed_labels(tmp_path):
     mem = Memory(tmp_path); place(mem, "p_room", "Name"); place(mem, "p_x", "Name"); place(mem, "p_place_3", "", 3)
     place(mem, "p_unique", "Only"); place(mem, "p_old", "Old")
@@ -230,7 +258,7 @@ def test_inferred_exit_keeps_destination_and_is_routable_without_a_departure(tmp
     exit = next(row for row in world._exits("room", live) if row["tile"] == (8, 0))
 
     assert exit["dest"] == "bedroom" and exit["status"] == "unverified" and exit["uses"] == 0
-    assert exit["label"] == "possible exit UP → Bedroom (unverified, never crossed)"
+    assert "label" not in exit and exit["head"] == "UP"
     assert "bedroom" in world._paths("room")
     assert "UP → Bedroom: possible exit, unverified (never crossed)" in world.view("", "room")
 
@@ -511,57 +539,6 @@ def test_world_view_is_bounded_deterministic_promotes_goal_and_caps_landmark_map
     assert view.index("Place: Kitchen") < view.index("Edges:")
 
 
-def test_compact_view_drops_what_the_options_say_and_draws_no_letters(tmp_path):
-    mem = Memory(tmp_path); place(mem, "here", "Atrium"); place(mem, "other", "Kitchen")
-    for x in range(-2, 3):
-        for y in range(-2, 3):
-            mem.upsert("tiles", {"id": f"here@{x},{y}", "place": "here", "x": x, "y": y, "floor": True, "blocked": [], "pushed": [],
-                                 "exit": {"dir": "UP", "to": "other", "arrive": [0, 0]} if (x, y) == (0, -1) else None, "step": 1})
-    for n in range(19):
-        mem.upsert("entities", {"id": f"lamp{n}", "name": f"Lamp {n}", "kind": "object", "place": "here", "tile": [n % 5 - 2, n // 5 - 2], "seen": 2, "tier": "interest"})
-    world = World(mem, 16); world.current_place, world.pos = "here", (0, 0)
-
-    default, compact = world.view("", "here"), world.view("", "here", compact=True)
-    lines = compact.splitlines()
-
-    assert "Thing " in default and "E at (0,-1) UP → Kitchen: possible exit, unverified (never crossed)" in default and "Landmark " not in default
-    assert lines[0].startswith("Here: Atrium (0,0)  map: ") and lines[16] == "Map: . walked, , seen, # blocked side, E exit already used, @ you"
-    assert not [l for l in lines if l.lstrip().startswith(("Thing", "Landmark", "Everything", "Edges"))]
-    assert "E at (0,-1) UP: possible, never crossed, 1 up" in lines and [l for l in lines if l.startswith("E at")] == ["E at (0,-1) UP: possible, never crossed, 1 up"]
-    assert "E" in "".join(lines[1:16]) and set("".join(lines[1:16])) <= set("@E.,# ")
-    assert "Place: Kitchen" in compact and len(compact) < len(default)
-
-
-def test_compact_view_says_where_each_exit_is_from_you_and_whether_it_was_used(tmp_path):
-    mem = Memory(tmp_path); place(mem, "here", "Atrium"); place(mem, "other", "Kitchen")
-    for x in range(-2, 3):
-        for y in range(-2, 3):
-            exit = {"dir": "LEFT", "to": "other", "arrive": [0, 0], "src": "observed"} if (x, y) == (-2, -1) else \
-                {"dir": "RIGHT", "to": "other", "arrive": [0, 0]} if (x, y) == (2, 1) else None
-            mem.upsert("tiles", {"id": f"here@{x},{y}", "place": "here", "x": x, "y": y, "floor": True, "blocked": [], "pushed": [], "exit": exit, "step": 1})
-    world = World(mem, 16); world.current_place, world.pos = "here", (0, 0)
-
-    compact = world.view("", "here", compact=True)
-
-    assert "E at (-2,-1) LEFT: used, 2 left, 1 up" in compact.splitlines()
-    assert "E at (2,1) RIGHT: possible, never crossed, 2 right, 1 down" in compact.splitlines()
-
-
-def test_compact_view_strips_map_trailing_spaces_flag_lines_and_name_only_aliases(tmp_path):
-    mem = Memory(tmp_path); place(mem, "here", "Atrium")
-    mem.upsert("places", {"id": "other", "name": "Kitchen", "screen": "world", "state": "place", "first": 1, "last": 1, "edges": [], "visits": 1, "aliases": ["kitchen"]})
-    for x in range(-2, 3):
-        for y in range(-2, 3):
-            mem.upsert("tiles", {"id": f"here@{x},{y}", "place": "here", "x": x, "y": y, "floor": True, "blocked": [], "pushed": [],
-                                 "exit": {"dir": "UP", "to": "other", "arrive": [0, 0]} if (x, y) == (0, -1) else None, "step": 1})
-    world = World(mem, 16); world.current_place, world.pos = "here", (0, 0); world.view_flags = ["stuck"]
-
-    default, compact = world.view("", "here"), world.view("", "here", compact=True)
-
-    assert not any(line.endswith(" ") for line in compact.splitlines()) and "Flag: stuck" in default and "Flag: stuck" not in compact
-    assert "Place: Kitchen aliases: kitchen" in default and "Place: Kitchen" in compact and "aliases:" not in compact
-
-
 def test_world_view_place_ranking_prefers_goal_overlap_and_keeps_duplicate_labels_unique(tmp_path):
     mem = Memory(tmp_path); place(mem, "here", "Town"); place(mem, "p_world", "Town"); place(mem, "goal", "Forest")
     place(mem, "recent", "Cave", first=9)
@@ -669,15 +646,14 @@ def test_loop_act_uses_world_facts_active_quests_and_labels(tmp_path, monkeypatc
     t1 = loop.notebook.heard(0, None, "Home", "Chest is in Home.")
     loop.notebook.apply_ops([{"op": "add", "key": "find_chest", "text": "Find Chest", "why": [t1]}, {"op": "top", "key": "find_chest"}], 0)
     seen = {}
-    monkeypatch.setattr(loop_module, "act", lambda *args, **kwargs: (seen.update(notebook=args[3], view=args[4], places=kwargs["places"]) or
+    monkeypatch.setattr(loop_module, "act", lambda *args, **kwargs: (seen.update(focus=args[2], options=args[3]) or
                       SimpleNamespace(place="Home", ops=[], action=None, expect="none", why="test", text=None)))
 
     loop.step()
 
-    assert "Top quest: Find Chest" in seen["notebook"] and "Chest is in Home" in seen["notebook"]
-    assert "Here: Home" in seen["view"] and "Thing" not in seen["view"]  # the ACT facts are compact: the options name the things
-    assert "Thing" in loop.world.view(loop._goal_text(), "home") and "chest" in loop.world.view(loop._goal_text(), "home").casefold()  # the planner's view keeps them
-    assert "Town [p_world]" in seen["places"] and "Town [p_world2]" in seen["places"]
+    assert "Goal: Find Chest" in seen["focus"] and "Chest is in Home" in seen["focus"]
+    assert "Here: Home" in seen["focus"]
+    assert any(row["label"].startswith("check Chest,") and row["action"] == {"thing": 1, "verb": "interact"} for row in seen["options"])
     assert mem.get("entities", "chest")["tier"] == "interest" and mem.get("entities", "oak")["tier"] == "landmark"
 
 
@@ -802,7 +778,7 @@ def test_anchor_stand_in_applies_only_while_anchor_unknown(tmp_path):
     _, tiles, _ = world.before(per, "room", "room", SIZE, 2)
     assert tiles[1] not in world.actor_tiles and tiles[2] in world.actor_tiles
 
-def test_probe_locks_after_a_move_and_here_flag_uses_tile_facts(tmp_path, monkeypatch):
+def test_probe_locks_after_a_move(tmp_path, monkeypatch):
     from agent import world as world_module
     from agent.skills import Ctx
     from tests.agent.fakes import StubModel
@@ -813,7 +789,6 @@ def test_probe_locks_after_a_move_and_here_flag_uses_tile_facts(tmp_path, monkey
     mem.upsert("tiles", {"id": "room@0,1", "place": "room", "x": 0, "y": 1,
                          "floor": True, "blocked": [], "pushed": [], "exit": None, "step": 1})
     world.self_spot = [.5, .5]  # legacy spot is present but has no motion evidence
-    assert world.here_flag() == "here: blocked RIGHT; open DOWN; untried UP, LEFT; self unlocked"
     original = world_module.press
 
     def lock_after_press(ctx, direction):
@@ -1031,19 +1006,6 @@ def test_view_exit_lines_say_status_and_the_dead_end_line_names_the_through_exit
     assert "E at (0,-2) north: possible exit, unverified (never crossed)" in c  # no destination known: no arrow
     assert "E at (1,2) not an exit: hatch (walked into 3×, steps 104–107)" in c and "E at (0,0) LEFT -> Room B used 1×" in c
     assert "Everything unexplored from here is through" not in c  # its own unverified exit is unexplored ground
-
-def test_here_flag_lists_failed_button_combos_and_drops_them_from_untried(tmp_path):
-    mem = Memory(tmp_path); world = World(mem, 16); world.current_place = "room"
-    mem.upsert("tiles", {"id": "room@0,0", "place": "room", "x": 0, "y": 0,
-                         "floor": True, "blocked": [], "pushed": [], "exit": None, "step": 1})
-    fails = {"room|buttons|up": {"n": 4, "why": "x", "step": 9, "act": "buttons UP A"},
-             "other|buttons|up": {"n": 1, "why": "x", "step": 10, "act": "buttons UP"}}
-    base = world.here_flag()
-    assert base == "here: blocked none; open none; untried UP, DOWN, LEFT, RIGHT; self unlocked"
-    assert world.here_flag({}) == base
-    flag = world.here_flag(fails)
-    assert "untried DOWN, LEFT, RIGHT;" in flag and "failed here: UP A x4; self unlocked" in flag
-
 
 def test_open_screen_edges_count_unseen_cells_past_them_until_seen(tmp_path):
     from PIL import Image, ImageDraw

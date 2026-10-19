@@ -11,7 +11,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.memory import Memory
-from agent.notebook import Notebook
+from agent.notebook import Notebook, _refs
 from agent.plan import REPLY, plan
 from agent.world import World
 
@@ -49,7 +49,6 @@ def _legacy_quest(row, world):
     check = q.get("check")
     raw_target = q.get("target") or (check.get("arg") if isinstance(check, dict) else None)
     q["target"] = world.ref(raw_target) if raw_target is not None else None
-    q["label"] = raw_target
     q.setdefault("opened", 0)
     q.setdefault("closed", None)
     q.setdefault("reason", "")
@@ -61,9 +60,10 @@ def notebook_at(run: Path, step: int) -> Notebook:
     run = Path(run)
     scratch = tempfile.TemporaryDirectory(prefix="eval-plan-")
     world = _world(run)
-    nb = Notebook(Path(scratch.name), ref=world.ref, canon=world.canon)
+    live = lambda kind: [f"{kind[:-1] if kind == 'places' else 'thing'}:{r['id']}" for r in world.mem.rows(kind) if r.get("state") != "merged"]
+    nb = Notebook(Path(scratch.name), ref=world.ref, canon=world.canon, label=world.label, refs=lambda: live("places") + live("entities"))
     nb._scratch = scratch
-    nb.data = {"text": [], "quests": [], "beliefs": {}, "last": {}}
+    nb.data = {"text": [], "quests": [], "last": {}}
     for event in _rows(run / "memory" / "notebook.history"):
         at = event.get("step", 0)
         if type(at) is int and at > step:
@@ -71,20 +71,23 @@ def notebook_at(run: Path, step: int) -> Notebook:
         op = event.get("op")
         if op == "quests" and isinstance(event.get("value"), list):
             nb.data["quests"] = [_legacy_quest(q, world) for q in event["value"] if isinstance(q, dict)]
-        elif op in ("add", "done", "drop", "top", "target", "observe") and isinstance(event.get("quest"), dict):
+        elif op in ("add", "done", "drop", "reopen", "top", "target", "observe") and isinstance(event.get("quest"), dict):
             q = event["quest"]
+            if op == "observe": q = {**q, "by": "observe"}  # recorded before observe marked its closures
+            if op == "target": q = {"retargeted": at, **q}
             prior = next((i for i, old in enumerate(nb.data["quests"]) if old.get("key") == q.get("key")), None)
             if prior is not None:
-                nb.data["quests"].pop(prior)
+                old = nb.data["quests"].pop(prior)
+                if "retargeted" in old: q = {"retargeted": old["retargeted"], **q}
             if op == "add" or prior is not None:
-                index = 0 if op == "top" else min(prior if prior is not None else len(nb.data["quests"]), len(nb.data["quests"]))
+                index = 0 if op in ("top", "reopen") else min(prior if prior is not None else len(nb.data["quests"]), len(nb.data["quests"]))
                 nb.data["quests"].insert(index, q)
-        elif op in ("belief", "believe", "refute"):
-            belief = event.get("value", event.get("belief"))
-            if isinstance(belief, dict) and belief.get("status") in ("held", "refuted"):
-                nb.data["beliefs"][belief.get("key", event.get("key"))] = belief
         elif op == "text" and isinstance(event.get("value"), dict):
-            nb.data["text"].append(event["value"])
+            row = event["value"]
+            if "who" not in row:  # recorded before heard() kept the speaker's ref: resolve the printed speaker
+                who = world.ref(row.get("speaker")) if row.get("speaker") else None
+                row = {**row, "who": who if str(who).startswith("thing:") else None}
+            nb.data["text"].append(row)
         elif op == "log":
             _text_from_log(event.get("text", ""), at, nb.data["text"])
         elif op == "last" and isinstance(event.get("value"), dict):
@@ -113,8 +116,7 @@ def _size(run):
         rendered = nb.render()
         section_starts = (("last_ops", "Your last ops ("), ("last_why", "Your last why:"),
                            ("open_quests", "Open quests (first is worked on now):"),
-                           ("closed", "Recently closed:"), ("held_beliefs", "Held beliefs:"),
-                           ("ruled_out", "Ruled out:"), ("game_text", "Game text:"))
+                           ("closed", "Recently closed:"), ("game_text", "Game text:"))
         lines = rendered.splitlines(keepends=True)
         starts = [(next((i for i, line in enumerate(lines) if line.startswith(marker)), len(lines)), name)
                   for name, marker in section_starts]
@@ -149,15 +151,18 @@ def _reply(raw):
 
 
 def _cite(nb, value, candidates=()):
-    refs = [value] if isinstance(value, str) else value if isinstance(value, list) else []
-    known = {row.get("key") for row in nb.data["text"]} | set(nb.data["beliefs"])
-    candidate_keys = {belief.get("key") for belief in candidates if isinstance(belief, dict)}
-    found = [key for key in refs if key in known | candidate_keys]
-    if found:
-        return found
-    return [belief.get("key") for belief in candidates if isinstance(belief, dict)
-            and belief.get("key") and any(ref in (belief.get("because") if isinstance(belief.get("because"), list)
-                                                  else [belief.get("because")]) for ref in refs)][:1]
+    """Resolve refs to text keys, following old belief keys through their because lists."""
+    pending = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+    beliefs = {belief.get("key"): belief for belief in candidates if isinstance(belief, dict)}
+    known = {row.get("key") for row in nb.data["text"]}
+    seen, found = set(), []
+    while pending:
+        ref = pending.pop(0)
+        if ref in seen: continue
+        seen.add(ref)
+        if ref in known: found.append(ref)
+        elif ref in beliefs: pending.extend(_refs(beliefs[ref].get("because")))
+    return found
 
 
 def _ops(run):
@@ -183,16 +188,6 @@ def _ops(run):
             omissions = [q.get("key") for q in prior.data["quests"]
                          if q.get("status") == "open" and q.get("key") not in returned]
             ops = []
-            for belief in beliefs:
-                key, status = belief.get("key"), belief.get("status", "held")
-                existing = prior.data["beliefs"].get(key, {})
-                if key not in prior.data["beliefs"] and status in ("held", "refuted", "revised"):
-                    ops.append({"op": "believe", "key": key, "text": belief.get("text", ""),
-                                "because": _cite(prior, belief.get("because"))})
-                    existing = {"status": "held"}
-                if existing.get("status") == "held" and status in ("refuted", "revised"):
-                    ops.append({"op": "refute", "key": key,
-                                "reason": belief.get("reason") or "recorded belief was revised"})
             for q in quests:
                 key = q.get("key") or q.get("id")
                 if key not in old:
@@ -218,6 +213,13 @@ def _ops(run):
             if omissions:
                 print(f"step {step}: omitted quests are no-ops: {', '.join(omissions)}")
         else:
+            kept = []
+            for op in ops:
+                if isinstance(op, dict) and op.get("op") in ("believe", "refute"):
+                    print(f"step {step}: skipped belief op {op.get('key')}")
+                else:
+                    kept.append(op)
+            ops = kept
             closed = {q.get("target") for q in prior.data["quests"]
                       if q.get("status") in ("done", "dropped") and q.get("target")}
             readds += sum(1 for op in ops if isinstance(op, dict) and op.get("op") == "add" and
@@ -270,7 +272,7 @@ def _observe(run):
             target = world.ref(item["target"]) or item["target"]
             nb.data["quests"].append({"key": f"observe_{item['kind']}_{n}",
                 "text": f"{item['kind']} {item['target']}", "why": [], "target": target,
-                "label": item["target"], "status": "open", "opened": opened,
+                "status": "open", "opened": opened,
                 "closed": None, "reason": None})
             activated.add(n)
 

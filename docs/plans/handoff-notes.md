@@ -1,61 +1,60 @@
 # Handoff notes
 
-Last written: 2026-10-15. RCR R1 offline gate passed on feat/lean-agent; the final live retry completed at the user's 80-step cap. Evidence: R1-identity.md §9 and MASTER.md §8.
+Last written: 2026-10-16. Resumed R3.2 passed; final R3.4 full suite has one assertion failure. Evidence: R3-decide.md §9 and MASTER.md §8.
 
 ## State of the code
-- S0 landed at d83bd9a; eligible R1 files are committed at d787836.
-- R1 provides geometry/track identity with aliases/kinds, position-based self exclusion, departure-only crossings, blocked-push exit truth, refs/canon/known/history and pixel-offset place closure.
-- Names no longer merge places; Memory.view/resolve/expire/add_edge and name/landmark identity paths are removed.
-- Loop's R1 changes are applied but remain unstaged alongside the user's live-view edits.
-- The golden changes exactly four memory files; its trace is unchanged.
-- First live run completed 150 rows without gameplay; one retry stopped at 5 rows on request; final retry runs/m1_rcr_r1_live_retry2 completed 80 rows and was scored.
+- Branch feat/lean-agent; HEAD dc4113f; live-view and R1/R4/R2 loop wiring committed at8fbe5eb.
+- Overseer fixed World.label(ref,place=None), four stale assertions and DECIDE; root R3.2 acceptance148/148 passed.
+- R3.4 removed remaining a.place in _live, completed script reply producers/callers, migrated owned OM test.
+- Root migrated remaining test_eval_act/test_loop/test_harness_reliability/test_world_golden callers and regenerated golden trace.
+- R3 gate PASS 10-19 on `runs/m1_rcr_baseline` (m1_bedroom_live lost 10-16): suite 612 passed/1 skipped (observer:160 needs the lost checkpoint), LV 20/20; `check_tracks.py m1_rcr_baseline --menu --first 1` exit 0, max prompt 1,909, dup 0, 74/74 steps. Off-screen remembered rows group by name (nearest of N). Next: R3.7 Phase D replay needs a ledger cap; S4 unmeasured offline.
+- R3.5 read-only prep only; check_tracks.py unchanged; R3.6/R3.7 not implemented.
+- All changes unstaged; index empty; no gate commit or push.
 
 ## Decisions in force
-- CLAUDE.md requires Ponytail full, CodeGraph before code reads/edits, Headroom for large output; the compression proxy is unreachable.
-- Every worker spawn explicitly used gpt-6-luna with reasoning high; all interrupted workers have finished.
-- Earlier bounded same-tier failure/retry history remains in R1 §9; no additional repair or runtime steering was introduced during finalization.
-- G8 was corrected by the user: inferred stairs remain unverified, retain destination/routability; the mat is verified by departure; phantom uses must be zero.
-- STATIC_GATE stays 1; no Q2 elimination logic, threshold tuning or perception prompt changes were needed.
-- Never stage files carrying live-view edits, never git add -A, never push.
-- The user authorized the final 80-step retry; it is complete. Do not start another live run or implement R4 as part of this R1 task.
+- CLAUDE: Ponytail full; CodeGraph first; Headroom large outputs; compression proxy unreachable.
+- CodeGraph MCP transport closed during resumed work; codegraph explore CLI works.
+- All workers explicitly spawned gpt-6-luna/high; interrupted R3.4/R3.5 resumed on user instruction.
+- R3.4 failed two root suite acceptances; extra final same-tier review received failure output and failed final acceptance.
+- Stop limit exhausted again; no more automatic repairs without a new user instruction.
+- Grouping approved, never applied; revert-on-S4 rule unexercised.
+- Phase D pre-approved but gate must pass; preserve all live-view hunks.
+- Never git add -A, stage uncommitted user LV hunks, or push; amendment permits R3 loop/test-loop at passing gate.
 
 ## Measured numbers
-- Earlier offline gate snapshot full suite: 658 passed, exit 0, 104.36 s; command PY -m pytest tests/agent -q -p no:cacheprovider -n auto.
-- Final replay: Mom/Pallet NPC 1/1 IDs, zero switches; corrected original-code comparator 3/1.
-- Pallet records/floor 39/69 (limit 86.25), zero unused same-class same-tile mints; original-code comparator 139/74 and 76.
-- Jitter p50/p95/max 0/2/3, distance-2 mints 11; replay diverges at 23 steps, first 76/85/86.
-- One place ID each for maps 38/37/0; phantom uses 0; mat 1 departure; stairs unverified to p_place_2; 2 bumped candidates refuted (2x/1x).
-- Agent delta: memory -99, world +95, R1-only loop -4, total -8; G10 prohibited-word scan clear.
-- Exact packet live-view acceptance: 47 passed before / 47 passed after, exit 0, 4.30 s.
-- Final live: 80 rows, 142 HTTP requests, 22 world rows from S49, 80/80 settled, zero stale/pending/timed-out; runner/scorer exit 0.
+- R3.1 isolated6passed; R3.3 focus4passed (initial attempt evidence).
+- Resumed R3.2 three files148passed, exit0,11.96s; .tmp/rcr/r3/resume-r3_2.log.
+- Root full suites:24failed587passed83.80s →1failed608passed73.29s → final1failed608passed110.80s; all exit1.
+- Final failure: test_loop.py:1488 rejects substring cause: inside required Because: heading; preceding failed-row evidence passes.
+- Last completed exact LV20passed, exit0,15.12s; .tmp/rcr/r3/resume-lv-1.log.
+- Concurrent final LV rerun interrupted after startup, exit1/no result; resume-lv-final.log; do not claim it passed.
+- Both eval script --help checks exit0; loop legacy-act grep0matches.
+- Golden regeneration1passed14.38s: only8trace rows changed, memory unchanged;8steps/15modelasks; W0_REGEN cleared.
+- S10 agent4063→3988 net−75; S1–S9/S11–S14 post-R3 unmeasured, replaycoverage0.
+- Protected hashes10/10unchanged; loop live methods3/4unchanged (_live canonical-place fix); test-loop live2/2unchanged.
+- Generality added-agent scan0matches; no agent cloudcalls; ledger4027total/3977M1/50smoke,788remaining.
 
 ## Environment and gotchas
-- PY is .venv-agent/Scripts/python.exe -B; TEMP/TMP use .tmp/rcr1/tmp.
-- Final live evidence: .tmp/rcr1/live-retry2.log, live-retry2-eval.log; runs/m1_rcr_r1_live_retry2/summary.json.
-- Final gate logs: .tmp/rcr1/finalize-suite.log, finalize-tracks.log, finalize-places.log, finalize-exits.log.
-- Corrected original-code replay uses .tmp/rcr1/before_replay.py without reverting working-tree files.
-- Only five baseline checkpoints exist (0/25/50/75/100); retain the 23-step replay divergence caveat.
-- The replay floor uses matched-record first kind, changing its denominator 74 to 69; it is not an independent perception floor.
-- Viewer /state on 127.0.0.1:8765 returned HTTP 200 before the live run.
-- The frozen runner classifies names without m1 into smoke; .tmp/rcr1/live_launcher.py routes this approved run to M1, preserving source/options/output path and caps 4815/4765/400.
-- First-run ledger 3756/3708/48 to 3762/3714/48; final direct-run retry ledger 3786/3736/50 to 3928/3878/50 (total/M1/smoke); 887 requests remain under unchanged caps.
-- eval_run.py does not emit S4 or S7; repeated_mistakes is not S4, and place/edge counts are not S7 transition steps.
+- PY=.venv-agent/Scripts/python.exe -B; PT adds -m pytest -q -p no:cacheprovider -n auto.
+- Every shell uses R3 packet TEMP/TMP prefix pointing at .tmp/rcr/r3/tmp.
+- Evidence logs all .tmp/rcr/r3/; final full suite resume-full-final.log; audit resume-final-audit.log.
+- Viewer previously returned HTTP200; runs/rcr_r3_live not created.
+- Frozen runner routes non-m1 names to exhausted smoke bucket; future approved live needs prior funded-M1 launcher approach without raising caps.
+- Requested clean boot150steps/400calls and replaycap20/fallbacks not run; no launcher created.
 
 ## Deviations from plan and contracts
-- R1.5/R1.6 acceptance was combined to retire callee/caller together without compatibility code.
-- Root removed an obsolete Memory.view assertion and updated two old non-live track expectations; workers stayed inside owned files.
-- Root modified only MASTER §8 under the user's explicit request; contracts.md is untouched, with its gate-approved proposal in R1 §9.
-- R1 hunks left unstaged: agent/loop.py, tests/agent/test_loop.py, tests/agent/test_track.py; all original live-view additions and live test functions remain present.
-- All 18 protected hashes match the final retry baseline .tmp/rcr1/retry2-protected-before.json; subsequent user runtime fixes are preserved and fingerprinted.
-- No push occurred; MASTER and this handoff remain unstaged.
+- Root additional migrations: test_loop/test_trace_brief/test_harness_reliability/test_eval_act/test_world_golden; workers stayed in card files.
+- Two tests/fixtures for deleted non-OM free/image CLI mode removed; golden uses strict numbered reply/follow-up path.
+- _live's only change is canonical label replacing removed Act.place; all frozen runtime/perception files unchanged.
+- contracts.md untouched; provisional built contracts and full per-file net deltas in R3 §9.
+- R3.4 final same-tier worker recommended fixture helper; root applied unowned test-only patch, no worker scope expansion.
 
 ## Do not retry
-- Do not tune STATIC_GATE or weaken gates to hide the replay limitations.
-- Do not regenerate the golden beyond the reviewed memory-only changes.
-- Do not treat missing live samples or S3's zero duplicate proxy as proof of live identity improvement.
+- Do not apply another test/source correction automatically or label this gate green.
+- No R3.5 edits/R3.6/R3.7/live until gate passes; no staging/commit for failed gate.
+- Do not cap rows, patch duplicate labels, tune perception or weaken invariants.
 
-## Open issues for R4
-- Preserve R1's departure-only exit invariant and stable references when implementing the R4 packet.
-- Review replay divergence, actor coverage and the record-class-dependent floor before generalizing offline measurements.
-- Final live S1/S2/S7 are unmeasured: no NPCs, Pallet or inter-map transitions; map 38 has one place p_place. S3 proxy 0 over 0 tile groups is inconclusive.
-- Final live repeated_mistakes is 3/80, not S4; S4 requires failed-option/alternative evidence not emitted by eval_run.py.
+## Open issues for R3
+- test_loop.py:1488 should check complete cause: lines, not substring inside Because:; suggestion recorded only.
+- Final exact LV command did not finish; latest completed20/20 and final full suite isolate the remaining failure outside LV.
+- Later authorized continuation: finish R3.4 acceptance, R3.5 offline menu, R3.6 grouping, gate/commit, R3.7 replay, requested live scorecard.
