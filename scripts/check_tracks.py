@@ -138,11 +138,26 @@ def _exits(run):
         print(f"phantom verified exits without departure={phantom}")
         return exits
 
-def menu(run, steps=None, first=1, dump=None):
+def capped(model, cap, charge=None):
+    """R3.7: every network request of model (retries and follow-ups too) is charged to the M1 ledger and refused beyond cap; cache hits never post."""
+    from scripts import run_agent
+    charge = charge or (lambda: run_agent._ledger(Path("runs/m1_rcr_r3_live"), None, cap))
+    post, model.requests = model._post, 0
+    def guarded(payload):
+        if model.requests >= cap: raise run_agent.CallCap(f"R3.7 request cap {cap}")
+        charge(); model.requests += 1
+        return post(payload)
+    model._post = guarded
+    return model
+
+def menu(run, steps=None, first=1, dump=None, live=(), cap=20, model=None):
     """Offline (0 requests): per recorded step, the act prompt and its option rows; checks duplicates, name lists, unacted rows, failed-before-new order."""
     src = Path("runs") / run; trace = {r["step"]: r for r in _jsonl(src / "trace.jsonl")}
     if dump: Path(dump).mkdir(parents=True, exist_ok=True)
-    last, per_step, fails, st = steps or max(trace), [], {}, {"prior": None}
+    last, per_step, fails, st, picks = steps or max(trace), [], {}, {"prior": None}, []
+    if live and model is None:
+        from agent.model import Ollama; from scripts.run_agent import MODEL
+        model = capped(Ollama(MODEL, cache_dir=Path(".cache/model")), cap)
     def on_step(s, row, per, truth, env, world):
         if not row: return
         place = row.get("place")
@@ -174,7 +189,17 @@ def menu(run, steps=None, first=1, dump=None):
                 "chars": len(sent[0]) if sent else 0, "order": int(order_bad)}
         per_step.append(stat)
         print(f"{s} {stat['rows']} {len(dups)} {len(names)} {stat['chars']} {stat['order']}")
-        if dump: (Path(dump) / f"{s}.txt").write_text(sent[0] if sent else "", encoding="utf8")
+        if dump:
+            (Path(dump) / f"{s}.txt").write_text(sent[0] if sent else "", encoding="utf8")
+            (Path(dump) / f"{s}.json").write_text(json.dumps([{k: o.get(k) for k in ("n", "label", "state", "tool", "intent_key")} for o in options]), encoding="utf8")
+        if s in live:  # R3.7: the same prompt, once through the real (cached, capped) model
+            new = any(o["state"] == "new" and o["tool"] != "buttons" for o in options)
+            try:
+                res = ask_act(model, per, focus, options, list(env.inputs()), "")
+                o = options[res.option - 1] if res.option else {}
+                picks.append({"step": s, "n": res.option, "label": o.get("label"), "state": o.get("state"), "new": new, "why": res.why})
+            except Exception as e: picks.append({"step": s, "error": f"{type(e).__name__}: {str(e)[:100]}", "new": new})
+            p = picks[-1]; print(f"live {s} pick {p.get('n')} [{p.get('state')}] {p.get('label') or p.get('error')} | {str(p.get('why', ''))[:100]}")
         intent, result = (row.get("choice") or {}).get("intent"), row.get("verdict")
         if intent and result in ("failed", "no_change"):  # ponytail: fails from trace verdicts only; Loop.fails also holds planner history
             f = fails.setdefault(intent, {"n": 0}); f.update(n=f["n"] + 1, why=f"verdict {result}", step=s)
@@ -188,8 +213,11 @@ def menu(run, steps=None, first=1, dump=None):
         for l in p["dups"] + p["names"]: print(f"  offender step {p['step']}: {l}")
     print(f"summary steps {len(per_step)}/{len(in_range)} rows max={max(rows, default=0)} mean={statistics.mean(rows) if rows else 0:.1f} max_chars={chars} dup={dup} namelist={name} noaction={noact} crashes={len(crashes)} {crashes[:10]} order_steps={len(bad_order)} {bad_order[:10]}")
     code = int(chars > 2000 or bool(dup or name or noact or crashes or bad_order))
+    if live:
+        s4 = [p["step"] for p in picks if p.get("state") == "failed" and p["new"]]
+        print(f"live steps {len(picks)} requests {getattr(model, 'requests', '?')} (cap {cap}) failed-while-new picks {len(s4)} {s4} errors {sum('error' in p for p in picks)}")
     print(f"exit {code}")
-    return {"steps": per_step, "exit": code}
+    return {"steps": per_step, "exit": code, "picks": picks}
 
 def check(run, steps=None, baseline=False, first=51, places=False, exits=False):
     if exits: return _exits(run)
@@ -197,7 +225,7 @@ def check(run, steps=None, baseline=False, first=51, places=False, exits=False):
     return _default(run, steps, baseline, first)
 
 if __name__ == "__main__":
-    a = argparse.ArgumentParser(); a.add_argument("run"); a.add_argument("--steps", type=int); a.add_argument("--first", type=int, default=51, help="a checkpoint step + 1"); a.add_argument("--baseline", action="store_true"); a.add_argument("--places", action="store_true"); a.add_argument("--exits", action="store_true"); a.add_argument("--menu", action="store_true", help="offline act-prompt check, 0 requests"); a.add_argument("--dump", help="write each step's act prompt to DIR/<step>.txt")
+    a = argparse.ArgumentParser(); a.add_argument("run"); a.add_argument("--steps", type=int); a.add_argument("--first", type=int, default=51, help="a checkpoint step + 1"); a.add_argument("--baseline", action="store_true"); a.add_argument("--places", action="store_true"); a.add_argument("--exits", action="store_true"); a.add_argument("--menu", action="store_true", help="offline act-prompt check, 0 requests"); a.add_argument("--dump", help="write each step's act prompt to DIR/<step>.txt"); a.add_argument("--live", action="store_true", help="R3.7: send the --only steps' prompts to the real model"); a.add_argument("--only", default="", help="comma-separated steps for --live"); a.add_argument("--cap", type=int, default=20, help="request cap for --live, retries included")
     a = a.parse_args()
-    if a.menu: raise SystemExit(menu(a.run, a.steps, a.first, a.dump)["exit"])
+    if a.menu: raise SystemExit(menu(a.run, a.steps, a.first, a.dump, {int(x) for x in a.only.split(",") if x} if a.live else (), a.cap)["exit"])
     check(a.run, a.steps, a.baseline, a.first, a.places, a.exits)

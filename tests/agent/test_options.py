@@ -437,3 +437,16 @@ def test_failed_rows_follow_new_rows_and_free_buttons_stay_last(tmp_path):
     ranks = [{"new": 0, "worked": 1, "failed": 2}[o["state"]] for o in opts[:-1]]
     assert "failed" in [o["state"] for o in opts] and ranks == sorted(ranks)
     assert opts[-1]["tool"] == "buttons" and [o["n"] for o in opts] == list(range(1, len(opts) + 1))
+
+def test_live_menu_charges_every_request_and_refuses_beyond_the_cap():
+    import pytest
+    import scripts.check_tracks as ct
+    from scripts.run_agent import CallCap
+    class Stub:  # like Ollama: every ask that misses the cache posts once
+        def _post(self, payload): return {"i": 1}
+        def ask(self, system, user, images=(), schema=None, *, role=""): return SimpleNamespace(data=self._post({"role": role}))
+    charged = []
+    model = ct.capped(Stub(), 2, charge=lambda: charged.append(1))
+    model.ask("s", "u", role="act"); model.ask("s", "u retry", role="act")  # a retry is a request too
+    with pytest.raises(CallCap): model.ask("s", "u", role="act")
+    assert model.requests == 2 and len(charged) == 2

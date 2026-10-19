@@ -543,6 +543,38 @@ Do not merge this as a passed contract.
   - Duplicates, name lists, rows without an action, crashes and failed-before-new are all **0**.
 - **Gate PASS.** Committed the shared tree (R1, R2 and R3 amendments plus docs). Next: Phase D (R3.7 `--menu --live --cap 20`) needs the user's ledger cap; S4 (failed re-picks) is unmeasured offline because the baseline trace has no failed verdicts.
 
+### R3.7 Phase D model replay (10-19, user-approved via coordinator): step list, fixed before any request
+
+- Code: `scripts/check_tracks.py RUN --menu --live --only STEPS --cap N`. The replay is unchanged; each `--only` step's exact act prompt goes once through the cached `Ollama(run_agent.MODEL)` (role `act`). `capped()` charges every network request (retries and buttons follow-ups too) to the M1 ledger (`run_agent._ledger`) and raises `CallCap` beyond `--cap`; cache hits never post. `--dump` also writes each step's rows (`<step>.json`). Test: `test_live_menu_charges_every_request_and_refuses_beyond_the_cap` (stub model).
+- Step rule, re-derived for `runs/m1_rcr_baseline` (offline `--dump` rows, `r37-offline.log`): a re-pick step is one where the recorded act made a wasted approach (failed, or a repeat of a failed intent) and the replayed menu shows a `failed` row beside `new` rows, so the S4 proxy can trigger. Replayed menus show failed rows only on steps 48-51, 53-59 and 67-74.
+  - **Re-pick steps (8):**
+    - 53 tiled room (failed);
+    - 56 cabinet (failed);
+    - 67 unexplored (repeat of failed intent 63);
+    - 68 unexplored (failed);
+    - 70 shelving unit (failed);
+    - 71 shelf (failed; its row is already `failed`);
+    - 73 computer (failed);
+    - 74 computer (repeat of failed 73; row `failed`).
+  - Candidates 65 and 66 are excluded: they were first failures, so their menus have no failed row to avoid.
+  - **Controls (4):**
+    - 41 dialogue advance (right = advance);
+    - 39 talk to the person on the first try (right = talk to person);
+    - 69 the door exit that crossed into the next place (right = the door row);
+    - **52** Pallet, where the old pick walked back home (reported separately).
+- Score: S4 proxy = re-pick steps where the model picks a `failed` row while a `new` row exists; **target ≤ 2 of 8**. Controls must stay right. Budget: 12 steps, `--cap 20`. Ablation (flat vs grouped) only if S4 misses, and only after asking the coordinator.
+
+### R3.7 result (10-19)
+
+- Command: `PY scripts/check_tracks.py m1_rcr_baseline --menu --first 1 --live --only 39,41,52,53,56,67,68,69,70,71,73,74 --cap 20 --dump .tmp/rcr/r3/prompts-live` (`r37-live.log`). **12 requests** (cap 20), 0 errors. Ledger **4,144 → 4,156** total (M1 4,094 → 4,106).
+- **S4 proxy: 0 of 8 re-pick steps** picked a `failed` row while a `new` row existed (target ≤ 2): **PASS**. Every re-pick step picked a `new` row. At 71 and 74 the recorded pick's own row was `failed`, and the model chose a new row instead. Grouping stays; no ablation was run.
+- **Controls: 1 of 3 right.**
+  - 41: advance (right).
+  - 39: "check desk, here" instead of "talk to person" (option 1); the replayed goal is "(none)" at that step.
+  - 69: "check computer" instead of the door; the goal still says "Explore the tiled room for items or further information", which the pick follows.
+- **S52 (reported separately):** picked "check house, 2 up". The old "walk back home" did not recur, and no place row for home is offered. The goal is the stale "Explore the tiled room…" while the player stands outdoors in place 3.
+- **Caveat:** the offline replay's focus is thinner than a live run's: `Because:` and `Recent:` are empty in every replayed prompt, and goals come from `notebook_at`. The control misses mostly track goal context, not the menu. The 150-step live run (coordinator) is the real check for S4, the controls, and S52.
+
 ## 10. Handoff notes
 
 Rewrite `docs/plans/handoff-notes.md` per `_template.md` §10: under 80 lines, fixed headings, one fact per bullet with a number, a command or a `file:line`.
