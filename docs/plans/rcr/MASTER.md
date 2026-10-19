@@ -247,6 +247,38 @@ S0 builds S1-S3, S5, S6, S8, S11 and S14 into `eval_run.py`, reusing `_entity_du
     - `world.after` uses an exact-tile lookup, which missed; 1F's position had drifted 1 tile.
     - `pos = arrive or (0, 0)` (world.py:375) then re-rooted the bedroom at the stairs. Result: computer ×3, desk ×2, and a wrong reverse exit written.
 
+### Phase D (10-19): R3.7 replay and post-R3 live run `runs/m1_rcr_post_r3` (3db80df, clean boot, 150 steps)
+
+- **R3.7:** 12 requests. S4 proxy 0 of 8; grouping stays and no ablation ran. Controls 1 of 3, but the replay's focus is thin. At S52 the agent no longer walks home.
+- **Live run:**
+  - 150 rows, 280 HTTP requests: perceiver 87, act 142, plan 38, skill 13. Ledger 4156 → 4436, 379 left.
+  - Reached Pallet (map 0) at **S98**; the baseline only stepped out for 1 step. Places: 1 id per map (bedroom p_place_2, 1F p_place_3, Pallet p_place_4).
+  - Then it bounced between 1F and Pallet through its own front door (S98-S139). It never found the route north.
+- **Scorecard:**
+
+  | Metric | Result | Note |
+  |---|---|---|
+  | S1 | Pallet NPC **4 ids**, Mom 2 (one is a chair proximity join) | regression vs offline |
+  | S2 | **58** Pallet records in the first 30 steps | S0 baseline 155 |
+  | S3 | 1 | |
+  | S5 | 0 false, 7 closures | |
+  | S6 | 0 of 14 mis-scored | |
+  | S8 | act **3,008** (> 2,000), planner 4,102 | |
+  | S11 | 0 | |
+  | S14 | 0 | |
+  | repeated mistakes | 1 | |
+
+- **Root causes found (not fixed):**
+  1. **Dead-loop at S144-150.**
+     - Option 17, "go to house, not on screen", produced `go_to thing:e_house`, then choice None, 0 inputs, `unobservable`.
+     - No failure was recorded, so the next prompt was identical. The cached act reply repeated it for 7 steps.
+     - Two faults: an off-screen remembered row whose action does not execute (R3 grouping / R1 resolve), and a zero-input step scored `unobservable` instead of `failed` (R4 result).
+  2. **Intro planner waste:** 17 plan calls at S1-S49, all `add` errors "why must cite game-text keys, none". The Oak intro became t-lines only at S53. T5 "no open quest" fires on title screens, and R2's cite rule makes `add` impossible there (R2 / R4 trigger).
+  3. **Quests close instantly.**
+     - The planner sets `target` to the place it is already in, or the thing it stands on, and `observe` closes the quest at once: q2-q4, q6, and q5 via the door mat "talked".
+     - `target` is read as "done when here", but the planner uses it as "where to work". R2 contract.
+  4. **S8 live:** the Pallet menu has 41 rows: 27 off-screen or remembered rows, walls and hedges perceived as exits, and a "dialogue box" thing. The 1,909-character offline gate did not cover outdoor scenes (R3, plus perception of exits).
+
 ## 9. Deletion ledger
 
 | Section | Planned removals (Phase A) | Net lines | Commit |
