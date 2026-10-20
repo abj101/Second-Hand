@@ -92,11 +92,10 @@ There are three causes. Status per item is in §3 and R3-decide.md §9.
 `targets=tuple(t for t in [next((q.get("target") for q in self.notebook.data["quests"] if q.get("status") == "open" and q.get("target")), None)] if t)`
 Add one loop test: an off-screen, history-less static quest target is still offered.
 
-**B. Prove the step-144 dead loop is closed.**
-- At step 144, a `go_to` whose `World.plan` is None set `action = None` at loop.py ~176, and nothing was recorded.
-- R4's `idle` path should now record it under `pick_key` with why "did nothing".
-- Add a loop test: a picked `go_to` row whose plan is None gives verdict `failed` and a `fails[pick_key]` entry, and the next menu shows that row under "Failed here".
-- If the test fails, record the failure at loop.py ~176 with stage "route" and reason "no known route", like a blocked route. Do not hide the row.
+**B. Step-144 dead loop: DONE (R4, in 49d8b82).**
+- `test_an_option_whose_action_never_resolves_lands_in_fails_under_its_own_key` proves that a `go_to` that never resolves lands in `fails` under the option's key.
+- An offline replay of post_r3 S1-S52 shows 2 plan calls (S17, S35), both with citable text, against 18 at HEAD.
+- Nothing to do here except watch it in the confirmation run.
 
 **C. Known gap, leave unless cheap.** `reachable` only checks off-screen rows. On-screen and exit rows are not reachability-checked; B's failure recording covers them.
 

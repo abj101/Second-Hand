@@ -583,3 +583,28 @@ print(f'wrote {len(out)} rows; surprises={sum(r["verdict"] == "surprise" for r i
 **Preservation and gate commit scope:** all ten protected live function/test snapshots match exactly; the other original modified tracked files are unchanged apart from the independently updated MASTER R1 row, which was retained (`gate-final-audit.log`). The Git index was empty before gate staging. Live-view functions and observation fields are preserved; the packet's separate legacy migration/cycle code is retired. The latest suite validates cancellation/stamps/staleness. Files with live work **must remain unstaged**: `agent/loop.py`, `agent/observer.py`, `tests/agent/test_loop.py`, `tests/agent/test_observer.py`, `tests/agent/test_run_provenance.py`, plus all other original live-view files. MASTER, handoff notes and live-view documentation are not part of this commit.
 
 Eligible changed files for gate commit `R4: gate PASS (648 tests)`: `agent/tasks.py`, `agent/predict.py`, `agent/skills.py`, `agent/world.py`, `agent/memory.py`; `tests/agent/test_predict.py`, `test_tasks.py`, `test_skills.py`, `test_world.py`, `test_options.py`, `test_harness_reliability.py`, deleted `test_patterns.py`; the user-authorized `scripts/eval_run.py` and `tests/agent/test_eval_run.py`; the fixture and three approved golden files named above (force-add exact paths); and this packet. The gate validates the **combined working tree**; the eligible commit alone deliberately excludes the LIVE-shared implementation and cannot be advertised as a clean-checkout suite result. No push is authorized or performed. Stop after the commit and this Result; R2/R3 and a live run are not started.
+
+## 9. Phase D amendment (10-19): fixes from the post-R3 live run
+
+Source: `runs/m1_rcr_post_r3` (3db80df), MASTER §8 "Phase D (10-19)". Uncommitted, in `agent/loop.py` and `tests/agent/test_loop.py` only. Suite **629 passed, 1 skipped** (`-n auto`); LIVE 11 + 12 passed.
+
+- **A. A zero-input option is a failure** (dead loop S144-150: `go_to thing:e_house` executed nothing, scored `unobservable`, same prompt 7×).
+  - `agent/loop.py:288`: `idle` = an option was picked, 0 inputs were sent, and the skill still says `done`. Such a step scores `failed`. Blocked and refused steps keep their own reason.
+  - `:316`: the failure's why is "did nothing". `:323-324`: when the pick never became an action (choice None), the fail is recorded under the option's own `intent_key`, kept in the step state as `pick_key`. The menu's notes then change.
+  - Tests: `test_a_picked_option_that_sends_no_input_lands_in_fails`, `test_an_option_whose_action_never_resolves_lands_in_fails_under_its_own_key`.
+- **B1. T5 "no open quest" fires once per no-quest period** (17 plan calls on S1-S49).
+  - `:43`: a `t5_armed` flag that starts False; nothing heard means nothing a plan could cite. `:441`: T1, T2 or T3 arms it. `:482`: T5 fires only when armed, then disarms. `:487`/`:508`: saved in state and restore.
+  - Test: `test_no_open_quest_fires_once_until_a_new_event`, which replaces the "every 3 steps" test.
+- **B2. Dialogue becomes citable off the world screen** (Oak's intro was only heard at S53).
+  - `:355`: a conversation ends when its screen kind or place changes, e.g. dialogue → menu, not only → world. `:365` records the screen kind.
+  - Menu, title and keyboard text stays knowledge only.
+  - Test: `test_dialogue_ends_when_its_screen_kind_changes`.
+- **Deviation accepted by the coordinator:** T5 re-arms on any new T1/T2/T3, so it can fire again whenever new text arrives. The original acceptance was "at most once on S1-S52".
+- **Offline evidence:** replay of S1-S52 through the real `_learn`/`_plan_trigger` with cached perceiver replies (scratch `replay_t5.py`).
+  - Now: 2 plan calls, S17 (1 t-line) and S35 (2 t-lines), against 2 new-text events.
+  - HEAD: 18 calls, all with 0 t-lines.
+- **Golden:** I regenerated `w0_golden/act/trace.jsonl`. It differs from HEAD only in the `plan` fields: the empty T5 plans at S1 and S7 are gone, and S2 now plans on its T2.
+- **Open for the next live run:**
+  - intro plan calls ≤ new-text events;
+  - none end with the "none heard yet" error;
+  - no option repeats after scoring "did nothing".
