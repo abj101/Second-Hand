@@ -110,3 +110,17 @@ Each item is one change, with `.venv-agent/Scripts/python.exe -B -m pytest tests
 - Don't change `agent/perceive.py` prompts.
 - Line counts are report-only.
 - Report exact command output.
+
+## 9. Review of c82abcc (2026-10-20, coordinator)
+
+The code is accepted. Both reported gate failures were mistakes in this plan's gate, not in the code.
+
+| Reported fail | Verdict |
+|---|---|
+| S138 prompt `Goal: (none)` / `Here: place 5` | **The gate was wrong.** (1) U1 closes q4 *at* S138, the step its target is set, so the S138 act prompt correctly has no open goal; the bar contradicted U1. (2) `check_tracks --menu` rebuilds memory from perception alone. It never runs the loop's effect path, so it has no `leads_to` relations and uses its own place labels. It cannot show U3. **The replacement check passes on the run's own memory** (copied to `.tmp/blv`, 0 calls): `World.here("p_place_5")` = `room with counters, entered through large house`; a q4 targeting `thing:e_large_house` renders `(done when: you enter large house)`; `here()` costs about 0.2 ms. |
+| Game-word grep, 12 hits | **The pattern was wrong.** `lab` matches `label`. Use `rg -niw 'oak\|mom\|pallet\|pokemon\|bedroom\|kitchen\|rug\|lab' agent/`. |
+| q4 closes "again" at S141 in the replay | This is a replay artifact of `eval_plan` re-applying recorded quest snapshots. A live `target` op on a closed quest returns "key is not open" (notebook.py ~113). Logged, not a blocker. |
+
+**Known limits for the live run:**
+- `e_shelf_2 leads_to p_place_3` is still live. It only loses support (`con`) on a future completed interact; in this run it closes nothing.
+- `World.beside` checks the 4 neighbours of the thing's single stored tile. A multi-tile building's centre neighbours can be inside its footprint, so "check large house" may end `route blocked`. That is recorded honestly and is not a zigzag.
