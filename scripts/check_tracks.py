@@ -184,9 +184,10 @@ def menu(run, steps=None, first=1, dump=None, live=(), cap=20, model=None):
         dups = [l for l in labels if labels.count(l) > 1]
         names = [l for l in labels if any(sep in l.partition(",")[0] for sep in (" or ", " and ", "/"))]
         order_bad, failed_seen = False, False
-        for o in options:  # ponytail: rule as stated for R4 (free buttons excluded)
-            if o["tool"] == "buttons": continue
-            failed_seen |= o["state"] == "failed"; order_bad |= o["state"] == "new" and failed_seen
+        if row.get("screen") == "world":
+            for o in options:  # ponytail: rule as stated for R4 (free buttons excluded)
+                if o["tool"] == "buttons": continue
+                failed_seen |= o["state"] == "failed"; order_bad |= o["state"] == "new" and failed_seen
         stat = {"step": s, "rows": len(options), "dups": dups, "names": names, "noaction": sum(o["tool"] != "buttons" and o["action"] is None for o in options),
                 "chars": len(sent[0]) if sent else 0, "order": int(order_bad)}
         per_step.append(stat)

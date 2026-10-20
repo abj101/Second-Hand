@@ -1138,7 +1138,8 @@ class World:
         if target["kind"] == "exit":
             exit_record = target.get("exit") or {}
             push = next((door.get("dir") for door in exit_record.get("doors", []) if tuple(door["tile"]) == tile and door.get("dir")), None) or exit_record.get("dir") or outward(self.mem, p, tile)
-            legs.append({"place": p, "dirs": dirs + [push], "push": None, "expect": exit_record.get("to") or "exit", "exit_tile": tile, "target": target})
+            if exit_record.get("to"): legs.append({"place": p, "dirs": dirs + [push], "push": None, "expect": exit_record["to"], "exit_tile": tile, "target": target})
+            else: legs.append({"place": p, "dirs": dirs, "push": push, "expect": None, "cross": True, "exit_tile": tile, "target": target})
         else: legs.append({"place": p, "dirs": dirs + ([facing] if facing else []), "push": None, "expect": None, "target": target})
         return legs
     def travel(self, ctx, legs, step, trace=None):
@@ -1147,7 +1148,7 @@ class World:
             if inputs >= TRAVEL_MAX_INPUTS: break
             if leg["place"] != place: return self._travel_result(results, "blocked", f"leg {n} unexpected place", ctx)
             result = approach(replace(ctx, max_inputs=min(ctx.max_inputs, TRAVEL_MAX_INPUTS-inputs)), self.pa, self.pa,
-                              exit_target="exit" if leg.get("expect") else None, route={"dirs": leg["dirs"], "push": leg.get("push")})
+                              exit_target="exit" if leg.get("expect") or leg.get("cross") else None, route={"dirs": leg["dirs"], "push": leg.get("push")})
             if result.failure: result = replace(result, failure={**result.failure, "place": place})
             results.append(result); inputs += result.inputs
             # the skill checks every press for a cut; first vs last frame of a long walk is a scroll, not a cut (m1_decide2 replay step 42)
