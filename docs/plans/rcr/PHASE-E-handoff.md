@@ -2,6 +2,8 @@
 
 Written 2026-10-19 by the RCR coordinator, and meant to be read without any other doc. The planning sessions have stopped. The rest of the work (one small fix, a gate, one live run, closing the program) is done outside Claude, for example in ChatGPT or Codex.
 
+**Subagents (user rule):** do all execution through **gpt6-luna subagents at High effort**. That covers code edits, tests, offline checks, the live run and scoring. Keep the main session for coordination: hand each subagent one step from §6 together with §2 and §9 of this brief, check what it reports against the real command output, and decide the next step. Don't run execution steps in the main session, and don't use any other model or effort level.
+
 **If you cannot run commands** (plain chat): ask the user to run each command in §6 and paste the output back. Never guess a result. A step is done only when its output has been seen.
 
 ## 1. What this project is
