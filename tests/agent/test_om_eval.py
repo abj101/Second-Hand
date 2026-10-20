@@ -171,7 +171,8 @@ def test_om_act_size_measures_the_act_prompt_with_a_capturing_stub_and_no_reques
     nb = eval_act.Notebook(tmp_path / "memory")
     option = {"n": 1, "tool": "approach", "label": "approach door", "action": {"thing": 1}, "notes": []}
     world = type("World", (), {"options": lambda self, per, place, fails, step, inputs: [option],
-                               "label": lambda self, ref: str(ref), "place_label": lambda self, place: "Room"})()
+                                   "label": lambda self, ref: str(ref), "place_label": lambda self, place: "Room",
+                                   "here": lambda self, place: self.place_label(place)})()
     loop = type("Loop", (), {"prev": {"screen": "world", "text": ["hello"]}, "notebook": nb, "world": world, "place": "p1", "fails": {},
                               "step_no": 100, "game": "pokemon_red", "_goal_text": lambda self: "goal"})()
     env = type("Env", (), {"closed": False, "inputs": lambda self: eval_act._INPUTS, "close": lambda self: setattr(self, "closed", True)})()

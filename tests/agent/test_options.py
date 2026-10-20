@@ -82,6 +82,20 @@ def test_dialogue_over_furniture_and_npc_offers_no_select(tmp_path):
     assert labels == ["advance", "cancel", BUTTONS]
 
 
+def test_leads_to_history_note_on_thing_option_from_source_and_destination(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, [{"name": "building", "kind": "building", "at": at(1, 0)}])
+    ident = ids(world, per)["building"]
+    mem.upsert("relations", {"id": "building-hall", "s": ident, "p": "leads_to", "o": "hall", "src": "observed", "sup": 3, "con": 1, "ev": [10, 20, 30], "state": "live", "step": 30})
+    mem.upsert("relations", {"id": "building-hall-other", "s": ident, "p": "seen_at", "o": "hall", "src": "observed", "sup": 4, "con": 0, "ev": [11, 21, 31, 32], "state": "live", "step": 32})
+
+    def building_row(place):
+        return next(row for row in world.options(per, place, {}, 31, inputs=INPUTS) if row["ref"] == f"thing:{ident}")
+
+    assert "leads to Hall 3×" in building_row("room")["notes"]
+    assert "leads to Hall 3×" in building_row("hall")["notes"]
+
+
 def test_dialogue_offers_select_only_for_flagged_yes_and_no(tmp_path):
     labels = labels_on(tmp_path, [{"name": "yes", "kind": "menu_item", "at": [.3, .4], "selectable": True}, {"name": "no", "kind": "menu_item", "at": [.3, .6], "selectable": True},
                                   {"name": "television", "kind": "furniture", "at": [.8, .3]}, {"name": "dialogue_box", "kind": "dialogue_box", "at": [.5, .9]}], "dialogue")
@@ -407,6 +421,7 @@ def test_menu_check_counts_rows_and_flags_duplicate_labels(tmp_path, monkeypatch
         def before(self, *args): pass
         def label(self, ref, place=None): return "x"
         def place_label(self, place): return "Room"
+        def here(self, place): return self.place_label(place)
         def options(self, per, place, fails, step, inputs=(), targets=()):
             seen.append((step, {k: dict(v) for k, v in fails.items()}))
             talk = {"tool": "approach", "label": "talk to Mom", "action": {"go_to": "mom"}, "state": "new"}

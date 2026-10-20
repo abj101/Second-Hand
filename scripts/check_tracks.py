@@ -169,7 +169,7 @@ def menu(run, steps=None, first=1, dump=None, live=(), cap=20, model=None):
         finally: world._seen_at = seen_at
         world.pos = pos; st["prior"] = place
         nb = notebook_at(src, s)
-        focus = f"{nb.render_focus(world.label)}\nHere: {world.place_label(place)}"
+        focus = f"{nb.render_focus(world.label)}\nHere: {world.here(place)}"
         target = next((q.get("target") for q in nb.data["quests"] if q.get("status") == "open" and q.get("target")), None)
         try: options = world.options(per, place, fails, s, inputs=list(env.inputs()), targets=(target,) if target else ())
         except TypeError as e:  # a crash in agent/world.py options is reported as a failure, never patched here

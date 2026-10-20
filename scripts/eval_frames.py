@@ -202,7 +202,7 @@ def evaluate(entry, trace_by_step, truth_by_step, model, attempts):
         loop.world.before(per, place, previous.get("place") if previous else None, frame.size, 1)
         options = loop.world.options(per, place, {}, 1, inputs=BUTTONS)
         if isinstance(model, DryModel): model.option = options[0]["n"]
-        focus = f"{loop.notebook.render_focus(loop.world.label)}\nHere: {loop.world.place_label(place)}"
+        focus = f"{loop.notebook.render_focus(loop.world.label)}\nHere: {loop.world.here(place)}"
         choice = act(model, per, focus, options, BUTTONS, controls)
         label, point, verb = _point_for(choice.action, per)
         self_target = bool(point is not None and truth_self is not None and

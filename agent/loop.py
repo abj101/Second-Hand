@@ -41,7 +41,7 @@ class Loop:
         self.world = World(mem, self.tile_px); self.world.tracker.wrap(env)
         self.observation_stamp = self.observation_age_ms = None; self.live_invalidation_reason = None
         self.events, self.t5_armed = [], False  # t5_armed: T5 fires once per no-quest period, armed by a new T1/T2/T3 (nothing heard yet: nothing a plan could cite)
-        self.notebook = Notebook(mem.root, ref=self.world.ref, canon=self.world.canon, label=self.world.label, ties=self.world.ties, route=self.world.exit_route, is_exit=self.world.is_exit,
+        self.notebook = Notebook(mem.root, ref=self.world.ref, canon=self.world.canon, label=self.world.label, ties=self.world.ties, route=self.world.exit_route, is_exit=self.world.is_exit, leads_to=self.world.leads_to,
                                  refs=lambda: [f"place:{p['id']}" for p in mem.rows("places") if p.get("state") != "merged"] + [f"thing:{e['id']}" for e in mem.rows("entities") if e.get("state") != "merged"])
         self.last_plan, self._plan_row = None, None
         self.conversation, self.text_for_trigger = {"place": None, "lines": []}, ""
@@ -158,7 +158,7 @@ class Loop:
         act_route = travel_legs = None; refused = False  # refused: no route to an on-screen target avoids the known blockers (occupied tiles, remembered avoid tile)
         options = self.world.options(per, place, self.fails, self.step_no + 1, inputs=list(self.env.inputs()),
                                      targets=(q["target"],) if (q := self.notebook.focused_quest()) and q.get("target") else ())  # failure history is in the option notes
-        focus = f"{self.notebook.render_focus(self.world.label)}\nHere: {self.world.place_label(place)}"
+        focus = f"{self.notebook.render_focus(self.world.label)}\nHere: {self.world.here(place)}"
         a = act(self.model, per, focus, options, list(self.env.inputs()), "\n".join(_load(self.game).get("controls", [])))
         picked = next((o for o in options if o["n"] == getattr(a, "option", None)), None)
         own_pick = picked if picked and picked.get("action") == a.action else None  # the option act picked, when its action is the one it answered with
@@ -186,6 +186,8 @@ class Loop:
                 affs.append(aff); targets.append((ident := self.world.entity_ids.get(n))); intents.append(self._fail_key(place, verb, aff["target"], ref=f"thing:{ident}" if ident else None)); i = 0
                 if verb == "approach":
                     t, act_route, refused = self._approach_route(place, entity, player, proj, intents[-1])
+                elif verb == "interact" and self.tile_px and player and not self.env.pointer:
+                    t, act_route, refused = self._approach_route(place, entity, player, proj, intents[-1], beside=True)
             else: action = None
         if action and action.get("verb") in ("advance", "cancel", "type"):
             aff = {"verb": action["verb"], "target": "", "at": None}
@@ -207,7 +209,7 @@ class Loop:
         if per.get("screen") == "world": self.world._record_view(per, before, reused, place, size, self.step_no + 1, self.world.pa, self.world.entity_ids)
         skillctx = Ctx(self.env, self.model, self.tile_px, self.move_frames); pressed_from = tuple(self.world.pos)
         try:
-            skill = SkillResult("blocked", "no route avoids blocker", 0, 0, before, before, (0, 0), False, failure={"stage": "route", "reason": "no route avoids blocker", "direction": None}) if refused else self.world.travel(skillctx, travel_legs, self.step_no + 1, self.trace) if travel_legs is not None and choice else wait_until(skillctx) if not affs or choice is None else press_seq(skillctx, affs[choice.i]["target"].split()) if affs[choice.i].get("verb") == "buttons" else run_affordance(skillctx, affs[choice.i], per, text=choice.text, exit=False, **({"route": act_route} if act_route else {}))
+            skill = SkillResult("blocked", "no route beside target" if choice and affs[choice.i].get("verb") == "interact" else "no route avoids blocker", 0, 0, before, before, (0, 0), False, failure={"stage": "route", "reason": "no route beside target" if choice and affs[choice.i].get("verb") == "interact" else "no route avoids blocker", "direction": None}) if refused else self.world.travel(skillctx, travel_legs, self.step_no + 1, self.trace) if travel_legs is not None and choice else wait_until(skillctx) if not affs or choice is None else press_seq(skillctx, affs[choice.i]["target"].split()) if affs[choice.i].get("verb") == "buttons" else run_affordance(skillctx, affs[choice.i], per, text=choice.text, exit=False, **({"route": act_route} if act_route else {}))
         except BaseException: self.pending_cut, self.pending_via, self.pending_key = cut(before, self.env.screenshot()), affs[choice.i].get("target") if choice else None, intent; self.cached = self.cached_hash = None; raise
         if choice and skill.status == "done" and affs[choice.i].get("verb") in ("approach", "interact") and choice.i < len(targets) and targets[choice.i]:
             self.world._promote([targets[choice.i]])
@@ -265,6 +267,10 @@ class Loop:
                     speaker = re.match(r"^([A-Z][A-Za-z.' -]{0,19}):\s*", new_text)
                     if entity and self.world._actor(tid, entity) and speaker and sum(c.isalpha() for c in speaker.group(1)) >= 2:
                         self.mem.call(tid, speaker.group(1), self.step_no + 1)
+            if skill.status == "done" and next_place == place and aff.get("verb") in ("interact", "approach"):
+                thing = self.world.canon(f"thing:{tid}").split(":", 1)[1]
+                for ref in self.world.leads_to(f"thing:{thing}"):
+                    self.mem.relate(thing, "leads_to", ref.split(":", 1)[1], src="observed", step=self.step_no + 1, hit=False)
         crossing = self.mem.get("crossings", f"{place}@{exit_key[0]},{exit_key[1]}>{next_place}") if exit_key else None
         unseen_crossing = self.mem.get("crossings", s.get("unseen_crossing")) if s.get("unseen_crossing") else None
         verified_edge = bool((next_place != place and crossing and crossing.get("n") == 1) or (unseen_crossing and unseen_crossing.get("n") == 1))
@@ -389,17 +395,17 @@ class Loop:
         self.notebook.heard(step, speaker, self.world.place_label(place) if place else "?", joined, who=self.conversation.get("who"))
         self._event("T1", f"new game text: {joined[:200]}", step)
         self.conversation = {"place": None, "lines": []}
-    def _screen_route(self, place, t, push, avoid=()):  # to an on-screen entity at tile t; an actor holds its tile, so stop beside it, facing it; avoid: tiles a route blocker held
+    def _screen_route(self, place, t, push, avoid=(), *, beside=False):  # to an on-screen entity at tile t; an actor holds its tile, so stop beside it, facing it; avoid: tiles a route blocker held
         occupied = self.world.occupied(place)
-        if t not in occupied:
+        if not beside and t not in occupied:
             dirs = route(self.mem, place, self.pos, t, occupied=occupied | set(avoid))
             return {"dirs": dirs, "push": push} if dirs is not None else None
         found = self.world.beside(place, self.pos, t)
         return {"dirs": found[2] + [found[1]], "push": push} if found else None
-    def _approach_route(self, place, entity, player, proj, intent):
+    def _approach_route(self, place, entity, player, proj, intent, *, beside=False):
         t = proj(entity.get("at")) if entity and self.tile_px and player else None
         held = (self.fails.get(intent) or {}).get("avoid")
-        if t is not None and entity.get("kind", "").casefold() == "exit":
+        if t is not None and not beside and entity.get("kind", "").casefold() == "exit":
             tx, ty = t
             exits = []
             for row in self.mem.rows("tiles"):
@@ -412,8 +418,8 @@ class Loop:
             if exits:
                 _, dirs, push = min(exits)
                 return t, {"dirs": dirs, "push": push}, False
-        result = self._screen_route(place, t, outward(self.mem, place, t, None), [tuple(held)] if held else ()) if t is not None else None
-        return t, result, bool(t is not None and result is None)
+        result = self._screen_route(place, t, outward(self.mem, place, t, None), [tuple(held)] if held else (), beside=beside) if t is not None else None
+        return t, result, bool(t is not None and result is None or beside and t is None)
     def _unexplored(self, place, d=None):
         routes = self.world.explore_dirs(place)
         return routes.get(d) if d is not None else min(routes.values(), key=lambda row: len(row["dirs"]), default=None)

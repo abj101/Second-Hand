@@ -11,7 +11,7 @@ def _refs(value):
 
 
 class Notebook:
-    def __init__(self, root: Path, *, ref=None, canon=None, label=None, refs=None, ties=None, route=None, is_exit=None) -> None:
+    def __init__(self, root: Path, *, ref=None, canon=None, label=None, refs=None, ties=None, route=None, is_exit=None, leads_to=None) -> None:
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
         self.file, self.history = root / "notebook.json", root / "notebook.history"
@@ -19,6 +19,7 @@ class Notebook:
         self.label, self.refs = label or self._label, refs or (lambda: [])
         self.ties, self.route = ties or (lambda text: []), route or (lambda ref: None)
         self.is_exit = is_exit or (lambda ref: False)
+        self.leads_to = leads_to or (lambda ref: [])
         try:
             loaded = json.loads(self.file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -187,14 +188,18 @@ class Notebook:
         return closed
 
     def _close_crossed(self, step: int, events: list) -> list[str]:
-        """Close an open exit-target quest when its crossing was at or after the step before it opened."""
+        """Close a thing-target quest when an exit is crossed or a linked place is entered."""
         closed = []
         for quest in self.data["quests"]:
             target, opened = quest.get("target"), quest.get("opened")
             if quest.get("status") != "open" or not target or target.partition(":")[0] != "thing" or type(opened) is not int: continue
             route = self.route(target)
-            if route is None or not any(s >= opened - 1 and (a, b) == route for s, a, b in self.data["moves"]): continue
-            quest.update(status="done", closed=step, reason="crossed", by="observe")
+            crossed = route is not None and any(s >= opened - 1 and (a, b) == route for s, a, b in self.data["moves"])
+            reason = "crossed" if crossed else "entered" if any(
+                s >= opened - 1 and b in self.leads_to(target) for s, _, b in self.data["moves"]
+            ) else None
+            if reason is None: continue
+            quest.update(status="done", closed=step, reason=reason, by="observe")
             closed.append(quest["key"])
             events.append({"step": step, "op": "observe", "key": quest["key"], "quest": quest})
         return closed
@@ -237,6 +242,9 @@ class Notebook:
             return q.get("reason", "")
         if target.startswith("place:"): return f"reached {self.label(target)}"
         if q.get("reason") == "crossed" and self.is_exit(target): return f"went through {self.label(target)}"
+        if q.get("reason") == "entered":
+            place = next((b for _, _, b in reversed(self.data["moves"]) if b in self.leads_to(target)), None)
+            if place: return f"entered {self.label(target)} ({self.label(place)})"
         said = [self._text_line(row, 160) for row in self.data["text"]
                 if row.get("who") == self.canon(target) and row.get("step", 0) >= q.get("retargeted", q.get("opened", 0))][:2]
         return f"talked to {self.label(target)}, " + ("who said " + "; ".join(said) if said else "who said nothing yet")
@@ -280,7 +288,9 @@ class Notebook:
             if target:
                 kind = target.partition(":")[0]
                 if kind == "thing":
-                    done_when = f" (done when: you go through {label(target)})" if self.is_exit(target) else f" (done when: {label(target)} speaks to you)"
+                    done_when = (f" (done when: you go through {label(target)})" if self.is_exit(target) else
+                                 f" (done when: you enter {label(target)})" if self.leads_to(target) else
+                                 f" (done when: {label(target)} speaks to you)")
                 else: done_when = f" (done when: you enter {label(target)})"
             lines.extend([f"Goal: {quest['text']}{done_when}", "Because:"])
             lines.extend(

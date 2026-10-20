@@ -631,7 +631,7 @@ def om_act_size(run, step):
             def ask(self, system, user, images=(), schema=None, *, role=""):
                 sent.append((system, user)); return Reply("", {"why": "size", "i": options[0]["n"]}, 0.0, None, None)
         before = _budget()
-        focus = f"{loop.notebook.render_focus(loop.world.label)}\nHere: {loop.world.place_label(place)}"
+        focus = f"{loop.notebook.render_focus(loop.world.label)}\nHere: {loop.world.here(place)}"
         act(Capture(), per, focus, options, list(env.inputs()), "\n".join(loop_mod._load(loop.game).get("controls", [])))
         system, user = sent[0]
         print(f"act prompt chars={len(system) + len(user)} (system {len(system)} + user {len(user)}); tokens~{(len(system) + len(user)) / 4:.1f} (len/4); options={len(options)}")

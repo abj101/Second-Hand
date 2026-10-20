@@ -138,6 +138,37 @@ def test_place_names_are_write_only_and_never_merge(tmp_path):
     assert mem.get("places", "old").get("state") != "merged"
 
 
+def test_leads_to_returns_only_observed_live_other_places_and_canonicalizes_merges(tmp_path):
+    mem = Memory(tmp_path)
+    place(mem, "room", "Room"); place(mem, "old", "Old"); place(mem, "live", "Live")
+    mem.upsert("places", {**mem.get("places", "old"), "state": "merged", "into": "live", "offset": [0, 0]})
+    entity(mem, "building", "Building", "room", [2, 2])
+    mem.upsert("entities", {"id": "building_alias", "name": "Old building", "kind": "object", "place": "room", "state": "merged", "into": "building"})
+    place(mem, "elsewhere", "Elsewhere"); place(mem, "model_place", "Model place"); place(mem, "disputed_place", "Disputed place")
+    rows = [
+        {"id": "yes", "s": "building_alias", "p": "leads_to", "o": "old", "src": "observed", "state": "live", "sup": 2, "con": 1},
+        {"id": "disputed", "s": "building", "p": "leads_to", "o": "disputed_place", "src": "observed", "state": "live", "sup": 2, "con": 2},
+        {"id": "own", "s": "building", "p": "leads_to", "o": "room", "src": "observed", "state": "live", "sup": 2, "con": 0},
+        {"id": "model", "s": "building", "p": "leads_to", "o": "model_place", "src": "model", "state": "live", "sup": 2, "con": 0},
+        {"id": "unobserved", "s": "building", "p": "leads_to", "o": "elsewhere", "src": "model", "state": "live", "sup": 2, "con": 0},
+        {"id": "gone", "s": "building", "p": "leads_to", "o": "gone", "src": "observed", "state": "live", "sup": 2, "con": 0},
+    ]
+    for row in rows: mem.upsert("relations", row)
+    world = World(mem, 16)
+
+    assert world.leads_to("thing:building_alias") == ["place:live"]
+
+
+def test_here_names_the_thing_that_leads_into_the_place(tmp_path):
+    mem = Memory(tmp_path)
+    place(mem, "outside", "Outside"); place(mem, "inside", "Room with counters")
+    entity(mem, "door", "large house door", "outside", [2, 2])
+    mem.upsert("relations", {"id": "entry", "s": "door", "p": "leads_to", "o": "inside", "src": "observed", "state": "live", "sup": 1, "con": 0})
+    world = World(mem, 16)
+
+    assert world.here("inside") == "Room with counters, entered through large house door"
+
+
 def test_world_before_does_not_store_a_dialogue_place_name(tmp_path):
     mem = Memory(tmp_path); place(mem, "room", "Room")
     world = World(mem, 16)
@@ -1187,6 +1218,23 @@ def test_plan_memory_target_stands_on_a_free_tile_beside_it_and_faces_it(tmp_pat
     *walk, facing = legs[-1]["dirs"]; visited = _walk(start, walk)
     assert actor not in visited and abs(visited[-1][0] - tile[0]) + abs(visited[-1][1] - tile[1]) == 1
     assert (visited[-1][0] + DIRS[facing][0], visited[-1][1] + DIRS[facing][1]) == tile
+
+
+def test_beside_routes_to_free_neighbor_of_solid_block(tmp_path):
+    from agent.space import DIRS
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    block = {(x, y) for x in range(1, 4) for y in range(0, 2)}
+    free = {(-2, 0), (-1, 0), (0, 0), (1, -1), (2, -1), (3, -1), (1, 2), (2, 2), (3, 2), (4, 0), (4, 1)}
+    _rooms(mem, "room", free)
+    world = World(mem, 16); world.current_place = "room"; world.pos = (-2, 0)
+
+    found = world.beside("room", world.pos, (1, 0))
+
+    assert found is not None
+    stand, facing, dirs = found
+    assert stand in free and stand not in block
+    assert (stand[0] + DIRS[facing][0], stand[1] + DIRS[facing][1]) == (1, 0)
+    assert _walk(world.pos, dirs)[-1] == stand
 
 
 def test_plan_ignores_actors_of_another_place_on_later_legs(tmp_path):

@@ -89,6 +89,28 @@ def test_approach_through_door_reports_cut_and_blank():
     assert result.blank_seen and env.scene == 1
 
 
+def test_interact_route_walks_beside_target_faces_and_presses_a(tmp_path):
+    import json
+    env = RecordingEnv()
+    route = {"dirs": ["RIGHT", "DOWN", "LEFT"]}
+    result = interact(ctx(env), point(env, (8, 7)), [.5, .5],
+                      route=route)
+    row = {"step": 1, "verb": "interact", "route_len": len(route["dirs"]), "keys": env.keys}
+    with (tmp_path / "presses.jsonl").open("a", encoding="utf8") as f:
+        f.write(json.dumps(row) + "\n")
+    assert result.inputs == 4
+    assert env.keys == route["dirs"] + ["A"]
+    assert len(env.keys) <= 2 * row["route_len"] + 2
+
+
+def test_interact_without_route_is_refused_without_inputs():
+    env = RecordingEnv()
+    result = interact(ctx(env), point(env, (10, 8)), [.5, .5], route=None)
+    assert result.status == "blocked" and result.reason == "no route beside target"
+    assert result.inputs == 0 and result.failure == {"stage": "route", "reason": "no route beside target"}
+    assert env.keys == []
+
+
 def test_approach_pushes_once_from_door_mat():
     env = GridEnv(); env.player = (8, 8); env.door = (10, 8); env.npc = (-5, -5)
     result = approach(ctx(env), point(env, (9, 8)), [.5, .5])
@@ -197,7 +219,7 @@ def test_blocked_exit_route_push_is_one_recorded_press():
 
 def test_interact_and_directional_press_preserve_move_records():
     env = GridEnv()
-    result = interact(ctx(env), point(env, env.npc), [.5, .5])
+    result = interact(ctx(env, tile_px=None), point(env, env.npc), [.5, .5])
     assert result.moves and all(move["dir"] in {"UP", "DOWN", "LEFT", "RIGHT"} and set(move) == {"dir", "shift", "self_at"} for move in result.moves)
     env = GridEnv(); env.player = (9, 8)
     result = run_affordance(ctx(env), {"verb": "press", "target": "RIGHT"}, {"entities": []})
@@ -241,7 +263,7 @@ def test_approach_at_player_is_blocked_without_pressing():
 
 def test_interact_opens_text_box():
     env = GridEnv()
-    result = interact(ctx(env), point(env, env.npc), [.5, .5])
+    result = interact(ctx(env, tile_px=None), point(env, env.npc), [.5, .5])
     assert result.status == "done" and env.text_box
 
 

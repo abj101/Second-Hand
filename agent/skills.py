@@ -140,13 +140,23 @@ def approach(ctx: Ctx, target_at: list[float], player_at: list[float] | None, *,
         blank |= saw_blank; before = end.frame
     return result("done" if route is not None and exit_target is None and len(route.get("dirs", [])) <= inputs else "blocked", "" if route is not None and exit_target is None and len(route.get("dirs", [])) <= inputs else "exit not crossed" if exit_target is not None else "input limit", inputs, calls, initial, before, total, blank, failure=_crossing(exit_target))
 @_tracked
-def interact(ctx: Ctx, target_at: list[float], player_at: list[float] | None) -> SkillResult:
+def interact(ctx: Ctx, target_at: list[float], player_at: list[float] | None, *, route=None) -> SkillResult:
     if ctx.env.pointer: return _pointer(ctx, target_at, "")
     start = _settled(ctx)
-    moved = approach(ctx, target_at, player_at)
+    if route is None and ctx.tile_px: return _result("blocked", "no route beside target", 0, 0, start.frame, start.frame, failure={"stage": "route", "reason": "no route beside target"})
+    path = {**route, "dirs": route.get("dirs", [])[:-1]} if route is not None else None
+    moved = approach(ctx, target_at, player_at, route=path)
     if moved.status != "done" or moved.reason == "scene cut" or moved.inputs >= ctx.max_inputs: return moved
     inputs, total, face_blank = moved.inputs, list(moved.scroll), False
-    if player_at is not None:
+    if route is not None:
+        face = route["dirs"][-1] if route.get("dirs") else None
+        if face and face in ctx.env.inputs() and inputs < ctx.max_inputs:
+            end, move, saw_blank, self_at = _step(ctx, face, moved.after); inputs += 1; moved.moves.append({"dir": face, "shift": move, "self_at": self_at})
+            face_blank = saw_blank
+            if move is not None: total[:] = [total[i] + move[i] for i in (0, 1)]
+            if cut(moved.after, end.frame, saw_blank):
+                return _result("done", "scene cut", inputs, moved.calls, start.frame, end.frame, total, start.blank_seen or moved.blank_seen or saw_blank, moved.moves)
+    elif player_at is not None:
         dx = (target_at[0] - player_at[0]) * start.frame.width + total[0]
         dy = (target_at[1] - player_at[1]) * start.frame.height + total[1]
         face = ("RIGHT" if dx > 0 else "LEFT") if abs(dx) >= abs(dy) and dx else ("DOWN" if dy > 0 else "UP")
@@ -259,7 +269,7 @@ def run_affordance(ctx: Ctx, aff: dict, perception: dict, text: str | None = Non
     verb, target, at = aff.get("verb"), aff.get("target", ""), aff.get("at")
     player = next((e.get("at") for e in perception.get("entities", []) if e.get("kind", "").lower() == "player"), None)
     if verb == "approach": return _pointer(ctx, at, target) if ctx.env.pointer else approach(ctx, at, player, exit_target=(target or "visible target") if exit else target if target.startswith("exit") else None, route=route)
-    if verb == "interact": return _pointer(ctx, at, target) if ctx.env.pointer else interact(ctx, at, player)
+    if verb == "interact": return _pointer(ctx, at, target) if ctx.env.pointer else interact(ctx, at, player, route=route)
     if verb == "select":
         if not any(str(e.get("name", "")).casefold() == target.casefold() and e.get("selectable") is True for e in perception.get("entities", [])):
             frame = ctx.env.screenshot(); return _result("failed", "not a selectable choice on this screen", 0, 0, frame, frame, failure={"stage": "interaction", "reason": "not a selectable choice on this screen"})

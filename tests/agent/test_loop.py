@@ -366,7 +366,7 @@ def test_dialogue_opening_over_world_keeps_place(tmp_path, monkeypatch):
     monkeypatch.setattr(loop_module, "act", fake_act(0, verb="interact"))
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
-    def interact(ctx, aff, per, text=None, exit=False):
+    def interact(ctx, aff, per, text=None, exit=False, **kwargs):
         env.scene = 1
         return SimpleNamespace(status="done", reason="", inputs=4, calls=0,
                                before=env.screenshot(), after=env.screenshot(), scroll=(0, 0), blank_seen=False)
@@ -384,7 +384,7 @@ def test_interact_scroll_with_new_text_is_not_a_cut(tmp_path, monkeypatch):
     monkeypatch.setattr(loop_module, "act", fake_act(0, verb="interact"))
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
-    def interact(ctx, aff, per, text=None, exit=False):
+    def interact(ctx, aff, per, text=None, exit=False, **kwargs):
         env.scene = 1
         return SimpleNamespace(status="done", reason="", inputs=12, calls=0,
                                before=GridEnv().screenshot(), after=env.screenshot(), scroll=(48, 0), blank_seen=False)
@@ -631,6 +631,37 @@ def test_tracked_approach_scroll_does_not_split_but_real_cuts_do(tmp_path, monke
         assert not [r for r in mem.rows("relations") if r["p"] == "leads_to" and r["src"] == "inferred"]
     loop, mem, row = run_case(tmp_path/"interact", "interact")
     assert row["scene_cut"] is False and row["next_place"] == row["place"]
+
+
+@pytest.mark.parametrize(("status", "failure", "expected_con"), [
+    ("done", None, 1), ("failed", None, 0), ("blocked", {"stage": "route", "reason": "route blocked"}, 0),
+])
+def test_interact_without_place_change_contradicts_leads_to_only_when_complete(tmp_path, monkeypatch, status, failure, expected_con):
+    from agent import loop as module
+    per = {"screen": "world", "text": [], "entities": [
+        {"kind": "player", "name": "player", "at": [.5, .5]},
+        {"kind": "object", "name": "Building", "at": [.7, .5]}]}
+    env = GridEnv(); mem = Memory(tmp_path / "memory")
+    loop = Loop(env, StubModel([]), mem, "grid")
+    monkeypatch.setattr(module, "perceive", lambda *_: (per, reply(per)))
+    monkeypatch.setattr(module, "act", fake_act(1, verb="interact"))
+    def interact(ctx, aff, *_args, **_kwargs):
+        ident = loop.world.entity_ids[1]
+        mem.relate(ident, "leads_to", "inside", src="observed", step=0, hit=True, verb="approach")
+        frame = ctx.env.screenshot()
+        return SimpleNamespace(status=status, reason="input limit" if status == "failed" else "", inputs=1, calls=0, before=frame, after=frame,
+                               scroll=(0, 0), blank_seen=False, moves=[], failure=failure)
+    monkeypatch.setattr(module, "run_affordance", interact)
+    mem.upsert("places", {"id": "inside", "name": "Inside", "screen": "world", "state": "place"})
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+
+    row = loop.step()
+
+    relations = [r for r in mem.rows("relations") if r.get("p") == "leads_to"]
+    relation = relations[0]
+    assert row["skill"]["status"] == status and row["next_place"] == row["place"]
+    assert len(relations) == 1 and relation["sup"] == 1 and relation["con"] == expected_con and relation["state"] == "live"
+    assert relation["verb"] == "approach"
 
 def test_runner_press_exception_and_truncation(tmp_path, monkeypatch):
     from scripts import run_agent
@@ -1348,7 +1379,7 @@ def test_go_to_unexplored_direction_walks_route_and_marks_new_view(tmp_path, mon
     assert loop.world.novel >= env.view_tiles[1]
 
 
-@pytest.mark.parametrize("action", [{"go_to": "npc"}, {"thing": 1, "verb": "approach"}])
+@pytest.mark.parametrize("action", [{"go_to": "npc"}, {"thing": 1, "verb": "approach"}, {"thing": 1, "verb": "interact"}])
 def test_on_screen_npc_routes_beside_it_facing_it_around_another_actor(tmp_path, monkeypatch, action):
     from agent import loop as module
     per = {"screen": "world", "text": [], "entities": [
@@ -1370,6 +1401,24 @@ def test_on_screen_npc_routes_beside_it_facing_it_around_another_actor(tmp_path,
     loop.step()
 
     assert seen["route"]["dirs"] == ["UP", "LEFT", "LEFT", "DOWN"]
+
+
+def test_interact_without_beside_route_is_refused_without_inputs(tmp_path, monkeypatch):
+    from agent import loop as module
+    per = {"screen": "world", "text": [], "entities": [
+        {"name": "player", "kind": "player", "at": [.5, .5]},
+        {"name": "block", "kind": "object", "at": [.6, .5]}]}
+    monkeypatch.setattr(module, "perceive", lambda *_: (per, reply({})))
+    monkeypatch.setattr(module, "act", lambda *a, **k: SimpleNamespace(place="", ops=[], action={"thing": 1, "verb": "interact"}, expect="screen_changes", why="check", text=None))
+    monkeypatch.setattr(module.World, "beside", lambda *_: None)
+    env = GridEnv(); keys = []; env.press = lambda key, *a, **k: keys.append(key)
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+
+    row = loop.step()
+
+    assert row["skill"]["failure"] == {"stage": "route", "reason": "no route beside target", "direction": None}
+    assert row["skill"]["inputs"] == 0 and keys == []
 
 
 def fail_affordance(monkeypatch, env, *, status="blocked", reason="wall", failure=None):

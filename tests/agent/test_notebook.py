@@ -176,10 +176,12 @@ def test_place_quest_targeted_while_in_place_closes_only_on_arrival(tmp_path):
 @pytest.mark.parametrize(("target", "name", "done_when"), [
     ("thing:person", "Mira", "Mira speaks to you"),
     ("thing:exit", "doorway", "you go through doorway"),
+    ("thing:building", "large house", "you enter large house"),
     ("place:hall", "Hall", "you enter Hall"),
 ])
 def test_render_focus_labels_target_and_limits_cited_text(tmp_path, target, name, done_when):
-    nb = notebook(tmp_path, ref=lambda value: value, is_exit=lambda ref: ref == "thing:exit")
+    nb = notebook(tmp_path, ref=lambda value: value, is_exit=lambda ref: ref == "thing:exit",
+                  leads_to=lambda ref: ["place:inside"] if ref == "thing:building" else [])
     cited = "Find the archive. " + "x" * 220
     nb.heard(1, "Mira", "Hall", cited)
     nb.heard(2, "Guide", "Hall", "Uncited text.")
@@ -202,6 +204,24 @@ def test_crossed_exit_evidence_says_went_through(tmp_path):
 
     assert nb._evidence({"target": "thing:exit", "by": "observe", "reason": "crossed"}) == "went through doorway"
     assert nb._evidence({"target": "thing:person", "by": "observe", "reason": "talked"}) == "talked to Mira, who said nothing yet"
+
+
+def test_entered_thing_evidence_names_linked_place(tmp_path):
+    links = {"thing:building": ["place:inside"]}.get
+    nb = notebook(tmp_path, label=lambda ref: {"thing:building": "large house", "place:inside": "room with counters"}.get(ref, ref),
+                  leads_to=links)
+    nb.data["moves"] = [(4, "place:outside", "place:inside")]
+
+    assert nb._evidence({"target": "thing:building", "by": "observe", "reason": "entered", "opened": 4, "closed": 4}) == "entered large house (room with counters)"
+
+
+def test_exit_focus_wording_precedes_linked_place_wording(tmp_path):
+    nb = notebook(tmp_path, ref=lambda value: value, is_exit=lambda ref: ref == "thing:door",
+                  leads_to=lambda ref: ["place:inside"])
+    nb.heard(1, None, "Outside", "Go through the door.")
+    nb.apply_ops([add("q", target="thing:door")], 2)
+
+    assert "Goal: Quest q (done when: you go through thing:door)" in nb.render_focus(lambda ref: ref)
 
 
 def test_render_focus_limits_recent_to_four_lines_of_120_chars(tmp_path):
@@ -298,3 +318,32 @@ def test_exit_quest_closes_on_crossing_after_target_was_set_but_not_in_reverse(t
     assert nb.observe(8, "place:room") == ["late"]  # crossed after the target was set
     assert nb.data["quests"][0]["status"] == "done"
     assert nb.data["quests"][0]["closed"] == 8 and nb.data["quests"][0]["reason"] == "crossed"
+
+
+def test_thing_quest_closes_entered_when_target_is_set_after_linked_move(tmp_path):
+    links = {"thing:building": ["place:inside"]}.get
+    nb = notebook(tmp_path, ref=lambda value: value if str(value).startswith(("place:", "thing:")) else None,
+                  leads_to=links)
+    nb.heard(1, None, "Outside", "Go inside.")
+    nb.observe(0, "place:outside")
+    nb.observe(1, "place:inside")  # opened - 1
+    assert nb.apply_ops([add("q")], 2)[0]["result"] == "ok"
+    assert nb.apply_ops([{"op": "target", "key": "q", "target": "thing:building"}], 3)[0]["result"] == "ok"
+
+    quest = nb.data["quests"][0]
+    assert quest["status"] == "done" and quest["reason"] == "entered" and quest["closed"] == 3 and quest["by"] == "observe"
+
+
+def test_thing_quest_closes_entered_on_later_linked_move_but_ignores_other_place(tmp_path):
+    links = {"thing:building": ["place:inside"]}.get
+    nb = notebook(tmp_path, ref=lambda value: value if str(value).startswith(("place:", "thing:")) else None,
+                  leads_to=links)
+    nb.heard(1, None, "Outside", "Go inside.")
+    nb.observe(1, "place:outside")
+    assert nb.apply_ops([add("q", target="thing:building")], 2)[0]["result"] == "ok"
+
+    assert nb.observe(3, "place:elsewhere") == []
+    assert nb.data["quests"][0]["status"] == "open"
+    assert nb.observe(4, "place:inside") == ["q"]
+    quest = nb.data["quests"][0]
+    assert quest["status"] == "done" and quest["reason"] == "entered" and quest["closed"] == 4 and quest["by"] == "observe"

@@ -542,6 +542,23 @@ class World:
             return f"thing:{ident}"
         return ref
 
+    def leads_to(self, ref):
+        """Observed live places entered through this canonical thing."""
+        canonical = self.canon(ref)
+        if not str(canonical or "").startswith("thing:"): return []
+        ident = canonical.split(":", 1)[1]
+        thing = self.mem.get("entities", ident)
+        if not thing: return []
+        own = self.canon_place(thing.get("place"))
+        places = set()
+        for row in self.mem.rows("relations"):
+            if row.get("p") != "leads_to" or row.get("src") != "observed" or row.get("state") != "live" or row.get("sup", 0) <= row.get("con", 0): continue
+            if self.canon(f"thing:{row.get('s')}") != canonical: continue
+            place = self.canon_place(row.get("o"))
+            target = self.mem.get("places", place)
+            if place != own and target and target.get("screen") == "world" and target.get("state") != "merged": places.add(place)
+        return [f"place:{place}" for place in sorted(places)]
+
     def known(self, ref):
         canonical = self.canon(ref)
         kind, _, ident = str(canonical or "").partition(":")
@@ -692,6 +709,19 @@ class World:
             return f"place {n if n.isdigit() else 1}"
         duplicates = sum(place_name(p).casefold() == name.casefold() for p in rows) > 1
         return f"{name} [{place}]" if duplicates else name
+
+    def here(self, place):
+        if not place: return self.place_label(place)
+        place = self.canon(place if str(place).startswith("place:") else f"place:{place}")
+        label = self.label(place)
+        entered = []
+        seen = set()
+        for thing in self.mem.rows("entities"):
+            ref = self.canon(f"thing:{thing['id']}")
+            if ref in seen or f"thing:{thing['id']}" != ref: continue
+            seen.add(ref)
+            if place in self.leads_to(ref): entered.append(self.label(ref))
+        return f"{label}, entered through {', '.join(entered)}" if entered else label
 
     def label(self, ref, place=None):  # place: where an exit ref's tile lies (exit refs carry no place); default the current place
         ref = self.canon(ref)
@@ -961,6 +991,13 @@ class World:
             history = self.history(ref, place) if ref else {}
             notes = []
             if note: notes.append(note)
+            for dest in self.leads_to(ref) if ref else ():
+                ident = dest.split(":", 1)[1]
+                uses = sum(r.get("sup", 0) for r in self.mem.rows("relations")
+                           if r.get("p") == "leads_to" and r.get("src") == "observed" and r.get("state") == "live"
+                           and self.canon(f"thing:{r.get('s')}") == self.canon(ref)
+                           and self.canon(f"place:{r.get('o')}") == dest)
+                notes.append(f"leads to {self.place_label(ident)} {uses}×")
             if hit: notes.append(f"{hit.get('why', '')} {hit.get('n', 0)}× (last step {hit.get('step', 0)})")
             if history.get("talked"):
                 talked = history["talked"]
