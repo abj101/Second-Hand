@@ -586,6 +586,8 @@ Do not merge this as a passed contract.
 
 ### Handover for an outside executor (10-19, work stopped at the user's request; nothing committed)
 
+> **Superseded (10-19):** the state below predates commit 49d8b82. Items 1-3 and the item-4 loop bug are committed; the one remaining change and the current state are in [PHASE-E-handoff.md](PHASE-E-handoff.md).
+
 Shell setup: Git Bash at the repo root.
 `export TEMP=$PWD/.tmp/rcr/r3/tmp TMP=$PWD/.tmp/rcr/r3/tmp PYTHONIOENCODING=utf-8; PY=".venv-agent/Scripts/python.exe -B"; PT="$PY -m pytest -q -p no:cacheprovider -n auto -W ignore"`
 
