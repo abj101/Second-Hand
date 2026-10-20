@@ -84,6 +84,33 @@ Do these as one change each, and measure each one (D9).
 4. **Commit:** `Exit crossing: <one-line gate result>`. Never push. Leave `scripts/run_agent.py`'s cap edit out of the commit unless the user says otherwise.
 5. **Report** to the user with a pass/fail table. Ask before any live run. If approved, run `--steps 150 --max-calls 300 --decide`; the pass bar is "crossed the door mat and reached map 0 before S135, and no row with 0 inputs picked twice in a row".
 
+## 3b. Review of f65b1b3 (2026-10-19, coordinator)
+
+| Item | Verdict | Reason |
+|---|---|---|
+| B2 "gate fail" (post_r3 q5 closes at S98) | **The gate was wrong, not the code** | In post_r3, q5 targets `thing:e_door_mat`, and at S98 the agent goes through that mat from `p_place_3` to `p_place_4`. Closing with `crossed` at S98 is the event D5 asks for. The old bar ("q5 must not close") guarded against the RCR-era false closure, where walking over the mat counted as "talked". New bar: post_r3 q5 closes at S98 with reason `crossed`, and nothing closes before its crossing. |
+| check_tracks exit 1, `order_steps=[2]` | **Pre-existing false positive in the check** | Step 2 is a modal screen (title). `World.options` keeps modal rows in screen order by design, and Phase E's run flagged the same step. Fix the check, not the agent: in `scripts/check_tracks.py` `menu()`, apply the failed-before-new order test only to world-screen steps. |
+| B3, B4 | pass | — |
+| **B1** | **Defect, must fix before any live run** | See below. |
+
+**B1 defect.** The final exit leg in `World.plan` is `{"dirs": dirs + [push], "push": None, "expect": exit_record.get("to") or "exit", ...}`. In `World.travel`, any leg with `expect` takes the known-door branch:
+- `edge = exit_to(..., leg["push"])` gets `push=None`, so `edge` is None and the leg is always a mismatch.
+- If the arrival is not recognised (the usual case for a first crossing into a new place), a **successful** crossing returns `blocked "exit mismatch"`. The row is then recorded as failed even though the agent crossed. This repeats the S6 mis-scoring that R4 fixed.
+- If the arrival *is* recognised, `mark_exit` writes the exit with `dir=None` and `_cross` uses the fake place id `"exit"`, which corrupts the tiles table.
+- A push into a wall comes back as `route blocked` (stage route) instead of `exit not crossed` (stage crossing), because the push is inside `dirs`.
+
+**Root fix.** An exit with no known destination is a *cross attempt*, not a known door:
+- The final leg is `{"dirs": dirs, "push": push, "expect": None, "cross": True, "exit_tile": tile, "target": target}`.
+- `travel` passes `exit_target="exit"` to `approach` when `leg.get("expect") or leg.get("cross")`, so the skill's existing push step (`route["push"]` with `exit_target`) runs.
+- A scene cut already goes down the existing no-`expect` branch: `_travel_open = True`, `done "scene cut"`, and the loop re-identifies the place and records the crossing through `unseen_cross`.
+- No cut gives the skill's own `blocked "exit not crossed"` with stage `crossing`.
+- Write no new crossing code.
+
+**Tests:**
+- `travel` on an unknown-exit leg where the push causes a cut returns `done` with `_travel_open`, and writes no `mark_exit` with a `None` direction.
+- Where the push does not cut, it returns `blocked` with failure stage `crossing`.
+- Keep B1's plan test, adjusted to the new shape: the push is in `push`, not in `dirs`.
+
 ## 4. Hard rules (repeat them in every subagent prompt)
 
 - No game words in `agent/`.
