@@ -67,6 +67,19 @@ Do these in this order, one change and one measurement each (D9): **H3, H1, H2, 
     - where the face step turns the player but A shows nothing, it is `failed`.
 - **Offline check:** for S146-S149 (2 keys each, no walk), compute `changed(frames/NNNNNN.png, frames/NNNNNN_after.png, mask=…)` from `runs/m1_building_live_150`. Build the mask from that row's non-player actor `entities` positions (tile boxes, screen fractions × 160×144). It must be 0 for S146-S149 and > 0 for the dialogue openings at S123 and S126. Report the four values.
 
+## Gate correction (2026-10-20, coordinator; supersedes the H3 and H2 gates above)
+
+My gate was wrong. `eval_plan` does not render `World.view` per step, and its op replay uses the run's final memory, so the per-step legend can't be rebuilt that way. Don't build checkpoint reconstruction for this. **The verified historical source already exists:** every planner prompt is stored verbatim in `runs/<run>/calls.jsonl` (rows with `role == "plan"`, field `user`), legend lines included, for example `Thing C counter with three spheres (2, -6) object seen step 133`.
+
+- **H3 gate:** unit test only, which is done. The recorded prompts were rendered by the old code, so they can't show the fix. Drop the `eval_plan --check size` header assertion.
+- **H2 gate (0 calls), in a small script under `.tmp/h2/`, not in the repo:**
+  1. For each recorded plan call whose op target failed with a legend handle (`m1_building_live_150` S99, S102, S134, S146; `m1_exit_b1_live_150` S135; `m1_rcr_phase_e` S59), parse that prompt's legend lines into `{symbol: (name, tile)}`.
+  2. Map each to an entity id in a **copy** of that run's `memory/` by name (or alias) and tile, and set `world.legend = {symbol: "thing:<id>"}`, the same shape `World.view` now stores.
+  3. Call `world.ref(<the recorded target text>)`.
+  4. Report per step: the target text, the legend line, the resolved ref, and the entity name. Pass means each resolves to the entity its legend line names; an unmatched legend line is reported, not guessed.
+  - The capture side (`World.view` storing `self.legend` for what it rendered) is covered by the H2 unit test.
+- **The other `eval_plan --check all` closure checks stay as written.** They don't depend on the legend.
+
 ## Gate summary (0 calls)
 
 - After each fix: `.venv-agent/Scripts/python.exe -B -m pytest tests/agent -q -p no:cacheprovider -n auto` is green.
