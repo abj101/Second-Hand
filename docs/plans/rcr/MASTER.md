@@ -1,6 +1,6 @@
 # RCR: Root-Cause Refactor (master tracker)
 
-Status: **R1/R4/R2 offline gates passed; R3 gate PASS 10-19 on m1_rcr_baseline (suite 612/1 skip, LV 20/20, menu max prompt 1,909, dup 0); R1/R2 amendments and R3 committed together. Phase D (R3.7) awaits the user's ledger cap.** Branch feat/lean-agent
+Status: **RCR CLOSED 2026-10-19 — Phase E live gate FAIL.** The top-five gate missed zero-input actions (2); S4 reconstructed-menu proxy was 4 (limit 2). Evidence and audit verdicts are in §8. Any further work starts as a new program; no further amendment or live run is authorized by this closure. Branch feat/lean-agent.
 
 **Goal:** remove the four root mechanisms the audit found, and leave the agent *smaller* than before.
 **Not in scope:** new features, new gates, game- or label-specific fixes, or tuning the perceiver prompt per label.
@@ -10,10 +10,10 @@ Status: **R1/R4/R2 offline gates passed; R3 gate PASS 10-19 on m1_rcr_baseline (
 
 | | Section | Doc | Planning session | Phase | Status |
 |---|---|---|---|---|---|
-| R1 | Identity and world truth | [R1-identity.md](R1-identity.md) | `rcr-r1-identity` | C done (offline) | **Offline gate passed**, committed d787836, fixes 4c755cb and c560dc6. Mom 1 id, Pallet NPC 1 id, S3 0, phantom exits 0. **Not yet shown live.** `rcr_r1_live` had 0 world rows (stale scene cuts, a runtime issue). `m1_rcr_r1_live_retry2` stalled in the bedroom because of an R1 regression (title-screen ids reused), fixed by 4c755cb but not re-run live. The first live evidence for R1 is now the post-R4 run |
-| R2 | Quest state and planner contract | [R2-quests.md](R2-quests.md) | `rcr-r2-quests` | C done (offline) | **Gate passed** 353f2fb (630 tests). S8 max 1,242 ≤ 3,500; S12 max 491 ≤ 600; S5b 7/7 targets close by id; re-adds 0; notebook −287, plan −100. Consumers migrated (eval_run keeps its own `_TACTICAL` copy). Not yet shown live |
-| R3 | Act prompt and option menu | [R3-decide.md](R3-decide.md) | rcr-r3-decide | **gate passed 10-19** | On m1_rcr_baseline: suite **612/1 skip**, LV **20/20**, `check_tracks --menu` 74/74 steps, max prompt **1,909**, dup **0**, rows max 29. R3.6 grouping and off-screen name-grouping applied. Phase D (R3.7) awaits ledger cap |
-| R4 | Feedback and control loop | [R4-feedback.md](R4-feedback.md) | `rcr-r4-feedback` | C done (offline) | **Gate passed** 3f521e8 (648 tests). S6 0 of 13 mis-scored (novelty proxy; S105 resolved by before-frame join); S11 settles with memory 256; stall K=8 (knob from one run). Not yet shown live; S9 and F1 unmeasured |
+| R1 | Identity and world truth | [R1-identity.md](R1-identity.md) | `rcr-r1-identity` | C done; live evidence limited | Phase E live S1 is **limited**: map `0x25:slot-1` scored `e_chair_2` and `e_person` (2 ids / 41 matched observations), with `e_chair_2` proximity-ambiguous; map `0x00:slot-2` scored `e_fence_post_1` (1 id / 1 observation, a landmark). The `e_person` join could be Mom, but it is not enough to establish her stable identity; the `e_chair_2` proximity join is also ambiguous. S1 therefore remains limited for Pallet NPC/Mom targets; S2 is unavailable because map 0 first appears at step 150. No claim of a live R1 pass. |
+| R2 | Quest state and planner contract | [R2-quests.md](R2-quests.md) | `rcr-r2-quests` | C done; live closure evidence passed | Phase E: 0 empty closures of 2 (q1 closed after acknowledgement at step 42; targeted q2 auto-closed on arrival at step 142), S5 false closures 0, S14 re-adds 0, 0 plan calls before first heard t-key and 0 “none heard yet” errors. The full Phase E live gate still fails on menu execution. |
+| R3 | Act prompt and option menu | [R3-decide.md](R3-decide.md) | rcr-r3-decide | Phase D closed; live gate fail | Phase E: act prompt max 1,318 user / 1,587 system+user passes ≤2,000; D7 qualifying zero-input dead-loop max is 1. The full live gate **fails**: 2 selected actions sent zero keys (steps 87, 135); S4 reconstructed-menu proxy 4 exceeds 2. |
+| R4 | Feedback and control loop | [R4-feedback.md](R4-feedback.md) | `rcr-r4-feedback` | C done; live feedback mixed | Phase E S6: 0 of 24 joined action failures were mis-scored; 9 were real no-movement failures and all were marked failed. Health reports `cut_self_loops=10` and `repeat_actions_max_length=13`; these signals and the two zero-input actions remain open. |
 
 The phases run in this order:
 - **A, solution:** the session writes it, then the coordinator reviews it against §4.
@@ -279,6 +279,37 @@ S0 builds S1-S3, S5, S6, S8, S11 and S14 into `eval_run.py`, reusing `_entity_du
      - `target` is read as "done when here", but the planner uses it as "where to work". R2 contract.
   4. **S8 live:** the Pallet menu has 41 rows: 27 off-screen or remembered rows, walls and hedges perceived as exits, and a "dialogue box" thing. The 1,909-character offline gate did not cover outdoor scenes (R3, plus perception of exits).
 
+### Phase E (2026-10-19): RCR closeout, `runs/m1_rcr_phase_e`
+
+**Verdict: FAIL. RCR is closed.** The live confirmation reached 150 trace rows but failed the top-five pass rule because 2 selected menu actions sent zero inputs. S4 also exceeded its threshold on an explicitly reconstructed-menu proxy. No agent fix or second run follows this result; further work starts as a new program under §8 of the Phase E brief.
+
+| Root cause / metric | `post_r3` baseline | Phase E result | Verdict and evidence |
+|---|---:|---:|---|
+| D7 same pick, zero inputs, same prompt: longest qualifying run | 7 | 1 | **Pass** (limit ≤1). Two zero-input actions occurred, at steps 87 and 135, but did not form a qualifying repeated streak. |
+| D5 empty closures | 5 of 7 | 0 of 2 | **Pass** (limit 0). q1 opened 19 and closed 42 after name acknowledgement/speech; q2 opened 48 and auto-closed by `observe` at 142 when its target place was reached. Neither closed on its opening step or without an arrival/speech event. Confirmed in `memory/notebook.history` and trace events. |
+| D6 intro planner waste: plan calls before first heard t-key / “none heard yet” errors | 17 / 17 | 0 / 0 | **Pass** (limits ≤ new-text events / 0). First T1 heard at step 18; first plan call was step 19 and included t1. |
+| S8 act prompt max | 3,008 user / 3,277 combined | 1,318 user / 1,587 combined | **Pass** (≤2,000). Planner prompt was 4,037 user / 4,758 combined; maximum planner reply was 551 chars (≤600). |
+| Menu rows selected but not executed | ≥1 | 2 | **Fail** (limit 0). Step 87 trace row: choice intent `p_place_3|interact|thing:e_desk_2`, perceived at `[0.42,0.51]`; action `{"thing":6,"verb":"interact"}`; skill `blocked / target is the player / inputs=0`; `presses.jsonl` step 87 has `keys: []`. The on-screen `World.options` thing path offered it without the shared same-tile guard; `skills.interact` rejected it. Step 135 trace row: choice intent `p_place_3|approach|exit:-5,6`, label `go to door mat, here`; action `{"go_to":"exit:-5,6"}`; skill `done / inputs=0`; `presses.jsonl` step 135 has `keys: []`, and verdict is failed. |
+| S1 ids per real NPC (Pallet NPC / Mom) | 4 / 2 | map `0x00:slot-2`: 1 ID / 1 observation (`e_fence_post_1`, landmark); map `0x25:slot-1`: 2 IDs / 41 matched observations (`e_chair_2`, `e_person`) | **Limited; no pass claimed.** The `e_chair_2` proximity join is ambiguous; map-0’s single observation is a fence-post landmark, not NPC evidence. The run supplies no adequate Pallet NPC/Mom population sample. Overall scorer max was 2 IDs; actor matched 42/44 truth sprite rows, proximity matched 43/44 (97.7% coverage), with 0 unmatched actor IDs. |
+| S2 records minted in first 30 Pallet steps | 58 | unavailable | **Limited.** Map 0 first appears in truth at step 150, so no 30-step Pallet sample exists. |
+| S5 false closures | 0 | 0 (2 actually closed) | **Pass.** `summary.json` reports zero false closures. |
+| S6 real failures not scored as failed | 0 / 14 | 0 / 9 real no-movement failures | **Pass.** 24/24 action failures joined to truth; 9 were confirmed no-movement failures and all 9 were scored failed; unknown unsettled rows 0. |
+| S4 re-picks of a failed row while another untried row exists | not measured live | 4 reconstructed cases | **Fail** (limit ≤2), explicitly a replay proxy, not a live menu capture. Trace picked-state plus reconstructed menus identify steps 2, 113, 136, 137. The `check_tracks --menu --first 1` diagnostic exited 1 on `order_steps=1 [2]`; its remaining report was 150/150 rows, max 12 rows, max 1,111 chars, duplicate 0, no-action 0. Interpret S4 with that limitation. |
+| Progress: first step on map 0 (Pallet); left Pallet northward? | S98; no | map 0 first at S150; no later step | **Limit missed; report only.** The run entered map 0 at the final step, so it could not demonstrate northward departure. |
+
+**Gate and run evidence.** The inherited Phase E implementation is `49d8b82`; Item A’s shared-function change and regression test are in `d473f7c`. Step 1’s required suite completed with **630 passed, 1 skipped**. Step 2 regenerated the golden successfully with no golden diff. The previous-run offline gate passed: `eval_plan --check all` exit 0; `check_tracks --menu --first 1` 150/150, max act prompt 1,541, duplicate 0, no-action rows 0. For the Phase E run, `eval_run.py --health` and `eval_plan.py --check all` both exited 0; these exit codes do not mean the live gate passed. Health fields included `cut_self_loops=10` and `repeat_actions_max_length=13`; actual notebook history/events were checked for D5. The run produced 150 trace rows and ended at `p_place_4`. Ledger usage moved from 4,436 to 4,626: **190 spent, 189 total remaining**. The detached process output showed completion through step 150 with no traceback, but the operating-system exit code was not captured.
+
+**Audit symptoms against the 10-15 audit:**
+
+- Repeated mistakes — **improved (number):** D7 qualifying run fell from 7 to 1 (like-for-like). S4 has 4 reconstructed-menu proxy cases, but that count is not comparable to the audit’s 14/99 live denominator and does not establish a like-for-like reduction. The proxy exceeds its limit, and health still reports 13 repeated actions and 10 cut self-loops.
+- Pointless actions — **open:** steps 87 and 135 selected actions that sent zero keys; the run reached Pallet only at step 150.
+- Not following or prioritizing directives — **open:** the planner recorded Mom’s “next door” text, but q3 was created only at step 150 with the current place as its target; the run ended before it could pursue Professor Oak.
+- Plans are not concise — **improved (number):** planner prompt max fell from 10,084 user chars in the baseline to 4,037; Phase E max reply was 551 chars, within the 600-char target. The prompt remains above the 3,500-char section target at 4,758 combined chars.
+- Misrecognition made fatal — **open:** the desk-at-player selection at step 87 was rejected by `skills.interact` after appearing as an on-screen option; S1 live joins are limited and ambiguous. No perceiver prompt change was made.
+- “Already talked to / already done” tracking — **improved (number):** 2 quests actually closed, 0 false closures, 0 finished-target re-adds; q1 closed after acknowledgement and q2 closed on target arrival. Actor identity remains ambiguous in the available S1 joins.
+
+RCR is **CLOSED — LIVE GATE FAIL**. The no-layering rule stands: any follow-up is a new program, not another RCR amendment or live run.
+
 ## 9. Deletion ledger
 
 | Section | Planned removals (Phase A) | Net lines | Commit |
@@ -338,7 +369,4 @@ S0 builds S1-S3, S5, S6, S8, S11 and S14 into `eval_run.py`, reusing `_entity_du
 1. ~~R3 grouping by history~~: **resolved 10-15, allowed** (§10).
 2. ~~Live-view work and RCR Phase C~~: **resolved 10-15, build on top** (§3). The question still asked at gates: whether a commit may include files that carry live-view hunks.
 3. ~~Ledger caps for Phase D~~: **resolved 10-15.** The user raised the caps by 1,000 (TOTAL 4815, M1 4765; 3,756 had been used) and pre-approved all of Phase D: R3.7's 20-call replay with its fallbacks (+2, +20), the live run after R1 and the live run after R3. Each live run is a clean boot, `--steps 150 --max-calls 400`. No section needs to come back for budget unless the ledger runs out.
-4. **Go-ahead for implementation.** The coordinator recommends this order:
-   - **S0:** the coordinator writes the scorecard in `eval_run.py` with a Haiku worker, and records the `m1_bedroom_live` baseline. 0 cloud calls.
-   - **Sections:** R1, then R4, then R2, then R3. Each runs in a fresh **GPT-6.1 orchestrator** session using its packet's paste block, with **gpt-6-luna (reasoning high)** workers. The user changed the tier on 10-15, and it overrides the Haiku/Sonnet tiers written in the packets.
-   - **Gates:** the coordinator reviews each gate against §4 and §5 before the next section starts. Any commit that touches a file with live-view hunks goes to the user first.
+4. **RCR implementation and measurement closed 2026-10-19.** Phase E live gate failed; the complete scorecard and audit verdicts are in §8. No further amendment or live run is pending. Any follow-up starts as a new program.
