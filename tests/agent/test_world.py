@@ -1197,3 +1197,17 @@ def test_actor_in_the_way_keeps_a_remembered_row(tmp_path):
 
     assert any(o["label"].startswith("go to fern") for o in world.options(per, "room", {}, 5, targets=("thing:fern",)))
     assert world.reachable("thing:fern", per, "room") and world.actor_tiles == frozenset({(-1, 0)})
+
+
+def test_tied_exit_names_are_no_ref_but_list_candidates_and_route_through_their_door(tmp_path):
+    mem = Memory(tmp_path); place(mem, "p_tiled", "tiled room"); place(mem, "p_room", "room")
+    entity(mem, "e_exit_stairs", "exit: stairs", "p_tiled", (4, -4)); entity(mem, "e_exit_stairs_2", "exit: stairs", "p_room", (0, 0))
+    mem.upsert("tiles", {"id": "p_tiled@3,-4", "place": "p_tiled", "x": 3, "y": -4, "floor": True, "blocked": [], "pushed": ["RIGHT"],
+                         "exit": {"dir": "RIGHT", "to": "p_room", "arrive": [0, 0], "src": "observed"}, "step": 1})
+    world = World(mem, 16)
+
+    assert world.ref("exit: stairs") is None
+    assert world.ties("exit: stairs") == [("thing:e_exit_stairs", "tiled room"), ("thing:e_exit_stairs_2", "room")]
+    assert world.ties("door") == []
+    assert world.exit_route("thing:e_exit_stairs") == ("place:p_tiled", "place:p_room")
+    assert world.exit_route("thing:e_exit_stairs_2") is None

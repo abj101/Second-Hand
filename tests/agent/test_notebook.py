@@ -218,7 +218,7 @@ def test_v2_file_loads_as_empty(tmp_path):
 
     nb = notebook(tmp_path)
 
-    assert nb.data == {"text": [], "quests": [], "last": {}, "here": None}
+    assert nb.data == {"text": [], "quests": [], "last": {}, "here": None, "moves": []}
     assert nb.log == []
 
 
@@ -248,3 +248,43 @@ def test_closed_thing_quest_shows_current_label_and_who_said(tmp_path):
     assert '- q "Quest q": done at step 39 — talked to MOM, who said t' in rendered
     assert "PROF next door" in rendered
     assert "talked to person" not in rendered
+
+
+def test_ambiguous_target_lists_each_candidate_ref(tmp_path):
+    ties = {"exit: stairs": [("thing:e_exit_stairs", "tiled room"), ("thing:e_exit_stairs_2", "room")]}
+    nb = notebook(tmp_path, ref=lambda value: value if str(value).startswith(("place:", "thing:")) else None,
+                  ties=lambda text: ties.get(text, []), label=lambda ref: ref, refs=lambda: ["thing:e_exit_right_passage"])
+    nb.heard(1, None, "Hall", "Go on.")
+
+    assert nb.apply_ops([add("q", target="exit: stairs")], 2)[0]["result"] == \
+        'error: target "exit: stairs" is ambiguous: thing:e_exit_stairs (tiled room), thing:e_exit_stairs_2 (room); use one of these refs'
+    assert nb.data["quests"] == []
+
+
+def test_exit_quest_closes_on_a_crossing_from_its_opening_even_if_target_is_set_later(tmp_path):
+    route = {"thing:stairs": ("place:tiled", "place:room")}.get
+    nb = notebook(tmp_path, ref=lambda value: value if str(value).startswith(("place:", "thing:")) else None, route=route)
+    nb.heard(1, None, "Hall", "Go on.")
+    nb.observe(1, "place:tiled")
+    assert nb.apply_ops([add("q")], 2)[0]["result"] == "ok"
+    assert nb.observe(3, "place:room") == []  # crossed before any target existed
+
+    assert nb.apply_ops([{"op": "target", "key": "q", "target": "thing:stairs"}], 4)[0]["result"] == "ok"
+
+    quest = nb.data["quests"][0]
+    assert quest["status"] == "done" and quest["reason"] == "crossed" and quest["closed"] == 4 and quest["by"] == "observe"
+
+
+def test_exit_quest_closes_only_on_crossings_before_its_target_was_set(tmp_path):
+    route = {"thing:stairs": ("place:tiled", "place:room")}.get
+    nb = notebook(tmp_path, ref=lambda value: value if str(value).startswith(("place:", "thing:")) else None, route=route)
+    nb.heard(1, None, "Hall", "Go on.")
+    nb.observe(1, "place:tiled")
+    nb.observe(2, "place:room")  # the stairs' crossing, two steps before the quest opens
+    assert nb.apply_ops([add("late")], 5)[0]["result"] == "ok"
+    assert nb.apply_ops([{"op": "target", "key": "late", "target": "thing:stairs"}], 6)[0]["result"] == "ok"
+    assert nb.data["quests"][0]["status"] == "open"  # crossed before it opened: not the step before its opening
+
+    assert nb.observe(7, "place:tiled") == []  # back up the other way: not this exit's route
+    assert nb.observe(8, "place:room") == []  # crossed after the target was set: an event after the target, not here
+    assert nb.data["quests"][0]["status"] == "open"

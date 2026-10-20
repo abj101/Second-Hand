@@ -3,7 +3,7 @@ import json
 import time
 from pathlib import Path
 
-MAX_OPEN, MAX_OPS = 5, 8
+MAX_OPEN, MAX_OPS, MAX_MOVES = 5, 8, 40
 
 
 def _refs(value):
@@ -11,22 +11,25 @@ def _refs(value):
 
 
 class Notebook:
-    def __init__(self, root: Path, *, ref=None, canon=None, label=None, refs=None) -> None:
+    def __init__(self, root: Path, *, ref=None, canon=None, label=None, refs=None, ties=None, route=None) -> None:
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
         self.file, self.history = root / "notebook.json", root / "notebook.history"
         self.ref, self.canon = ref or (lambda text: None), canon or (lambda value: value)
         self.label, self.refs = label or self._label, refs or (lambda: [])
+        self.ties, self.route = ties or (lambda text: []), route or (lambda ref: None)
         try:
             loaded = json.loads(self.file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             loaded = {}
         if isinstance(loaded, dict) and isinstance(loaded.get("text"), list) and isinstance(loaded.get("quests"), list):
-            self.data = {"text": loaded["text"], "quests": loaded["quests"], "last": loaded.get("last", {}), "here": loaded.get("here")}
+            self.data = {"text": loaded["text"], "quests": loaded["quests"], "last": loaded.get("last", {}), "here": loaded.get("here"),
+                         "moves": loaded.get("moves", [])}
             if not isinstance(self.data["last"], dict): self.data["last"] = {}
+            if not isinstance(self.data["moves"], list): self.data["moves"] = []
             self.log = loaded.get("log", [])
         else:
-            self.data = {"text": [], "quests": [], "last": {}, "here": None}
+            self.data = {"text": [], "quests": [], "last": {}, "here": None, "moves": []}
             self.log = []
         if not isinstance(self.log, list): self.log = []
         self._heard_closed = []
@@ -43,6 +46,9 @@ class Notebook:
         return any(row.get("key") == key for row in self.data["text"] if isinstance(row, dict))
 
     def _no_target(self, target):
+        ties = self.ties(target)
+        if ties:  # the candidates are refs the planner can name; the closest-label list would hide them
+            return f'target "{target}" is ambiguous: ' + ", ".join(f"{ref} ({place})" for ref, place in ties) + "; use one of these refs"
         labels = list(dict.fromkeys(l for r in self.refs() if (l := self.label(r)) and self.ref(l)))
         closest = difflib.get_close_matches(str(target), labels, n=3, cutoff=0)
         tail = f"closest: {', '.join(closest)}" if closest else "no known places or things yet"
@@ -137,6 +143,7 @@ class Notebook:
                 rows.append(row)
                 event["result"] = result
                 events.append(event)
+        self._close_crossed(step, events)  # a target set after its exit was used closes now, not at the next crossing
         self.data["last"] = {"step": step, "why": why, "results": rows}
         self._save(events + [{"step": step, "op": "last", "value": self.data["last"]}])
         return rows
@@ -159,11 +166,13 @@ class Notebook:
         return key
 
     def observe(self, step: int, place: str | None) -> list[str]:
-        """Close place quests on arrival (here changed to the target) after the target was set; heard closures come first."""
+        """Close place quests on arrival (here changed to the target) after the target was set; heard closures come first. Crossings are kept for _close_crossed."""
         here = self.canon(place) if place is not None else None
         prev, self.data["here"] = self.data["here"], here
         closed, self._heard_closed = self._heard_closed, []
         events = []
+        if prev is not None and here is not None and prev != here:
+            self.data["moves"] = (self.data["moves"] + [[step, prev, here]])[-MAX_MOVES:]
         for quest in self.data["quests"]:
             target = quest.get("target")
             since = quest.get("retargeted") or quest.get("opened")
@@ -173,6 +182,20 @@ class Notebook:
             closed.append(quest["key"])
             events.append({"step": step, "op": "observe", "key": quest["key"], "quest": quest})
         if events or prev != here: self._save(events)
+        return closed
+
+    def _close_crossed(self, step: int, events: list) -> list[str]:
+        """Close an open quest whose exit target was already used when the target was set: a crossing from the step before the quest opened (the arrival that prompted its plan) up to the step the target was set. A crossing after that is an event after the target (D5), so it closes nothing here."""
+        closed = []
+        for quest in self.data["quests"]:
+            target, opened = quest.get("target"), quest.get("opened")
+            if quest.get("status") != "open" or not target or target.partition(":")[0] != "thing" or type(opened) is not int: continue
+            set_at = quest["retargeted"] if type(quest.get("retargeted")) is int else opened
+            route = self.route(target)
+            if route is None or not any(opened - 1 <= s < set_at and (a, b) == route for s, a, b in self.data["moves"]): continue
+            quest.update(status="done", closed=step, reason="crossed", by="observe")
+            closed.append(quest["key"])
+            events.append({"step": step, "op": "observe", "key": quest["key"], "quest": quest})
         return closed
 
     def note(self, step: int, text: str) -> None:

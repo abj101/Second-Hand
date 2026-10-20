@@ -570,9 +570,27 @@ class World:
             return self.canon(f"place:{match[1]}")
         named = [p for p in places if key in {n.casefold() for n in [place_name(p), *place_aliases(p)] if n}]
         if len(named) == 1: return f"place:{named[0]['id']}"
-        things = [e for e in self.mem.rows("entities") if e.get("state") != "merged" and e.get("place") in maps
-                  and key in {str(n).casefold() for n in [e.get("name"), *e.get("aliases", [])] if n}]
+        things = self._named_things(text)
         return f"thing:{things[0]['id']}" if len(things) == 1 else None
+
+    def _named_things(self, text):  # live things on a world map whose name or alias is text
+        maps = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged" and p.get("screen") == "world"}
+        key = str(text or "").strip().casefold()
+        return [e for e in self.mem.rows("entities") if e.get("state") != "merged" and e.get("place") in maps
+                and key in {str(n).casefold() for n in [e.get("name"), *e.get("aliases", [])] if n}]
+
+    def ties(self, text):  # a name that several things share, which ref() cannot pick: each candidate's ref with its place's label
+        things = self._named_things(text)
+        return [(f"thing:{e['id']}", self.place_label(e["place"])) for e in things] if len(things) > 1 else []
+
+    def exit_route(self, ref):  # (from, to) place refs of a thing named as an exit; None until its door's destination is known
+        kind, _, ident = str(self.canon(ref) or "").partition(":")
+        row = self.mem.get("entities", ident) if kind == "thing" else None
+        if not row or not row.get("tile") or not row.get("place"): return None
+        pid, tile = self.canon_place(row["place"]), tuple(row["tile"])
+        live = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged"}
+        exit = next((x for x in self._exits(pid, live) if x.get("ident") == ident or x["tile"] == tile or any(d["tile"] == tile for d in x["doors"])), None)
+        return (f"place:{pid}", f"place:{exit['dest']}") if exit and exit.get("dest") else None
 
     def history(self, ref, place=None):
         canonical = self.canon(ref)

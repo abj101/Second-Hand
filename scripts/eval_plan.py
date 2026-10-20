@@ -66,9 +66,9 @@ def notebook_at(run: Path, step: int) -> Notebook:
     scratch = tempfile.TemporaryDirectory(prefix="eval-plan-")
     world = _world(run)
     live = lambda kind: [f"{kind[:-1] if kind == 'places' else 'thing'}:{r['id']}" for r in world.mem.rows(kind) if r.get("state") != "merged"]
-    nb = Notebook(Path(scratch.name), ref=world.ref, canon=world.canon, label=world.label, refs=lambda: live("places") + live("entities"))
+    nb = Notebook(Path(scratch.name), ref=world.ref, canon=world.canon, label=world.label, ties=world.ties, route=world.exit_route, refs=lambda: live("places") + live("entities"))
     nb._scratch = scratch
-    nb.data = {"text": [], "quests": [], "last": {}, "here": None}
+    nb.data = {"text": [], "quests": [], "last": {}, "here": None, "moves": []}
     at = lambda event: event.get("step", 0) if type(event.get("step", 0)) is int else 0
     history = [event for event in _rows(run / "memory" / "notebook.history") if at(event) <= step]
     trace = {row.get("step"): row for row in _rows(run / "trace.jsonl") if at(row) <= step}
@@ -90,6 +90,7 @@ def notebook_at(run: Path, step: int) -> Notebook:
                     nb.data["quests"].insert(index, q)
             elif op == "last" and isinstance(event.get("value"), dict):
                 nb.data["last"] = event["value"]
+        nb._close_crossed(s, [])  # apply_ops closes a quest whose exit was already used when its target was set
         texts = []
         for event in events:
             if event.get("op") == "text" and isinstance(event.get("value"), dict):
