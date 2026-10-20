@@ -156,7 +156,8 @@ class Loop:
         affs, targets, intents = [], [], []  # intents: each affordance's intent key, resolved before input
         choice, player = None, next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         act_route = travel_legs = None; refused = False  # refused: no route to an on-screen target avoids the known blockers (occupied tiles, remembered avoid tile)
-        options = self.world.options(per, place, self.fails, self.step_no + 1, inputs=list(self.env.inputs()))  # failure history is in the option notes
+        options = self.world.options(per, place, self.fails, self.step_no + 1, inputs=list(self.env.inputs()),
+                                     targets=(q["target"],) if (q := self.notebook.focused_quest()) and q.get("target") else ())  # failure history is in the option notes
         focus = f"{self.notebook.render_focus(self.world.label)}\nHere: {self.world.place_label(place)}"
         a = act(self.model, per, focus, options, list(self.env.inputs()), "\n".join(_load(self.game).get("controls", [])))
         picked = next((o for o in options if o["n"] == getattr(a, "option", None)), None)

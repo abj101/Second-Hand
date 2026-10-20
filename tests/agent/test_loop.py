@@ -953,6 +953,28 @@ def test_plan_returns_operations_and_why(tmp_path):
     assert missing.ops is None and missing.why == "nothing new"
 
 
+def test_focused_off_screen_static_quest_target_stays_in_menu(tmp_path, monkeypatch):
+    from agent import loop as module
+
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.mem.upsert("places", {"id": "room", "name": "Room", "screen": "world", "state": "place", "visits": 1})
+    loop.mem.upsert("entities", {"id": "crate1", "name": "crate", "kind": "furniture", "place": "room", "tile": [2, 2], "status": "remembered", "last": 1, "seen": 1})
+    loop.mem.match_place = lambda *args, **kwargs: "room"
+    loop.world.current_place = loop.place = "room"
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    loop.notebook.data["quests"] = [{"key": "crate", "text": "Inspect the crate", "why": [], "target": "thing:crate1", "status": "open"}]
+    data = {"screen": "world", "text": [], "entities": [{"kind": "player", "name": "player", "at": [.5, .5]}]}
+    monkeypatch.setattr(module, "perceive", lambda *_: (data, reply(data)))
+    monkeypatch.setattr(module, "cut", lambda *_a, **_k: False)
+    menus = []
+    monkeypatch.setattr(module, "act", lambda _model, _per, _focus, options, *_a, **_k: menus.append(options) or SimpleNamespace(
+        place="", ops=[], action=None, expect="screen_changes", why="test", text=None))
+
+    loop.step()
+
+    assert any(row.get("ref") == "thing:crate1" for row in menus[0])
+
+
 def test_planner_prioritizes_game_text_and_checks_it_before_throttle(tmp_path):
     loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
     loop.notebook.data["quests"] = [{"key": "g", "text": "explore", "status": "open"}]

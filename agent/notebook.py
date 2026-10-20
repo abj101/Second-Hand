@@ -33,7 +33,11 @@ class Notebook:
 
     @property
     def focus(self):
-        return next((q["key"] for q in self.data["quests"] if q.get("status") == "open"), None)
+        quest = self.focused_quest()
+        return quest["key"] if quest else None
+
+    def focused_quest(self):
+        return next((q for q in self.data["quests"] if q.get("status") == "open"), None)
 
     def _known_key(self, key):
         return any(row.get("key") == key for row in self.data["text"] if isinstance(row, dict))
@@ -243,7 +247,7 @@ class Notebook:
         return "\n".join(lines)
 
     def render_focus(self, label) -> str:
-        quest = next((q for q in self.data["quests"] if q.get("status") == "open"), None)
+        quest = self.focused_quest()
         lines = []
         if quest:
             target = quest.get("target")
