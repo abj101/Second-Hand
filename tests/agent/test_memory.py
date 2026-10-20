@@ -1,6 +1,6 @@
 import json
 
-from agent.memory import Memory, conf
+from agent.memory import TRANSIENT, Memory, conf, normalize_kind
 
 
 def test_upsert_restart_replay_and_unknown_store(tmp_path):
@@ -84,6 +84,25 @@ def test_position_identity_relabels_co_visible_things_and_keeps_tracks(tmp_path)
     assert mem.observe({"entities": [{"name": "player", "kind": "player"}]}, "s", 2,
                        {0: (8, 8)}, {0: track})[0] == track
     assert mem.get("entities", track)["kind"] == "npc"
+
+
+def test_normalize_kind_folds_spaces_and_ui_and_marks_transient_kinds():
+    assert normalize_kind("dialogue box") == "dialogue_box" and normalize_kind("UI") == "ui_element" and normalize_kind("menu items") == "menu_item"
+    assert {"dialogue_box", "ui_element", "menu_item"} <= TRANSIENT
+
+
+def test_exit_and_wall_on_one_tile_are_two_things(tmp_path):
+    mem = Memory(tmp_path)
+    ids = mem.observe({"entities": [{"name": "stone wall", "kind": "scenery"}, {"name": "exit: path", "kind": "exit"}]}, "p", 1, {0: (3, 3), 1: (3, 3)})
+    wall = ids[0]
+    assert ids[0] != ids[1]
+    assert not any("exit" in k for k in mem.get("entities", wall)["kinds"] + mem.get("entities", wall)["aliases"])
+
+
+def test_exit_landing_on_a_wall_tile_does_not_join_the_wall(tmp_path):
+    mem = Memory(tmp_path)
+    wall = mem.observe({"entities": [{"name": "stone wall", "kind": "scenery"}]}, "p", 1, {0: (3, 3)})[0]
+    assert mem.observe({"entities": [{"name": "exit: path", "kind": "exit"}]}, "p", 2, {0: (3, 3)})[0] != wall
 
 
 def test_tile_identity_survives_scrolling_and_separates_same_name(tmp_path):
@@ -344,3 +363,30 @@ def test_new_record_is_logged_with_the_records_it_did_not_match(tmp_path):
     rows = [json.loads(line) for line in (tmp_path / "mints.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [r["name"] for r in rows] == ["girl", "girl"]
     assert rows[1]["near"][0]["name"] == "girl" and rows[1]["near"][0]["tile_d"] == 7 and rows[1]["near"][0]["name_d"] == 0
+
+
+def test_normalize_kind_folds_spaces_and_ui():
+    from agent.memory import normalize_kind
+    assert normalize_kind("dialogue box") == "dialogue_box"
+    assert normalize_kind("Menu Items") == "menu_item"
+    assert normalize_kind("ui") == "ui_element"
+    assert normalize_kind("exit: door") == "exit"
+
+
+def test_exit_perception_never_joins_a_wall_on_its_tile(tmp_path):
+    from agent.memory import normalize_kind
+    mem = Memory(tmp_path)
+    wall = {"name": "stone wall", "kind": "wall", "at": [.5, .5]}
+    wall_id = mem.observe({"entities": [wall]}, "p", 1, {0: (3, 3)})[0]
+
+    both = mem.observe({"entities": [dict(wall), {"name": "exit: path", "kind": "exit", "at": [.5, .5]}]}, "p", 2, {0: (3, 3), 1: (3, 3)})
+    assert both[0] == wall_id and both[1] != wall_id
+    record = mem.get("entities", wall_id)
+    assert not any(str(a).casefold().startswith("exit:") for a in record.get("aliases", []))
+    assert "exit" not in [normalize_kind(k) for k in record.get("kinds", [])]
+
+    assert mem.observe({"entities": [{"name": "exit: path", "kind": "exit", "at": [.5, .5]}]}, "p", 3, {0: (3, 3)}) == {0: both[1]}
+
+    other = Memory(tmp_path / "wall_only")
+    other_wall = other.observe({"entities": [wall]}, "p", 1, {0: (3, 3)})[0]
+    assert other.observe({"entities": [{"name": "exit: path", "kind": "exit", "at": [.5, .5]}]}, "p", 2, {0: (3, 3)})[0] != other_wall

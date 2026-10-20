@@ -15,9 +15,13 @@ STATIC_GATE = 1
 
 
 def normalize_kind(kind: str) -> str:
-    value = str(kind or "").casefold().split(":", 1)[0].strip()
+    value = "_".join(str(kind or "").casefold().split(":", 1)[0].split())  # "dialogue box" == "dialogue_box"
     value = value[:-1] if value.endswith("s") else value
-    return {"doorway": "door"}.get(value, value)
+    return {"doorway": "door", "ui": "ui_element"}.get(value, value)
+
+
+def _is_exit(kind, name) -> bool:  # category is part of identity: a passage is never the same thing as a wall or a sign on its tile
+    return normalize_kind(kind) == "exit" or str(name or "").casefold().startswith("exit:")
 
 
 def _actor(row: dict) -> bool:
@@ -260,19 +264,20 @@ class Memory:
         # Position is the identity evidence for every positioned observation.
         lead = {}  # a tile holds one static thing: static perceptions projected onto one tile in one frame follow the first one
         for i, entity, name, kind, nk, tile in entities:
-            if tile is not None and not (nk in ACTOR_KINDS or nk == "player"): lead.setdefault(tuple(tile), i)
+            if tile is not None and not (nk in ACTOR_KINDS or nk == "player"): lead.setdefault((tuple(tile), _is_exit(kind, name)), i)
         pairs = []
         for i, entity, name, kind, nk, tile in entities:
             if tile is None or i in result:
                 continue
             is_actor = nk in ACTOR_KINDS or nk == "player"
-            if not is_actor and lead[tuple(tile)] != i:
+            exit_ = _is_exit(kind, name)
+            if not is_actor and lead[(tuple(tile), exit_)] != i:
                 continue
             hit = self.get("entities", (tracks or {}).get(i))
-            if hit and hit.get("place") == place and hit.get("state") != "merged":
+            if hit and hit.get("place") == place and hit.get("state") != "merged" and _is_exit(hit.get("kind"), hit.get("name")) == exit_:  # a track never turns a passage into its walker
                 pairs.append(((-1,), i, hit))
             for row in rows:
-                if row.get("place") != place or row.get("state") == "merged" or not row.get("tile"):
+                if row.get("place") != place or row.get("state") == "merged" or not row.get("tile") or _is_exit(row.get("kind"), row.get("name")) != exit_:
                     continue
                 d = max(abs(tile[0] - row["tile"][0]), abs(tile[1] - row["tile"][1]))
                 gate = min(4, 1 + max(0, step - row.get("last", step)) // 4) if (
@@ -287,11 +292,12 @@ class Memory:
 
         for i, entity, name, kind, nk, tile in entities:
             row = self.get("entities", result[i]) if i in result else None
-            if row is None and tile is not None and lead.get(tuple(tile), i) != i:  # follows the first static perception on its tile, whatever that one matched or minted
-                row = self.get("entities", result.get(lead[tuple(tile)]))
+            group = (tuple(tile), _is_exit(kind, name)) if tile is not None else None
+            if row is None and group and lead.get(group, i) != i:  # follows the first static perception of its category on its tile, whatever that one matched or minted
+                row = self.get("entities", result.get(lead[group]))
             if row is None and tile is not None and not (nk in ACTOR_KINDS or nk == "player"):  # a tile holds one static thing: a second perception on it in one frame is projection noise, not a new thing
                 row = next((r for r in self.rows("entities") if r.get("place") == place and r.get("state") != "merged" and not _actor(r)
-                            and r.get("tile") and tuple(r["tile"]) == tuple(tile)), None)
+                            and r.get("tile") and tuple(r["tile"]) == tuple(tile) and _is_exit(r.get("kind"), r.get("name")) == _is_exit(kind, name)), None)
             if row is None:
                 recurring = kind in RECURRING
                 eid = self._id("entities", name)
@@ -319,7 +325,8 @@ class Memory:
                 row["kinds"] = [*row["kinds"], kind]
             row.update(at=entity.get("at"), last=step, seen=row.get("seen", 0) + 1, status="seen", misses=0)
             if tile is not None and (_actor(row) or not any(r["id"] != row["id"] and r.get("place") == place and r.get("state") != "merged" and not _actor(r)
-                                                             and r.get("tile") and tuple(r["tile"]) == tuple(tile) for r in self.rows("entities"))):  # one static record per tile: noise never drifts a record onto another's tile
+                                                             and r.get("tile") and tuple(r["tile"]) == tuple(tile) and _is_exit(r.get("kind"), r.get("name")) == _is_exit(row.get("kind"), row.get("name"))
+                                                             for r in self.rows("entities"))):  # one static record per tile and category: noise never drifts a record onto another's tile
                 row["tile"] = list(tile)
             result[i] = self.upsert("entities", row)["id"]
             used.add(result[i])

@@ -22,13 +22,14 @@ class Notebook:
         except (OSError, ValueError):
             loaded = {}
         if isinstance(loaded, dict) and isinstance(loaded.get("text"), list) and isinstance(loaded.get("quests"), list):
-            self.data = {"text": loaded["text"], "quests": loaded["quests"], "last": loaded.get("last", {})}
+            self.data = {"text": loaded["text"], "quests": loaded["quests"], "last": loaded.get("last", {}), "here": loaded.get("here")}
             if not isinstance(self.data["last"], dict): self.data["last"] = {}
             self.log = loaded.get("log", [])
         else:
-            self.data = {"text": [], "quests": [], "last": {}}
+            self.data = {"text": [], "quests": [], "last": {}, "here": None}
             self.log = []
         if not isinstance(self.log, list): self.log = []
+        self._heard_closed = []
 
     @property
     def focus(self):
@@ -141,25 +142,33 @@ class Notebook:
         value = {"key": key, "step": step, "speaker": speaker, "where": where, "text": text,
                  "who": self.canon(who) if who else None}
         self.data["text"].append(value)
-        self._save([{"step": step, "op": "text", "value": value}])
-        return key
-
-    def observe(self, step: int, place: str | None, talked=()) -> list[str]:
-        talked = {self.canon(ref) for ref in talked}
-        here = self.canon(place) if place is not None else None
-        closed, events = [], []
+        events = [{"step": step, "op": "text", "value": value}]
         for quest in self.data["quests"]:
             target = quest.get("target")
-            opened = quest.get("opened", step)
-            if quest.get("status") != "open" or not target or (type(opened) is int and step < opened): continue
-            kind = target.partition(":")[0]
-            if kind == "place" and here == self.canon(target): reason = "reached"
-            elif kind == "thing" and self.canon(target) in talked: reason = "talked"
-            else: continue
-            quest.update(status="done", closed=step, reason=reason, by="observe")
+            since = quest.get("retargeted") or quest.get("opened")
+            if quest.get("status") != "open" or not target or value["who"] is None or target.partition(":")[0] != "thing": continue
+            if self.canon(target) != value["who"] or (type(since) is int and step < since): continue
+            quest.update(status="done", closed=step, reason="talked", by="observe")
+            self._heard_closed.append(quest["key"])
+            events.append({"step": step, "op": "observe", "key": quest["key"], "quest": quest})
+        self._save(events)
+        return key
+
+    def observe(self, step: int, place: str | None) -> list[str]:
+        """Close place quests on arrival (here changed to the target) after the target was set; heard closures come first."""
+        here = self.canon(place) if place is not None else None
+        prev, self.data["here"] = self.data["here"], here
+        closed, self._heard_closed = self._heard_closed, []
+        events = []
+        for quest in self.data["quests"]:
+            target = quest.get("target")
+            since = quest.get("retargeted") or quest.get("opened")
+            if quest.get("status") != "open" or not target or target.partition(":")[0] != "place": continue
+            if (type(since) is int and step < since) or prev == here or here != self.canon(target): continue
+            quest.update(status="done", closed=step, reason="reached", by="observe")
             closed.append(quest["key"])
             events.append({"step": step, "op": "observe", "key": quest["key"], "quest": quest})
-        if events: self._save(events)
+        if events or prev != here: self._save(events)
         return closed
 
     def note(self, step: int, text: str) -> None:
@@ -200,7 +209,7 @@ class Notebook:
             return q.get("reason", "")
         if target.startswith("place:"): return f"reached {self.label(target)}"
         said = [self._text_line(row, 160) for row in self.data["text"]
-                if row.get("who") == self.canon(target) and row.get("step", 0) >= q["closed"]][:2]
+                if row.get("who") == self.canon(target) and row.get("step", 0) >= q.get("retargeted", q.get("opened", 0))][:2]
         return f"talked to {self.label(target)}, " + ("who said " + "; ".join(said) if said else "who said nothing yet")
 
     @staticmethod
@@ -241,8 +250,7 @@ class Notebook:
             done_when = ""
             if target:
                 kind = target.partition(":")[0]
-                condition = "talked to" if kind == "thing" else "in"
-                done_when = f" (done when: {condition} {label(target)})"
+                done_when = f" (done when: {label(target)} speaks to you)" if kind == "thing" else f" (done when: you enter {label(target)})"
             lines.extend([f"Goal: {quest['text']}{done_when}", "Because:"])
             lines.extend(
                 f"{row.get('speaker') or 'text'}, step {row.get('step', '?')}: \"{row.get('text', '')}\""[:160]

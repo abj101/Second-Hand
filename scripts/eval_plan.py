@@ -55,43 +55,57 @@ def _legacy_quest(row, world):
     return q
 
 
+def _unclosed(q):
+    """A snapshot taken after an observe closure reopens here: closures are re-derived, never copied."""
+    return {**q, "status": "open", "closed": None, "reason": None, "by": None} if q.get("by") == "observe" else q
+
+
 def notebook_at(run: Path, step: int) -> Notebook:
-    """Build a v3 notebook from the history events no later than step."""
+    """Re-derive a notebook at step: planner events, then heard text, then observe, per trace step."""
     run = Path(run)
     scratch = tempfile.TemporaryDirectory(prefix="eval-plan-")
     world = _world(run)
     live = lambda kind: [f"{kind[:-1] if kind == 'places' else 'thing'}:{r['id']}" for r in world.mem.rows(kind) if r.get("state") != "merged"]
     nb = Notebook(Path(scratch.name), ref=world.ref, canon=world.canon, label=world.label, refs=lambda: live("places") + live("entities"))
     nb._scratch = scratch
-    nb.data = {"text": [], "quests": [], "last": {}}
-    for event in _rows(run / "memory" / "notebook.history"):
-        at = event.get("step", 0)
-        if type(at) is int and at > step:
-            continue
-        op = event.get("op")
-        if op == "quests" and isinstance(event.get("value"), list):
-            nb.data["quests"] = [_legacy_quest(q, world) for q in event["value"] if isinstance(q, dict)]
-        elif op in ("add", "done", "drop", "reopen", "top", "target", "observe") and isinstance(event.get("quest"), dict):
-            q = event["quest"]
-            if op == "observe": q = {**q, "by": "observe"}  # recorded before observe marked its closures
-            if op == "target": q = {"retargeted": at, **q}
-            prior = next((i for i, old in enumerate(nb.data["quests"]) if old.get("key") == q.get("key")), None)
-            if prior is not None:
-                old = nb.data["quests"].pop(prior)
-                if "retargeted" in old: q = {"retargeted": old["retargeted"], **q}
-            if op == "add" or prior is not None:
-                index = 0 if op in ("top", "reopen") else min(prior if prior is not None else len(nb.data["quests"]), len(nb.data["quests"]))
-                nb.data["quests"].insert(index, q)
-        elif op == "text" and isinstance(event.get("value"), dict):
-            row = event["value"]
-            if "who" not in row:  # recorded before heard() kept the speaker's ref: resolve the printed speaker
+    nb.data = {"text": [], "quests": [], "last": {}, "here": None}
+    at = lambda event: event.get("step", 0) if type(event.get("step", 0)) is int else 0
+    history = [event for event in _rows(run / "memory" / "notebook.history") if at(event) <= step]
+    trace = {row.get("step"): row for row in _rows(run / "trace.jsonl") if at(row) <= step}
+    for s in sorted({at(event) for event in history} | set(trace)):
+        events = [event for event in history if at(event) == s]
+        for event in events:
+            op = event.get("op")
+            if op == "quests" and isinstance(event.get("value"), list):
+                nb.data["quests"] = [_legacy_quest(_unclosed(q), world) for q in event["value"] if isinstance(q, dict)]
+            elif op in ("add", "done", "drop", "reopen", "top", "target") and isinstance(event.get("quest"), dict):
+                q = _unclosed(event["quest"])
+                if op == "target": q = {"retargeted": s, **q}
+                prior = next((i for i, old in enumerate(nb.data["quests"]) if old.get("key") == q.get("key")), None)
+                if prior is not None:
+                    old = nb.data["quests"].pop(prior)
+                    if "retargeted" in old: q = {"retargeted": old["retargeted"], **q}
+                if op == "add" or prior is not None:
+                    index = 0 if op in ("top", "reopen") else min(prior if prior is not None else len(nb.data["quests"]), len(nb.data["quests"]))
+                    nb.data["quests"].insert(index, q)
+            elif op == "last" and isinstance(event.get("value"), dict):
+                nb.data["last"] = event["value"]
+        texts = []
+        for event in events:
+            if event.get("op") == "text" and isinstance(event.get("value"), dict):
+                texts.append(event["value"])
+            elif event.get("op") == "log":
+                _text_from_log(event.get("text", ""), s, texts)
+        for row in texts:
+            if "who" in row:
+                who = row["who"]
+            else:  # recorded before heard() kept the speaker's ref: resolve the printed speaker
                 who = world.ref(row.get("speaker")) if row.get("speaker") else None
-                row = {**row, "who": who if str(who).startswith("thing:") else None}
-            nb.data["text"].append(row)
-        elif op == "log":
-            _text_from_log(event.get("text", ""), at, nb.data["text"])
-        elif op == "last" and isinstance(event.get("value"), dict):
-            nb.data["last"] = event["value"]
+                who = who if str(who).startswith("thing:") else None
+            nb.heard(s, row.get("speaker"), row.get("where", "?"), row.get("text", ""), who=who)
+        if s in trace:
+            place = trace[s].get("next_place") or trace[s].get("place")
+            nb.observe(s, f"place:{place}" if place else None)
     return nb
 
 
@@ -281,9 +295,10 @@ def _observe(run):
         if index == 0:
             for opened in sorted(k for k in by_open if k < step):
                 activate(opened)
-        talked = [f"thing:{relation['s']}" for relation in relations
-                  if relation.get("p") == "says" and relation.get("step") == step and relation.get("s")]
-        closed = nb.observe(step, f"place:{row['place']}" if row.get("place") else None, talked)
+        for relation in relations:
+            if relation.get("p") == "says" and relation.get("step") == step and relation.get("s"):
+                nb.heard(step, None, "?", str(relation.get("o", "")), who=f"thing:{relation['s']}")
+        closed = nb.observe(step, f"place:{row['place']}" if row.get("place") else None)
         for key in closed:
             q = next(q for q in nb.data["quests"] if q.get("key") == key)
             actual[q["text"].split(" ", 1)[1] + f"@{q['closed']}"] = q["closed"]

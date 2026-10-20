@@ -40,7 +40,7 @@ class Loop:
         self.reperception_used = False  # ponytail: read only by invalidate_live_observation (live view); remove with it
         self.world = World(mem, self.tile_px); self.world.tracker.wrap(env)
         self.observation_stamp = self.observation_age_ms = None; self.live_invalidation_reason = None
-        self.events = []
+        self.events, self.t5_armed = [], False  # t5_armed: T5 fires once per no-quest period, armed by a new T1/T2/T3 (nothing heard yet: nothing a plan could cite)
         self.notebook = Notebook(mem.root, ref=self.world.ref, canon=self.world.canon, label=self.world.label,
                                  refs=lambda: [f"place:{p['id']}" for p in mem.rows("places") if p.get("state") != "merged"] + [f"thing:{e['id']}" for e in mem.rows("entities") if e.get("state") != "merged"])
         self.last_plan, self._plan_row = None, None
@@ -222,7 +222,7 @@ class Loop:
              "exit_key": list(exit_key) if exit_key else None, "unseen_crossing": unseen_crossing, "cut_dir": cut_dir, "travel": travel_legs is not None, "route_len": len(act_route["dirs"]) if act_route else None,
              "refused": refused, "pressed_from": list(pressed_from), "go_to": f'go_to "{a.action["go_to"]}": not in memory' if a.action and "go_to" in a.action and choice is None else None,
              "no_action": not a.action, "act": {"place": self.world.place_label(place), "why": a.why, "action": a.action},
-             "option": {k: picked[k] for k in ("n", "tool", "label", "notes", "state")} if picked else None, "plan": self._plan_row,
+             "option": {k: picked[k] for k in ("n", "tool", "label", "notes", "state")} if picked else None, "pick_key": picked.get("intent_key") if picked else None, "plan": self._plan_row,
              "probe": {"presses": probe["presses"], "locked": probe["locked"]} if probe is not None else None,
              "world": {"cut_dir": cut_dir, "pos": list(self.world.pos), "travelled": skill is self.world._travelled, "travel_open": self.world._travel_open, "current_place": self.world.current_place}}
         try: after_set = wait_settled(self.env)
@@ -246,8 +246,7 @@ class Loop:
             source = self.mem.get("places", place); source["state"] = "place"; self.mem.upsert("places", source)
         world_exit = bool(scene_cut and next_place != place and cut_dir and per.get("screen") == after_per.get("screen") == "world")
         outcome = effects(per, after_per, skill, place, next_place, place_after_candidate=not world_exit and self.mem.get("places", next_place).get("state") == "candidate", scene_cut=scene_cut and next_place != place)
-        talked = set()
-        route = (getattr(skill, "failure", None) or {}).get("stage") in ("route", "interaction")  # never reached the thing (a route stopped short, a choice refused before any press): no evidence about it
+        route =(getattr(skill, "failure", None) or {}).get("stage") in ("route", "interaction")  # never reached the thing (a route stopped short, a choice refused before any press): no evidence about it
         if choice and tid and not route:  # a route that never reached the thing says nothing about it
             new_text = next((t for t in after_per.get("text", []) if t not in per.get("text", [])), "")
             for effect in outcome["effects"]:
@@ -260,7 +259,7 @@ class Loop:
                     verb=aff["verb"])
                 if said_step is not None: self.mem.upsert("relations", {**rel, "why": f"says the same as before (step {said_step})"})  # ponytail: a note on the says row, not a new relation kind
                 if effect == "text_appears":
-                    talked.add(f"thing:{tid}"); self.conversation["who"] = f"thing:{tid}"  # the dialogue it starts is that thing's
+                    self.conversation["who"] = f"thing:{tid}"  # the dialogue it starts is that thing's
                     entity = self.mem.get("entities", tid)
                     speaker = re.match(r"^([A-Z][A-Za-z.' -]{0,19}):\s*", new_text)
                     if entity and self.world._actor(tid, entity) and speaker and sum(c.isalpha() for c in speaker.group(1)) >= 2:
@@ -282,11 +281,12 @@ class Loop:
         self.step_no += 1
         after.save(self.mem.root.parent / row["after"])
         drift_fix = self.world.observe_after(after_per, after, after_reused, next_place, after.size, self.step_no, skill=skill)
-        closed = self.notebook.observe(self.step_no, f"place:{next_place}" if next_place else None, talked)
+        closed = self.notebook.observe(self.step_no, f"place:{next_place}" if next_place else None)
         self._closed(closed, self.step_no)
         first_visit = (self.mem.get("places", next_place) or {}).get("first") == self.step_no
         novel = bool(closed) or self.world.novel > 0 or verified_edge or (next_place != place and first_visit)
-        v = "progress" if closed else action_result(skill.status, outcome["effects"], novel) if choice else "unobservable"
+        idle = bool((choice or s.get("pick_key")) and not skill.inputs and skill.status == "done")  # a picked option that sent no input yet "succeeded" did nothing: a failure of that option, so the menu changes (blocked/failed keep their own reason)
+        v = "progress" if closed else "failed" if idle else action_result(skill.status, outcome["effects"], novel) if choice else "unobservable"
         row["verdict"] = v
         row["tile"], row["drift_fix"] = self.world.pos if self.tile_px else None, list(drift_fix) if drift_fix else None
         row["self_spot"], row["self_locked"] = self.world.self_spot, self.world._self_from_motion
@@ -313,13 +313,15 @@ class Loop:
                 held = tuple(prior["avoid"]) if reuse else (self.world.pos[0] + DIRS[step_dir][0], self.world.pos[1] + DIRS[step_dir][1]) if step_dir in DIRS else None  # the tile a route stopped at
                 blocker = prior.get("blocker") if reuse else next((r["id"] for r in self.mem.rows("entities") if r.get("place") == place and r.get("tile") and held and tuple(r["tile"]) == held and r["id"] != tid), None) if stage == "route" else None
                 self.cause = failure_cause(intent, f"{verb} {target}".strip(), stage, skill.reason or ("no change" if "no_change" in outcome.get("effects", []) else f"verdict {v}"), held if stage == "route" else None, blocker)
-                f = self.fails.setdefault(intent, {"n": 0}); f.update(n=f["n"] + 1, why=(skill.reason or f"verdict {v}")[:40], step=self.step_no, act=f"{verb} {target}".strip())
+                f = self.fails.setdefault(intent, {"n": 0}); f.update(n=f["n"] + 1, why=("did nothing" if idle else skill.reason or f"verdict {v}")[:40], step=self.step_no, act=f"{verb} {target}".strip())
                 if stage == "route" and blocker and held and not refused and blocker != tid: f.update(avoid=list(held), blocker=blocker)  # the next route goes around it
                 if thing and not route: self.mem.relate(thing, PRED["no_change"], "", src="observed", step=self.step_no, hit=False, verb=verb)  # the thing itself is contradicted; never deleted
             else:
                 if intent in self.fails and not str(self.fails[intent].get("why", "")).endswith(": cycle"): self.fails.pop(intent)  # a success clears this intent's own counter, never another's
                 if thing and (failure := next((r for r in self.mem.rows("relations") if (r.get("s"), r.get("p"), r.get("o")) == (thing, PRED["no_change"], "")), None)):
                     self.mem.upsert("relations", {**failure, "con": 0, "ev": [], "state": "live"})  # ponytail: clear the no-change relation in place
+        elif idle:  # the picked option never became an action (an unresolved go_to): count it under the option's own key
+            f = self.fails.setdefault(s["pick_key"], {"n": 0}); f.update(n=f["n"] + 1, why="did nothing", step=self.step_no, act=s["option"]["label"])
         if s["go_to"]: reason = s["go_to"]
         if s["no_action"] and not reason: reason = "your last reply had no valid action, so nothing happened: use one of the action shapes"
         self.flags = [x for x in (reason, f"last action {skill.status}: {skill.reason}" if skill.status != "done" else None, f"cause: {self.cause}" if self.cause else None) if x]
@@ -350,16 +352,17 @@ class Loop:
         known = {_key(r.get("text", "")) for r in self.mem.rows("knowledge")}
         fresh = [t for t in texts if t not in seen and _key(t) not in known]
         for text in (t for t in texts if t not in seen): self.mem.know(text, src="game_text", step=step)
-        if self.conversation["lines"] and (screen == "world" or place != self.conversation["place"]):
+        if self.conversation["lines"] and (screen != self.conversation.get("screen", screen) or place != self.conversation["place"]):  # a conversation ends when its screen kind or place changes (dialogue -> menu, not only -> world)
             self._flush_conversation(step)
         if screen in ("menu", "title", "keyboard", "other"): return bool(fresh)  # non-dialogue, non-world text is knowledge only: no conversation, no trigger
         if screen == "world":
+            self.conversation.pop("who", None)  # back in the world with no dialogue: nothing was said by the thing last touched
             if fresh:
                 self.text_for_trigger = " / ".join(fresh)
                 for text in fresh: self.notebook.heard(step, None, self.world.place_label(place) if place else "?", text)
                 self._event("T1", f"new game text: {self.text_for_trigger[:200]}", step)
             return bool(fresh)
-        if not self.conversation["lines"]: self.conversation["place"] = place
+        if not self.conversation["lines"]: self.conversation.update(place=place, screen=screen)
         lines = self.conversation["lines"]
         for text in fresh:
             line = " ".join(str(text).replace("▼", "").replace("▶", "").split())
@@ -435,6 +438,7 @@ class Loop:
         quest = next((q for q in self.notebook.data["quests"] if q.get("status") == "open"), None)
         return str(quest.get("text", "")) if quest else ""
     def _event(self, kind, text, step):  # T4 and T5 wait at most once
+        if kind in ("T1", "T2", "T3"): self.t5_armed = True
         if kind in ("T4", "T5") and any(e["kind"] == kind for e in self.events): return
         self.events.append({"kind": kind, "text": text, "step": step})
     def _closed(self, keys, step):
@@ -475,12 +479,12 @@ class Loop:
         return "\n".join(lines)
     def _plan_trigger(self, per):
         """Replan once the three-step floor has passed and an event is waiting (T1 text only on the world screen); no open quest queues one."""
-        if self.notebook.focus is None: self._event("T5", "no open quest", self.step_no + 1)
+        if self.notebook.focus is None and self.t5_armed: self._event("T5", "no open quest", self.step_no + 1); self.t5_armed = False
         if self.last_plan is not None and self.step_no + 1 - self.last_plan < 3: return None
         if not any(e["kind"] != "T1" or per.get("screen") == "world" for e in self.events): return None
         return "; ".join(e["text"] for kind in ("T3", "T1", "T2", "T5", "T4") for e in self.events if e["kind"] == kind)
     def state(self):
-        state = {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "perception": self.cached, "frame_hash": self.cached_hash, "perception_marked": self.cached_marked, "frame_mark_eligible": self.prev_frame_mark_eligible, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "pending_via": self.pending_via, "pending_key": self.pending_key, "flags": self.flags, "planner": {"last": self.last_plan, "events": self.events, "fails": self.fails, "moves": self.moves, "new_places": self.new_places, "planner_evidence": self.planner_evidence, "fail_baseline": self.fail_baseline, "conversation": self.conversation, "text_for_trigger": self.text_for_trigger, "cause": self.cause}}
+        state = {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "perception": self.cached, "frame_hash": self.cached_hash, "perception_marked": self.cached_marked, "frame_mark_eligible": self.prev_frame_mark_eligible, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "pending_via": self.pending_via, "pending_key": self.pending_key, "flags": self.flags, "planner": {"last": self.last_plan, "events": self.events, "t5_armed": self.t5_armed, "fails": self.fails, "moves": self.moves, "new_places": self.new_places, "planner_evidence": self.planner_evidence, "fail_baseline": self.fail_baseline, "conversation": self.conversation, "text_for_trigger": self.text_for_trigger, "cause": self.cause}}
         if self.observation_stamp: state["observation_stamp"] = self.observation_stamp
         if not self.provenance_incomplete: state["modes"] = {"decide": bool(self.decide), "act_text": bool(self.act_text)}  # after a legacy restore the modes are not written: they were never recorded
         return state
@@ -501,7 +505,7 @@ class Loop:
         self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = bool(state.get("parse_failed")), int(state.get("empty_streak", 0)), bool(state.get("repair_used")), bool(state.get("repair_pending")); self.pending_cut, self.pending_via, self.pending_key = bool(state.get("pending_cut")), state.get("pending_via"), state.get("pending_key"); self.flags = state.get("flags", [])
         planner = state.get("planner") or {}; self.last_plan = planner.get("last")
         self.fails, self.moves = planner.get("fails") or {}, planner.get("moves") or []
-        self.events = [dict(e) for e in planner.get("events", [])]
+        self.events, self.t5_armed = [dict(e) for e in planner.get("events", [])], planner.get("t5_armed", False)
         self.new_places = planner.get("new_places") or []
         self.planner_evidence = planner.get("planner_evidence") or []
         self.fail_baseline = planner.get("fail_baseline", {key: value.get("n", 0) for key, value in self.fails.items()} if self.last_plan is not None else {})

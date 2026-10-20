@@ -168,8 +168,10 @@ def menu(run, steps=None, first=1, dump=None, live=(), cap=20, model=None):
         try: world.before(per, place, st["prior"], (160, 144), s)
         finally: world._seen_at = seen_at
         world.pos = pos; st["prior"] = place
-        focus = f"{notebook_at(src, s).render_focus(world.label)}\nHere: {world.place_label(place)}"
-        try: options = world.options(per, place, fails, s, inputs=list(env.inputs()))
+        nb = notebook_at(src, s)
+        focus = f"{nb.render_focus(world.label)}\nHere: {world.place_label(place)}"
+        target = next((q.get("target") for q in nb.data["quests"] if q.get("status") == "open" and q.get("target")), None)
+        try: options = world.options(per, place, fails, s, inputs=list(env.inputs()), targets=(target,) if target else ())
         except TypeError as e:  # a crash in agent/world.py options is reported as a failure, never patched here
             per_step.append({"step": s, "rows": 0, "dups": [], "names": [], "noaction": 0, "chars": 0, "order": 0, "crash": str(e)[:120]})
             print(f"{s} CRASH options: {str(e)[:120]}"); return

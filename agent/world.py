@@ -602,6 +602,12 @@ class World:
             else: result["checked"] = text
         return result
 
+    def reachable(self, ref, per, place):  # the loop's go_to test, shared so a row is offered only if it executes: resolves, and is on screen or has travel legs
+        found = self.resolve(ref, per, place)
+        if not found or found["kind"] == "screen": return bool(found)
+        held, self.actor_tiles = self.actor_tiles, frozenset()  # an actor in the way blocks only for now: the row stays, a failed try is recorded
+        try: return self.plan(found) is not None
+        finally: self.actor_tiles = held
     def resolve(self, name, per, place):
         ref = self.ref(name)
         if ref:
@@ -919,7 +925,7 @@ class World:
     def _tile(self, ident):
         tile = (self.entity_tiles.get(ident) or (self.mem.get("entities", ident) or {}).get("tile")) if ident else None
         return tuple(tile) if tile else None
-    def options(self, per, place, fails, step, inputs=()):
+    def options(self, per, place, fails, step, inputs=(), targets=()):
         """What can be done now, from the situation only. Pure: writes nothing, asks no model, never removes or hides an option for its history.
         Modal choices stay in their existing order. Navigable rows are exits, actors, things, explore directions, places, then free buttons."""
         ents, modal, fails = per.get("entities", []), per.get("screen") != "world", fails or {}
@@ -1008,18 +1014,21 @@ class World:
                 things.append((_yx(self._tile(ident) or e.get("at"), name), row))
             actors = [row for _, row in sorted(actors, key=lambda t: t[0])]
             things = [row for _, row in sorted(things, key=lambda t: t[0])]
-            far_groups = {}
+            far_groups, goal = {}, {self.canon(t) for t in targets}
             for r in self.mem.rows("entities"):
                 if r.get("place") != place or not r.get("tile") or not r.get("name") or r["id"] in on or r.get("status") == "gone" or normalize_kind(r.get("kind")) in TRANSIENT or _is_exit(r): continue
                 ref = f"thing:{r['id']}"
                 history = self.history(ref, place)
                 if not history.get("talked") and history.get("checked") is None and not history.get("walked_into") and fail_key(place, "approach", ref, inputs, ref) not in fails:
+                    if not _actor(r) and self.canon(ref) not in goal: continue  # user decision 10-19: an off-screen static thing with no history is no row; walking or explore shows it again
                     far_groups.setdefault(self.label(ref).casefold(), []).append(r)  # like on-screen plain things: one row per name, the nearest member
                     continue
                 far_groups[ref] = [r]  # history or a failure: its own row, with its notes
             for group in far_groups.values():
                 group.sort(key=lambda r: (sum(abs(a - b) for a, b in zip(r["tile"], self.pos)), _yx(r["tile"], r["id"])))
-                r = group[0]; tile, ref = tuple(r["tile"]), f"thing:{r['id']}"
+                r = next((m for m in group if self.reachable(f"thing:{m['id']}", per, place)), None)  # offered = executable: the loop runs exactly resolve + plan
+                if r is None: continue
+                tile, ref = tuple(r["tile"]), f"thing:{r['id']}"
                 shown = f"{self.label(ref)} (nearest of {len(group)})" if len(group) > 1 else self.label(ref)
                 label = f"go to {shown}, not on screen{self._where(tile)}"
                 row = option("go_to", label, {"go_to": ref}, "approach", ref, ref, r["id"])

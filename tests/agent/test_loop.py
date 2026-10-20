@@ -869,7 +869,7 @@ def test_place_target_closes_after_observation_without_planner_call(tmp_path, mo
     assert row["verdict"] == "progress" and loop.stuck.progress_n == 0
 
 
-def test_says_from_target_thing_closes_talk_quest(tmp_path, monkeypatch):
+def test_text_from_target_thing_closes_talk_quest(tmp_path, monkeypatch):
     from agent import loop as module
     per = {"screen": "world", "text": [], "entities": [
         {"kind": "player", "name": "player", "at": [.5, .5]},
@@ -885,11 +885,13 @@ def test_says_from_target_thing_closes_talk_quest(tmp_path, monkeypatch):
     loop.notebook.data["quests"] = [{"key": "guide", "text": "Talk to the guide", "target": "thing:e_guide", "opened": 1, "status": "open"}]
     monkeypatch.setattr(module, "plan", lambda *a, **k: pytest.fail("a target closure must not call the planner"))
 
-    row = loop.step()
+    loop.step()
 
-    assert loop.notebook.data["quests"][0]["status"] == "done"
+    assert loop.notebook.data["quests"][0]["status"] == "open"  # touching it is not hearing it
     assert any(r.get("s") == "e_guide" and r.get("p") == "says" and r.get("step") == 1 for r in loop.mem.rows("relations"))
-    assert row["verdict"] == "progress" and loop.stuck.progress_n == 0
+    loop.conversation = {"place": None, "lines": ["Guide: Welcome."], "who": "thing:e_guide"}
+    loop._flush_conversation(2)
+    assert loop.notebook.data["quests"][0]["status"] == "done" and loop.notebook.observe(3, None) == ["guide"]
 
 
 def test_act_ops_never_change_notebook(tmp_path, monkeypatch):
@@ -903,7 +905,7 @@ def test_act_ops_never_change_notebook(tmp_path, monkeypatch):
 
     loop.step()
 
-    assert loop.notebook.data == before
+    assert {k: v for k, v in loop.notebook.data.items() if k != "here"} == {k: v for k, v in before.items() if k != "here"}  # here: observe's last place, not an act write
 
 
 def test_plan_ops_apply_and_plan_row_carries_results(tmp_path, monkeypatch):
@@ -1757,12 +1759,15 @@ def test_trace_skill_carries_failure_and_settled(tmp_path, monkeypatch):
 def _loop(tmp_path, model=None): return Loop(GridEnv(), model or StubModel([]), Memory(tmp_path / "memory"), "grid")
 
 
-def test_empty_quest_list_does_not_replan_every_step(tmp_path):
+def test_no_open_quest_fires_once_until_a_new_event(tmp_path):
     loop, plans = _loop(tmp_path), []
     for step in range(1, 13):
         loop.step_no = step - 1
-        if loop._plan_trigger({"screen": "world"}): plans.append(step); loop.events, loop.last_plan = [], step
-    assert plans == [1, 4, 7, 10]
+        if step == 8: loop._event("T1", "new game text: hi", step)  # new game text re-arms T5
+        if (trigger := loop._plan_trigger({"screen": "world"})): plans.append((step, trigger)); loop.events, loop.last_plan = [], step
+    assert plans == [(8, "new game text: hi; no open quest")]  # nothing heard before step 8: no plan could cite anything
+    state = json.loads(json.dumps(loop.state())); resumed = _loop(tmp_path / "r"); resumed.restore(state)
+    assert resumed.t5_armed is False
 
 
 def test_events_wait_out_the_floor_and_are_never_lost(tmp_path):
@@ -1812,3 +1817,42 @@ def test_title_text_is_not_a_game_text_trigger(tmp_path):
     assert loop._learn(["GAME FREAK Red Version"], [], 3, "p", "title") is True
     assert loop.events == [] and loop.conversation["lines"] == [] and loop.text_for_trigger == ""
     assert any("GAME FREAK" in r["text"] for r in loop.mem.rows("knowledge"))
+
+
+def test_dialogue_ends_when_its_screen_kind_changes(tmp_path):
+    loop = _loop(tmp_path)
+    loop._learn(["OAK: Hello there!"], [], 5, "p", "dialogue"); loop._learn(["Welcome to the world of POKEMON!"], [], 6, "p", "dialogue")
+    assert loop.events == []  # still one conversation
+    loop._learn(["NEW NAME"], [], 7, "p", "menu")  # the intro moves on to a naming menu, long before any world screen
+    assert [e["kind"] for e in loop.events] == ["T1"] and "Welcome to the world" in loop.text_for_trigger
+    assert ["OAK"] == [t["speaker"] for t in loop.notebook.data["text"]] and "Welcome to the world" in loop.notebook.data["text"][0]["text"]  # a citable t-line
+
+
+def _idle_loop(tmp_path, monkeypatch, action):
+    from agent import loop as module
+    per = {"screen": "world", "text": [], "entities": [{"kind": "player", "name": "player", "at": [.5, .5]}, {"kind": "object", "name": "Lamp", "at": [.7, .5]}]}
+    loop = Loop(GridEnv(), StubModel([reply(per), reply(per)]), Memory(tmp_path / "memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    picks = []
+    def act(model, per, focus, options, *args, **kwargs):
+        o = next(o for o in options if action(o)); picks.append(o)
+        return SimpleNamespace(action=dict(o["action"]) if action(o) is True else action(o), option=o["n"], why="test", text=None, place="", ops=[], expect="screen_changes")
+    def run(ctx, aff, *_args, **_kwargs):
+        frame = ctx.env.screenshot()
+        return SimpleNamespace(status="done", reason="", inputs=0, calls=0, before=frame, after=frame, scroll=(0, 0), blank_seen=False, moves=[])
+    monkeypatch.setattr(module, "act", act); monkeypatch.setattr(module, "run_affordance", run)
+    return loop, picks
+
+
+def test_a_picked_option_that_sends_no_input_lands_in_fails(tmp_path, monkeypatch):
+    loop, picks = _idle_loop(tmp_path, monkeypatch, lambda o: "thing" in (o.get("action") or {}) or None)
+    row = loop.step()
+    assert row["skill"]["inputs"] == 0 and row["verdict"] == "failed"
+    assert loop.fails[row["choice"]["intent"]]["why"] == "did nothing"
+
+
+def test_an_option_whose_action_never_resolves_lands_in_fails_under_its_own_key(tmp_path, monkeypatch):
+    loop, picks = _idle_loop(tmp_path, monkeypatch, lambda o: {"go_to": "thing:e_gone"})  # S144: a remembered row whose go_to resolves to nothing
+    row = loop.step()
+    assert row["choice"] is None and row["skill"]["inputs"] == 0 and row["verdict"] == "failed"
+    assert loop.fails[picks[0]["intent_key"]]["why"] == "did nothing"  # the menu notes it, so the next prompt differs

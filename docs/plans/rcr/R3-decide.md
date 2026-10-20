@@ -575,6 +575,58 @@ Do not merge this as a passed contract.
 - **S52 (reported separately):** picked "check house, 2 up". The old "walk back home" did not recur, and no place row for home is offered. The goal is the stale "Explore the tiled room…" while the player stands outdoors in place 3.
 - **Caveat:** the offline replay's focus is thinner than a live run's: `Because:` and `Recent:` are empty in every replayed prompt, and goals come from `notebook_at`. The control misses mostly track goal context, not the menu. The 150-step live run (coordinator) is the real check for S4, the controls, and S52.
 
+### Outdoor-menu amendment (coordinator, 10-19; user decision "Drop them")
+
+- Evidence: live act prompt at S144 of `runs/m1_rcr_post_r3` was 3,277 chars (41 rows), and S145-150 were the same size. The three contributors and their roots:
+  - **UI stored as a world thing:** `normalize_kind` does not fold "dialogue box" or "ui" into the TRANSIENT kinds. R1 fixes this in memory.py.
+  - **Walls and hedges listed as exits:** R1's same-tile join merged "exit: path" perceptions into wall records, and `_is_exit` matches kinds and aliases. R1 fixes this in memory.py. "exit: water" is the perceiver itself; the perceive.py change is deferred, since it would invalidate the perception cache.
+  - **27 off-screen rows.**
+- **User decision (supersedes "never hide an option" for this case only):** an off-screen thing gets no row when it is static (not an actor, not an exit), has no history (never talked to, checked, walked into or failed), and is not the current quest target. Things with history, actors, exits and the quest target keep their rows.
+- Estimate at S144 from calls.jsonl: 3,277 → 1,962 chars with all three fixes. Measured result: below, after implementation.
+
+### Handover for an outside executor (10-19, work stopped at the user's request; nothing committed)
+
+Shell setup: Git Bash at the repo root.
+`export TEMP=$PWD/.tmp/rcr/r3/tmp TMP=$PWD/.tmp/rcr/r3/tmp PYTHONIOENCODING=utf-8; PY=".venv-agent/Scripts/python.exe -B"; PT="$PY -m pytest -q -p no:cacheprovider -n auto -W ignore"`
+
+**Tree state:**
+- `PT tests/agent`: **626 passed, 3 failed, 1 skipped**. None of the failures come from these items:
+  - `test_says_from_target_thing_closes_talk_quest` and `test_world_golden::test_act_eight_steps` belong to R2's half-done loop/notebook change.
+  - `test_act_ops_never_change_notebook` passes when run alone; it is in the coordinator's in-progress loop.py/notebook.py area.
+- The off-screen rule, R1's `reachable`, the memory fixes and their tests are complete and consistent. Nothing is half-done in memory.py or world.py.
+- **Offline rebuild:** `$PY scripts/check_tracks.py m1_rcr_post_r3 --menu --first 1 --dump .tmp/rcr/r3/prompts-post` exits 0 (`post-menu.log`):
+  - 150/150 steps; max prompt **1,541** (S132); S144 **1,546** (live was 3,277); rows max 18, mean 7.0;
+  - 0 duplicates, name lists, rows without an action, crashes and order violations;
+  - no dialogue-box row; no wall or hedge listed as an exit. "go to water … — exit" remains (item 2b).
+
+**1. memory.py `normalize_kind`: DONE**
+- Root cause: `agent/memory.py:17` did not fold "dialogue box" or "ui" into the TRANSIENT kinds (`dialogue_box`, `ui_element`; memory.py:11). So the TRANSIENT filters, including the off-screen loop in `World.options`, never matched, and UI chrome was stored and offered as a world thing.
+- Change (in tree): `value = "_".join(...split())` and the map `{"ui": "ui_element"}`. Nothing compared against the unfolded form: every kind set uses underscores.
+- Acceptance: `PT tests/agent/test_memory.py -k normalize_kind`. The rebuilt S144 has no "dialogue box" row (`grep -ci "dialogue box" .tmp/rcr/r3/prompts-post/144.txt` gives 0).
+
+**2. Same-tile join keeps exits separate: DONE (2b deferred)**
+- Root cause: R1's "a tile holds one static thing" join (`agent/memory.py`, `Memory.observe`, the `lead` and same-tile lookups) merged an "exit: path" perception into the wall or hedge record on that tile. "exit: …" then sat in the wall's kinds and aliases, and `_is_exit` (`agent/world.py:44`) matches kinds and aliases, so walls were listed as exits.
+- Change (in tree): `_is_exit(kind, name)` in memory.py:23. The category is part of the join key in all three join paths: `lead` is keyed on (tile, is_exit), the gate-pair loop skips rows of the other category, and so does the same-tile fallback.
+- Acceptance: `PT tests/agent/test_memory.py -k "exit"`; the rebuilt S144 has no "stone wall"/"hedge … — exit" row.
+- 2b, not started (deferred by the coordinator): "exit: water" is the perceiver naming water as a passage (`agent/perceive.py:34`). A prompt change there invalidates the perception cache. Possible wording: list only passages the player can walk through.
+- Known gap: the pixel-track pair in `observe` (the `(-1,)` cost path) does not check category. It is low risk, since a track belongs to a moving thing.
+
+**3. Off-screen rule (user decision "Drop them"): DONE in world.py; one loop.py line OUTSTANDING**
+- Root cause: `World.options` listed every remembered off-screen thing (27 rows at S144).
+- Change (in tree): `World.options(..., targets=())` in `agent/world.py`. In the `far_groups` loop, an off-screen thing that is static (`not _actor(r)`; exits never reach this loop), has no history (not talked, not checked, not walked into, no fail key) and is not in `targets` gets no row. Actors with no history are still grouped by name and show their first reachable member; rows with history keep their own row.
+- `scripts/check_tracks.py` `menu()` passes the first open quest's target.
+- **OUTSTANDING:** `agent/loop.py:159` (coordinator's file) must pass the same `targets`:
+  `targets=tuple(t for t in [next((q.get("target") for q in self.notebook.data["quests"] if q.get("status") == "open" and q.get("target")), None)] if t)`
+  Until then, a live run drops an off-screen, history-less static quest target.
+- Acceptance: `PT tests/agent/test_options.py -k off_screen` (four tests: no history means no row; history or a failure keeps the row; an actor keeps its row; the quest target keeps its row). After the loop line, add a loop-level test that a quest target off screen is offered.
+
+**4. `reachable` against S144: VERIFIED (it explains the failure); a loop bug remains OUTSTANDING**
+- Facts: at S144-150 the act picked `{"go_to": "thing:e_house"}` (old row 17). `resolve` correctly returned the memory record (tile (0,-2), player at (6,-2)), so this is not a resolve bug. But no walkable tile beside it is known: `World.beside` returns None, so `World.plan` returns None (`agent/world.py`, `plan`, the `target["kind"] == "memory"` branch).
+- R1's `World.reachable` (world.py:605: resolve, then `plan` with actors cleared) is therefore False, and the row is now not offered. Repro: copy `runs/m1_rcr_post_r3/memory` to a scratch dir, `World(Memory(dir), 16)`, `current_place="p_place_4"`, `pos=(6,-2)`; `reachable("thing:e_house", {"screen":"world","entities":[]}, "p_place_4")` is False.
+- OUTSTANDING (loop.py, coordinator's file): when `plan` returns None, `agent/loop.py:176` sets `action = None` and the step does nothing. The trace shows choice None, verdict "unobservable", 0 inputs, and **no failure is recorded**, so the model re-picked the same row for 7 steps. Intended change: record a failure for that intent (stage "route", reason "no known route"), the same as a blocked route, so the row turns `failed`.
+- Acceptance: offered rows with no action = 0 in the rebuild above. Add a loop test where a `go_to` whose plan is None records a fail under its intent key.
+- Not yet verified: `reachable` covers only off-screen rows. On-screen and exit rows are not reachability-checked, and "every offered row executes" is verified only as "every row has an action".
+
 ## 10. Handoff notes
 
 Rewrite `docs/plans/handoff-notes.md` per `_template.md` §10: under 80 lines, fixed headings, one fact per bullet with a number, a command or a `file:line`.

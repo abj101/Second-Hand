@@ -1166,3 +1166,34 @@ def test_travel_leg_that_cuts_into_another_place_is_done_and_left_open_for_reide
     world = World(mem, 16); world.current_place = "out"
     result = world.travel(Ctx(GridEnv(), StubModel([]), 16), [{"place": "out", "dirs": ["UP", "RIGHT"], "push": None}], 3)
     assert result.status == "done" and result.failure is None and world._travel_open and world._travel_cut
+
+
+def _remembered_scene(tmp_path, cells):
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    _rooms(mem, "room", cells)
+    entity(mem, "fern", "fern", "room", (1, 0))  # reachable: stands on (0, 0)
+    entity(mem, "rock", "rock", "room", (0, 2))  # every neighbour is wall
+    for x, y in ((0, 1), (0, 3), (-1, 2), (1, 2)):
+        mem.upsert("tiles", {"id": f"room@{x},{y}", "place": "room", "x": x, "y": y, "floor": False, "blocked": [], "pushed": [], "exit": None, "step": 1})
+    world = World(mem, 16); world.current_place, world.pos = "room", (-2, 0)
+    return mem, world, {"screen": "world", "text": [], "entities": []}
+
+
+def test_offered_remembered_rows_resolve_and_plan(tmp_path):
+    mem, world, per = _remembered_scene(tmp_path, {(-2, 0), (-1, 0), (0, 0), (1, 0)})
+    opts = world.options(per, "room", {}, 5, targets=("thing:fern",))  # an off-screen static thing with no history is offered only as a goal
+    labels = [o["label"] for o in opts]
+
+    assert not any(label.startswith("go to rock") for label in labels)
+    assert any(label.startswith("go to fern") for label in labels)
+    for o in opts:
+        if o["action"] and o["action"].get("go_to") not in (None, "unexplored"):  # explore rows target a direction, not a ref
+            assert world.reachable(o["action"]["go_to"], per, "room")
+
+
+def test_actor_in_the_way_keeps_a_remembered_row(tmp_path):
+    mem, world, per = _remembered_scene(tmp_path, {(-2, 0), (-1, 0), (0, 0), (1, 0)})
+    world.actor_tiles = frozenset({(-1, 0)})  # the only corridor is held by an actor
+
+    assert any(o["label"].startswith("go to fern") for o in world.options(per, "room", {}, 5, targets=("thing:fern",)))
+    assert world.reachable("thing:fern", per, "room") and world.actor_tiles == frozenset({(-1, 0)})

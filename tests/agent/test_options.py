@@ -393,7 +393,7 @@ def test_menu_check_counts_rows_and_flags_duplicate_labels(tmp_path, monkeypatch
         def before(self, *args): pass
         def label(self, ref, place=None): return "x"
         def place_label(self, place): return "Room"
-        def options(self, per, place, fails, step, inputs=()):
+        def options(self, per, place, fails, step, inputs=(), targets=()):
             seen.append((step, {k: dict(v) for k, v in fails.items()}))
             talk = {"tool": "approach", "label": "talk to Mom", "action": {"go_to": "mom"}, "state": "new"}
             return [dict(talk, n=1), dict(talk, n=2), {"n": 3, "tool": "buttons", "label": "free", "action": {"buttons": ["A"]}, "state": "new"}]
@@ -403,7 +403,7 @@ def test_menu_check_counts_rows_and_flags_duplicate_labels(tmp_path, monkeypatch
         return world, {}, [], first, 3
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(ct, "replay", fake_replay)
-    monkeypatch.setattr(ct, "notebook_at", lambda run, step: SimpleNamespace(render_focus=lambda label: "Goal: (none)"))
+    monkeypatch.setattr(ct, "notebook_at", lambda run, step: SimpleNamespace(render_focus=lambda label: "Goal: (none)", data={"quests": []}))
     out = ct.menu("r")
     assert [s["rows"] for s in out["steps"]] == [3, 3, 3]
     assert out["steps"][0]["dups"] == ["talk to Mom", "talk to Mom"]
@@ -413,7 +413,7 @@ def test_menu_check_counts_rows_and_flags_duplicate_labels(tmp_path, monkeypatch
 
 def test_tied_remembered_things_sort_without_comparing_rows(tmp_path):  # regression: equal sort keys used to compare row dicts (TypeError)
     mem = Memory(tmp_path); room(mem)
-    for n in range(2): mem.upsert("entities", {"id": f"ghost{n}", "name": "crate", "kind": "furniture", "place": "room", "tile": [1, 2], "status": "remembered", "last": 1, "seen": 1})
+    for n in range(2): mem.upsert("entities", {"id": f"ghost{n}", "name": "crate", "kind": "person", "place": "room", "tile": [1, 2], "status": "remembered", "last": 1, "seen": 1})
     world, per = setup(mem, [])
     opts = world.options(per, "room", {}, 9, inputs=INPUTS)
     assert [o["n"] for o in opts] == list(range(1, len(opts) + 1))
@@ -422,7 +422,7 @@ def test_tied_remembered_things_sort_without_comparing_rows(tmp_path):  # regres
 
 def test_off_screen_things_with_one_name_are_one_row_to_the_nearest(tmp_path):
     mem = Memory(tmp_path); room(mem)
-    for n, tile in enumerate(([2, 2], [-2, 1], [0, 2])): mem.upsert("entities", {"id": f"post{n}", "name": "post", "kind": "furniture", "place": "room", "tile": tile, "status": "remembered", "last": 1, "seen": 1})
+    for n, tile in enumerate(([2, 2], [-2, 1], [0, 2])): mem.upsert("entities", {"id": f"post{n}", "name": "post", "kind": "person", "place": "room", "tile": tile, "status": "remembered", "last": 1, "seen": 1})
     world, per = setup(mem, [])
     rows = [o for o in world.options(per, "room", {}, 9, inputs=INPUTS) if "post" in o["label"]]
     assert len(rows) == 1 and "(nearest of 3)" in rows[0]["label"] and rows[0]["action"] == {"go_to": "thing:post2"}
@@ -437,6 +437,38 @@ def test_failed_rows_follow_new_rows_and_free_buttons_stay_last(tmp_path):
     ranks = [{"new": 0, "worked": 1, "failed": 2}[o["state"]] for o in opts[:-1]]
     assert "failed" in [o["state"] for o in opts] and ranks == sorted(ranks)
     assert opts[-1]["tool"] == "buttons" and [o["n"] for o in opts] == list(range(1, len(opts) + 1))
+
+def test_off_screen_static_thing_with_no_history_has_no_row(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    mem.upsert("entities", {"id": "crate1", "name": "crate", "kind": "furniture", "place": "room", "tile": [2, 2], "status": "remembered", "last": 1, "seen": 1})
+    world, per = setup(mem, [])
+    assert not [o for o in world.options(per, "room", {}, 9, inputs=INPUTS) if "crate" in o["label"]]
+
+
+def test_off_screen_static_thing_with_history_or_failure_keeps_its_row(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    mem.upsert("entities", {"id": "crate2", "name": "crate", "kind": "furniture", "place": "room", "tile": [2, 2], "status": "remembered", "last": 1, "seen": 1})
+    mem.upsert("entities", {"id": "crate3", "name": "drum", "kind": "furniture", "place": "room", "tile": [1, 2], "status": "remembered", "last": 1, "seen": 1})
+    world, per = setup(mem, [])
+    world.history = lambda ref, place=None: {"checked": "nothing"} if ref == "thing:crate2" else {}
+    assert [o for o in world.options(per, "room", {}, 9, inputs=INPUTS) if "crate" in o["label"]]
+    failed = {fail_key("room", "approach", "thing:crate3", INPUTS, "thing:crate3"): {"n": 1, "why": "blocked", "step": 1, "act": "approach"}}
+    assert [o for o in world.options(per, "room", failed, 9, inputs=INPUTS) if "drum" in o["label"]]
+
+
+def test_off_screen_actor_with_no_history_keeps_its_row(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    mem.upsert("entities", {"id": "mom1", "name": "mom", "kind": "person", "place": "room", "tile": [2, 2], "status": "remembered", "last": 1, "seen": 1})
+    world, per = setup(mem, [])
+    assert [o for o in world.options(per, "room", {}, 9, inputs=INPUTS) if "mom" in o["label"]]
+
+
+def test_off_screen_static_thing_that_is_the_quest_target_keeps_its_row(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    mem.upsert("entities", {"id": "crate4", "name": "crate", "kind": "furniture", "place": "room", "tile": [2, 2], "status": "remembered", "last": 1, "seen": 1})
+    world, per = setup(mem, [])
+    assert [o for o in world.options(per, "room", {}, 9, inputs=INPUTS, targets=("thing:crate4",)) if "crate" in o["label"]]
+
 
 def test_live_menu_charges_every_request_and_refuses_beyond_the_cap():
     import pytest

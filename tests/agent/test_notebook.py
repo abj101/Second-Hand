@@ -108,23 +108,22 @@ def test_heard_uses_sequential_keys_and_preserves_game_text(tmp_path):
     ]
 
 
-def test_observe_closes_canonical_place_and_thing_targets_only(tmp_path):
+def test_observe_closes_canonical_place_on_arrival_and_thing_only_via_heard(tmp_path):
     refs = {"Library": "place:old", "Mira": "thing:merged"}
     canon = {"place:old": "place:new", "thing:merged": "thing:mira"}
     nb = notebook(tmp_path, ref=refs.get, canon=lambda ref: canon.get(ref, ref))
-    nb.heard(1, "Mira", "Library", "Meet me there.")
+    nb.heard(1, "Mira", "Library", "Meet me there.", who="thing:merged")
     assert all(row["result"] == "ok" for row in nb.apply_ops([
         add("place", target="Library"), add("person", target="Mira"), add("none"),
-        {"op": "drop", "key": "place", "reason": "already done"},
     ], 2))
-    nb.data["quests"][0]["target"] = "place:new"
-    nb.data["quests"][1]["target"] = "thing:mira"
 
-    assert nb.observe(1, "place:new", ["thing:merged"]) == []
-    assert nb.observe(5, "place:new", ["thing:merged"]) == ["person"]
-    assert nb.observe(6, "place:old", []) == []
-    assert nb.data["quests"][0]["status"] == "dropped"
+    assert nb.observe(2, "place:hall") == []
+    assert nb.observe(3, "place:old") == ["place"]
+    assert nb.data["quests"][0]["reason"] == "reached" and nb.data["quests"][0]["by"] == "observe"
+    assert nb.observe(4, "place:new") == []
+    assert nb.heard(5, "Mira", "Library", "Here I am.", who="thing:merged") == "t2"
     assert nb.data["quests"][1]["reason"] == "talked"
+    assert nb.observe(6, "place:new") == ["person"]
     assert nb.data["quests"][2]["status"] == "open"
 
 
@@ -146,11 +145,39 @@ def test_render_count_caps_cited_history_and_character_size(tmp_path):
     assert len(rendered) <= 3500
 
 
-@pytest.mark.parametrize(("target", "condition", "name"), [
-    ("thing:person", "talked to", "Mira"),
-    ("place:hall", "in", "Hall"),
+def test_observe_ignores_thing_quest_until_heard_from_target(tmp_path):
+    nb = notebook(tmp_path, ref=lambda value: value if str(value).startswith(("place:", "thing:")) else None)
+    nb.heard(1, "Mira", "Hall", "Hi.", who="thing:mira")
+    assert nb.apply_ops([add("q", target="thing:mira")], 2)[0]["result"] == "ok"
+    assert nb.observe(2, "place:hall") == []
+    assert nb.heard(3, None, "Hall", "Hmm.") == "t2"
+    assert nb.heard(3, "Guard", "Hall", "Halt.", who="thing:guard") == "t3"
+    assert nb.observe(3, "place:hall") == [] and nb.data["quests"][0]["status"] == "open"
+
+    nb.heard(4, "Mira", "Hall", "Hello.", who="thing:mira")
+
+    assert nb.data["quests"][0]["reason"] == "talked" and nb.data["quests"][0]["closed"] == 4
+    assert nb.observe(4, "place:hall") == ["q"]
+    assert nb.observe(5, "place:hall") == []
+
+
+def test_place_quest_targeted_while_in_place_closes_only_on_arrival(tmp_path):
+    nb = notebook(tmp_path, ref=lambda value: value if str(value).startswith(("place:", "thing:")) else None)
+    nb.heard(1, None, "Hall", "Go on.")
+    nb.observe(1, "place:hall")
+    assert nb.apply_ops([add("q", target="place:hall")], 2)[0]["result"] == "ok"
+
+    assert nb.observe(2, "place:hall") == []
+    assert nb.observe(3, "place:kitchen") == []
+    assert nb.observe(4, "place:hall") == ["q"]
+    assert nb.data["quests"][0]["reason"] == "reached"
+
+
+@pytest.mark.parametrize(("target", "name", "done_when"), [
+    ("thing:person", "Mira", "Mira speaks to you"),
+    ("place:hall", "Hall", "you enter Hall"),
 ])
-def test_render_focus_labels_target_and_limits_cited_text(tmp_path, target, condition, name):
+def test_render_focus_labels_target_and_limits_cited_text(tmp_path, target, name, done_when):
     nb = notebook(tmp_path, ref=lambda value: value)
     cited = "Find the archive. " + "x" * 220
     nb.heard(1, "Mira", "Hall", cited)
@@ -161,7 +188,7 @@ def test_render_focus_labels_target_and_limits_cited_text(tmp_path, target, cond
     rendered = nb.render_focus(lambda ref: name)
     because = rendered.split("Because:\n", 1)[1].split("\nRecent:", 1)[0].splitlines()
 
-    assert f"Goal: Quest q (done when: {condition} {name})" in rendered
+    assert f"Goal: Quest q (done when: {done_when})" in rendered
     assert len(because) == 1 and len(because[0]) == 160
     assert because[0].startswith('Mira, step 1: "Find the archive.')
     assert "Uncited text" not in rendered
@@ -191,7 +218,7 @@ def test_v2_file_loads_as_empty(tmp_path):
 
     nb = notebook(tmp_path)
 
-    assert nb.data == {"text": [], "quests": [], "last": {}}
+    assert nb.data == {"text": [], "quests": [], "last": {}, "here": None}
     assert nb.log == []
 
 
@@ -212,7 +239,8 @@ def test_closed_thing_quest_shows_current_label_and_who_said(tmp_path):
     nb = notebook(tmp_path, ref={"person": "thing:a"}.get, label=lambda ref: {"thing:a": "MOM"}.get(ref, ref))
     nb.heard(1, "MOM", "kitchen", "Go find the professor.", who="thing:a")
     assert nb.apply_ops([add("q", target="person")], 2)[0]["result"] == "ok"
-    assert nb.observe(39, None, talked=["thing:a"]) == ["q"]
+    nb.heard(39, "MOM", "kitchen", "Ah, you came back.", who="thing:a")
+    assert nb.observe(39, None) == ["q"]
     nb.heard(44, "MOM", "room", "PROF next door is looking for you.", who="thing:a")
 
     rendered = nb.render()

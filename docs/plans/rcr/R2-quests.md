@@ -367,6 +367,45 @@ def plan(model, trigger: str, notebook, view: str, screen_text: list, recent: li
 
 ## 9. Result (filled in by the orchestrator)
 
+**2026-10-19 amendments (coordinator-approved, uncommitted; the coordinator commits the tree).** Haiku workers made the notebook, planner, replay-script and test edits. The orchestrator wired loop.py, the observe/heard lines only.
+
+*Amendment 1, from runs/m1_rcr_baseline:*
+- **Beliefs deleted.** The `believe`/`refute` ops, `data["beliefs"]`, MAX_HELD and the Held/Ruled-out sections are gone.
+  - A quest's `why` cites t-keys directly. Errors name the citable keys: `why must cite game-text keys, newest: t2, t1`.
+  - This fixes S45, where the belief cap blocked Mom's directive.
+- **Closure evidence.**
+  - "Recently closed" shows the quest text, the target's current label (via `World.label`), the lines that thing said after the closure, and "target set by you at step N".
+  - New `reopen` op.
+  - The replay at S45 shows `talked to MOM, who said t2 … "PROF. OAK, next door, is looking for you." (target set by you at step 39)`.
+- **Target errors list candidates.** Example: `target "desk" matches no known place or thing; closest: debris, outside house, Professor Oak`. Candidates are only labels that `World.ref` resolves.
+- **loop.py:** `Notebook(..., label=world.label, refs=<live place/thing refs>)`; dialogue flushes pass `who=thing:<tid>` of the thing that started the conversation.
+
+*Amendment 2, from runs/m1_rcr_post_r3 (quests closed the moment they were created):*
+- **Closure is now an event, not a state.**
+  - `observe(step, place)` has no `talked` argument. It closes a place quest only on an arrival: the previous observed place (`data["here"]`, persisted) differs, the current place is the target, and the target was set at or before this step.
+  - `heard(..., who)` closes a thing quest when `who` is the target and the line comes at or after the target step. The next `observe` returns that key, so T3 is unchanged.
+  - loop.py clears a stale `who` when the screen returns to the world without dialogue. Touching a thing no longer credits it with a later conversation.
+  - `render_focus` says "(done when: you enter X)" or "(done when: X speaks to you)".
+- **`eval_plan.notebook_at` re-derives closures.** It ignores recorded observe events and replays each step's planner events, then text through `heard`, then `observe(next_place)`.
+- **post_r3 replay:**
+
+| Quest | Result |
+|---|---|
+| q5 (door mat) | open |
+| q3, q4 | open from S87 while the player is already in the target place; close at S99 after a real leave (S98) and re-enter |
+| q2 | reached at S70, target set at S69 |
+| q6 | reached at S102, target set at S102; the plan runs before that step's move, which crosses into the target |
+| q8 | open |
+
+- 0 closures while the player is already in the target place.
+- **Open issue, for the next owner: q2 and q6 close at the wrong places.** They are real arrivals, but the planner targeted the wrong place: q6 "Find Professor Oak next door" targeted p_place_4, which is outside, not the lab. This is a planner targeting error, not a closure bug, and no gate was added. The closed-quest evidence line makes the mismatch visible to the planner, and `reopen` undoes it.
+- **Acceptance:**
+  - full suite `-n auto`: **629 passed, 1 skipped** (missing bedroom checkpoint), 0 failed;
+  - live-view tests: 11 passed, and 9 passed;
+  - `eval_plan.py --check all`: exits 0 on m1_rcr_post_r3 and on m1_rcr_baseline;
+  - generic grep on notebook.py/plan.py is clear.
+- **Data note:** `--check observe` on post_r3 lists `says` relations whose subject is a place id (`thing:p_place_4`). That is an R1 memory oddity and harmless to R2.
+
 **2026-10-16 (finalize): gate PASS.** The user authorized fixing the three blocked consumers, and a Haiku worker migrated them:
 - `scripts/eval_run.py` carries its own copy of the old `_TACTICAL` regex, since it is a measurement script. A T4 plan row counts as unchanged when it has an `ops` list with no `"ok"` result. The `quests_changed` and history fallbacks stay for old runs.
 - `test_harness_reliability.py` door/checkpoint test: the stub reply is now v3 `ops/why` citing a `heard` t-line. Its asserts check `data["text"]` and `Top quest:` after the restore.
