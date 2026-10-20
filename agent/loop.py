@@ -207,7 +207,17 @@ class Loop:
                     observation_age_ms=age, stale_reason="scene_cut" if current.generation == self.observation_stamp["generation"] else "generation_changed")
         self._live(before, place, per, choice and {**affs[choice.i], "why": choice.why, "text": choice.text}, a)
         if per.get("screen") == "world": self.world._record_view(per, before, reused, place, size, self.step_no + 1, self.world.pa, self.world.entity_ids)
-        skillctx = Ctx(self.env, self.model, self.tile_px, self.move_frames); pressed_from = tuple(self.world.pos)
+        def actor_boxes():
+            tracker = self.world.tracker
+            if tracker.arr is None: return ()
+            h, w = tracker.arr.shape[:2]; r = (self.tile_px or tracker.tile_px) / 2
+            player = self.world.self_spot
+            px, py = (player[0] * w, player[1] * h) if player else (None, None)
+            return tuple((max(0, int(t["x"] - r)), max(0, int(t["y"] - r)),
+                          min(w, int(t["x"] + r)), min(h, int(t["y"] + r)))
+                         for t in tracker.tracks.values() if t["status"] == "live" and t["actor"] and
+                         (px is None or max(abs(t["x"] - px), abs(t["y"] - py)) > r))
+        skillctx = Ctx(self.env, self.model, self.tile_px, self.move_frames, actor_boxes=actor_boxes); pressed_from = tuple(self.world.pos)
         try:
             skill = SkillResult("blocked", "no route beside target" if choice and affs[choice.i].get("verb") == "interact" else "no route avoids blocker", 0, 0, before, before, (0, 0), False, failure={"stage": "route", "reason": "no route beside target" if choice and affs[choice.i].get("verb") == "interact" else "no route avoids blocker", "direction": None}) if refused else self.world.travel(skillctx, travel_legs, self.step_no + 1, self.trace) if travel_legs is not None and choice else wait_until(skillctx) if not affs or choice is None else press_seq(skillctx, affs[choice.i]["target"].split()) if affs[choice.i].get("verb") == "buttons" else run_affordance(skillctx, affs[choice.i], per, text=choice.text, exit=False, **({"route": act_route} if act_route else {}))
         except BaseException: self.pending_cut, self.pending_via, self.pending_key = cut(before, self.env.screenshot()), affs[choice.i].get("target") if choice else None, intent; self.cached = self.cached_hash = None; raise

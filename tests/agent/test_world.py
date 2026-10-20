@@ -666,6 +666,62 @@ def test_world_view_groups_entities_and_hides_unseen_model_stubs(tmp_path):
     assert mem.rows("entities") == before and model.calls == 0 and env.player == (8, 8)
 
 
+def _legend_world(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room")
+    ids = ["a", "b", "c", "d", "f", "g", "h", "i", "j"]
+    for n, ident in enumerate(ids):
+        entity(mem, ident, f"Object {ident}", "room", (n - 4, 0), n + 1)
+        mem.upsert("entities", {**mem.get("entities", ident), "tier": "landmark" if n == 8 else "interest"})
+    world = World(mem, 16); world.current_place = "room"
+    return mem, world
+
+
+def test_world_view_legend_handles_resolve_and_persist(tmp_path):
+    mem, world = _legend_world(tmp_path)
+
+    view = world.view("", "room")
+
+    assert "Thing C Object c (-2, 0) object remembered step 0" in view
+    assert "Landmark J Object j (4, 0) object remembered step 0" in view
+    assert world.ref("Thing C") == world.ref("C") == "thing:c"
+    assert world.ref("landmark J") == "thing:j"
+    assert world.ref("Thing Z") is None
+    restored = World(mem, 16); restored.restore(json.loads(json.dumps(world.state())))
+    assert restored.ref("Thing C") == "thing:c" and restored.ref("landmark J") == "thing:j"
+
+    for row in mem.rows("entities"):
+        mem.upsert("entities", {**row, "tier": "transient"})
+    world.view("", "room")
+    assert world.legend == {} and world.ref("C") is None
+
+
+def test_world_view_legend_exit_resolves_to_exit_thing(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room"); place(mem, "hall", "Hall")
+    entity(mem, "stairs", "exit: stairs", "room", (1, 0))
+    mem.upsert("entities", {**mem.get("entities", "stairs"), "kind": "exit", "tier": "interest"})
+    mem.upsert("tiles", {"id": "room@1,0", "place": "room", "x": 1, "y": 0, "floor": True,
+                          "blocked": [], "pushed": [], "exit": {"dir": "RIGHT", "to": "hall", "arrive": [0, 0]}, "step": 1})
+    world = World(mem, 16); world.current_place = "room"
+
+    view = world.view("", "room")
+
+    assert "Thing A stairs (1, 0) exit remembered step 0" in view
+    assert world.legend["A"] == "thing:stairs" and world.ref("Thing A") == "thing:stairs"
+
+
+def test_exact_thing_name_precedes_legend_symbol(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room")
+    entity(mem, "a", "B", "room", (0, 0)); entity(mem, "b", "Other", "room", (1, 0))
+    for ident in ("a", "b"):
+        mem.upsert("entities", {**mem.get("entities", ident), "tier": "interest"})
+    world = World(mem, 16); world.current_place = "room"
+
+    world.view("", "room")
+
+    assert world.legend["B"] == "thing:b"
+    assert world.ref("B") == "thing:a" and world.ref("Thing B") == "thing:b"
+
+
 def test_world_view_lists_all_place_exits_before_any_other_place_things(tmp_path):
     mem = Memory(tmp_path); place(mem, "here", "Atrium")
     for name in ("North", "South", "West"):
@@ -696,11 +752,14 @@ def test_world_view_labels_other_place_detail_bundle(tmp_path):
                               "blocked": [], "pushed": [], "exit": {"dir": direction, "to": target, "arrive": [0, 0]}, "step": 1})
     entity(mem, "chest", "Chest", "hall", [1, 0])
     mem.upsert("entities", {**mem.get("entities", "chest"), "tier": "interest"})
+    entity(mem, "lamp", "Lamp", "here", [1, 0])
+    mem.upsert("entities", {**mem.get("entities", "lamp"), "tier": "interest"})
     world = World(mem, 16); world.current_place = "here"
 
     view = world.view("", "here")
 
     lines = view.splitlines()
+    assert "Things here: Atrium" in lines
     assert lines.index("Place: Hall") < lines.index("  Exit LEFT → Atrium: possible exit, unverified (never crossed)") < lines.index("Things: Hall")
     assert lines[lines.index("Things: Hall") + 1] == "  Thing: Chest remembered"
 
@@ -795,6 +854,51 @@ def test_evidence_actor_is_remembered_then_stale_after_twenty_steps(tmp_path):
     assert mem.get("entities", ident)["status"] == "remembered"
     world.observe_after({"screen": "world", "entities": [player]}, Image.new("RGB", (160, 144), "green"), False, "room", (160, 144), 21)
     assert mem.get("entities", ident)["status"] == "stale"
+
+
+def _drift_world(tmp_path):
+    from PIL import Image
+
+    mem = Memory(tmp_path); place(mem, "room", "Room")
+    world = World(mem, 16)
+    player = {"name": "Player", "kind": "player", "at": [.5, .5]}
+    thing = {"name": "Coin", "kind": "object", "at": [.55, .5]}
+    world.before({"screen": "world", "entities": [player, thing]}, "room", None, SIZE, 1)
+    shifted = {"screen": "world", "entities": [player, {**thing, "at": [.65, .5]}]}
+    return world, shifted, Image.new("RGB", (160, 144))
+
+
+def test_drift_fix_requires_two_world_observations(tmp_path):
+    world, shifted, frame = _drift_world(tmp_path)
+
+    world.observe_after(shifted, frame, False, "room", SIZE, 2)
+    assert world.drift == (-1, 0) and world.pos == (0, 0)
+    drift_ref = world.drift_ref
+    dialogue = {**shifted, "screen": "dialogue"}
+    assert world.observe_after(dialogue, frame, False, "room", SIZE, 3) is None
+    assert world.drift == (-1, 0) and world.drift_ref is drift_ref and world.pos == (0, 0)
+
+
+def test_dialogue_between_world_frames_preserves_drift_confirmation(tmp_path):
+    world, shifted, frame = _drift_world(tmp_path)
+
+    world.observe_after(shifted, frame, False, "room", SIZE, 2)
+    drift_ref = world.drift_ref
+    assert world.observe_after({**shifted, "screen": "dialogue"}, frame, False, "room", SIZE, 3) is None
+    assert world.drift == (-1, 0) and world.drift_ref is drift_ref and world.pos == (0, 0)
+    assert world.observe_after(shifted, frame, False, "room", SIZE, 4) == (-1, 0)
+    assert world.pos == (-1, 0) and world.drift is None and world.drift_ref is None
+
+
+def test_modal_world_frame_does_not_change_pending_drift(tmp_path):
+    world, shifted, frame = _drift_world(tmp_path)
+
+    world.observe_after(shifted, frame, False, "room", SIZE, 2)
+    drift_ref = world.drift_ref
+    modal = {"name": "Text box", "kind": "dialogue_box", "at": [.5, .9]}
+    with_modal = {**shifted, "entities": [*shifted["entities"], modal]}
+    assert world.observe_after(with_modal, frame, False, "room", SIZE, 3) is None
+    assert world.drift == (-1, 0) and world.drift_ref is drift_ref and world.pos == (0, 0)
 
 
 def test_tiers_preserve_transient_interest_and_promote_offscreen_text_names(tmp_path):

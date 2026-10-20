@@ -82,6 +82,7 @@ def _health(result, world_maps):
         ("place_ids_per_map", p3, 1),
         ("screen_places", result.get("screen_places"), 0),
         ("tile_accuracy", tile, .95),
+        ("drift_fix_off_world", result.get("drift_fix_off_world"), 0),
         ("no_effect_streak_max", result.get("no_effect_streak_max"), 5),
         ("repeat_actions_max_length", max((len(r.get("steps", [])) for r in repeats), default=0)
          if repeats is not None else None, 5),
@@ -1200,6 +1201,8 @@ def evaluate(run, *, from_step=None):
                         "known_exit_id_reuse": exit_reuse},
             **_e4_metrics(run, trace, truth_rows, from_step), **_p3b_metrics(trace, truth_rows), **p3,
             **spot_metrics, "false_walls": false_walls,
+            "drift_fix_off_world": (sum(row.get("drift_fix") is not None and row.get("screen") != "world" for row in trace)
+                                    if (run / "trace.jsonl").exists() else None),
             "probe_unmeasured_world_steps": sum(r.get("screen") == "world" and
                 (r.get("probe") or {}).get("presses", 0) > 0 for r in trace),
             "no_effect_streak_max": _no_effect_streak(trace) if (run / "trace.jsonl").exists() and trace else None}

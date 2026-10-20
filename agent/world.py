@@ -78,6 +78,7 @@ class World:
         self.pos, self.drift, self.drift_ref = (0, 0), None, None
         self.entity_tiles, self.entity_ids, self.actor_tiles = {}, {}, frozenset()
         self.entities, self.pa, self._prepared = [], None, None
+        self.legend = {}
         self._observed_per = None
         self.novel = 0
         self.current_place = None
@@ -432,8 +433,13 @@ class World:
         tiles = self._tiles(per, aa, size, place)
         drift_fix, ids = None, self.entity_ids
         observed = self._observation(per, size)
-        if not reused: ids = self.mem.observe(observed, place, step, tiles, self._hits(observed))
-        if not reused and place and self.tile_px:
+        world_screen = False
+        if not reused:
+            entities = per.get("entities", [])
+            modal = any(normalize_kind(e.get("kind")) in {"dialogue_box", "menu", "keyboard", "input_field"} for e in entities)
+            world_screen = per.get("screen") == "world" and not modal
+            ids = self.mem.observe(observed, place, step, tiles, self._hits(observed))
+        if not reused and world_screen and place and self.tile_px:
             current = {ids[i]: t for i, t in tiles.items() if i in ids}
             walked = self.tracker.moved()
             untracked = {ids[i] for i, e in enumerate(per.get("entities", []))
@@ -458,12 +464,10 @@ class World:
             self.entity_ids = ids
             self._observed_per = per; self._follow(per, self.entity_ids)
         if not reused:
-            entities = per.get("entities", [])
-            modal = any(normalize_kind(e.get("kind")) in {"dialogue_box", "menu", "keyboard", "input_field"} for e in entities)
             stored = any(self.mem._home(v["place"])[0] == place and
                          tuple(v["pos"][i] + self.mem._home(v["place"])[1][i] for i in (0, 1)) == tuple(self.pos)
                          for v in self.mem.rows("views"))
-            if per.get("screen") == "world" and not modal and self.tile_px and not stored and frame is not None:
+            if world_screen and self.tile_px and not stored and frame is not None:
                 hit = self.mem.seen_view(frame, "world", place, self.tile_px)
                 if hit:
                     other, tile = hit; off = tuple(tile[i] - self.pos[i] for i in (0, 1)); prior = getattr(self, "_closure", None)
@@ -491,7 +495,7 @@ class World:
 
     def state(self):
         return {"pos": self.pos, "drift": self.drift, "drift_ref": self.drift_ref, "entity_tiles": self.entity_tiles,
-                "entity_ids": self.entity_ids,
+                "entity_ids": self.entity_ids, "legend": self.legend,
                 "last_miss_hash": self._last_miss_hash,
                 "self_spot": self.self_spot, "self_contradictions": self._self_contradictions,
                 "self_from_motion": self._self_from_motion,
@@ -501,6 +505,7 @@ class World:
         self.pos, self.drift = tuple(state.get("pos", (0, 0))), tuple(state["drift"]) if state.get("drift") else None
         self.drift_ref, self.entity_tiles = state.get("drift_ref"), state.get("entity_tiles", {})
         self.entity_ids = {int(i): v for i, v in state.get("entity_ids", {}).items()}
+        self.legend = dict(state.get("legend") or {})
         self._last_miss_hash = state.get("last_miss_hash", {})
         self.self_spot = state.get("self_spot")
         self._self_contradictions = int(state.get("self_contradictions", 0))
@@ -588,7 +593,10 @@ class World:
         named = [p for p in places if key in {n.casefold() for n in [place_name(p), *place_aliases(p)] if n}]
         if len(named) == 1: return f"place:{named[0]['id']}"
         things = self._named_things(text)
-        return f"thing:{things[0]['id']}" if len(things) == 1 else None
+        if len(things) == 1: return f"thing:{things[0]['id']}"
+        if (match := re.fullmatch(r"(?:(?:thing|landmark)\s+)?(\S)", text, re.IGNORECASE)):
+            return self.legend.get(match[1])
+        return None
 
     def _named_things(self, text):  # live things on a world map whose name or alias is text
         maps = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged" and p.get("screen") == "world"}
@@ -856,7 +864,7 @@ class World:
             return next((x for x in exit_rows if x["ident"] == e["id"] or x["tile"] and e.get("tile")
                          and max(abs(x["tile"][0] - e["tile"][0]), abs(x["tile"][1] - e["tile"][1])) <= 1), None)
         symbols = "ABCDFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-        marks, legend, shown = {}, [], set()
+        marks, legend, legend_refs, legend_lines, shown = {}, [], {}, {}, set()
         mapped = set()
         for i, e in enumerate(e for e in entities if x0 <= e["tile"][0] <= x1 and y0 <= e["tile"][1] <= y1 and tuple(e["tile"]) not in marks):
             if i == len(symbols): break
@@ -871,7 +879,10 @@ class World:
             called = next((member.get("called") for member in e["_members"] if member.get("called")), None)
             name = rec["head"] if rec else f"{called or e['name']} ×{count}" if count > 1 else called or e.get("name", e["id"])
             nearest = f" (nearest {tuple(e['tile'])})" if count > 1 else ""
-            legend.append(f"{'Thing' if tier(e) == 'interest' else 'Landmark'} {symbol} {name} {tuple(e['tile'])} {normalize_kind(e.get('kind'))} {last}{nearest}{self._notes(e['id'])}")
+            legend_line = f"{'Thing' if tier(e) == 'interest' else 'Landmark'} {symbol} {name} {tuple(e['tile'])} {normalize_kind(e.get('kind'))} {last}{nearest}{self._notes(e['id'])}"
+            legend.append(legend_line)
+            legend_refs[symbol] = f"thing:{(rec or {}).get('ident') or e['id']}"
+            legend_lines[symbol] = legend_line
         for y in range(y0, y1 + 1):
             row = []
             for x in range(x0, x1 + 1):
@@ -921,10 +932,10 @@ class World:
         for other in others:
             pid = other["id"]
             aliases = other.get("aliases", [])
-            label = self.place_label(pid)
-            same = {label.casefold(), str(place_name(other) or "").casefold()}
+            other_label = self.place_label(pid)
+            same = {other_label.casefold(), str(place_name(other) or "").casefold()}
             redundant = all(str(a).casefold() in same for a in aliases)
-            header = [f"Place: {label}" + (f" aliases: {', '.join(map(str, aliases))}" if aliases and not redundant else "")]
+            header = [f"Place: {other_label}" + (f" aliases: {', '.join(map(str, aliases))}" if aliases and not redundant else "")]
             header.extend(f"  Exit {exit_text(e)}" for e in self._exits(pid, live))
             place_headers[pid] = header
             other_edges = frontier(self.mem, pid)
@@ -974,6 +985,7 @@ class World:
             if hud["changed"] is not None and row and row.get("place") == place: flags.append(f"HUD {row['name']} changed at step {hud['changed']}")
         for line in (f"Flag: {flag}" for flag in dict.fromkeys(flags)):
             if len("\n".join((*output, line))) <= VIEW_TOKENS * 4: output.append(line)
+        self.legend = {symbol: ref for symbol, ref in legend_refs.items() if legend_lines[symbol] in output}
         return "\n".join(output)
     def _tile(self, ident):
         tile = (self.entity_tiles.get(ident) or (self.mem.get("entities", ident) or {}).get("tile")) if ident else None

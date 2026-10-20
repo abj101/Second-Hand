@@ -21,9 +21,15 @@ def _blank(img: Image.Image) -> bool:
     return bool(np.unique(v.ravel(), return_counts=True)[1].max() >= 0.99 * a.shape[0] * a.shape[1])  # fades are uniform; the NEW GAME menu is 95% white and must still settle
 
 
-def changed(a: Image.Image, b: Image.Image, thresh: int = 16) -> float:
+def changed(a: Image.Image, b: Image.Image, thresh: int = 16, mask=()) -> float:
     a, b = np.asarray(a).astype(np.int16), np.asarray(b).astype(np.int16)
-    return float(np.mean(np.max(np.abs(a - b), axis=-1) > thresh))
+    pixels = np.max(np.abs(a - b), axis=-1) > thresh
+    if not mask: return float(np.mean(pixels))
+    included = np.ones(pixels.shape, dtype=bool)
+    h, w = pixels.shape
+    for x0, y0, x1, y1 in mask:
+        included[max(0, y0):min(h, y1), max(0, x0):min(w, x1)] = False
+    return float(np.mean(pixels[included])) if included.any() else 0.0
 
 
 def _residual(frames: list[Image.Image], shifts: list[tuple[int, int]]):

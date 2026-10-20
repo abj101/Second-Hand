@@ -29,6 +29,7 @@ class Ctx:
     move_frames: int = 16
     max_inputs: int = 30
     settles: list = field(default_factory=list)  # every settle's flag, shared by reference through replace(ctx)
+    actor_boxes: object = None
 def _settled(ctx, **kw):
     settle = wait_settled(ctx.env, **kw); ctx.settles.append(settle.settled); return settle
 def _tracked(fn):  # a skill's settled flag: False if any settle inside it (its own, nested skills', travel legs') timed out
@@ -148,10 +149,12 @@ def interact(ctx: Ctx, target_at: list[float], player_at: list[float] | None, *,
     moved = approach(ctx, target_at, player_at, route=path)
     if moved.status != "done" or moved.reason == "scene cut" or moved.inputs >= ctx.max_inputs: return moved
     inputs, total, face_blank = moved.inputs, list(moved.scroll), False
+    before_a = moved.after
     if route is not None:
         face = route["dirs"][-1] if route.get("dirs") else None
         if face and face in ctx.env.inputs() and inputs < ctx.max_inputs:
             end, move, saw_blank, self_at = _step(ctx, face, moved.after); inputs += 1; moved.moves.append({"dir": face, "shift": move, "self_at": self_at})
+            before_a = end.frame
             face_blank = saw_blank
             if move is not None: total[:] = [total[i] + move[i] for i in (0, 1)]
             if cut(moved.after, end.frame, saw_blank):
@@ -162,14 +165,18 @@ def interact(ctx: Ctx, target_at: list[float], player_at: list[float] | None, *,
         face = ("RIGHT" if dx > 0 else "LEFT") if abs(dx) >= abs(dy) and dx else ("DOWN" if dy > 0 else "UP")
         if face in ctx.env.inputs() and inputs < ctx.max_inputs:
             end, move, saw_blank, self_at = _step(ctx, face, moved.after); inputs += 1; moved.moves.append({"dir": face, "shift": move, "self_at": self_at})
+            before_a = end.frame
             face_blank = saw_blank
             if move is not None: total[:] = [total[i] + move[i] for i in (0, 1)]
             if cut(moved.after, end.frame, saw_blank):
                 return _result("done", "scene cut", inputs, moved.calls, start.frame, end.frame, total, start.blank_seen or moved.blank_seen or saw_blank, moved.moves)
+    mask = tuple(ctx.actor_boxes()) if callable(ctx.actor_boxes) else ()
     if inputs < ctx.max_inputs: ctx.env.press("A", ctx.move_frames); inputs += 1
     end = _settled(ctx)
-    return _result("done" if changed(start.frame, end.frame) else "failed",
-                   "" if changed(start.frame, end.frame) else "nothing changed", inputs, moved.calls,
+    if callable(ctx.actor_boxes): mask += tuple(ctx.actor_boxes())
+    changed_a = changed(before_a, end.frame, mask=mask)
+    return _result("done" if changed_a else "failed",
+                   "" if changed_a else "nothing changed", inputs, moved.calls,
                    start.frame, end.frame, total, start.blank_seen or moved.blank_seen or face_blank or end.blank_seen, moved.moves)
 @_tracked
 def select(ctx: Ctx, item: str) -> SkillResult:

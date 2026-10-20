@@ -85,6 +85,29 @@ def test_drop_then_add_at_open_cap_in_one_reply(tmp_path):
     assert next(q for q in nb.data["quests"] if q["key"] == "replacement")["status"] == "open"
 
 
+def test_add_resolves_legend_target_from_current_world_view(tmp_path):
+    from agent.memory import Memory
+    from agent.world import World
+
+    mem = Memory(tmp_path / "memory")
+    mem.upsert("places", {"id": "room", "name": "Room", "screen": "world", "state": "place",
+                           "first": 1, "last": 1, "visits": 1, "edges": []})
+    for ident, name, tile in (("a", "Object A", [-2, 0]), ("b", "Object B", [-1, 0]), ("c", "Object C", [0, 0])):
+        mem.upsert("entities", {"id": ident, "name": name, "kind": "object", "place": "room", "tile": tile,
+                               "seen": 1, "tier": "interest", "status": "remembered"})
+    world = World(mem, 16)
+    world.view("", "room")
+    nb = notebook(tmp_path / "notebook", ref=world.ref)
+    nb.heard(1, None, "Room", "Go to the third object.")
+
+    result = nb.apply_ops([add("q", target="Thing C")], 2)
+
+    assert result == [{"op": "add", "key": "q", "result": "ok"}]
+    assert nb.data["quests"][0]["target"] == "thing:c"
+    assert nb.apply_ops([add("unknown", target="Thing Z")], 3)[0]["result"].startswith(
+        'error: target "Thing Z" matches no known place or thing;')
+
+
 def test_bad_reply_shapes_and_ninth_op_are_saved(tmp_path):
     nb = notebook(tmp_path)
     nb.heard(1, "Guide", "Hall", "Wait here.")

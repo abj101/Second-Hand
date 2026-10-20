@@ -181,6 +181,14 @@ def test_changed_model_scaling_and_tile_snap():
     assert snap([0.13, 0.13], (64, 64), 16) == [0.125, 0.125]
 
 
+def test_changed_excludes_masked_pixel_boxes():
+    a = Image.new("RGB", (10, 10)); b = a.copy()
+    b.paste((255, 255, 255), (2, 2, 4, 4))
+
+    assert changed(a, b) == .04
+    assert changed(a, b, mask=((1, 1, 5, 5),)) == 0
+
+
 def test_residual_finds_compact_screen_anchored_motion():
     tile = np.random.default_rng(4).integers(0, 160, (16, 16, 3), dtype=np.uint8)
     image = np.tile(tile, (9, 10, 1))[:144, :160]

@@ -267,6 +267,59 @@ def test_interact_opens_text_box():
     assert result.status == "done" and env.text_box
 
 
+def test_interact_ignores_actor_motion_between_a_press_frames(monkeypatch):
+    import agent.skills as skills
+    from types import SimpleNamespace
+    from PIL import Image
+
+    before = Image.new("RGB", (16, 16)); before.paste((255, 0, 0), (4, 4, 8, 8))
+    after = before.copy(); after.paste((0, 0, 0), (4, 4, 8, 8)); after.paste((255, 0, 0), (8, 8, 12, 12))
+    frames = iter((before, before, after))
+    monkeypatch.setattr(skills, "wait_settled", lambda _env, **_kw: SimpleNamespace(frame=next(frames), settled=True, blank_seen=False))
+    boxes = iter((((4, 4, 8, 8),), ((8, 8, 12, 12),)))
+    c = ctx(RecordingEnv(), tile_px=None); c.actor_boxes = lambda: next(boxes)
+    monkeypatch.setattr(skills, "_step", lambda _ctx, _direction, old: (SimpleNamespace(frame=old, blank_seen=False), (0, 0), False, None))
+
+    result = interact(c, [.6, .5], [.5, .5], route={"dirs": ["RIGHT"]})
+
+    assert result.status == "failed" and result.reason == "nothing changed"
+
+
+def test_interact_keeps_dialogue_text_change_after_actor_mask(monkeypatch):
+    import agent.skills as skills
+    from types import SimpleNamespace
+    from PIL import Image
+
+    before = Image.new("RGB", (16, 16)); after = before.copy()
+    after.paste((255, 255, 255), (1, 10, 15, 15))
+    frames = iter((before, before, after))
+    monkeypatch.setattr(skills, "wait_settled", lambda _env, **_kw: SimpleNamespace(frame=next(frames), settled=True, blank_seen=False))
+    boxes = iter((((4, 4, 8, 8),), ((8, 8, 12, 12),)))
+    c = ctx(RecordingEnv(), tile_px=None); c.actor_boxes = lambda: next(boxes)
+    monkeypatch.setattr(skills, "_step", lambda _ctx, _direction, old: (SimpleNamespace(frame=old, blank_seen=False), (0, 0), False, None))
+
+    result = interact(c, [.6, .5], [.5, .5], route={"dirs": ["RIGHT"]})
+
+    assert result.status == "done" and result.reason == ""
+
+
+def test_interact_does_not_count_face_step_as_a_press_effect(monkeypatch):
+    import agent.skills as skills
+    from types import SimpleNamespace
+    from PIL import Image
+
+    initial = Image.new("RGB", (16, 16)); faced = initial.copy()
+    faced.paste((255, 255, 0), (7, 7, 9, 9))
+    frames = iter((initial, initial, faced))
+    monkeypatch.setattr(skills, "wait_settled", lambda _env, **_kw: SimpleNamespace(frame=next(frames), settled=True, blank_seen=False))
+    c = ctx(RecordingEnv(), tile_px=None)
+    monkeypatch.setattr(skills, "_step", lambda _ctx, _direction, _old: (SimpleNamespace(frame=faced, blank_seen=False), (0, 0), False, None))
+
+    result = interact(c, [.6, .5], [.5, .5], route={"dirs": ["RIGHT"]})
+
+    assert result.status == "failed" and result.reason == "nothing changed"
+
+
 def test_select_uses_one_model_call_then_moves_and_confirms():
     env = MenuEnv()
     model = StubModel([Reply("", {"items": env.items, "cursor": 0,
