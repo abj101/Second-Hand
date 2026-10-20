@@ -439,6 +439,39 @@ Rewrite `Memory.observe(perception, place, step, tiles=None, tracks=None) -> {in
 - **Source/preservation:** the manifest fingerprints user runtime fixes made after the earlier offline gate. The reported **658-pass** suite belongs to that earlier gate snapshot, not a rerun against those subsequent fixes. All **18 protected files** remain byte-identical to `.tmp/rcr1/retry2-protected-before.json` after this invocation; no runtime steering, repair, staging of shared files or push. R1 hunks in `agent/loop.py`, `tests/agent/test_loop.py`, `tests/agent/test_track.py` remain unstaged with live-view edits. No further live run is started.
 
 
+### Follow-up 10-19b: offered rows execute, kind folding, category in identity (S144 of m1_rcr_post_r3)
+
+**Offered = executable.**
+- At S144, row 17 "go to house, not on screen, 6 left" did nothing (0 inputs). `resolve` was correct: `e_house`, current place, not merged, map place. But the building's recorded tile (0,-2) lies inside its solid footprint, and a route to all four sides is None with no actors in the way. It truly cannot route.
+- Root cause, by file:line in the current tree:
+  - `World.plan` (`agent/world.py:1094`) handles a remembered target through `World.beside` (`agent/world.py:1077`), which needs a route to one of the target tile's four neighbours.
+  - None exists for a tile inside a building's footprint, so `plan` returns None (`agent/world.py:1109`), and `agent/loop.py:176` then drops the action (`action = None` when `travel_legs` is None), giving 0 inputs.
+  - Meanwhile `options` offered the row without that test.
+- Fix: one predicate, `World.reachable(ref, per, place)` (`agent/world.py:605`), used by the remembered rows at `agent/world.py:1029`. R3 has since taken over this item and the two below; its working tree may differ. It is exactly the loop's go_to test: resolve, then on screen or `plan()` legs. Actors are ignored for it, so a row blocked only by an actor stays offered and its failure is recorded.
+- The remembered rows of `options` offer each name group's nearest *reachable* member, or no row.
+- Cost: about 1 ms per row (S144: 111 ms against 87 ms for 26 rows), so the full predicate is kept.
+
+**Kinds.** `normalize_kind` folds whitespace to `_` and maps `ui` to `ui_element`, so "dialogue box", "menu item" and "ui" now hit TRANSIENT/FURNITURE/TYPING. A Haiku sweep found no caller relying on the unfolded form.
+
+**Category is part of identity.** An exit perception never joins, follows on a tile, inherits a track from, or blocks the tile of a non-exit record, and the reverse holds too (`memory._is_exit`). This fixes walls and hedges collecting "exit:" aliases (a regression from the 10-19 follow-up) and an NPC record collecting "exit: path" through its pixel track.
+
+**Acceptance** (`.tmp/rcr1/s144_rows.py 144`, emulator replay of `m1_rcr_post_r3` through the current code, 0 requests):
+- 16 rows, all executable;
+- no non-exit record listed as an exit;
+- no dialogue or UI row.
+
+Against the run's own recorded memory (`.tmp/rcr1/s144_recorded.py`): without the predicate, row 21 "go to house" is not executable; with it, all rows execute.
+
+**Tests (Haiku):**
+- `test_normalize_kind_folds_spaces_and_ui`;
+- `test_exit_perception_never_joins_a_wall_on_its_tile`, which found the tile-update guard's missing category check, now fixed;
+- `test_offered_remembered_rows_resolve_and_plan`;
+- `test_actor_in_the_way_keeps_a_remembered_row`.
+
+**Suite `-n auto`: 629 passed, 1 skipped, 0 failed.**
+
+**Open, recorded only (coordinator):** S1 live in `m1_rcr_post_r3` shows the Pallet NPC with 4 ids. Not chased.
+
 ### Follow-up 10-19: R3 re-gate duplicates (steps 55 and 69 of m1_rcr_baseline)
 
 **Step 55** ("check shelf, 2 left, 3 up" ×2).
