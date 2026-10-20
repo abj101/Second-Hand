@@ -301,6 +301,35 @@ def test_resolve_and_plan_skip_merged_history_and_plan_entity_facing(tmp_path):
     assert world.plan({**target, "place": "c"}) is None
 
 
+def test_plan_unknown_exit_pushes_outward_and_travel_reports_uncrossed(tmp_path, monkeypatch):
+    from agent import world as world_module
+    from agent.skills import Ctx, SkillResult
+    from tests.agent.fakes import StubModel
+
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    entity(mem, "door", "exit: doorway", "room", (-5, 6))
+    mem.upsert("entities", {**mem.get("entities", "door"), "kind": "exit"})
+    mem.upsert("tiles", {"id": "room@-5,0", "place": "room", "x": -5, "y": 0, "floor": True,
+                          "blocked": [], "pushed": [], "exit": None, "step": 1})
+    world = World(mem, 16); world.current_place, world.pos = "room", (-5, 6)
+    target = world.resolve("exit:-5,6", {"screen": "world", "entities": []}, "room")
+
+    legs = world.plan(target)
+
+    assert legs[-1]["dirs"] == ["DOWN"] and legs[-1]["expect"]
+    attempted = {}
+    def no_cut(ctx, _target, _player, *, exit_target=None, route=None):
+        attempted.update(exit_target=exit_target, route=route)
+        frame = ctx.env.screenshot()
+        return SkillResult("blocked", "exit not crossed", 1, 0, frame, frame, (0, 0), False,
+                           failure={"stage": "crossing", "reason": "exit not crossed"})
+    monkeypatch.setattr(world_module, "approach", no_cut)
+    result = world.travel(Ctx(GridEnv(), StubModel([]), 16), legs, 2)
+
+    assert attempted["exit_target"] == "exit" and attempted["route"]["dirs"] == ["DOWN"]
+    assert result.status == "blocked" and result.failure["reason"] == "exit not crossed"
+
+
 def test_plan_routes_to_unknown_entity_neighbor_around_blocked_edges(tmp_path):
     from agent.space import DIRS
     from tests.agent.fakes import GridEnv, StubModel

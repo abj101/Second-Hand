@@ -3,7 +3,7 @@ import hashlib, json, re
 from dataclasses import replace
 from itertools import pairwise
 from PIL import ImageDraw
-from agent.memory import ACTOR_KINDS, STATIC_GATE, TRANSIENT, _actor, _base, _distance, _nameable, normalize_kind, place_aliases, place_name
+from agent.memory import ACTOR_KINDS, STATIC_GATE, TRANSIENT, _actor, _base, _distance, _is_exit as _memory_is_exit, _nameable, normalize_kind, place_aliases, place_name
 from agent.observer import changed, cut
 from agent.space import DIRS, exit_to, fold, frontier, mark_exit, outward, route, tile_of
 from agent.skills import SkillResult, approach, on_player, press
@@ -592,6 +592,11 @@ class World:
         exit = next((x for x in self._exits(pid, live) if x.get("ident") == ident or x["tile"] == tile or any(d["tile"] == tile for d in x["doors"])), None)
         return (f"place:{pid}", f"place:{exit['dest']}") if exit and exit.get("dest") else None
 
+    def is_exit(self, ref):
+        kind, _, ident = str(self.canon(ref) or "").partition(":")
+        row = self.mem.get("entities", ident) if kind == "thing" else None
+        return bool(row and _memory_is_exit(row.get("kind"), row.get("name")))
+
     def history(self, ref, place=None):
         canonical = self.canon(ref)
         kind, _, ident = str(canonical or "").partition(":")
@@ -989,10 +994,11 @@ class World:
             on = set(self.entity_ids.get(i) for i in range(len(ents))) - {None}
             exits, actors, things, remembered, explores, places = [], [], [], [], [], []
             exit_things = [(i, e, self.entity_ids.get(i)) for i, e in enumerate(ents) if e.get("name") and _is_exit(e)]
+            player_at = next((e.get("at") for e in ents if e.get("kind", "").lower() == "player"), None)
             beyond = self.beyond(place, exit_things)
             for x in self._exits(place, live, exit_things):
                 dest = x["dest"]
-                under = x["idx"] is not None and self.size is not None and on_player(ents[x["idx"]].get("at"), next((e.get("at") for e in ents if e.get("kind", "").lower() == "player"), None), self.size, self.tile_px)  # approach's own refusal test: cross by the verified push, else nothing to offer
+                under = x["idx"] is not None and self.size is not None and on_player(ents[x["idx"]].get("at"), player_at, self.size, self.tile_px)  # approach's own refusal test: cross by the verified push, else nothing to offer
                 if x["idx"] is not None and not under: action, tool, target = {"thing": x["idx"], "verb": "approach"}, "approach", x["name"]
                 elif dest: action, tool, target = {"go_to": f"place:{dest}"}, "go_to", x["name"] or self.place_label(dest)  # the verified tile + push
                 else: action, tool, target = {"go_to": exit_ref(x)}, "go_to", x["name"] or self.label(exit_ref(x), place)
@@ -1011,6 +1017,7 @@ class World:
             for i, e in enumerate(ents):
                 kind, name, ident = normalize_kind(e.get("kind")), e.get("name"), self.entity_ids.get(i)
                 if not name or kind in TRANSIENT or _is_exit(e) or (ident and ident in listed): continue  # two perceptions of one thing (one tile, one id) are one row
+                if self.size is not None and on_player(e.get("at"), player_at, self.size, self.tile_px): continue
                 listed.add(ident)
                 ref, where = thing_ref(ident), self._where(self._tile(ident))
                 history = self.history(ref, place) if ref else {}
@@ -1128,7 +1135,12 @@ class World:
             tile, facing, dirs = found
         else: dirs = route(self.mem, p, pos, tile, occupied=self.occupied(p))
         if dirs is None: return None
-        legs.append({"place": p, "dirs": dirs + ([facing] if facing else []), "push": None, "expect": None, "target": target}); return legs
+        if target["kind"] == "exit":
+            exit_record = target.get("exit") or {}
+            push = next((door.get("dir") for door in exit_record.get("doors", []) if tuple(door["tile"]) == tile and door.get("dir")), None) or exit_record.get("dir") or outward(self.mem, p, tile)
+            legs.append({"place": p, "dirs": dirs + [push], "push": None, "expect": exit_record.get("to") or "exit", "exit_tile": tile, "target": target})
+        else: legs.append({"place": p, "dirs": dirs + ([facing] if facing else []), "push": None, "expect": None, "target": target})
+        return legs
     def travel(self, ctx, legs, step, trace=None):
         results, inputs, place = [], 0, self.current_place; self._travel_cut = self._travel_open = False  # open: a cut travel could not place; the loop re-identifies
         for n, leg in enumerate(legs, 1):

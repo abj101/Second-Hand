@@ -1062,6 +1062,35 @@ def test_option_pick_drives_grid_through_its_exit(tmp_path, monkeypatch):
     assert row["act"]["action"]["thing"] == 2 and row["choice"]["verb"] == "approach" and row["choice"]["target"] == "exit: door"
     assert env.scene == 1
 
+def test_picking_unknown_exit_on_player_tile_sends_outward_key(tmp_path, monkeypatch):
+    from agent import loop as module
+    class Recording(GridEnv):
+        def __init__(self):
+            super().__init__(); self.keys = []
+        def press(self, key, frames=8, on_frame=None):
+            self.keys.append(key); super().press(key, frames, on_frame)
+
+    env = Recording()
+    def perceive(*_):
+        per = env.perception()
+        player = next(e for e in per["entities"] if e.get("kind") == "player")
+        exit = next(e for e in per["entities"] if e.get("kind") == "exit")
+        exit["at"] = list(player["at"])
+        return per, reply(per)
+    monkeypatch.setattr(module, "perceive", perceive)
+    loop = Loop(env, StubModel([reply({"i": 1, "why": "test"})]), Memory(tmp_path / "memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    monkeypatch.setattr(loop.world, "occupied", lambda _place: frozenset())
+    monkeypatch.setattr(loop.world, "resolve", lambda _ref, _per, place: {
+        "kind": "exit", "place": place, "tile": tuple(loop.world.pos), "id": "door", "stale": False,
+        "exit": {"tile": tuple(loop.world.pos), "dir": "", "to": None, "doors": []}})
+
+    row = loop.step()
+
+    assert row["act"]["action"]["go_to"].startswith("exit:")
+    assert row["skill"]["inputs"] >= 1 and env.keys
+    assert row["skill"]["status"] == "blocked" and row["skill"]["failure"]["reason"] == "exit not crossed"
+
 def test_go_to_unexplored_walks_to_nearest_frontier(tmp_path):
     from agent.space import fold
     loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")

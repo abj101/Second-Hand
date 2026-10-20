@@ -175,10 +175,11 @@ def test_place_quest_targeted_while_in_place_closes_only_on_arrival(tmp_path):
 
 @pytest.mark.parametrize(("target", "name", "done_when"), [
     ("thing:person", "Mira", "Mira speaks to you"),
+    ("thing:exit", "doorway", "you go through doorway"),
     ("place:hall", "Hall", "you enter Hall"),
 ])
 def test_render_focus_labels_target_and_limits_cited_text(tmp_path, target, name, done_when):
-    nb = notebook(tmp_path, ref=lambda value: value)
+    nb = notebook(tmp_path, ref=lambda value: value, is_exit=lambda ref: ref == "thing:exit")
     cited = "Find the archive. " + "x" * 220
     nb.heard(1, "Mira", "Hall", cited)
     nb.heard(2, "Guide", "Hall", "Uncited text.")
@@ -193,6 +194,14 @@ def test_render_focus_labels_target_and_limits_cited_text(tmp_path, target, name
     assert because[0].startswith('Mira, step 1: "Find the archive.')
     assert "Uncited text" not in rendered
     assert "Recent note" in rendered
+
+
+def test_crossed_exit_evidence_says_went_through(tmp_path):
+    nb = notebook(tmp_path, label=lambda ref: "doorway" if ref == "thing:exit" else "Mira",
+                  is_exit=lambda ref: ref == "thing:exit")
+
+    assert nb._evidence({"target": "thing:exit", "by": "observe", "reason": "crossed"}) == "went through doorway"
+    assert nb._evidence({"target": "thing:person", "by": "observe", "reason": "talked"}) == "talked to Mira, who said nothing yet"
 
 
 def test_render_focus_limits_recent_to_four_lines_of_120_chars(tmp_path):
@@ -275,7 +284,7 @@ def test_exit_quest_closes_on_a_crossing_from_its_opening_even_if_target_is_set_
     assert quest["status"] == "done" and quest["reason"] == "crossed" and quest["closed"] == 4 and quest["by"] == "observe"
 
 
-def test_exit_quest_closes_only_on_crossings_before_its_target_was_set(tmp_path):
+def test_exit_quest_closes_on_crossing_after_target_was_set_but_not_in_reverse(tmp_path):
     route = {"thing:stairs": ("place:tiled", "place:room")}.get
     nb = notebook(tmp_path, ref=lambda value: value if str(value).startswith(("place:", "thing:")) else None, route=route)
     nb.heard(1, None, "Hall", "Go on.")
@@ -286,5 +295,6 @@ def test_exit_quest_closes_only_on_crossings_before_its_target_was_set(tmp_path)
     assert nb.data["quests"][0]["status"] == "open"  # crossed before it opened: not the step before its opening
 
     assert nb.observe(7, "place:tiled") == []  # back up the other way: not this exit's route
-    assert nb.observe(8, "place:room") == []  # crossed after the target was set: an event after the target, not here
-    assert nb.data["quests"][0]["status"] == "open"
+    assert nb.observe(8, "place:room") == ["late"]  # crossed after the target was set
+    assert nb.data["quests"][0]["status"] == "done"
+    assert nb.data["quests"][0]["closed"] == 8 and nb.data["quests"][0]["reason"] == "crossed"

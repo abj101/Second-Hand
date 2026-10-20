@@ -140,6 +140,20 @@ def test_each_thing_has_an_action_duplicate_pair_groups_and_actor_has_one_row(tm
     assert all("state" in row for row in opts)
 
 
+def test_on_screen_thing_on_player_tile_has_no_row_but_adjacent_thing_stays_offered(tmp_path):
+    world, per = setup(Memory(tmp_path), [
+        {"name": "underfoot", "kind": "object", "at": at(0, 0)},
+        {"name": "nearby", "kind": "object", "at": at(1, 0)},
+    ])
+    entity_ids = ids(world, per)
+
+    rows = world.options(per, "room", {}, 5, inputs=INPUTS)
+    refs = {row["ref"] for row in rows}
+
+    assert f"thing:{entity_ids['underfoot']}" not in refs
+    assert f"thing:{entity_ids['nearby']}" in refs
+
+
 def test_known_places_each_have_a_concrete_route_row(tmp_path):
     mem = Memory(tmp_path); room(mem)
     mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
