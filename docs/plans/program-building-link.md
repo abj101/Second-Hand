@@ -124,3 +124,36 @@ The code is accepted. Both reported gate failures were mistakes in this plan's g
 **Known limits for the live run:**
 - `e_shelf_2 leads_to p_place_3` is still live. It only loses support (`con`) on a future completed interact; in this run it closes nothing.
 - `World.beside` checks the 4 neighbours of the thing's single stored tile. A multi-tile building's centre neighbours can be inside its footprint, so "check large house" may end `route blocked`. That is recorded honestly and is not a zigzag.
+
+## 10. Live result: `runs/m1_building_live_150` (2026-10-20, on 7b78e97, 230 calls, ledger 5040 of the uncommitted 5115 cap)
+
+| Pass bar (§6) | Result |
+|---|---|
+| Enter map 40 and stay ≥3 steps on an entry | **PASS.** In at S81 and stayed through S150 (70 steps). Earlier run: in at S138, out within 1 step. |
+| No interact sends > 2×(route)+2 keys | **PASS.** 52 interacts, 0 over the bound, max 7 keys; routed walks match the truth delta exactly. No zigzag. |
+| q4 or its successor closes `entered` or by speech | **Not met.** q3 targeted `place:p_place_5` at S89, after arriving at S80. A place arrival that happened before the target was set doesn't count (by design), so the planner closed it with `done` at S92. |
+| `leads_to` recorded on the building or the door? | **The door** (`e_exit_large_house_door → p_place_5`), as predicted. The planner targeted the place, not the building, so B (door-to-building link) isn't needed yet. |
+
+**Progress:** Pallet at S70 (was S131), the lab at S81 (was S138), and the rival's line "Gramps isn't around!" was heard at S101.
+
+### New harness bugs found in this run
+
+These have priority over the game-logic issue (Oak's appearance is triggered by walking north out of town).
+
+1. **H1. Drift correction runs on dialogue screens (tile_accuracy 0.97 → 0.41).**
+   - `World.observe_after` (world.py ~436-456) applies the entity-median drift with no screen check.
+   - The two times the agent's tile disagrees with truth are both `advance` steps on a dialogue screen right after a talk (S82 `drift_fix [1,1]`, S97 `[-1,1]`).
+   - Every routed walk tracks truth exactly. After the two bad shifts, 28 interacts end in `route blocked` (S102-S141).
+   - The view-closure block a few lines below already guards on `screen == "world" and not modal`. The drift block needs the same guard: compute it once and use it for both.
+2. **H2. The planner targets map-legend letters that the resolver rejects.**
+   - The planner view's legend reads `Thing C counter with three spheres (2,-6) …`, and the planner answers `target: "Thing C"`, `"B"`, `"Thing B"` or `"J"`. Each is rejected with "matches no known place or thing".
+   - In the lab, 5 of 8 plan calls failed this way, leaving no open quest from S92 to S150. The same failure appears in m1_exit_b1_live_150 (S135, "J") and in phase_e (S59, "B").
+   - Root: two vocabularies. Anything the planner is shown must be resolvable. The fix is to have `World.ref` resolve the handles of the most recently rendered view (`B`, `Thing B`, `Landmark J`), keeping that legend on World. Prompt size doesn't change.
+3. **H3. The "Things here:" header names the wrong place.** The places loop at world.py ~924 reassigns `label`, so line ~965 prints `Things here: tiled room` while the agent is in the lab. Fix: rename the loop variable.
+4. **H4. Interact success is read from a whole-frame pixel diff, which moving actors spoil.**
+   - At S145-S149, "check counter 5" was scored `changed` five times with nothing happening (aides walking in view). No failure was recorded, so the act repeated it; this is part of `repeat_actions_max_length=13`.
+   - `skills.interact` returns `done` when `changed(start, end)` is true.
+   - Root: judge the effect of the A press with tracked actor boxes masked out. The tracker already has the boxes. Don't count every pixel.
+
+### Budget
+75 calls are left under the uncommitted cap. Another 150-step run needs about 230 calls, so it needs the user's cap decision first.
