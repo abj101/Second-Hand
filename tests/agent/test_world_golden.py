@@ -9,7 +9,7 @@ def golden(root, episode):
     actual = {}
     for path in sorted((root / "memory").glob("*.jsonl")):
         actual[f"memory/{path.name}"] = sorted(map(json.loads, path.read_text().splitlines()), key=lambda r: r.get("id", ""))
-    actual["trace.jsonl"] = [{k:v for k,v in r.items() if k not in {"t","ms","entities","scroll","after"}} for r in map(json.loads, (root / "trace.jsonl").read_text().splitlines())]
+    actual["trace.jsonl"] = [{k:v for k,v in r.items() if k not in {"t","ms","entities","scroll","after","settle_frames"}} for r in map(json.loads, (root / "trace.jsonl").read_text().splitlines())]
     target = DATA / episode
     if os.getenv("W0_REGEN") == "1":
         shutil.rmtree(target, ignore_errors=True)

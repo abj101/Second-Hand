@@ -81,6 +81,14 @@ def test_bare_advance_presses_a(tmp_path):
     assert env.keys == ["A"]
 
 
+def test_action_row_records_integer_before_and_after_settle_frames(tmp_path, monkeypatch):
+    short_settle(monkeypatch)
+    scripted_world(monkeypatch, acts=[chosen({"buttons": ["A"]})])
+    loop = Loop(Busy(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    row = loop.step()
+    assert all(type(row["settle_frames"][side]) is int and row["settle_frames"][side] > 0 for side in ("before", "after"))
+
+
 @pytest.mark.parametrize("known", [False, True])
 def test_first_departure_crossing_is_verified_for_known_or_new_destination(tmp_path, monkeypatch, known):
     from agent import loop as loop_module

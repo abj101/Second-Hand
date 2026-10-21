@@ -213,6 +213,7 @@ class Loop:
                 path.parent.mkdir(parents=True, exist_ok=True); before.save(path)
                 self.cached = self.cached_hash = None
                 return self._hold_row(name, place, start, calls, observation_status="stale", execution="stale",
+                    settle_frames={"before": before_set.waited, "after": None},
                     observation_generation=self.observation_stamp["generation"], observation_frame_seq=self.observation_stamp["frame_seq"],
                     observation_age_ms=age, stale_reason="scene_cut" if current.generation == self.observation_stamp["generation"] else "generation_changed")
         self._live(before, place, per, choice and {**affs[choice.i], "why": choice.why, "text": choice.text}, a)
@@ -239,7 +240,7 @@ class Loop:
         self.pending_cut, self.pending_via, self.pending_key = scene_cut, affs[choice.i].get("target") if choice else None, intent
         row_choice = {"i": choice.i, **affs[choice.i], "id": targets[choice.i], "called": choice.called, "text": choice.text, "why": choice.why, "intent": intent} if choice else None
         # the action's state, JSON-safe: values used by the outcome tail below
-        s = {"action_step": self.step_no + 1, "before_settled": before_set.settled, "frame": f"frames/{self.step_no + 1:06d}.png", "place": place, "per": per, "reused": reused, "frame_hash": frame_hash, "marked": marked, "observation_stamp": self.observation_stamp,
+        s = {"action_step": self.step_no + 1, "before_settled": before_set.settled, "before_waited": before_set.waited, "frame": f"frames/{self.step_no + 1:06d}.png", "place": place, "per": per, "reused": reused, "frame_hash": frame_hash, "marked": marked, "observation_stamp": self.observation_stamp,
              "player_fix": player_fix, "options": len(affs), "choice": row_choice, "aff": affs[choice.i] if choice else None, "tid": targets[choice.i] if choice else None,
              "detail": choice.detail if choice else None, "intent": intent, "unknown": unknown, "scene_cut": scene_cut,
              "exit_key": list(exit_key) if exit_key else None, "unseen_crossing": unseen_crossing, "cut_dir": cut_dir, "travel": travel_legs is not None, "route_len": len(act_route["dirs"]) if act_route else None,
@@ -305,6 +306,7 @@ class Loop:
             "scene_cut": scene_cut, "next_place": next_place, "verified_edge": verified_edge, "view_ids": [], "tile": self.world.pos if self.tile_px else None, "drift_fix": None, "player_fix": player_fix, "entities": self.world.entities, "scroll": spatial["scroll"], **({"exit": list(exit_key)} if scene_cut and not modal and next_place != place and exit_key else {}),
             "act": s["act"], "option": s["option"], "plan": s["plan"], "probe": s["probe"],
             "observation_status": "settled" if after_set.settled and s.get("before_settled", True) else "timed_out", "execution": skill.status, "action_step": None, **self._provenance(),
+            "settle_frames": {"before": s["before_waited"], "after": after_set.waited},
             }
         self.step_no += 1
         after.save(self.mem.root.parent / row["after"])
