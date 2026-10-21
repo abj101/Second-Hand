@@ -722,6 +722,19 @@ def test_exact_thing_name_precedes_legend_symbol(tmp_path):
     assert world.ref("B") == "thing:a" and world.ref("Thing B") == "thing:b"
 
 
+def test_called_thing_name_resolves_and_ties(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room")
+    entity(mem, "scientist", "scientist", "room", (0, 0))
+    mem.upsert("entities", {**mem.get("entities", "scientist"), "called": "OAK"})
+    world = World(mem, 16)
+
+    assert world.ref("OAK") == world.ref("oak") == "thing:scientist"
+
+    entity(mem, "scientist_2", "scientist", "room", (1, 0))
+    mem.upsert("entities", {**mem.get("entities", "scientist_2"), "called": "OAK"})
+    assert {ident for ident, _ in world.ties("oak")} == {"thing:scientist", "thing:scientist_2"}
+
+
 def test_world_view_lists_all_place_exits_before_any_other_place_things(tmp_path):
     mem = Memory(tmp_path); place(mem, "here", "Atrium")
     for name in ("North", "South", "West"):

@@ -602,7 +602,7 @@ class World:
         maps = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged" and p.get("screen") == "world"}
         key = str(text or "").strip().casefold()
         return [e for e in self.mem.rows("entities") if e.get("state") != "merged" and e.get("place") in maps
-                and key in {str(n).casefold() for n in [e.get("name"), *e.get("aliases", [])] if n}]
+                and key in {str(n).casefold() for n in [e.get("name"), e.get("called"), *e.get("aliases", [])] if n}]
 
     def ties(self, text):  # a name that several things share, which ref() cannot pick: each candidate's ref with its place's label
         things = self._named_things(text)
