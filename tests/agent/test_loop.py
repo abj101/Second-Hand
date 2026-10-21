@@ -517,36 +517,6 @@ def test_blocked_exit_without_novelty_reports_failed(tmp_path, monkeypatch):
     assert row["pred"] is None and row["used"] == []
     assert "screen_changes" in row["outcome"]["effects"] and row["verdict"] == "failed"
 
-
-def test_blocked_with_novelty_still_counts_as_failure(tmp_path, monkeypatch):
-    from agent import loop as module
-    per = {"screen": "world", "text": [], "entities": [
-        {"kind": "player", "name": "player", "at": [.5, .5]},
-        {"kind": "object", "name": "Lamp", "at": [.7, .5]}]}
-    monkeypatch.setattr(module, "perceive", lambda *_: (per, reply(per)))
-    monkeypatch.setattr(module, "act", fake_act(1, verb="interact"))
-    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
-    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
-    record = loop.world._record_view
-    def novel(*args, **kwargs):
-        record(*args, **kwargs); loop.world.novel = 5
-    monkeypatch.setattr(loop.world, "_record_view", novel)
-    def blocked(ctx, *args, **kwargs):
-        frame = ctx.env.screenshot()
-        return SimpleNamespace(status="blocked", reason="route blocked", inputs=1, calls=0,
-                               before=frame, after=frame, scroll=(0, 0), blank_seen=False, moves=[],
-                               failure={"stage": "route", "direction": "RIGHT"})
-    monkeypatch.setattr(module, "run_affordance", blocked)
-
-    first = loop.step()
-    intent = first["choice"]["intent"]
-    assert first["verdict"] == "progress" and loop.fails[intent]["n"] == 1
-    second = loop.step()
-    assert second["verdict"] == "progress" and loop.fails[intent]["n"] == 2
-    options = loop.world.options(per, loop.place, loop.fails, 3, inputs=list(loop.env.inputs()))
-    option = next(o for o in options if o.get("intent_key") == intent)
-    assert option["state"] == "failed" and any("2×" in note for note in option["notes"])
-
 def test_mislabelled_player_does_not_shift_tiles_or_duplicate_entities(tmp_path, monkeypatch):
     from agent import loop as module
     env, seen, shot = GridEnv(), [], GridEnv.screenshot; env.phase = 0

@@ -329,7 +329,7 @@ class Loop:
         self.cause = None
         if choice is not None:
             verb, target = aff.get("verb"), aff.get("target") or ""
-            failed = v in ("failed", "no_change") or skill.status in ("blocked", "failed")
+            failed = v in ("failed", "no_change")
             pressed_from = tuple(s["pressed_from"])
             d = next((x.upper() for x in target.split() if x.upper() in DIRS), None) if verb == "buttons" else None  # a press aims at the tile it faces
             ahead = (pressed_from[0] + DIRS[d][0], pressed_from[1] + DIRS[d][1]) if d else None
