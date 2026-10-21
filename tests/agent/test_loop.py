@@ -1466,6 +1466,27 @@ def test_same_text_from_the_same_thing_is_noted_as_said_before(tmp_path, monkeyp
     assert len(says) == 1 and says[0]["why"] == "says the same as before (step 1)"
 
 
+def test_repeated_reply_counts_as_did_nothing_for_the_interact_option(tmp_path, monkeypatch):
+    from agent import loop as module
+    env, state = GridEnv(), {"text": []}
+    monkeypatch.setattr(module, "perceive", lambda *_: ({"screen": "world", "text": list(state["text"]), "entities": [
+        {"name": "player", "kind": "player", "at": [.5, .5]}, {"name": "sign", "kind": "object", "at": [.6, .5]}]}, reply({})))
+    monkeypatch.setattr(module, "act", lambda *a, **k: SimpleNamespace(place="", ops=[], action={"thing": 1, "verb": "interact"}, expect="text_appears", why="t", text=None))
+    def read(ctx, aff, per, text=None, exit=False, **kwargs):
+        before = env.screenshot(); env.text_box = True; state["text"] = ["Hi"]; after = env.screenshot()
+        return SimpleNamespace(status="done", reason="", inputs=1, calls=0, before=before, after=after, scroll=(0, 0), blank_seen=False, moves=[])
+    monkeypatch.setattr(module, "run_affordance", read)
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    first = loop.step()
+    env.text_box, state["text"] = False, []
+    second = loop.step()
+
+    assert first["verdict"] == "changed"
+    assert second["verdict"] == "failed"
+    assert loop.fails[second["choice"]["intent"]]["why"] == "same reply"
+
+
 def test_repeated_reply_closes_quest_for_thing_and_marks_progress(tmp_path, monkeypatch):
     from agent import loop as module
     env, state = GridEnv(), {"text": []}

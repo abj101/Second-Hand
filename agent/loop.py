@@ -275,12 +275,14 @@ class Loop:
         world_exit = bool(scene_cut and next_place != place and cut_dir and per.get("screen") == after_per.get("screen") == "world")
         outcome = effects(per, after_per, skill, place, next_place, place_after_candidate=not world_exit and self.mem.get("places", next_place).get("state") == "candidate", scene_cut=scene_cut and next_place != place)
         route =(getattr(skill, "failure", None) or {}).get("stage") in ("route", "interaction")  # never reached the thing (a route stopped short, a choice refused before any press): no evidence about it
+        said_step, repeated = None, False
         if choice and tid and not route:  # a route that never reached the thing says nothing about it
             new_text = next((t for t in after_per.get("text", []) if t not in per.get("text", [])), "")
             for effect in outcome["effects"]:
                 detail = outcome.get("to") if effect == "place_changes" else new_text if effect == "text_appears" else s["detail"] or effect
                 said = next((r for r in self.mem.rows("relations") if (r.get("s"), r.get("p"), r.get("o")) == (tid, PRED[effect], detail)), None) if effect == "text_appears" else None
                 said_step = said["step"] if said else None  # relate() updates the stored row in place
+                repeated |= said_step is not None
                 rel = self.mem.relate(tid, PRED[effect], str(detail or ""),
                     src=outcome["basis"].get(effect, "model"), step=self.step_no + 1,
                     hit=True if outcome["basis"].get(effect) == "pixel" else None,
@@ -322,6 +324,7 @@ class Loop:
         novel = bool(closed) or self.world.novel > 0 or verified_edge or (next_place != place and first_visit)
         idle = bool((choice or s.get("pick_key")) and not skill.inputs and skill.status == "done")  # a picked option that sent no input yet "succeeded" did nothing: a failure of that option, so the menu changes (blocked/failed keep their own reason)
         idle |= bool(choice and skill.status == "done" and next_place == place and not scene_cut and sum((r.get("choice") or {}).get("intent") == intent and r.get("frame_hash") == s["frame_hash"] and r.get("execution") == "done" for r in self.recent) >= 2)  # the same action from the same screen for the third time in five steps changed nothing that lasts
+        idle |= repeated  # this reply said the same thing as before
         v = "progress" if closed else "failed" if idle else action_result(skill.status, outcome["effects"], novel) if choice else "unobservable"
         row["verdict"] = v
         row["tile"], row["drift_fix"] = self.world.pos if self.tile_px else None, list(drift_fix) if drift_fix else None
@@ -350,7 +353,7 @@ class Loop:
                 held = tuple(prior["avoid"]) if reuse else (self.world.pos[0] + DIRS[step_dir][0], self.world.pos[1] + DIRS[step_dir][1]) if step_dir in DIRS else None  # the tile a route stopped at
                 blocker = prior.get("blocker") if reuse else next((r["id"] for r in self.mem.rows("entities") if r.get("place") == place and r.get("tile") and held and tuple(r["tile"]) == held and r["id"] != tid), None) if stage == "route" else None
                 self.cause = failure_cause(intent, f"{verb} {target}".strip(), stage, skill.reason or ("no change" if "no_change" in outcome.get("effects", []) else f"verdict {v}"), held if stage == "route" else None, blocker)
-                f = self.fails.setdefault(intent, {"n": 0}); f.update(n=f["n"] + 1, why=("did nothing" if idle else skill.reason or f"verdict {v}")[:40], step=self.step_no, act=f"{verb} {target}".strip())
+                f = self.fails.setdefault(intent, {"n": 0}); f.update(n=f["n"] + 1, why=("same reply" if repeated else "did nothing" if idle else skill.reason or f"verdict {v}")[:40], step=self.step_no, act=f"{verb} {target}".strip())
                 if stage == "route" and blocker and held and not refused and blocker != tid: f.update(avoid=list(held), blocker=blocker)  # the next route goes around it
                 if thing and not route: self.mem.relate(thing, PRED["no_change"], "", src="observed", step=self.step_no, hit=False, verb=verb)  # the thing itself is contradicted; never deleted
             else:
