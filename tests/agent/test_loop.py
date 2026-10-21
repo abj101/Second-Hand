@@ -1166,6 +1166,48 @@ def test_plan_followup_before_act_is_bounded_and_reads_errors(tmp_path, monkeypa
         assert len([user for role, user in sent if role == "plan"]) == 2
 
 
+def test_followup_accomplished_at_once_gets_one_more_call(tmp_path, monkeypatch):
+    from agent import loop as module
+    from agent.act import act
+
+    def run(third, root):
+        short_settle(monkeypatch); scripted_world(monkeypatch)
+        monkeypatch.setattr(module, "act", act)
+        plans = iter([[{"op": "done", "key": "q1", "reason": "named"}],
+                      [{"op": "add", "key": "q2", "text": "Go through the door", "why": ["t1"], "target": "door"}],
+                      third])
+        sent = []
+        class Capture(StubModel):
+            def ask(self, system, user, images=(), schema=None, *, role=""):
+                sent.append((role, user))
+                if role == "plan": return reply({"ops": next(plans), "why": "follow the game text"})
+                return reply({"i": 0, "why": "no action"})
+        loop = Loop(Busy(), Capture([]), Memory(root / "memory"), "grid")
+        for text in ("What is his name again?", "Introduction"):
+            loop.notebook.heard(0, None, "room", text)
+        loop.notebook.apply_ops([{"op": "add", "key": "q1", "text": "Choose your name", "why": ["t1"]}], 0)
+        loop.notebook.ref = lambda t: "thing:door" if t == "door" else None
+        loop.notebook.canon = lambda v: v
+        loop.notebook.route = lambda r: None
+        loop.notebook.leads_to = lambda r: ["b"] if r == "thing:door" else []
+        loop.notebook.data["moves"] = [[1, "a", "b"]]
+        loop._event("T1", "new game text", 1)
+        row = loop.step()
+        return loop, row, [user for role, user in sent if role == "plan"], [user for role, user in sent if role == "act"]
+
+    loop, row, plan_prompts, act_prompts = run(
+        [{"op": "add", "key": "q3", "text": "Talk to the professor", "why": ["t1"]}], tmp_path / "valid")
+    assert len(plan_prompts) == 3
+    assert next(q for q in loop.notebook.data["quests"] if q["key"] == "q2")["status"] == "done"
+    assert next(q for q in loop.notebook.data["quests"] if q["key"] == "q2")["reason"] == "entered"
+    assert loop.notebook.focus == "q3"
+    assert act_prompts and not act_prompts[0].startswith("Goal: (none)")
+
+    loop, row, plan_prompts, _ = run(
+        [{"op": "add", "key": "q3", "text": "Talk to the professor"}], tmp_path / "invalid")
+    assert len(plan_prompts) == 3 and loop.notebook.focus is None
+
+
 def test_actor_speaker_name_attaches_after_new_text(tmp_path, monkeypatch):
     from agent import loop as module
     from types import SimpleNamespace

@@ -156,7 +156,10 @@ class Loop:
             results = self.notebook.apply_ops(p.ops, self.step_no + 1, p.why)
             if p.ops and self.notebook.focus is None and any(r["result"] != "ok" or r["op"] in ("done", "drop") for r in results):
                 p = plan(self.model, "no open quest", self.notebook, self.world.view("", place), per.get("text", []), recent)
-                results += self.notebook.apply_ops(p.ops, self.step_no + 1, p.why)
+                more = self.notebook.apply_ops(p.ops, self.step_no + 1, p.why); results += more
+                if p.ops and self.notebook.focus is None and all(r["result"] == "ok" for r in more):  # ok, but its quest was already accomplished
+                    p = plan(self.model, "no open quest", self.notebook, self.world.view("", place), per.get("text", []), recent)
+                    results += self.notebook.apply_ops(p.ops, self.step_no + 1, p.why)
             changed = any(r["result"] == "ok" for r in results)
             if trigger.startswith("stuck:"): self.stuck.replanned(changed)
             self.last_plan = self.step_no + 1
