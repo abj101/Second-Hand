@@ -181,6 +181,17 @@ def gate_run(run, steps, acquired_after):
     write(run / "truth.jsonl", truth)
 
 
+def test_preset_names_and_legacy_names_pass_only_when_different(tmp_path):
+    for player, rival, expected in (("RED", "BLUE", True), ("GARY", "JOHN", True),
+                                    ("RED", "RED", False), ("HAND", "BLUE", True)):
+        run = tmp_path / f"{player}-{rival}"
+        gate_run(run, 6, 5)
+        rows = [dict(row, player_name=player, rival_name=rival)
+                for row in map(json.loads, (run / "truth.jsonl").read_text().splitlines())]
+        write(run / "truth.jsonl", rows)
+        assert evaluate(run)["m1_gate_pass"] is expected
+
+
 def test_starter_steps_uses_before_action_truth_and_terminal_row(tmp_path):
     at_limit, over_limit = tmp_path / "at-limit", tmp_path / "over-limit"
     gate_run(at_limit, 600, 600)

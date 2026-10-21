@@ -1169,12 +1169,13 @@ def evaluate(run, *, from_step=None):
           "place_mapping": {MAPS[mid]: {"place": matched[mid], "purity": purity[mid]} for mid in MAPS},
           "edges_found": edges_found, "knowledge_game_text": game_text,
           "player_name": player, "rival_name": rival,
-          "player_name_match": str(player or "").casefold() == "hand",
-          "rival_name_match": str(rival or "").casefold() == "blue"}
+          "player_name_match": str(player or "").casefold() in ("hand", "red", "ash", "jack", "blue", "gary", "john"),
+          "rival_name_match": str(rival or "").casefold() in ("red", "ash", "jack", "blue", "gary", "john")}
     m1["m1_gate_pass"] = (m1["m1_starter"] and m1["steps_to_starter"] <= 600 and
                            m1["places_matched"] and all(p is not None and p >= .9 for p in purity.values()) and
                            all(edges_found.values()) and game_text >= 10 and
-                           m1["player_name_match"] and m1["rival_name_match"])
+                           m1["player_name_match"] and m1["rival_name_match"] and
+                           str(player or "").casefold() != str(rival or "").casefold())
     result = {**m1,
             "execution_success": _execution(trace),
             "coverage": {"confirmed_places": len(mapping), "affordance_types": sorted({

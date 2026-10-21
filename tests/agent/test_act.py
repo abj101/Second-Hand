@@ -72,6 +72,16 @@ def test_act_shape_and_system_are_generic():
     assert all(word not in SYSTEM.casefold() for word in ("pokemon", "oak", "mom", "rug"))
 
 
+def test_default_choices_clause_is_sent_and_changes_act_cache_key():
+    from agent.model import Ollama
+    _, model = run({"why": "choose the offered name", "i": 1})
+    clause = "; pick a preset or default name or setting when offered instead of typing your own"
+    system, user, images, schema, role = model.calls[0]
+    assert clause in system and role == "act"
+    cache = Ollama("test")
+    assert cache._key(system, user, images, schema) != cache._key(system.replace(clause, ""), user, images, schema)
+
+
 def test_world_menu_headers_mark_state_changes_and_modal_menus_get_none():
     opts = [
         {"n": 1, "tool": "go_to", "label": "go to Hall", "action": {"go_to": "hall"}, "notes": [], "state": "new"},
