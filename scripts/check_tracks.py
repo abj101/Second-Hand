@@ -203,10 +203,12 @@ def menu(run, steps=None, first=1, dump=None, live=(), cap=20, model=None):
                 picks.append({"step": s, "n": res.option, "label": o.get("label"), "state": o.get("state"), "new": new, "why": res.why})
             except Exception as e: picks.append({"step": s, "error": f"{type(e).__name__}: {str(e)[:100]}", "new": new})
             p = picks[-1]; print(f"live {s} pick {p.get('n')} [{p.get('state')}] {p.get('label') or p.get('error')} | {str(p.get('why', ''))[:100]}")
-        intent, result = (row.get("choice") or {}).get("intent"), row.get("verdict")
-        if intent and result in ("failed", "no_change"):  # ponytail: fails from trace verdicts only; Loop.fails also holds planner history
-            f = fails.setdefault(intent, {"n": 0}); f.update(n=f["n"] + 1, why=f"verdict {result}", step=s)
+        intent, result, status = (row.get("choice") or {}).get("intent"), row.get("verdict"), (row.get("skill") or {}).get("status")
+        last = next((r for r in reversed(st.setdefault("recent", [])) if (r.get("choice") or {}).get("intent") == intent), {})
+        if intent and (result in ("failed", "no_change") or status in ("blocked", "failed") and last.get("execution") in ("blocked", "failed")):
+            f = fails.setdefault(intent, {"n": 0}); f.update(n=f["n"] + 1, why=(row.get("skill") or {}).get("reason") or f"verdict {result}", step=s)
         elif intent: fails.pop(intent, None)
+        st["recent"] = [*st["recent"], row][-5:]
     _, _, _, first, last = replay(run, steps, first, callback=on_step)
     in_range = [s for s in trace if first <= s <= last]
     ok = [p for p in per_step if "crash" not in p]; rows = [p["rows"] for p in ok]; chars = max((p["chars"] for p in ok), default=0)

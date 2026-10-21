@@ -440,6 +440,36 @@ def test_menu_check_counts_rows_and_flags_duplicate_labels(tmp_path, monkeypatch
     assert out["exit"] == 1
 
 
+def test_menu_replay_counts_only_repeated_novel_blocks_and_success_clears(tmp_path, monkeypatch):
+    import scripts.check_tracks as ct
+    run = tmp_path / "runs" / "repeat"; run.mkdir(parents=True)
+    statuses = ["blocked", "blocked", "blocked", "done", "blocked", "failed", "done"]
+    trace = [{"step": s, "place": "p", "screen": "world", "choice": {"intent": "p|x"},
+              "verdict": "progress", "execution": status, "skill": {"status": status, "reason": "route blocked"}}
+             for s, status in enumerate(statuses, 1)]
+    (run / "trace.jsonl").write_text("\n".join(json.dumps(r) for r in trace), encoding="utf8")
+    seen = []
+    class ReplayWorld:
+        mem = Memory(tmp_path / "mem")
+        def _seen_at(self, place): return None
+        def before(self, *args): pass
+        def label(self, ref, place=None): return "Room"
+        def here(self, place): return "Room"
+        def options(self, per, place, fails, step, inputs=(), targets=()):
+            seen.append(dict(fails.get("p|x", {})))
+            return [{"n": 1, "tool": "interact", "label": "check box", "action": {"thing": 0, "verb": "interact"}, "state": "failed" if fails else "new"}]
+    def replay(run, steps=None, first=1, baseline=False, callback=None):
+        world, env = ReplayWorld(), SimpleNamespace(inputs=lambda: ("A",))
+        for row in trace: callback(row["step"], row, {"screen": "world", "text": [], "entities": []}, {"x": 0, "y": 0}, env, world)
+        return world, {}, [], 1, len(trace)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ct, "replay", replay)
+    monkeypatch.setattr(ct, "notebook_at", lambda *a: SimpleNamespace(render_focus=lambda label: "Goal: inspect", data={"quests": []}))
+    assert ct.menu("repeat")["exit"] == 0
+    assert [f.get("n", 0) for f in seen] == [0, 0, 1, 2, 0, 0, 1]
+    assert seen[2]["why"] == "route blocked"
+
+
 def test_tied_remembered_things_sort_without_comparing_rows(tmp_path):  # regression: equal sort keys used to compare row dicts (TypeError)
     mem = Memory(tmp_path); room(mem)
     for n in range(2): mem.upsert("entities", {"id": f"ghost{n}", "name": "crate", "kind": "person", "place": "room", "tile": [1, 2], "status": "remembered", "last": 1, "seen": 1})
