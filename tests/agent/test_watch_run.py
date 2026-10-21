@@ -220,3 +220,48 @@ function response(run,generation,seq,{delay=false}={}){
 '''
     result = subprocess.run([node, "-e", production + harness + tail], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_browser_keeps_last_frame_on_fetch_failure_and_visibility_change():
+    node = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
+    if not os.path.exists(node): pytest.skip("Node.js is unavailable")
+    from scripts.watch_run import PAGE
+    start = PAGE.index("let frameEpoch=")
+    end = PAGE.index('document.addEventListener("visibilitychange"')
+    production = PAGE[start:PAGE.index("\n", end)]
+    harness = r'''
+const assert = require("node:assert/strict");
+let drawn=[], timers=[], rafs=[], fetches=[], listener, fetchCount=0;
+const live={dataset:{},getContext:()=>({drawImage(b){drawn.push(b.seq)},clearRect(){drawn.length=0}})};
+const els={live,fstep:{textContent:""}};
+function $(id){return els[id]}
+let last={run:"run",generation:"g1"}, after=0;
+globalThis.document={hidden:false,addEventListener(event,fn){listener=fn}};
+globalThis.fetch=async()=>{fetchCount++;return fetches.shift()};
+globalThis.createImageBitmap=async blob=>({seq:blob.seq,close(){}});
+globalThis.requestAnimationFrame=fn=>rafs.push(fn);
+globalThis.setTimeout=fn=>timers.push(fn);
+function response(seq){
+  const h={"X-Run":"run","X-Generation":"g1","X-Frame-Seq":String(seq)};
+  return {ok:true,headers:{get:k=>h[k]},blob:async()=>({seq})};
+}
+'''
+    tail = r'''
+(async()=>{
+  fetches.push(response(2)); await pullFrame();
+  assert.deepEqual(drawn,[2]); assert.equal(live.dataset.frameSeq,"2");
+  fetches.push({ok:false}); await pullFrame();
+  assert.deepEqual(drawn,[2]); assert.equal(live.dataset.frameSeq,"2");
+  assert.equal(timers.length,1); assert.equal(frameConnected,false);
+  fetches.push(response(3)); await timers.shift()();
+  assert.deepEqual(drawn,[2,3]); assert.equal(live.dataset.frameSeq,"3");
+  document.hidden=true; listener();
+  assert.deepEqual(drawn,[2,3]); assert.equal(live.dataset.frameSeq,"3");
+  fetches.push(response(4)); document.hidden=false; listener();
+  await new Promise(setImmediate);
+  assert.equal(fetchCount,4); assert.deepEqual(drawn,[2,3,4]);
+  assert.equal(live.dataset.frameSeq,"4");
+})().catch(error=>{console.error(error);process.exitCode=1});
+'''
+    result = subprocess.run([node, "-e", harness + production + tail], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr

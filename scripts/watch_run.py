@@ -344,12 +344,12 @@ async function pullFrame(){
       }
     }finally{bitmap.close()}
     if(epoch===frameEpoch&&run===expectedRun&&generation===expectedGeneration&&run===last.run&&generation===last.generation) frameConnected=true;
-  }catch(e){if(!controller.signal.aborted&&frameConnected){resetFrames()}}
+  }catch(e){if(!controller.signal.aborted) frameConnected=false}
   if(frameAbort===controller) frameAbort=null;
   frameBusy=false;
   if(frameWake){frameWake=false;queueMicrotask(pullFrame)}else if(frameConnected) requestAnimationFrame(pullFrame); else setTimeout(pullFrame,250);
 }
-document.addEventListener("visibilitychange",()=>{visible=!document.hidden;resetFrames();if(visible)pullFrame()});
+document.addEventListener("visibilitychange",()=>{visible=!document.hidden;if(visible)pullFrame()});
 pullFrame();
 $("follow").onclick=()=>{pinned=null;chosenPlace=null;setView(0)};
 $("place").onchange=e=>{chosenPlace=e.target.value;render()};
