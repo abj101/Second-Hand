@@ -204,7 +204,7 @@ def menu(run, steps=None, first=1, dump=None, live=(), cap=20, model=None):
             except Exception as e: picks.append({"step": s, "error": f"{type(e).__name__}: {str(e)[:100]}", "new": new})
             p = picks[-1]; print(f"live {s} pick {p.get('n')} [{p.get('state')}] {p.get('label') or p.get('error')} | {str(p.get('why', ''))[:100]}")
         intent, result = (row.get("choice") or {}).get("intent"), row.get("verdict")
-        if intent and result in ("failed", "no_change"):  # ponytail: fails from trace verdicts only; Loop.fails also holds planner history
+        if intent and (result in ("failed", "no_change") or (row.get("skill") or {}).get("status") in ("blocked", "failed")):  # Loop.fails also holds planner history
             f = fails.setdefault(intent, {"n": 0}); f.update(n=f["n"] + 1, why=f"verdict {result}", step=s)
         elif intent: fails.pop(intent, None)
     _, _, _, first, last = replay(run, steps, first, callback=on_step)
