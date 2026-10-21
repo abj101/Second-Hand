@@ -83,7 +83,7 @@ def test_default_choices_clause_is_sent_and_changes_act_cache_key():
 
 
 def test_system_declines_optional_naming_offers():
-    assert "decline any optional naming offer" in SYSTEM and "end key" in SYSTEM
+    assert "answer no when asked whether to give or change a name or nickname" in SYSTEM and "end key" in SYSTEM
     assert len(SYSTEM.split(". ")) == 4 and len(SYSTEM) <= 2000
 
 
