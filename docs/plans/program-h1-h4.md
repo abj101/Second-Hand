@@ -114,3 +114,30 @@ My gate was wrong. `eval_plan` does not render `World.view` per step, and its op
 - Don't change `agent/perceive.py` prompts.
 - Line counts are report-only.
 - Report exact command output.
+
+## Live result: `runs/m1_h1h4_live` (2026-10-20, 70 + 150 calls; steps 1-90, then resumed for 91-144; ledger 5451 of 5565)
+
+| Check | Result |
+|---|---|
+| H1: `drift_fix_off_world` 0, tile_accuracy ≥ 0.95 | **PASS**: 0 and 1.0 |
+| H2: no plan error naming a legend handle | **PASS**: the only error after S90 is "key is not open" (S112) |
+| H3: header matches the current place | **PASS**: 0 mismatches across all plan prompts |
+| H4: no interact `changed`/`done` 3× in a row on one intent | **PASS**: longest streak is 1 |
+
+**Progress (new records):**
+- S86: walked north and set off the professor's tall-grass scene.
+- S111: "which POKéMON do you want?"
+- S139: received a starter (truth `party = 1`).
+- q5 "Choose a POKéMON" closed at S140.
+
+### New bug, found by the resume: the place isn't re-identified after a live resume
+
+- **What happened:** the first resume attempt crashed in `cut(None, frame)` (loop.py:111). After `restore`, `invalidate_live_observation()` sets `prev_frame = None` while `self.place` stays.
+- **The guard committed as 2430653** stops the crash. When there is no prior frame it gives no cut evidence, so the step keeps the checkpoint's place.
+- **The cost:** in this run the emulator advanced between the checkpoint (S90, map 0, "come with me") and the first resumed observation (S91, map 40). The professor's scripted walk into the lab happened in that gap.
+  - The lab was kept as `p_place_4` (Pallet) for S91-S144, so its tiles and things merged into Pallet's place.
+  - The exits picked at S141-S144 failed because the agent thought it was outdoors.
+- **Root fix (not done):** on resume, take the prior frame from what the agent last observed, the run's own `frames/<step>_after.png` for the checkpoint step, instead of None. The first resumed step's normal `cut` test then sees a changed world and re-identifies the place. If the file is missing, treat it as an unknown cut so the place is re-matched by view.
+- **Open question:** does an uninterrupted run catch a cutscene walk that happens inside a dialogue `advance` step? `world_exit` needs world screens on both sides. Check this offline before assuming it does.
+
+Other health: `self_spot_coverage` 0.71 and `repeat_actions_max_length` 23. The 23 is the 18-step dialogue run at S91-S108, which is real dialogue, not a loop.
