@@ -190,16 +190,21 @@ def interact(ctx: Ctx, target_at: list[float], player_at: list[float] | None, *,
 def select(ctx: Ctx, item: str) -> SkillResult:
     start = _settled(ctx)
     schema = {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "string"}},
-              "cursor": {"type": "integer"}, "layout": {"type": "string"}}, "required": ["items", "cursor", "layout"]}
-    reply = ctx.model.ask("Read the visible menu and answer only with JSON.", f'Return one JSON object with exactly these keys: "items" (the visible menu labels in order as strings), "cursor" (the highlighted item index, zero-based integer), and "layout" ("vertical" or "horizontal"). Match the target label case-insensitively: {item}', [for_model(start.frame)], schema, role="skill")
+              "cursor": {"type": "integer"}, "layout": {"type": "string"}, "cursor_cell": {"type": "array", "items": {"type": "integer"}}, "item_cell": {"type": "array", "items": {"type": "integer"}}}, "required": ["items", "cursor", "layout"]}
+    reply = ctx.model.ask("Read the visible menu and answer only with JSON.", f'Return one JSON object with these keys: "items" (the visible menu labels in order as strings), "cursor" (the highlighted item index, zero-based integer), and "layout" ("vertical", "horizontal" or "grid"); for a grid also "cursor_cell" and "item_cell", the [row, column] of the highlighted item and of the target. Match the target label case-insensitively: {item}', [for_model(start.frame)], schema, role="skill")
     data = reply.data or {}; items, cursor = data.get("items"), data.get("cursor")
-    if not isinstance(items, list) or not items or not isinstance(cursor, int) or not 0 <= cursor < len(items): return _result("failed", "menu or item not identified", 0, 1, start.frame, start.frame, blank=start.blank_seen)
-    diff = next((i - cursor for i, name in enumerate(items) if str(name).casefold() == item.casefold()), None)
-    if diff is None: return _result("failed", "menu or item not identified", 0, 1, start.frame, start.frame, blank=start.blank_seen)
-    key = ("RIGHT" if diff > 0 else "LEFT") if data.get("layout") == "horizontal" else ("DOWN" if diff > 0 else "UP")
-    n = abs(diff) + 1
+    cells = [data.get("cursor_cell"), data.get("item_cell")]
+    if data.get("layout") == "grid" and all(isinstance(c, list) and len(c) == 2 and all(type(v) is int for v in c) for c in cells):  # a keyboard: rows and columns, as type_text moves
+        (r0, c0), (r1, c1) = cells
+        keys = ["DOWN" if r1 > r0 else "UP"] * abs(r1 - r0) + ["RIGHT" if c1 > c0 else "LEFT"] * abs(c1 - c0)
+    else:
+        if not isinstance(items, list) or not items or not isinstance(cursor, int) or not 0 <= cursor < len(items): return _result("failed", "menu or item not identified", 0, 1, start.frame, start.frame, blank=start.blank_seen)
+        diff = next((i - cursor for i, name in enumerate(items) if str(name).casefold() == item.casefold()), None)
+        if diff is None: return _result("failed", "menu or item not identified", 0, 1, start.frame, start.frame, blank=start.blank_seen)
+        keys = [("RIGHT" if diff > 0 else "LEFT") if data.get("layout") == "horizontal" else ("DOWN" if diff > 0 else "UP")] * abs(diff)
+    n = len(keys) + 1
     if n > ctx.max_inputs: return _result("blocked", "input limit", 0, 1, start.frame, start.frame, blank=start.blank_seen)
-    for _ in range(abs(diff)): ctx.env.press(key, ctx.move_frames)
+    for key in keys: ctx.env.press(key, ctx.move_frames)
     ctx.env.press("A", ctx.move_frames); end = _settled(ctx)
     return _result("done", "", n, 1, start.frame, end.frame, blank=start.blank_seen or end.blank_seen)
 @_tracked

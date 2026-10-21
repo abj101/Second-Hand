@@ -1,7 +1,7 @@
 from PIL import Image
 
 from agent.model import Reply
-from agent.skills import Ctx, approach, press, run_affordance, type_text
+from agent.skills import Ctx, approach, press, run_affordance, select, type_text
 from tests.agent.fakes import StubModel
 
 
@@ -133,3 +133,11 @@ def test_approach_keeps_sidestepping_past_a_two_tile_obstacle(monkeypatch):
     unknown = Grid(unknown=True)
     result = approach(Ctx(unknown, StubModel([]), tile_px=16, max_inputs=5), [.7, .5], [.5, .5])
     assert result.status == "failed" and result.reason == "scroll unsure" and result.inputs == 1
+
+
+def test_select_on_a_grid_moves_by_row_and_column():
+    env = KeyboardEnv(); env.done_key = [2, 6]
+    model = StubModel([Reply("", {"items": ["A"], "cursor": 0, "layout": "grid", "cursor_cell": [0, 0], "item_cell": [2, 6]}, 0, None, None)])
+    result = select(Ctx(env, model), "Y")
+    assert result.status == "done" and result.inputs == 9 and env.committed
+    assert env.events == ["DOWN", "DOWN"] + ["RIGHT"] * 6 + ["A"]
