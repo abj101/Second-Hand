@@ -168,6 +168,17 @@ def test_render_count_caps_cited_history_and_character_size(tmp_path):
     assert len(rendered) <= 3500
 
 
+def test_render_shows_a_long_recent_line_whole_within_budget(tmp_path):
+    nb = notebook(tmp_path, ref=lambda value: value if value.startswith(("place:", "thing:")) else None)
+    for i in range(5): nb.heard(i, "Guide", "Hall", f"Short {i}.")
+    nb.heard(5, "Guide", "Hall", "Cutscene " + "x" * 505)
+    for i in range(6, 8): nb.heard(i, "Guide", "Hall", f"Short {i}.")
+    rendered = nb.render()
+
+    assert 't6 Guide at Hall: "Cutscene ' + "x" * 505 + '"' in rendered
+    assert all(f"t{i} Guide" in rendered for i in range(1, 9))
+
+
 def test_observe_ignores_thing_quest_until_heard_from_target(tmp_path):
     nb = notebook(tmp_path, ref=lambda value: value if str(value).startswith(("place:", "thing:")) else None)
     nb.heard(1, "Mira", "Hall", "Hi.", who="thing:mira")

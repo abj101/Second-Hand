@@ -282,7 +282,14 @@ class Notebook:
             lines.append(f"- {q['key']} \"{q['text']}\": {q.get('status')} at step {q.get('closed')} — {self._evidence(q)}{retarget}")
         lines.append("Game text:")
         lines.extend(self._text_line(row) for row in cited)
-        lines.extend(self._text_line(row, 160) for row in recent if row.get("key") not in cited_keys)
+        uncited = [row for row in recent if row.get("key") not in cited_keys]
+        whole, total = 0, 0
+        for row in reversed(uncited):  # newest first: whole while the total stays within 1000 characters; the rest keep the 160 cut
+            total += len(self._text_line(row))
+            if total > 1000: break
+            whole += 1
+        cut = len(uncited) - whole
+        lines.extend(self._text_line(row) if i >= cut else self._text_line(row, 160) for i, row in enumerate(uncited))
         return "\n".join(lines)
 
     def render_focus(self, label) -> str:
