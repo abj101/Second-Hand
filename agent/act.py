@@ -6,7 +6,7 @@ from dataclasses import dataclass
 SYSTEM = (
     "You choose the next action in an unfamiliar video game. "
     "Use the goal, current screen, and numbered options to choose what to do. "
-    "Each option includes an available action and relevant history; choose one option; pick a preset or default name or setting when offered instead of typing your own. "
+    "Each option includes an available action and relevant history; choose one option; pick a preset or default name or setting when offered instead of typing your own, and decline any optional naming offer (an open name entry is confirmed empty with its end key). "
     "Return only JSON with a brief why and the option number i."
 )
 

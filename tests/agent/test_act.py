@@ -82,6 +82,11 @@ def test_default_choices_clause_is_sent_and_changes_act_cache_key():
     assert cache._key(system, user, images, schema) != cache._key(system.replace(clause, ""), user, images, schema)
 
 
+def test_system_declines_optional_naming_offers():
+    assert "decline any optional naming offer" in SYSTEM and "end key" in SYSTEM
+    assert len(SYSTEM.split(". ")) == 4 and len(SYSTEM) <= 2000
+
+
 def test_world_menu_headers_mark_state_changes_and_modal_menus_get_none():
     opts = [
         {"n": 1, "tool": "go_to", "label": "go to Hall", "action": {"go_to": "hall"}, "notes": [], "state": "new"},
