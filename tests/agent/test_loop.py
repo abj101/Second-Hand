@@ -1010,8 +1010,9 @@ def test_zero_ok_stuck_plan_reply_increments_backoff(tmp_path, monkeypatch):
     loop.place = "room"; loop.stuck.seen_places.add("room")
     loop.prev_frame = loop.env.screenshot()
     loop._plan_trigger = lambda per: "stuck: no_progress"
-    monkeypatch.setattr(module, "plan", lambda *a, **k: SimpleNamespace(
-        ops=[{"op": "done", "key": "missing", "reason": "finished"}], why="nothing applied"))
+    plans = iter([SimpleNamespace(ops=[{"op": "done", "key": "missing", "reason": "finished"}], why="nothing applied"),
+                  SimpleNamespace(ops=[], why="nothing applied")])
+    monkeypatch.setattr(module, "plan", lambda *a, **k: next(plans))
 
     row = loop.step()
 
@@ -1073,6 +1074,51 @@ def test_dialogue_text_replans_on_a_naming_menu(tmp_path):
         assert "what is his name again" in loop._plan_trigger({"screen": screen})
     for screen in ("dialogue", "battle"):
         assert loop._plan_trigger({"screen": screen}) is None
+
+
+@pytest.mark.parametrize("case", ["closes_without_adding", "rejected_target", "invalid_twice", "empty_ops"])
+def test_plan_followup_before_act_is_bounded_and_reads_errors(tmp_path, monkeypatch, case):
+    from agent import loop as module
+    from agent.act import act
+    short_settle(monkeypatch)
+    scripted_world(monkeypatch)
+    monkeypatch.setattr(module, "act", act)
+    first = {
+        "closes_without_adding": [{"op": "done", "key": "q1", "reason": "Professor Oak has acknowledged the name RED and the introduction sequence has progressed."}],
+        "rejected_target": [{"op": "add", "key": "q3", "text": "Find Professor Oak (t4: 'PROF. OAK, next door, is looking for you.')", "why": ["t4"], "target": "PROF. OAK"}],
+        "invalid_twice": [{"op": "add", "key": "q3", "text": "Leave the office and begin the adventure (t3: 'Your very own POKÉMON legend is about to unfold!')", "target": "B"}],
+        "empty_ops": [],
+    }[case]
+    second = first if case == "invalid_twice" else [{"op": "add", "key": "q2", "text": "Choose the rival's name", "why": ["t1"]}]
+    plans = iter([first, second]); sent = []
+    class Capture(StubModel):
+        def ask(self, system, user, images=(), schema=None, *, role=""):
+            sent.append((role, user))
+            if role == "plan": return reply({"ops": next(plans), "why": "follow the game text"})
+            return reply({"i": 0, "why": "no action"})
+    loop = Loop(Busy(), Capture([]), Memory(tmp_path / "memory"), "grid")
+    for text in ("What is his name again?", "Introduction", "Begin your adventure", "PROF. OAK, next door, is looking for you."):
+        loop.notebook.heard(0, None, "room", text)
+    if case == "closes_without_adding":
+        loop.notebook.apply_ops([{"op": "add", "key": "q1", "text": "Choose your name", "why": ["t1"]}], 0)
+    loop._event("T1", "new game text", 1)
+
+    row = loop.step()
+
+    plan_prompts = [user for role, user in sent if role == "plan"]
+    assert len(plan_prompts) == (1 if case == "empty_ops" else 2)
+    if case in ("closes_without_adding", "rejected_target"):
+        assert loop.notebook.focus == "q2"
+        assert all(user.startswith("Goal:") and not user.startswith("Goal: (none)") for role, user in sent if role == "act")
+        assert row["plan"]["focus"] == "q2"
+    if case == "rejected_target":
+        assert row["plan"]["ops"][0]["result"].startswith("error: target")
+        assert row["plan"]["ops"][0]["result"] in plan_prompts[1]
+    if case == "invalid_twice":
+        assert loop.notebook.focus is None
+        assert len(row["plan"]["ops"]) == 2
+        loop.step()
+        assert len([user for role, user in sent if role == "plan"]) == 2
 
 
 def test_actor_speaker_name_attaches_after_new_text(tmp_path, monkeypatch):
