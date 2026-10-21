@@ -388,7 +388,7 @@ def test_perceiver_guides_whole_name_entry(tmp_path):
     assert "visible editable text field with its on-screen keyboard" not in model.prompt
     assert "Previous-place memory is reference only" not in model.prompt
     assert 'List every visible passage (door, stairs, door mat, opening) as an entity named "exit: <what it is>"' in model.prompt
-    assert loop.prompt_version == "e5-perceiver-10"
+    assert loop.prompt_version == "e5-perceiver-11"
 
 def test_probe_act_uses_post_probe_frame_and_perception(tmp_path, monkeypatch):
     from agent import loop as loop_module

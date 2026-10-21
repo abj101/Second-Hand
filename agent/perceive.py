@@ -19,7 +19,7 @@ SYSTEM = (
 )
 
 PLACE_LINE = '\n- "place": a short name for where the player is, specific enough to tell it from similar places (such as "upstairs bedroom" or "town square", not just "house"); null when no map is shown.'
-PROMPT = """Return JSON with:
+PROMPT = """Return compact one-line JSON (no code fence, no indentation) with:
 - "screen": one of world, dialogue, menu, keyboard, battle, title, other.""" + PLACE_LINE + """
 - "text": every piece of readable text on screen, verbatim.
 - "entities": each distinct thing on screen (characters, objects, buttons, icons, cards, menu items), as

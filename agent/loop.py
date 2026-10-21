@@ -33,7 +33,7 @@ class Loop:
         self.trace = Trace(mem.root.parent / "trace.jsonl"); self.step_no = 0
         self.place = None; self.prev = None; self.tile_px = getattr(env, "tile_px", None)
         self.move_frames = 16; self.stuck = Stuck()
-        self.recent = self.trace.tail(5); self.cached = None; self.cached_hash = None; self.cached_marked = False; self.prev_frame = None; self.prev_frame_mark_eligible = None; self.prompt_version = "e5-perceiver-10"; self.cached_version = self.prompt_version
+        self.recent = self.trace.tail(5); self.cached = None; self.cached_hash = None; self.cached_marked = False; self.prev_frame = None; self.prev_frame_mark_eligible = None; self.prompt_version = "e5-perceiver-11"; self.cached_version = self.prompt_version
         self.seen_image, self.seen_marked = None, False
         self.cut_carry = False  # a cut seen while no world screen could be matched: the next world screen re-identifies the place
         self.pending_cut, self.pending_via, self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = False, None, False, 0, False, False
