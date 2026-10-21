@@ -2,11 +2,12 @@
 from dataclasses import dataclass, field, replace; from typing import Literal
 from functools import wraps
 import re
-from PIL import Image
+from PIL import Image, ImageDraw
 from agent.env import Env
 from agent.locate import refine
 from agent.model import Ollama
 from agent.observer import _blank, _residual, changed, cut, for_model, scroll, wait_settled
+INTERACT_MIN_CHANGED_TILE_FRACTION = 0.25  # ponytail: quarter-tile minimum change, calibrated on m1_building_live_150 S146-149 vs S123/S126; raise if sprite noise exceeds it
 @dataclass
 class SkillResult:
     status: Literal["done", "failed", "blocked"]
@@ -175,6 +176,13 @@ def interact(ctx: Ctx, target_at: list[float], player_at: list[float] | None, *,
     end = _settled(ctx)
     if callable(ctx.actor_boxes): mask += tuple(ctx.actor_boxes())
     changed_a = changed(before_a, end.frame, mask=mask)
+    included = Image.new("1", before_a.size, 1)
+    draw = ImageDraw.Draw(included)
+    for x0, y0, x1, y1 in mask:
+        x0, y0, x1, y1 = max(0, x0), max(0, y0), min(before_a.width, x1), min(before_a.height, y1)
+        if x0 < x1 and y0 < y1: draw.rectangle((x0, y0, x1 - 1, y1 - 1), fill=0)
+    changed_pixels = round(changed_a * included.histogram()[1])
+    changed_a = changed_pixels >= (ctx.tile_px or 8) ** 2 * INTERACT_MIN_CHANGED_TILE_FRACTION
     return _result("done" if changed_a else "failed",
                    "" if changed_a else "nothing changed", inputs, moved.calls,
                    start.frame, end.frame, total, start.blank_seen or moved.blank_seen or face_blank or end.blank_seen, moved.moves)

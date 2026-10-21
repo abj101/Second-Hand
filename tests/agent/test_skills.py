@@ -320,6 +320,42 @@ def test_interact_does_not_count_face_step_as_a_press_effect(monkeypatch):
     assert result.status == "failed" and result.reason == "nothing changed"
 
 
+def test_interact_requires_quarter_tile_of_unmasked_pixels(monkeypatch):
+    import agent.skills as skills
+    from types import SimpleNamespace
+    from PIL import Image
+
+    before = Image.new("RGB", (32, 32)); after = before.copy()
+    after.paste((255, 0, 0), (28, 0, 32, 3))
+    frames = iter((before, before, after))
+    monkeypatch.setattr(skills, "wait_settled", lambda _env, **_kw: SimpleNamespace(frame=next(frames), settled=True, blank_seen=False))
+    boxes = ((-20, -20, 28, 28), (16, 16, 40, 40))
+    c = ctx(RecordingEnv(), tile_px=8); c.actor_boxes = lambda: boxes
+    monkeypatch.setattr(skills, "_step", lambda _ctx, _direction, old: (SimpleNamespace(frame=old, blank_seen=False), (0, 0), False, None))
+
+    result = interact(c, [.6, .5], [.5, .5], route={"dirs": ["RIGHT"]})
+
+    assert result.status == "failed" and result.reason == "nothing changed"
+
+
+def test_interact_uses_included_pixel_count_for_overlapping_clipped_masks(monkeypatch):
+    import agent.skills as skills
+    from types import SimpleNamespace
+    from PIL import Image
+
+    before = Image.new("RGB", (40, 40)); after = before.copy()
+    after.paste((255, 0, 0), (24, 0, 40, 16))
+    frames = iter((before, before, after))
+    monkeypatch.setattr(skills, "wait_settled", lambda _env, **_kw: SimpleNamespace(frame=next(frames), settled=True, blank_seen=False))
+    boxes = ((-20, -20, 24, 24), (16, 16, 50, 50))
+    c = ctx(RecordingEnv(), tile_px=16); c.actor_boxes = lambda: boxes
+    monkeypatch.setattr(skills, "_step", lambda _ctx, _direction, old: (SimpleNamespace(frame=old, blank_seen=False), (0, 0), False, None))
+
+    result = interact(c, [.6, .5], [.5, .5], route={"dirs": ["RIGHT"]})
+
+    assert result.status == "done" and result.reason == ""
+
+
 def test_select_uses_one_model_call_then_moves_and_confirms():
     env = MenuEnv()
     model = StubModel([Reply("", {"items": env.items, "cursor": 0,
