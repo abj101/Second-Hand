@@ -1095,7 +1095,7 @@ def evaluate(run, *, from_step=None):
             continue
         src = row.get("place")
         dst = row.get("next_place") or row.get("transition_to") or outcome.get("to")
-        has_ok_edge = any(e.get("to") == dst and e.get("ok", 0) >= 1
+        has_ok_edge = row.get("verified_edge") is True or any(e.get("to") == dst and e.get("ok", 0) >= 1
                           for e in places.get(src, {}).get("edges", []))
         before, after = truth.get(row.get("step")), truth.get(row.get("step", -1) + 1)
         if has_ok_edge and src in mapping and dst in mapping and before and after:
@@ -1129,12 +1129,11 @@ def evaluate(run, *, from_step=None):
     repeated = 0
     for row in trace:
         choice = row.get("choice") or {}
-        key = (row.get("place"), row.get("frame_hash"), str(choice.get("verb", "")).casefold(),
-               str(choice.get("target", "")).casefold())
-        if key[1] and key in failed:
-            repeated += 1
-        if key[1] and row.get("verdict") in ("miss", "surprise", "failed", "no_change"):
-            failed.add(key)
+        key = (row.get("place"), choice.get("intent") or (str(choice.get("verb", "")).casefold(), str(choice.get("target", "")).casefold()))
+        bad = row.get("verdict") in ("miss", "surprise", "failed", "no_change") or (row.get("skill") or {}).get("status") in ("blocked", "failed")
+        if choice.get("verb") and key in failed: repeated += 1
+        if bad: failed.add(key)
+        elif choice.get("verb"): failed.discard(key)
     chooser = read(run / "chooser.jsonl")
     shown = used = 0
     for row in chooser:

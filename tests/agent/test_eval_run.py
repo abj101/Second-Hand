@@ -68,6 +68,27 @@ def test_eval_run_metrics_and_excludes_candidates(tmp_path):
     assert result["m1_gate_pass"] is True
 
 
+def test_novel_blocked_repeats_ignore_frame_hash_and_success_clears(tmp_path):
+    run = tmp_path / "repeats"
+    write(run / "trace.jsonl", [
+        {"step": s, "place": "room", "frame_hash": f"frame-{s}", "verdict": "progress",
+         "choice": {"verb": "approach", "target": "renamed" if s > 1 else "door", "intent": "room|exit"},
+         "skill": {"status": "blocked" if s < 3 else "done"}}
+        for s in range(1, 5)])
+    assert evaluate(run)["repeated_mistakes"]["count"] == 2
+
+
+def test_verified_trace_edge_counts_without_legacy_place_edges(tmp_path):
+    run = tmp_path / "edge"
+    write(run / "memory" / "places.jsonl", [{"id": p, "state": "place"} for p in ("up", "down")])
+    write(run / "trace.jsonl", [
+        {"step": 1, "place": "up", "next_place": "down", "scene_cut": True, "verified_edge": True,
+         "outcome": {"effects": ["place_changes"], "basis": {"place_changes": "pixel"}}},
+        {"step": 2, "place": "down"}])
+    write(run / "truth.jsonl", [{"step": 1, "map": "0x26"}, {"step": 2, "map": "0x25"}])
+    assert evaluate(run)["edges_found"]["0x26->0x25"] is True
+
+
 def test_rcr_scorecard_uses_recorded_sprite_history_prompts_and_settlement(tmp_path):
     run = tmp_path / "scorecard"
     trace = [{"step": step, "screen": "world", "place": "p", "frame": "frames/one.png", "entities": []}
