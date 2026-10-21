@@ -1466,6 +1466,31 @@ def test_same_text_from_the_same_thing_is_noted_as_said_before(tmp_path, monkeyp
     assert len(says) == 1 and says[0]["why"] == "says the same as before (step 1)"
 
 
+def test_repeated_reply_closes_quest_for_thing_and_marks_progress(tmp_path, monkeypatch):
+    from agent import loop as module
+    env, state = GridEnv(), {"text": []}
+    monkeypatch.setattr(module, "perceive", lambda *_: ({"screen": "world", "text": list(state["text"]), "entities": [
+        {"name": "player", "kind": "player", "at": [.5, .5]}, {"name": "sign", "kind": "object", "at": [.6, .5]}]}, reply({})))
+    monkeypatch.setattr(module, "act", lambda *a, **k: SimpleNamespace(place="", ops=[], action={"thing": 1, "verb": "interact"}, expect="text_appears", why="t", text=None))
+    def read(ctx, aff, per, text=None, exit=False, **kwargs):
+        before = env.screenshot(); env.text_box = True; state["text"] = ["Hi"]; after = env.screenshot()
+        return SimpleNamespace(status="done", reason="", inputs=1, calls=0, before=before, after=after, scroll=(0, 0), blank_seen=False, moves=[])
+    monkeypatch.setattr(module, "run_affordance", read)
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    loop.step()
+    thing = next(r["s"] for r in loop.mem.rows("relations") if r["p"] == "says" and r["o"] == "Hi")
+    assert loop.notebook.apply_ops([{"op": "add", "key": "q", "text": "Talk to the sign", "why": ["t1"], "target": f"thing:{thing}"}], 2)[0]["result"] == "ok"
+
+    env.text_box, state["text"] = False, []
+    row = loop.step()
+
+    quest = loop.notebook.data["quests"][0]
+    assert row["verdict"] == "progress"
+    assert quest["status"] == "done" and quest["reason"] == "talked" and quest["closed"] == 2
+    assert any(event["kind"] == "T3" and event["step"] == 2 for event in loop.events)
+
+
 def test_successful_use_clears_a_refuted_thing_in_place(tmp_path, monkeypatch):
     from agent import loop as module
     env = GridEnv(); env.walls.add((8, 7))  # the fake exit: three presses into a wall, then one real use

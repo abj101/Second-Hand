@@ -315,6 +315,31 @@ def test_closed_thing_quest_shows_current_label_and_who_said(tmp_path):
     assert "talked to person" not in rendered
 
 
+def test_talked_closes_targeted_thing_quest(tmp_path):
+    nb = notebook(tmp_path, ref=lambda value: value if str(value).startswith("thing:") else None,
+                  canon=lambda value: value.lower() if isinstance(value, str) else value)
+    nb.heard(1, "Guide", "Hall", "The door is open.", who="thing:guide")
+    assert nb.apply_ops([add("q", target="thing:GUIDE")], 2)[0]["result"] == "ok"
+
+    events = nb.talked(3, "thing:GUIDE")
+
+    assert [event["op"] for event in events] == ["observe"]
+    assert events[0]["key"] == "q"
+    assert nb.data["quests"][0]["status"] == "done"
+    assert nb.data["quests"][0]["reason"] == "talked"
+    assert nb.observe(3, None) == ["q"]
+
+
+def test_talked_does_not_close_for_reply_before_retarget(tmp_path):
+    nb = notebook(tmp_path, ref=lambda value: value if str(value).startswith("thing:") else None)
+    nb.heard(1, "Guide", "Hall", "The door is open.", who="thing:guide")
+    assert nb.apply_ops([add("q")], 2)[0]["result"] == "ok"
+    assert nb.apply_ops([{"op": "target", "key": "q", "target": "thing:guide"}], 3)[0]["result"] == "ok"
+
+    assert nb.talked(2, "thing:guide") == []
+    assert nb.data["quests"][0]["status"] == "open"
+
+
 def test_ambiguous_target_lists_each_candidate_ref(tmp_path):
     ties = {"exit: stairs": [("thing:e_exit_stairs", "tiled room"), ("thing:e_exit_stairs_2", "room")]}
     nb = notebook(tmp_path, ref=lambda value: value if str(value).startswith(("place:", "thing:")) else None,

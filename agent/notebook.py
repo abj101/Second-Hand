@@ -156,16 +156,22 @@ class Notebook:
                  "who": self.canon(who) if who else None}
         self.data["text"].append(value)
         events = [{"step": step, "op": "text", "value": value}]
+        events.extend(self.talked(step, who))
+        self._save(events)
+        return key
+
+    def talked(self, step: int, who) -> list[dict]:
+        who = self.canon(who) if who else None
+        events = []
         for quest in self.data["quests"]:
             target = quest.get("target")
             since = quest.get("retargeted") or quest.get("opened")
-            if quest.get("status") != "open" or not target or value["who"] is None or target.partition(":")[0] != "thing": continue
-            if self.canon(target) != value["who"] or (type(since) is int and step < since): continue
+            if quest.get("status") != "open" or not target or who is None or target.partition(":")[0] != "thing": continue
+            if self.canon(target) != who or (type(since) is int and step < since): continue
             quest.update(status="done", closed=step, reason="talked", by="observe")
             self._heard_closed.append(quest["key"])
             events.append({"step": step, "op": "observe", "key": quest["key"], "quest": quest})
-        self._save(events)
-        return key
+        return events
 
     def observe(self, step: int, place: str | None) -> list[str]:
         """Close place quests on arrival (here changed to the target) after the target was set; heard closures come first. Crossings are kept for _close_crossed."""
