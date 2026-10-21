@@ -211,6 +211,19 @@ def test_live_resume_invalidation_clears_pending_but_keeps_durable_world(tmp_pat
     assert loop.world._hud["player"] == {"crop": None, "changed": 2}
     assert loop.live_invalidation_reason == "live_resume_cleared_pending"
 
+def test_first_step_after_live_resume_has_no_prior_frame_and_keeps_its_place(tmp_path, monkeypatch):
+    from agent import loop as module
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.mem.upsert("places", {"id": "room", "name": "Room", "screen": "world", "state": "place", "visits": 1})
+    loop.world.current_place = loop.place = "room"; loop.prev_frame = None  # what invalidate_live_observation leaves after a resume
+    data = {"screen": "world", "text": [], "entities": [{"kind": "player", "name": "player", "at": [.5, .5]}]}
+    monkeypatch.setattr(module, "perceive", lambda *_: (data, reply(data)))
+    monkeypatch.setattr(module, "act", lambda *_a, **_k: SimpleNamespace(place="", ops=[], action=None, expect="screen_changes", why="test", text=None))
+
+    loop.step()  # m1_h1h4_live resume: cut(None, frame) raised before any trace row
+
+    assert loop.place == "room"
+
 def test_cut_before_frame_suppresses_marker_and_same_raw_after_frame_reuses(tmp_path, monkeypatch):
     from PIL import Image
     from agent import loop as module
