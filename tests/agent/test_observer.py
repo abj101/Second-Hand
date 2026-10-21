@@ -205,3 +205,13 @@ def test_mostly_white_menu_is_not_blank():
     from agent.observer import _blank
     menu = Image.new("RGB", (160, 144), "white"); menu.paste((0, 0, 0), (0, 0, 64, 18))  # ~95% white, like the NEW GAME menu
     assert not _blank(menu) and _blank(Image.new("RGB", (160, 144), "white"))
+
+
+def test_cut_when_the_scene_changes_under_an_unchanged_dialogue_box():
+    import numpy as np
+    rng = np.random.default_rng(3)
+    box = rng.integers(0, 255, (56, 160, 3), dtype=np.uint8)  # the same text box in both frames pins the best shift to (0, 0)
+    a = Image.fromarray(np.vstack([rng.integers(0, 255, (88, 160, 3), dtype=np.uint8), box]))
+    b = Image.fromarray(np.vstack([rng.integers(0, 255, (88, 160, 3), dtype=np.uint8), box]))
+    assert scroll(a, b) == (0, 0) and changed(a, b) > .5 and cut(a, b)  # m1_h1h4_live S90->S91: another map behind the professor's dialogue
+    assert not cut(a, a)

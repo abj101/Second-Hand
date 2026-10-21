@@ -1,5 +1,6 @@
 """One game-neutral perception, choice, action, and learning cycle."""
 import hashlib, json, os, re, time
+from PIL import Image
 from agent.act import act
 from agent.brief import GENERAL, _load, load_brief
 from agent.decide import Choice
@@ -34,6 +35,7 @@ class Loop:
         self.move_frames = 16; self.stuck = Stuck()
         self.recent = self.trace.tail(5); self.cached = None; self.cached_hash = None; self.cached_marked = False; self.prev_frame = None; self.prev_frame_mark_eligible = None; self.prompt_version = "e5-perceiver-10"; self.cached_version = self.prompt_version
         self.seen_image, self.seen_marked = None, False
+        self.cut_carry = False  # a cut seen while no world screen could be matched: the next world screen re-identifies the place
         self.pending_cut, self.pending_via, self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = False, None, False, 0, False, False
         self.pending_key = None  # intent key of the last action, for a cycle mark on the move it caused
         self.cause = None  # failure_cause text of the last failed act (planner and chooser read it)
@@ -64,6 +66,9 @@ class Loop:
         self.cached = self.cached_hash = self.cached_version = None
         self.cached_marked = False; self.seen_image, self.seen_marked = None, False
         self.prev = self.prev_frame = None; self.prev_frame_mark_eligible = None
+        last = self.mem.root.parent / "frames" / f"{self.step_no:06d}_after.png"  # what the agent last saw: the gap since then is checked like any step
+        if last.exists(): self.prev_frame = Image.open(last).convert("RGB")
+        else: self.cut_carry = True  # nothing to compare: re-identify at the next world screen
         self.pending = None; self.pending_cut = False; self.pending_via = self.pending_key = None
         self.repair_pending = False; self.parse_failed = False; self.empty_streak = self.repair_used = 0
         self.reperception_used = False; self.unsettled = 0; self.observation_stamp = self.observation_age_ms = None
@@ -107,8 +112,8 @@ class Loop:
             before_mark = self.prev_frame_mark_eligible
         per, frame_hash, reused, _ = self._see(before, prior, screen_was_world=before_mark); marked = self.seen_marked
         player_fix = self.world.fix_player(per, before.size); self.empty_streak = self.empty_streak + 1 if self.parse_failed else 0; self.repair_used = self.repair_used if self.parse_failed else False
-        modal = self.prev and {self.prev.get("screen"), per.get("screen")} <= {"world", "dialogue", "menu"} and self.prev.get("screen") != per.get("screen") and "world" in (self.prev.get("screen"), per.get("screen")) and not (self.pending_cut or before_set.blank_seen)
-        place = self.mem.match_place(per, self.step_no + 1, prev=prior, cut=bool((self.pending_cut or prior and self.prev_frame is not None and cut(self.prev_frame, before, before_set.blank_seen)) and not modal), via=self.pending_via, frame=before, tile_px=self.tile_px)
+        modal = self.prev and {self.prev.get("screen"), per.get("screen")} <= {"world", "dialogue", "menu"} and self.prev.get("screen") != per.get("screen") and "world" in (self.prev.get("screen"), per.get("screen")) and not (self.pending_cut or self.cut_carry or before_set.blank_seen)
+        place = self.mem.match_place(per, self.step_no + 1, prev=prior, cut=(is_cut := bool((self.pending_cut or self.cut_carry or prior and self.prev_frame is not None and cut(self.prev_frame, before, before_set.blank_seen)) and not modal)), via=self.pending_via, frame=before, tile_px=self.tile_px)
         unseen_crossing = None
         if prior and place != prior:
             crossings = {r["id"] for r in self.mem.rows("crossings")}
@@ -116,6 +121,7 @@ class Loop:
             unseen_crossing = next((r["id"] for r in self.mem.rows("crossings") if r["id"] not in crossings), None)
             self._moved(prior, place, self.pending_via, self.step_no + 1, self.pending_key)
         self.place, self.pending_cut, self.pending_via, self.pending_key = place, False, None, None
+        self.cut_carry = is_cut and per.get("screen") != "world"  # match_place keeps the place on a non-world screen: the cut waits for a world one
         size = before.size
         proj = self.world.before(per, place, prior, size, self.step_no + 1)[0]
         drift_fix = None
@@ -252,8 +258,9 @@ class Loop:
         except BaseException: self.cached = self.cached_hash = None; raise
         modal = {per.get("screen"), after_per.get("screen")} <= {"world", "dialogue", "menu"} and per.get("screen") != after_per.get("screen") and "world" in (per.get("screen"), after_per.get("screen")) and not (skill.blank_seen or skill.reason == "scene cut")
         scene_cut &= not modal
-        next_place = self.world.current_place if s["travel"] and not self.world._travel_open else place if modal else self.mem.match_place(after_per, self.step_no + 1, prev=place, cut=scene_cut, via=(aff.get("target") if aff else None), exit=exit_key, via_id=tid, frame=after, tile_px=self.tile_px)
+        next_place = self.world.current_place if s["travel"] and not self.world._travel_open else place if modal else self.mem.match_place(after_per, self.step_no + 1, prev=place, cut=scene_cut or self.cut_carry, via=(aff.get("target") if aff else None), exit=exit_key, via_id=tid, frame=after, tile_px=self.tile_px)
         spatial = self.world.after(skill, place, next_place, scene_cut, self.step_no + 1)
+        self.cut_carry = bool((scene_cut or self.cut_carry) and not (s["travel"] and not self.world._travel_open or not modal and after_per.get("screen") == "world"))
         if next_place != place: self._moved(place, next_place, aff.get("target") if aff else None, self.step_no + 1, intent)
         if skill.scroll != (0, 0) and next_place == place and self.mem.get("places", place).get("state") == "candidate" and self.mem.get("places", place).get("screen") == "world":
             source = self.mem.get("places", place); source["state"] = "place"; self.mem.upsert("places", source)
@@ -501,7 +508,7 @@ class Loop:
         if not any(e["kind"] != "T1" or per.get("screen") == "world" for e in self.events): return None
         return "; ".join(e["text"] for kind in ("T3", "T1", "T2", "T5", "T4") for e in self.events if e["kind"] == kind)
     def state(self):
-        state = {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "perception": self.cached, "frame_hash": self.cached_hash, "perception_marked": self.cached_marked, "frame_mark_eligible": self.prev_frame_mark_eligible, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "pending_via": self.pending_via, "pending_key": self.pending_key, "flags": self.flags, "planner": {"last": self.last_plan, "events": self.events, "t5_armed": self.t5_armed, "fails": self.fails, "moves": self.moves, "new_places": self.new_places, "planner_evidence": self.planner_evidence, "fail_baseline": self.fail_baseline, "conversation": self.conversation, "text_for_trigger": self.text_for_trigger, "cause": self.cause}}
+        state = {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "perception": self.cached, "frame_hash": self.cached_hash, "perception_marked": self.cached_marked, "frame_mark_eligible": self.prev_frame_mark_eligible, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "cut_carry": self.cut_carry, "pending_via": self.pending_via, "pending_key": self.pending_key, "flags": self.flags, "planner": {"last": self.last_plan, "events": self.events, "t5_armed": self.t5_armed, "fails": self.fails, "moves": self.moves, "new_places": self.new_places, "planner_evidence": self.planner_evidence, "fail_baseline": self.fail_baseline, "conversation": self.conversation, "text_for_trigger": self.text_for_trigger, "cause": self.cause}}
         if self.observation_stamp: state["observation_stamp"] = self.observation_stamp
         if not self.provenance_incomplete: state["modes"] = {"decide": bool(self.decide), "act_text": bool(self.act_text)}  # after a legacy restore the modes are not written: they were never recorded
         return state
@@ -519,7 +526,7 @@ class Loop:
         self.prev_frame_mark_eligible = state.get("frame_mark_eligible")
         digest = hashlib.sha256(self.prev_frame.tobytes()).hexdigest()
         self.cached, self.cached_hash, self.cached_marked, self.cached_version = state.get("perception"), state.get("frame_hash"), bool(state.get("perception_marked", False)), state.get("perception_version")
-        self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = bool(state.get("parse_failed")), int(state.get("empty_streak", 0)), bool(state.get("repair_used")), bool(state.get("repair_pending")); self.pending_cut, self.pending_via, self.pending_key = bool(state.get("pending_cut")), state.get("pending_via"), state.get("pending_key"); self.flags = state.get("flags", [])
+        self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = bool(state.get("parse_failed")), int(state.get("empty_streak", 0)), bool(state.get("repair_used")), bool(state.get("repair_pending")); self.pending_cut, self.pending_via, self.pending_key = bool(state.get("pending_cut")), state.get("pending_via"), state.get("pending_key"); self.cut_carry = bool(state.get("cut_carry")); self.flags = state.get("flags", [])
         planner = state.get("planner") or {}; self.last_plan = planner.get("last")
         self.fails, self.moves = planner.get("fails") or {}, planner.get("moves") or []
         self.events, self.t5_armed = [dict(e) for e in planner.get("events", [])], planner.get("t5_armed", False)

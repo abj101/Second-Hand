@@ -224,6 +224,39 @@ def test_first_step_after_live_resume_has_no_prior_frame_and_keeps_its_place(tmp
 
     assert loop.place == "room"
 
+def test_live_resume_compares_against_the_last_after_frame_on_disk(tmp_path):
+    from PIL import Image
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "run" / "memory"), "grid")
+    loop.env.snapshot = lambda: None; loop.step_no = 90
+    loop.invalidate_live_observation()
+    assert loop.prev_frame is None and loop.cut_carry  # no record of what was last seen: re-identify at the next world screen
+    (tmp_path / "run" / "frames").mkdir(parents=True); Image.new("RGB", (160, 144), "red").save(tmp_path / "run" / "frames" / "000090_after.png")
+    loop.cut_carry = False
+    loop.invalidate_live_observation()
+    assert loop.prev_frame.size == (160, 144) and not loop.cut_carry
+
+def test_a_cut_seen_on_a_dialogue_screen_reidentifies_at_the_next_world_screen(tmp_path, monkeypatch):
+    from agent import loop as module
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.mem.upsert("places", {"id": "room", "name": "Room", "screen": "world", "state": "place", "visits": 1})
+    loop.world.current_place = loop.place = "room"
+    screens = iter(["dialogue"])  # m1_h1h4_live S91-S109: walked into another map during a scripted dialogue; then the world
+    def see(*_):
+        data = {"screen": next(screens, "world"), "text": [], "entities": [{"kind": "player", "name": "player", "at": [.5, .5]}]}
+        return data, reply(data)
+    monkeypatch.setattr(module, "perceive", see)
+    monkeypatch.setattr(module, "act", lambda *_a, **_k: SimpleNamespace(place="", ops=[], action=None, expect="screen_changes", why="test", text=None))
+    from PIL import Image
+    first = Image.new("RGB", (160, 144), "black"); first.paste((90, 90, 90), (0, 0, 160, 72))  # not uniform: a one-colour frame is a blank transition
+    second = first.copy(); second.putpixel((3, 3), (200, 0, 0))  # a new frame (fresh perception) that is no cut by itself: only the carried cut counts
+    loop.env.screenshot = lambda: first.copy()
+    loop.cut_carry = True  # the cut was seen on the dialogue screen
+    loop.step()
+    assert loop.place == "room" and loop.cut_carry  # a dialogue is a state of the place: the cut waits
+    loop.env.screenshot = lambda: second.copy()
+    loop.step()
+    assert loop.place != "room" and not loop.cut_carry  # the first world screen is matched as a new place
+
 def test_cut_before_frame_suppresses_marker_and_same_raw_after_frame_reuses(tmp_path, monkeypatch):
     from PIL import Image
     from agent import loop as module

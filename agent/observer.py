@@ -165,4 +165,4 @@ def snap(at: list[float], size: tuple[int, int], tile_px: int, phase: tuple[int,
     return [min(1.0, max(0.0, x / w)), min(1.0, max(0.0, y / h))]
 
 def cut(a: Image.Image, b: Image.Image, blank_seen: bool = False) -> bool:
-    return blank_seen or (changed(a, b) > 0.5 and scroll(a, b) is None)
+    return blank_seen or (changed(a, b) > 0.5 and scroll(a, b) in (None, (0, 0)))  # a best shift of zero that leaves half the screen changed is no scroll
