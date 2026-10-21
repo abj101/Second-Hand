@@ -504,12 +504,13 @@ class Loop:
             if at <= since: continue
             exits = moved.setdefault(self.world.place_label(src), {})
             exits[via or "unknown"] = exits.get(via or "unknown", 0) + 1
-        def fit(label, items, cap, sep=", "):  # whole entries only, newest first, the line within cap characters
+        def fit(label, items, cap, sep=", "):  # whole entries newest first within cap characters; if none fits, the newest cut with …
             kept, n = [], len(label) + 1
             for item in items:
                 if n + len(item) > cap: break
                 kept.append(item); n += len(item) + len(sep)
-            return f"{label} {sep.join(kept) or ('none' if not items else f'({len(items)} too long)')}"
+            if not kept and items: kept = [items[0][:max(0, cap - len(label) - 2)] + "…"]
+            return f"{label} {sep.join(kept) or 'none'}"
         dump = lambda k, v: f"{k}:{json.dumps(v, ensure_ascii=False, separators=(',', ':'))}"
         lines = [fit("new places:", places[::-1], 60), fit("tried by place:", [dump(k, v) for k, v in reversed(tried.items())], 100),
                  fit("moves:", [dump(k, v) for k, v in reversed(moved.items())], 60), fit("failed attempts:", failed[::-1], 60, "; "),

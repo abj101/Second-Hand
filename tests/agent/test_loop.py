@@ -1907,6 +1907,17 @@ def test_evidence_omits_removed_planner_reconciliation_fields(tmp_path):
     assert all(text not in packet for text in ("reconcile flags", "closed checks", "new text since last plan", "last stall changed nothing"))
 
 
+def test_evidence_cuts_newest_failure_when_it_alone_is_too_long(tmp_path):
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    act = "approach the glowing red door at the far end of the long dim corridor past the shelves and the sign"
+    loop.fails = {"p|approach|door": {"n": 1, "step": 1, "why": "route blocked", "act": act}}
+
+    packet = loop._evidence()
+    line = next(row for row in packet.splitlines() if row.startswith("failed attempts:"))
+
+    assert act[:20] in line and line.endswith("…") and "too long" not in packet
+
+
 def test_evidence_counts_all_post_plan_attempts_and_only_new_failures(tmp_path):
     loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
     loop.last_plan = 5
