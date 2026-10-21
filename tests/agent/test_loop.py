@@ -557,6 +557,31 @@ def test_blocked_with_novelty_still_counts_as_failure(tmp_path, monkeypatch):
     loop.step()
     assert loop.fails[intent]["n"] == 2
 
+
+def test_third_identical_action_from_the_same_screen_counts_as_did_nothing(tmp_path, monkeypatch):
+    from agent import loop as module
+    per = {"screen": "keyboard", "text": [], "entities": []}
+    monkeypatch.setattr(module, "perceive", lambda *_: (per, reply(per)))
+    def cancel(*args, **kwargs):
+        row = next(o for o in args[3] if o["tool"] == "cancel")
+        return SimpleNamespace(action=dict(row["action"]), option=row["n"], why="t", text=None)
+    monkeypatch.setattr(module, "act", cancel)
+    def run(ctx, *args, **kwargs):
+        frame = ctx.env.screenshot(); frame2 = frame.copy(); frame2.putpixel((0, 0), (255, 0, 0))
+        return SimpleNamespace(status="done", reason="", inputs=1, calls=0,
+                               before=frame, after=frame2, scroll=(0, 0), blank_seen=False, moves=[])
+    monkeypatch.setattr(module, "run_affordance", run)
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+
+    first, second = loop.step(), loop.step()
+    intent = first["choice"]["intent"]
+    assert first["verdict"] == second["verdict"] == "changed" and intent not in loop.fails
+    third = loop.step()
+    assert third["verdict"] == "failed" and loop.fails[intent]["n"] == 1
+    assert loop.fails[intent]["why"] == "did nothing"
+    option = next(o for o in loop.world.options(per, loop.place, loop.fails, 4, inputs=list(loop.env.inputs())) if o["tool"] == "cancel")
+    assert option["state"] == "failed" and any("did nothing" in note for note in option["notes"])
+
 def test_mislabelled_player_does_not_shift_tiles_or_duplicate_entities(tmp_path, monkeypatch):
     from agent import loop as module
     env, seen, shot = GridEnv(), [], GridEnv.screenshot; env.phase = 0

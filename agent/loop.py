@@ -319,6 +319,7 @@ class Loop:
         first_visit = (self.mem.get("places", next_place) or {}).get("first") == self.step_no
         novel = bool(closed) or self.world.novel > 0 or verified_edge or (next_place != place and first_visit)
         idle = bool((choice or s.get("pick_key")) and not skill.inputs and skill.status == "done")  # a picked option that sent no input yet "succeeded" did nothing: a failure of that option, so the menu changes (blocked/failed keep their own reason)
+        idle |= bool(choice and skill.status == "done" and next_place == place and not scene_cut and sum((r.get("choice") or {}).get("intent") == intent and r.get("frame_hash") == s["frame_hash"] and r.get("execution") == "done" for r in self.recent) >= 2)  # the same action from the same screen for the third time in five steps changed nothing that lasts
         v = "progress" if closed else "failed" if idle else action_result(skill.status, outcome["effects"], novel) if choice else "unobservable"
         row["verdict"] = v
         row["tile"], row["drift_fix"] = self.world.pos if self.tile_px else None, list(drift_fix) if drift_fix else None
