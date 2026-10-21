@@ -502,10 +502,10 @@ class Loop:
         while len("\n".join(lines)) > 600: lines.pop()
         return "\n".join(lines)
     def _plan_trigger(self, per):
-        """Replan once the three-step floor has passed and an event is waiting (T1 text only on the world screen); no open quest queues one."""
+        """Replan after the three-step floor with an event waiting; T1 waits during dialogue or battle, and no open quest queues one."""
         if self.notebook.focus is None and self.t5_armed: self._event("T5", "no open quest", self.step_no + 1); self.t5_armed = False
         if self.last_plan is not None and self.step_no + 1 - self.last_plan < 3: return None
-        if not any(e["kind"] != "T1" or per.get("screen") == "world" for e in self.events): return None
+        if not any(e["kind"] != "T1" or per.get("screen") in ("world", "menu", "keyboard") for e in self.events): return None
         return "; ".join(e["text"] for kind in ("T3", "T1", "T2", "T5", "T4") for e in self.events if e["kind"] == kind)
     def state(self):
         state = {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "perception": self.cached, "frame_hash": self.cached_hash, "perception_marked": self.cached_marked, "frame_mark_eligible": self.prev_frame_mark_eligible, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "cut_carry": self.cut_carry, "pending_via": self.pending_via, "pending_key": self.pending_key, "flags": self.flags, "planner": {"last": self.last_plan, "events": self.events, "t5_armed": self.t5_armed, "fails": self.fails, "moves": self.moves, "new_places": self.new_places, "planner_evidence": self.planner_evidence, "fail_baseline": self.fail_baseline, "conversation": self.conversation, "text_for_trigger": self.text_for_trigger, "cause": self.cause}}

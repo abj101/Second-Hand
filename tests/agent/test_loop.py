@@ -1064,6 +1064,17 @@ def test_planner_prioritizes_game_text_and_checks_it_before_throttle(tmp_path):
     assert loop._plan_trigger({"screen": "world"}) == "new game text: " + loop.text_for_trigger[:200]
 
 
+def test_dialogue_text_replans_on_a_naming_menu(tmp_path):
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.notebook.data["quests"] = [{"key": "q1", "text": "Choose a name", "status": "open"}]
+    loop.last_plan, loop.step_no = 19, 24
+    loop._event("T1", "Erm, what is his name again?", 24)
+    for screen in ("world", "menu", "keyboard"):
+        assert "what is his name again" in loop._plan_trigger({"screen": screen})
+    for screen in ("dialogue", "battle"):
+        assert loop._plan_trigger({"screen": screen}) is None
+
+
 def test_actor_speaker_name_attaches_after_new_text(tmp_path, monkeypatch):
     from agent import loop as module
     from types import SimpleNamespace
