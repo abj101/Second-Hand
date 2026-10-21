@@ -68,6 +68,41 @@ def test_eval_run_metrics_and_excludes_candidates(tmp_path):
     assert result["m1_gate_pass"] is True
 
 
+def test_place_purity_ignores_dialogue_rows(tmp_path):
+    run = tmp_path / "dialogue-purity"
+    write(run / "memory" / "places.jsonl", [{"id": "p_a", "state": "place"}])
+    write(run / "trace.jsonl", [
+        {"step": 1, "screen": "world", "place": "p_a"},
+        {"step": 2, "screen": "world", "place": "p_a"},
+        *[{"step": step, "screen": "dialogue", "place": "p_a"} for step in range(3, 6)],
+    ])
+    write(run / "truth.jsonl", [
+        {"step": 1, "map": "0x26"}, {"step": 2, "map": "0x26"},
+        *[{"step": step, "map": "0x25"} for step in range(3, 6)],
+    ])
+
+    assert evaluate(run)["place_purity"]["0x26"] == 1.0
+
+
+def test_edge_is_found_across_a_cutscene(tmp_path):
+    run = tmp_path / "cutscene-edge"
+    write(run / "memory" / "places.jsonl", [
+        {"id": "p_a", "state": "place"}, {"id": "p_b", "state": "place"},
+    ])
+    write(run / "trace.jsonl", [
+        {"step": 1, "screen": "world", "place": "p_a"},
+        {"step": 2, "screen": "dialogue", "place": "p_a"},
+        {"step": 3, "screen": "dialogue", "place": "p_a"},
+        {"step": 4, "screen": "world", "place": "p_b"},
+    ])
+    write(run / "truth.jsonl", [
+        {"step": 1, "map": "0x00"}, {"step": 2, "map": "0x28"},
+        {"step": 3, "map": "0x28"}, {"step": 4, "map": "0x28"},
+    ])
+
+    assert evaluate(run)["edges_found"]["0x00->0x28"] is True
+
+
 def test_novel_blocked_repeats_ignore_frame_hash_and_success_clears(tmp_path):
     run = tmp_path / "repeats"
     write(run / "trace.jsonl", [

@@ -1070,7 +1070,7 @@ def evaluate(run, *, from_step=None):
     for row in full_trace:
         t = truth.get(row.get("step"))
         pid = row.get("place")
-        if t and pid in places and places[pid].get("state") == "place" and t.get("map") is not None:
+        if t and pid in places and places[pid].get("state") == "place" and t.get("map") is not None and row.get("screen", "world") == "world":
             step_places[pid][map_id(t["map"])] += 1
     mapping = {}
     for pid, counts in step_places.items():
@@ -1100,6 +1100,11 @@ def evaluate(run, *, from_step=None):
         before, after = truth.get(row.get("step")), truth.get(row.get("step", -1) + 1)
         if has_ok_edge and src in mapping and dst in mapping and before and after:
             valid_edges.add((map_id(before.get("map")), map_id(after.get("map"))))
+    world = [r for r in full_trace if r.get("screen", "world") == "world"]
+    for a, b in zip(world, world[1:]):  # a scripted entry (a cutscene on dialogue screens) has no crossing row: the label change between world frames is the edge
+        ta, tb = truth.get(a.get("step")), truth.get(b.get("step"))
+        if a.get("place") != b.get("place") and ta and tb and ta.get("map") is not None and tb.get("map") is not None:
+            valid_edges.add((map_id(ta["map"]), map_id(tb["map"])))
     edges_found = {f"{a}->{b}": ((a, b) in valid_edges or (b, a) in valid_edges)
                    for a, b in EDGES}
 
