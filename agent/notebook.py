@@ -82,8 +82,8 @@ class Notebook:
                 return f"why must cite game-text keys, newest: {', '.join(newest)}" if newest else "why must cite game-text keys, none heard yet"
             if sum(q.get("status") == "open" for q in quests) >= MAX_OPEN: return "maximum open quests reached"
             target = op_data.get("target")
-            resolved = self._resolve(target) if target is not None else None
-            if target is not None and resolved is None: return self._no_target(target)
+            resolved = self._resolve(target) if target is not None else None  # an add whose target names nothing known keeps its text and why: the quest just has no target
+            if target is not None and resolved is None and self.ties(target): return self._no_target(target)
             value = {"key": key, "text": text, "why": refs, "target": resolved,
                      "status": "open", "opened": step, "closed": None, "reason": None}
             quests.append(value)

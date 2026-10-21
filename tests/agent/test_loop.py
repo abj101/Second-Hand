@@ -1149,16 +1149,15 @@ def test_plan_followup_before_act_is_bounded_and_reads_errors(tmp_path, monkeypa
     row = loop.step()
 
     plan_prompts = [user for role, user in sent if role == "plan"]
-    assert len(plan_prompts) == (1 if case in ("empty_ops", "malformed") else 2)
+    assert len(plan_prompts) == (1 if case in ("rejected_target", "empty_ops", "malformed") else 2)
     if case == "malformed":
         assert row["plan"]["ops"] == [{"op": None, "key": None, "result": "error: ops must be a list"}]
     if case in ("closes_without_adding", "rejected_target"):
-        assert loop.notebook.focus == "q2"
+        assert loop.notebook.focus == ("q3" if case == "rejected_target" else "q2")
         assert all(user.startswith("Goal:") and not user.startswith("Goal: (none)") for role, user in sent if role == "act")
-        assert row["plan"]["focus"] == "q2"
+        assert row["plan"]["focus"] == ("q3" if case == "rejected_target" else "q2")
     if case == "rejected_target":
-        assert row["plan"]["ops"][0]["result"].startswith("error: target")
-        assert row["plan"]["ops"][0]["result"] in plan_prompts[1]
+        assert row["plan"]["ops"][0]["result"] == "ok"
     if case == "invalid_twice":
         assert loop.notebook.focus is None
         assert len(row["plan"]["ops"]) == 2

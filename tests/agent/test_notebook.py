@@ -31,7 +31,7 @@ CASES = [
     ("add-empty-why", [], {**add("q"), "why": []}, "why must cite game-text keys, newest: t1"),
     ("add-unknown-why", [], {**add("q"), "why": ["missing"]}, "why must cite game-text keys, newest: t1"),
     ("add-open-cap", [add(f"q{i}") for i in range(MAX_OPEN)], add("extra"), "maximum open quests reached"),
-    ("add-unresolved-target", [], {**add("q"), "target": "unknown"}, 'target "unknown" matches no known place or thing; no known places or things yet'),
+    ("add-unresolved-target", [], {**add("q"), "target": "unknown"}, None),
     ("reopen-not-closed", [add("q")], {"op": "reopen", "key": "q", "reason": "Needed again"}, "key is not closed"),
     ("reopen-ok", closed_setup(), {"op": "reopen", "key": "q", "reason": "Needed again"}, None),
     ("done-not-open", [], {"op": "done", "key": "q", "reason": "Finished"}, "key is not open"),
@@ -104,8 +104,8 @@ def test_add_resolves_legend_target_from_current_world_view(tmp_path):
 
     assert result == [{"op": "add", "key": "q", "result": "ok"}]
     assert nb.data["quests"][0]["target"] == "thing:c"
-    assert nb.apply_ops([add("unknown", target="Thing Z")], 3)[0]["result"].startswith(
-        'error: target "Thing Z" matches no known place or thing;')
+    assert nb.apply_ops([add("unknown", target="Thing Z")], 3)[0]["result"] == "ok"
+    assert nb.data["quests"][-1]["target"] is None
 
 
 def test_bad_reply_shapes_and_ninth_op_are_saved(tmp_path):
@@ -283,8 +283,21 @@ def test_why_error_names_newest_text_keys_and_closest_target_candidates(tmp_path
 
     assert nb.apply_ops([{**add("q"), "why": ["missing"]}], 5)[0]["result"] == \
         "error: why must cite game-text keys, newest: t4, t3, t2"
-    assert nb.apply_ops([add("q", target="Hal")], 6)[0]["result"] == \
-        'error: target "Hal" matches no known place or thing; closest: Hall, MOM, Guide'
+    assert nb.apply_ops([add("q", target="Hal")], 6)[0]["result"] == "ok"
+
+
+def test_add_with_unknown_target_keeps_the_quest_without_a_target(tmp_path):
+    ties = {"exit: stairs": [("thing:stairs_a", "Hall"), ("thing:stairs_b", "Room")]}
+    nb = notebook(tmp_path, ties=lambda text: ties.get(text, []))
+    for text in ("What is his name again?", "Introduction", "Begin your adventure", "PROF. OAK, next door, is looking for you."):
+        nb.heard(0, None, "room", text)
+    op = {"op": "add", "key": "q3", "text": "Find Professor Oak (t4: 'PROF. OAK, next door, is looking for you.')", "why": ["t4"], "target": "PROF. OAK"}
+
+    assert nb.apply_ops([op], 57)[0]["result"] == "ok"
+    quest = nb.data["quests"][-1]
+    assert quest["target"] is None and quest["text"] == op["text"] and quest["why"] == ["t4"]
+    assert nb.focus == "q3"
+    assert nb.apply_ops([add("ambiguous", target="exit: stairs")], 58)[0]["result"].startswith('error: target "exit: stairs" is ambiguous:')
 
 
 def test_closed_thing_quest_shows_current_label_and_who_said(tmp_path):
