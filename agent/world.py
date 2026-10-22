@@ -1033,6 +1033,14 @@ class World:
                            and self.canon(f"place:{r.get('o')}") == dest)
                 notes.append(f"leads to {self.place_label(ident)} {uses}×")
             if hit: notes.append(f"{hit.get('why', '')} {hit.get('n', 0)}× (last step {hit.get('step', 0)})")
+            reach_place, reach_tile = ((self.mem.get("entities", ident) or {}).get("place") or place, self._tile(ident)) if ident else (place, None)
+            if ref and ref.startswith("exit:"):
+                try: reach_tile = tuple(map(int, ref.partition(":")[2].split(",")))
+                except ValueError: pass
+            elif ref and ref.startswith("place:") and (found := self.resolve(ref, per, place)):
+                reach_place, reach_tile = found["place"], found.get("tile")
+            if reach_tile and (reach := self.mem.get("reach", f"{reach_place}@{reach_tile[0]},{reach_tile[1]}")) and reach.get("n", 0):
+                at = reach.get("at", [0, 0]); notes.append(f"not reached: stopped at ({at[0]},{at[1]}) {reach['n']}× (last step {reach.get('last', 0)})")
             if history.get("talked"):
                 talked = history["talked"]
                 spoken = str(talked.get("text") or "")[:60]

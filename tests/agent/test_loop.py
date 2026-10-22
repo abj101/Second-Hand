@@ -1374,6 +1374,32 @@ def test_option_pick_drives_grid_through_its_exit(tmp_path, monkeypatch):
     assert row["act"]["action"].get("onto") is True
     assert env.scene == 1
 
+
+def test_route_failure_marks_target_unreached_and_later_arrival_clears_it(tmp_path, monkeypatch):
+    from agent import loop as module
+    env = GridEnv()
+    def perceive(*_):
+        per = {"screen": "world", "text": [], "entities": [{"name": "player", "kind": "player", "at": [.5, .5]}, {"name": "Fern", "kind": "object", "at": [.6, .5]}]}
+        return per, reply(per)
+    monkeypatch.setattr(module, "perceive", perceive)
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    def act(*_args, **_kwargs): return SimpleNamespace(option=1, action={"thing": 1, "verb": "approach"}, why="test", text=None)
+    monkeypatch.setattr(module, "act", act)
+    monkeypatch.setattr(loop, "_approach_route", lambda place, entity, player, proj, intent, **kwargs: (proj(entity["at"]), None, True))
+    row = loop.step(); tile = tuple(loop.world._tile(loop.world.entity_ids[1]))
+    reach = loop.mem.get("reach", f"{row['place']}@{tile[0]},{tile[1]}")
+    assert row["skill"]["failure"]["stage"] == "route" and reach["n"] == 1 and reach["at"] == list(loop.world.pos)
+    monkeypatch.setattr(module, "act", lambda *_args, **_kwargs: SimpleNamespace(option=None, action=None, why="", text=None))
+    loop.world.pos = (tile[0] - 1, tile[1] - 1)
+    loop.step()
+    reach = loop.mem.get("reach", f"{row['place']}@{tile[0]},{tile[1]}")
+    assert reach["n"] == 1 and reach["step"] == 1
+    loop.world.pos = tile
+    loop.step()
+    reach = loop.mem.get("reach", f"{row['place']}@{tile[0]},{tile[1]}")
+    assert reach["n"] == 0 and reach["step"] == reach["reached"] == 3
+
 def test_picking_unknown_exit_on_player_tile_sends_outward_key(tmp_path, monkeypatch):
     from agent import loop as module
     class Recording(GridEnv):

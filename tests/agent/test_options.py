@@ -34,7 +34,7 @@ def test_uncrossed_exit_rows_offer_each_push_and_keep_tried_facts(tmp_path):
     world.pos = (0, 0)
     for direction in DIRS: push_failed(mem, "room", (2, 0), direction, 5)
     rows = [o for o in world.options(per, "room", {}, 6, inputs=INPUTS) if o["ref"] == "exit:2,0"]
-    assert len(rows) == 1 and rows[0]["state"] == "failed" and rows[0]["label"] == "go to doorway, 2 right"
+    assert len(rows) == 1 and rows[0]["state"] == "failed" and rows[0]["label"] == "go to doorway, 2 right" and rows[0]["notes"][0].startswith("exit failed: blocked ")
 
 
 def test_uncrossed_exit_direction_facts_come_from_tile_memory(tmp_path):
@@ -60,6 +60,16 @@ def test_explicit_push_controls_screen_and_remembered_exit_routes(tmp_path):
     assert world.plan(target, onto=True)[-1] == {"place": "room", "dirs": ["RIGHT", "RIGHT"], "push": None, "expect": None, "target": target}
     _, onto_route, refused = loop._approach_route("room", entity, per["entities"][0], lambda _: (2, 0), "", onto=True)
     assert not refused and onto_route == {"dirs": ["RIGHT", "RIGHT"], "push": None}
+
+
+def test_unreached_note_is_shared_by_rows_to_a_tile_and_clears_on_arrival(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, [{"name": "exit: doorway", "kind": "exit", "at": at(2, 0)}, {"name": "Rock", "kind": "object", "at": at(2, 0)}])
+    mem.mark_unreached("room", (2, 0), (1, 0), 3)
+    rows = [o for o in world.options(per, "room", {}, 4, inputs=INPUTS) if "doorway" in o["label"] or "Rock" in o["label"]]
+    assert len(rows) == 2 and all("not reached: stopped at (1,0) 1× (last step 3)" in o["notes"] for o in rows)
+    mem.mark_reached("room", (2, 0), 4)
+    assert mem.get("reach", "room@2,0")["n"] == 0 and mem.get("reach", "room@2,0")["reached"] == 4
 
 
 def at(dx, dy):  # GridEnv(wander=True) geometry: the player's centre is (88, 72), tiles are 16 px
