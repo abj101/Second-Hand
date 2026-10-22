@@ -237,7 +237,7 @@ def test_points_stub_captures_target_plan_prompt_even_when_recording_is_exhauste
     assert found["plan_prompt"]["user"] == "planner text" and stub.plan_extra == 1 and stub.calls == 1
 
 @pytest.mark.parametrize("no_cache", [False, True])
-def test_points_case_restores_saved_modes_and_captures_target_without_rom(monkeypatch, tmp_path, no_cache):
+def test_points_case_ignores_saved_modes_and_captures_target_without_rom(monkeypatch, tmp_path, no_cache):
     monkeypatch.chdir(tmp_path)
     case = {"run": "fixture", "step": 1, "checkpoint": 0, "situation": "fixture", "right": [{"tool": "select", "label_re": "RED"}], "wrong": []}
     cp = tmp_path / "runs" / "fixture" / "checkpoint" / "000000"
@@ -267,14 +267,13 @@ def test_points_case_restores_saved_modes_and_captures_target_without_rom(monkey
     monkeypatch.setattr(eval_act.run_agent, "_ledger", lambda *args: charged.append(args))
     monkeypatch.setattr(eval_act, "MODEL_CACHE", cache)
     monkeypatch.setattr(eval_act, "Memory", lambda path: object())
-    seen, envs = [], []
+    envs = []
     class Env:
         tile_px = 16
         def close(self): self.closed = True
     class FakeLoop:
-        def __init__(self, env, model, mem, game, act_text=False, decide=False):
+        def __init__(self, env, model, mem, game):
             self.env, self.model, self.step_no = env, model, 0
-            seen.append((decide, act_text))
             self.options = [{"n": 1, "tool": "select", "label": "select RED", "state": "new", "notes": [], "action": {"thing": 0, "verb": "select"}}]
         def restore(self, state): self.step_no = state["step"]
         def step(self): eval_act.loop_mod.act(self.model, {"screen": "menu", "text": [], "entities": []}, "Goal: Select RED\nHere: menu", self.options, [], "")
@@ -290,7 +289,6 @@ def test_points_case_restores_saved_modes_and_captures_target_without_rom(monkey
     result = eval_act._points_case(case, live=no_cache, no_cache=no_cache)
     assert len(posted) == len(charged) == int(no_cache)
     if no_cache: assert result["live_right"]
-    assert seen == [(True, False)]
     assert result["status"] == "PASS" and result["options"][0]["label"] == "select RED"
     assert result["act_prompt"]["user"] and envs[0].closed
 
@@ -308,3 +306,28 @@ def test_points_perception_fallback_uses_last_prior_row_not_future():
         stub.ask("", "", role="perceiver")
     with pytest.raises(eval_act.PointsInconclusive, match="no recorded skill"):
         stub.ask("", "", role="skill")
+
+
+def test_absent_points_check_fails_on_match_and_passes_without_match():
+    case = {"absent": [{"tool": "approach", "label_re": "press here"}]}
+    assert eval_act.points_checks(case, [_opt(1, "approach", "press here")]) == [("absent", False, "approach / press here: 1 match(es)")]
+    assert eval_act.points_checks(case, [_opt(1, "approach", "walk to door")])[0][1]
+
+
+def test_eval_memory_on_a_tiny_run(tmp_path):
+    from scripts import eval_memory
+    run = tmp_path / "run"; memory = run / "memory"; memory.mkdir(parents=True)
+    (memory / "places.jsonl").write_text('{"id":"p","screen":"world"}\n', encoding="utf-8")
+    (memory / "entities.jsonl").write_text(
+        '{"id":"e","place":"p","name":"old","kind":"menu_item","last":1}\n'
+        '{"id":"e","place":"p","name":"new","kind":"menu_item","last":2}\n'
+        '{"id":"f","place":"p","name":"wall","kind":"wall","first":2}\n', encoding="utf-8")
+    rows = [
+        {"step": 1, "screen": "menu", "choice": {"intent": "i"}, "skill": {"failure": {"stage": "route"}}},
+        {"step": 2, "screen": "battle", "choice": {"intent": "i"}, "skill": {"failure": {"stage": "route"}}},
+        {"step": 3, "screen": "world", "choice": {"intent": "i"}, "skill": {"status": "done"}},
+        {"step": 4, "screen": "world", "skill": {"failure": {"stage": "crossing"}}},
+    ]
+    (run / "trace.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    assert eval_memory.analyze(run) == {"world": 2, "modal": 1, "minted": 1, "strict": 1, "loose": 1,
+                                         "route": 2, "crossing": 1, "steps": 4, "unreached": 1, "reached": 1}

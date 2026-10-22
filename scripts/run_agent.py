@@ -14,20 +14,6 @@ class CallCap(RuntimeError): pass
 MODEL = "gemma4:31b-cloud"
 MAX_HASHED_BYTES = 5 * 1024 * 1024
 TOTAL_CAP, M1_CAP = 7854, 7804  # persistent e3 ledger caps; raised only with user approval
-def _flag(name, value):
-    dashed = name.replace("_", "-"); return f"--{dashed}" if value else f"--no-{dashed}"
-def resolve_modes(saved: dict | None, decide: bool | None, act_text: bool | None, *, resume: bool = False) -> tuple[dict, list[str]]:
-    """A resume restores the checkpoint's modes; an explicit flag must agree with them. Returns (modes, notes)."""
-    modes, notes = {}, []
-    for name, value in (("decide", decide), ("act_text", act_text)):
-        known = saved.get(name) if saved else None
-        if known is not None:
-            if value is not None and value != known: raise ValueError(f"checkpoint was saved with {name}={known}; {_flag(name, value)} conflicts with it")
-            modes[name] = known
-        else:
-            modes[name] = bool(value)
-            if resume and value is None: notes.append(f"{name} not recorded in the checkpoint; resumed with {name}=False (unspecified)")
-    return modes, notes
 def source_fingerprint(root: Path = Path(".")) -> dict:
     """Git HEAD and a sha256 per modified or untracked file; notes name what could not be recorded."""
     git = lambda *args: subprocess.run(["git", "-C", str(root), *args], capture_output=True, check=True).stdout.decode("utf-8", "replace")
@@ -51,7 +37,8 @@ def manifest_record(*, resume, start_checkpoint, from_step, steps, max_calls, st
     notes = [*notes, *source["notes"]]
     return {"t": datetime.now(timezone.utc).isoformat(timespec="seconds"), "resume": resume, "start_checkpoint": start_checkpoint,
             "from_step": from_step, "steps": steps, "max_calls": max_calls, "stage": stage, "stage_b_cap": stage_b_cap,
-            "model": model, "modes": modes, "source": {"head": source["head"], "dirty": source["dirty"]},
+            "model": model, "modes": {"headless": modes.get("headless", False)}, "dirty": any(value != "skipped" for value in source["dirty"].values()),
+            "source": {"head": source["head"], "dirty": source["dirty"]},
             "provenance": "incomplete" if notes else "complete", "notes": notes}
 def append_manifest(run: Path, record: dict) -> dict:
     path = run / "manifest.jsonl"; count = len(path.read_text(encoding="utf-8").splitlines()) if path.exists() else 0
@@ -150,14 +137,14 @@ def _boot_reset(run, rewind):
 def main(argv=None):
     ap = argparse.ArgumentParser(); ap.add_argument("--game", default="pokemon_red"); ap.add_argument("--steps", type=int, required=True)
     ap.add_argument("--max-calls", type=int, required=True); ap.add_argument("--run", type=Path, required=True)
-    ap.add_argument("--resume", action="store_true"); ap.add_argument("--act-text", action=argparse.BooleanOptionalAction, default=None); ap.add_argument("--decide", action=argparse.BooleanOptionalAction, default=None); ap.add_argument("--from-step", type=int); ap.add_argument("--stage", choices="abpqc")
+    ap.add_argument("--resume", action="store_true"); ap.add_argument("--from-step", type=int); ap.add_argument("--stage", choices="abpqc")
     ap.add_argument("--stage-b-cap", type=int, choices=(180, 300), default=180)
     ap.add_argument("--headless", action="store_true", help="deterministic offline stepping instead of the visible continuous runtime")
     a = ap.parse_args(argv); run = a.run
     if a.steps < 1 or a.max_calls < 1: ap.error("steps and max-calls must be positive")
     if "m1" in str(run).lower() and a.steps > 600: ap.error("m1 runs are limited to 600 cumulative steps")
     if run.exists() and not a.resume and (run / "trace.jsonl").exists(): ap.error("run exists; use --resume")
-    run.mkdir(parents=True, exist_ok=True); cp = None; boot = not a.resume; modes, notes = resolve_modes(None, a.decide, a.act_text)
+    run.mkdir(parents=True, exist_ok=True); cp = None; boot = not a.resume; notes = []
     if a.resume:
         paths = sorted((run / "checkpoint").glob("*/harness.json"))
         paths = [p for p in paths if a.from_step is None or int(p.parent.name) <= a.from_step]
@@ -166,9 +153,7 @@ def main(argv=None):
             boot = True; _boot_reset(run, True)
         else:
             cp = paths[-1].parent; state = json.loads((cp / "harness.json").read_text()); boot = False
-            try: modes, notes = resolve_modes(state.get("modes"), a.decide, a.act_text, resume=True)
-            except ValueError as error: ap.error(str(error))
-            if "modes" not in state: notes = [*notes, "checkpoint records no modes (written before provenance); resumed as legacy"]
+            if "provenance" not in state and "modes" not in state: notes = ["checkpoint records no provenance; resumed as legacy"]
             base=(run / "checkpoint").resolve(); [shutil.rmtree(p) for p in base.iterdir() if p.is_dir() and p.name.isdigit() and p.resolve().parent == base and int(p.name) > int(cp.name)]
             if "m1" in str(run).lower() and int(state.get("step",0))+a.steps > 600: ap.error("m1 runs are limited to 600 cumulative steps")
             for name in ("trace.jsonl", "chooser.jsonl", "calls.jsonl", "truth.jsonl", "presses.jsonl"): _truncate(run / name, int(cp.name))
@@ -176,19 +161,19 @@ def main(argv=None):
             shutil.copytree(cp / "memory", run / "memory", dirs_exist_ok=True)
     elif boot: _boot_reset(run, False)
     invocation_row = append_manifest(run, manifest_record(resume=a.resume, start_checkpoint=cp.name if cp else None, from_step=a.from_step,
-        steps=a.steps, max_calls=a.max_calls, stage=a.stage, stage_b_cap=a.stage_b_cap, model=MODEL, modes={**modes, "headless": a.headless},
+        steps=a.steps, max_calls=a.max_calls, stage=a.stage, stage_b_cap=a.stage_b_cap, model=MODEL, modes={"headless": a.headless},
         source=source_fingerprint(Path(__file__).resolve().parents[1]), notes=notes))
     if a.headless:
         env = PyBoyEnv(find_rom(), state=str(cp / "pyboy.state") if cp else None)
-        return _play(env, a, run, cp, state if cp else None, boot, modes, invocation_row)
+        return _play(env, a, run, cp, state if cp else None, boot, invocation_row)
     from agent.env_pyboy import LivePyBoyHost
     from scripts.watch_run import FramePublisher
     publisher = FramePublisher(run)
     try: host = LivePyBoyHost(find_rom(), state=str(cp / "pyboy.state") if cp else None)
     except BaseException: publisher.close(); raise
-    return run_continuous(host, publisher, lambda env, cancel: _play(env, a, run, cp, state if cp else None, boot, modes, invocation_row, cancel))
+    return run_continuous(host, publisher, lambda env, cancel: _play(env, a, run, cp, state if cp else None, boot, invocation_row, cancel))
 
-def _play(env, a, run, cp, state, boot, modes, invocation_row, cancelled=None):
+def _play(env, a, run, cp, state, boot, invocation_row, cancelled=None):
     from agent.env_pyboy import LiveEnvClosed, LiveEnvFailed
     env.tile_px = 16
     invocation = [0]; active_step = [1]; logged_requests = [0]
@@ -207,7 +192,7 @@ def _play(env, a, run, cp, state, boot, modes, invocation_row, cancelled=None):
         _ledger(run, a.stage, stage_cap); invocation[0] += 1
         check_cancel()
         return post(payload)
-    model._post = guarded; loop = Loop(env, model, Memory(run / "memory"), a.game, **({"act_text": True} if modes["act_text"] else {}), **({"decide": True} if modes["decide"] else {}))
+    model._post = guarded; loop = Loop(env, model, Memory(run / "memory"), a.game)
     loop.invocation = invocation_row["invocation"]
     if cp:
         loop.restore(state)

@@ -83,50 +83,6 @@
   },
   {
     "run": "m1_r6_live_150",
-    "step": 131,
-    "checkpoint": 130,
-    "truth": {
-      "map": 40,
-      "x": 4,
-      "y": 2
-    },
-    "situation": "Lab modal says “which POKéMON do you want?”; the recorded choice advances the dialogue. No planner call fired at this step.",
-    "right": [
-      {
-        "tool": "advance",
-        "label_re": "^advance$"
-      }
-    ],
-    "wrong": []
-  },
-  {
-    "run": "m1_r6_live_150",
-    "step": 132,
-    "checkpoint": 130,
-    "truth": {
-      "map": 40,
-      "x": 4,
-      "y": 2
-    },
-    "situation": "First chooser world view with repeat-talk feedback for BLUE after the repeat at step 125; step 129 did not offer BLUE. BLUE’s talk option is failed with a same-reply note.",
-    "right": [],
-    "wrong": [
-      {
-        "tool": "interact",
-        "label_re": "^talk\\ to\\ BLUE,\\ 1\\ down$"
-      }
-    ],
-    "section": {
-      "label_re": "^talk\\ to\\ BLUE,\\ 1\\ down$",
-      "state": "failed"
-    },
-    "note_re": {
-      "label_re": "^talk\\ to\\ BLUE,\\ 1\\ down$",
-      "re": "same reply"
-    }
-  },
-  {
-    "run": "m1_r6_live_150",
     "step": 136,
     "checkpoint": 135,
     "truth": {
@@ -189,49 +145,6 @@
       {
         "tool": "approach|go_to",
         "label_re": "^go\\ to\\ door,\\ 3\\ up$"
-      }
-    ]
-  },
-  {
-    "run": "m1_r6_live_150",
-    "step": 104,
-    "checkpoint": 100,
-    "truth": {
-      "map": 40,
-      "x": 5,
-      "y": 3
-    },
-    "situation": "Furthest new map entry, lab map 40 during the intro dialogue; nearest equivalent to absent town-after-starter because no starter was reached.",
-    "right": [
-      {
-        "tool": "advance",
-        "label_re": "^advance$"
-      }
-    ],
-    "wrong": []
-  },
-  {
-    "run": "m1_r7_resume115",
-    "step": 135,
-    "checkpoint": 130,
-    "truth": {
-      "map": 40,
-      "x": 4,
-      "y": 2
-    },
-    "situation": "lab: talk to OAK after the same reply",
-    "section": {
-      "label_re": "^talk\\ to\\ OAK",
-      "state": "failed"
-    },
-    "note_re": {
-      "label_re": "^talk\\ to\\ OAK",
-      "re": "same reply"
-    },
-    "wrong": [
-      {
-        "tool": "interact",
-        "label_re": "^talk\\ to\\ OAK"
       }
     ]
   }

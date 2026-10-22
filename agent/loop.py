@@ -3,7 +3,6 @@ import hashlib, json, os, re, time
 from PIL import Image
 from agent.act import act
 from agent.brief import GENERAL, _load, load_brief
-from agent.decide import Choice
 from agent.memory import _key
 from agent.notebook import Notebook
 from agent.observer import _blank, cut, for_model, snap, wait_settled
@@ -25,9 +24,7 @@ def failure_cause(intent, label, stage, reason, tile=None, blocker=None):
     elif stage == "crossing": text += "; crossing attempted"
     return text
 class Loop:
-    def __init__(self, env, model, mem, game, act_text=False, decide=False):
-        self.act_text = act_text  # act sees description + spatial layer only, no pixels
-        self.decide = decide  # act is text-only and answers only an option number (act.py _decide)
+    def __init__(self, env, model, mem, game):
         self.env, self.model, self.mem, self.game = env, model, mem, game
         self.flags = []
         self.trace = Trace(mem.root.parent / "trace.jsonl"); self.step_no = 0
@@ -53,7 +50,7 @@ class Loop:
         self.pending = None  # ponytail: read only by invalidate_live_observation (live view); remove with it
         self.unsettled = 0  # ponytail: read only by invalidate_live_observation (live view); remove with it
         self.invocation = None  # the runner's manifest invocation number (set by scripts/run_agent.py)
-        self.provenance_incomplete = False  # restored from a checkpoint with no recorded modes: earlier calls and modes are unknown
+        self.provenance_incomplete = False
         self._seq0 = None  # model.seq when the current outer step began: its model calls are (_seq0, seq]
     @property
     def pos(self): return self.world.pos
@@ -225,9 +222,9 @@ class Loop:
         if action and action.get("verb") in ("advance", "cancel", "type"):
             aff = {"verb": action["verb"], "target": "", "at": None}
             affs.append(aff); targets.append(None); intents.append(self._fail_key(place, action["verb"], "")); i = 0
-        if action: choice = Choice(i, "screen_changes", "", [], a.why, True, a.text)
-        intent = ((own_pick or {}).get("intent_key") or intents[choice.i]) if choice else None  # captured before input: the same key execution, counters and trace use
-        unknown = bool(choice and affs[choice.i].get("verb") in ("approach", "interact") and not self.env.pointer and
+        if action: choice = {"i": i, "why": a.why, "text": a.text}
+        intent = ((own_pick or {}).get("intent_key") or intents[choice["i"]]) if choice else None  # captured before input: the same key execution, counters and trace use
+        unknown = bool(choice and affs[choice["i"]].get("verb") in ("approach", "interact") and not self.env.pointer and
                        not any(e.get("kind", "").casefold() == "player" for e in per.get("entities", [])))
         if choice and self.observation_stamp:
             stale, current, age = self._live_observation_stale(before, self.observation_stamp)
@@ -239,7 +236,7 @@ class Loop:
                     settle_frames={"before": before_set.waited, "after": None},
                     observation_generation=self.observation_stamp["generation"], observation_frame_seq=self.observation_stamp["frame_seq"],
                     observation_age_ms=age, stale_reason="scene_cut" if current.generation == self.observation_stamp["generation"] else "generation_changed")
-        self._live(before, place, per, choice and {**affs[choice.i], "why": choice.why, "text": choice.text}, a)
+        self._live(before, place, per, choice and {**affs[choice["i"]], "why": choice["why"], "text": choice["text"]}, a)
         if per.get("screen") == "world": self.world._record_view(per, before, reused, place, size, self.step_no + 1, self.world.pa, self.world.entity_ids)
         def actor_boxes():
             tracker = self.world.tracker
@@ -253,19 +250,19 @@ class Loop:
                          (px is None or max(abs(t["x"] - px), abs(t["y"] - py)) > r))
         skillctx = Ctx(self.env, self.model, self.tile_px, self.move_frames, actor_boxes=actor_boxes); pressed_from = tuple(self.world.pos)
         try:
-            skill = SkillResult("blocked", "no route beside target" if choice and affs[choice.i].get("verb") == "interact" else "no route avoids blocker", 0, 0, before, before, (0, 0), False, failure={"stage": "route", "reason": "no route beside target" if choice and affs[choice.i].get("verb") == "interact" else "no route avoids blocker", "direction": None}) if refused else self.world.travel(skillctx, travel_legs, self.step_no + 1, self.trace) if travel_legs is not None and choice else wait_until(skillctx) if not affs or choice is None else press_seq(skillctx, affs[choice.i]["target"].split()) if affs[choice.i].get("verb") == "buttons" else run_affordance(skillctx, affs[choice.i], per, text=choice.text, exit=False, **({"route": act_route} if act_route else {}))
-        except BaseException: self.pending_cut, self.pending_via, self.pending_key = cut(before, self.env.screenshot()), affs[choice.i].get("target") if choice else None, intent; self.cached = self.cached_hash = None; raise
-        if choice and skill.status == "done" and affs[choice.i].get("verb") in ("approach", "interact") and choice.i < len(targets) and targets[choice.i]:
-            self.world._promote([targets[choice.i]])
+            skill = SkillResult("blocked", "no route beside target" if choice and affs[choice["i"]].get("verb") == "interact" else "no route avoids blocker", 0, 0, before, before, (0, 0), False, failure={"stage": "route", "reason": "no route beside target" if choice and affs[choice["i"]].get("verb") == "interact" else "no route avoids blocker", "direction": None}) if refused else self.world.travel(skillctx, travel_legs, self.step_no + 1, self.trace) if travel_legs is not None and choice else wait_until(skillctx) if not affs or choice is None else press_seq(skillctx, affs[choice["i"]]["target"].split()) if affs[choice["i"]].get("verb") == "buttons" else run_affordance(skillctx, affs[choice["i"]], per, text=choice["text"], exit=False, **({"route": act_route} if act_route else {}))
+        except BaseException: self.pending_cut, self.pending_via, self.pending_key = cut(before, self.env.screenshot()), affs[choice["i"]].get("target") if choice else None, intent; self.cached = self.cached_hash = None; raise
+        if choice and skill.status == "done" and affs[choice["i"]].get("verb") in ("approach", "interact") and choice["i"] < len(targets) and targets[choice["i"]]:
+            self.world._promote([targets[choice["i"]]])
         self.tile_px = skillctx.tile_px; self.world.tile_px = self.tile_px
-        scene_cut = self.world._travel_cut if travel_legs is not None else skill.blank_seen or skill.reason == "scene cut" or (cut(skill.before, skill.after) and (self.env.pointer or not choice or affs[choice.i].get("verb") not in ("approach", "interact") or skill.scroll == (0, 0)))
+        scene_cut = self.world._travel_cut if travel_legs is not None else skill.blank_seen or skill.reason == "scene cut" or (cut(skill.before, skill.after) and (self.env.pointer or not choice or affs[choice["i"]].get("verb") not in ("approach", "interact") or skill.scroll == (0, 0)))
         spatial = self.world.prepare(skill, place, scene_cut, self.step_no + 1); exit_key, cut_dir = spatial["exit_key"], spatial["cut_dir"]
-        self.pending_cut, self.pending_via, self.pending_key = scene_cut, affs[choice.i].get("target") if choice else None, intent
-        row_choice = {"i": choice.i, **affs[choice.i], "id": targets[choice.i], "called": choice.called, "text": choice.text, "why": choice.why, "intent": intent} if choice else None
+        self.pending_cut, self.pending_via, self.pending_key = scene_cut, affs[choice["i"]].get("target") if choice else None, intent
+        row_choice = {"i": choice["i"], **affs[choice["i"]], "id": targets[choice["i"]], "called": True, "text": choice["text"], "why": choice["why"], "intent": intent} if choice else None
         # the action's state, JSON-safe: values used by the outcome tail below
         s = {"action_step": self.step_no + 1, "before_settled": before_set.settled, "before_waited": before_set.waited, "frame": f"frames/{self.step_no + 1:06d}.png", "place": place, "per": per, "reused": reused, "frame_hash": frame_hash, "marked": marked, "observation_stamp": self.observation_stamp,
-             "player_fix": player_fix, "options": len(affs), "choice": row_choice, "aff": affs[choice.i] if choice else None, "tid": targets[choice.i] if choice else None,
-             "detail": choice.detail if choice else None, "intent": intent, "unknown": unknown, "scene_cut": scene_cut,
+             "player_fix": player_fix, "options": len(affs), "choice": row_choice, "aff": affs[choice["i"]] if choice else None, "tid": targets[choice["i"]] if choice else None,
+             "detail": "" if choice else None, "intent": intent, "unknown": unknown, "scene_cut": scene_cut,
              "exit_key": list(exit_key) if exit_key else None, "unseen_crossing": unseen_crossing, "cut_dir": cut_dir, "travel": travel_legs is not None, "route_len": len(act_route["dirs"]) if act_route else None,
              "refused": refused, "pressed_from": list(pressed_from), "push": self.world._travel_push if travel_legs is not None and choice else (act_route or {}).get("push"), "go_to": f'go_to "{a.action["go_to"]}": not in memory' if a.action and "go_to" in a.action and choice is None else None,
              "no_action": not a.action, "act": {"place": self.world.place_label(place), "why": a.why, "action": a.action},
@@ -555,16 +552,12 @@ class Loop:
         if not any(e["kind"] != "T1" or per.get("screen") in ("world", "menu", "keyboard") for e in self.events): return None
         return "; ".join(e["text"] for kind in ("T3", "T1", "T2", "T5", "T4") for e in self.events if e["kind"] == kind)
     def state(self):
-        state = {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "perception": self.cached, "frame_hash": self.cached_hash, "perception_marked": self.cached_marked, "frame_mark_eligible": self.prev_frame_mark_eligible, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "cut_carry": self.cut_carry, "pending_via": self.pending_via, "pending_key": self.pending_key, "flags": self.flags, "planner": {"last": self.last_plan, "events": self.events, "t5_armed": self.t5_armed, "fails": self.fails, "moves": self.moves, "new_places": self.new_places, "planner_evidence": self.planner_evidence, "fail_baseline": self.fail_baseline, "conversation": self.conversation, "text_for_trigger": self.text_for_trigger, "cause": self.cause}}
+        state = {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "perception": self.cached, "frame_hash": self.cached_hash, "perception_marked": self.cached_marked, "frame_mark_eligible": self.prev_frame_mark_eligible, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "cut_carry": self.cut_carry, "pending_via": self.pending_via, "pending_key": self.pending_key, "flags": self.flags, "provenance_incomplete": self.provenance_incomplete, "planner": {"last": self.last_plan, "events": self.events, "t5_armed": self.t5_armed, "fails": self.fails, "moves": self.moves, "new_places": self.new_places, "planner_evidence": self.planner_evidence, "fail_baseline": self.fail_baseline, "conversation": self.conversation, "text_for_trigger": self.text_for_trigger, "cause": self.cause}}
         if self.observation_stamp: state["observation_stamp"] = self.observation_stamp
-        if not self.provenance_incomplete: state["modes"] = {"decide": bool(self.decide), "act_text": bool(self.act_text)}  # after a legacy restore the modes are not written: they were never recorded
         return state
     def restore(self, state):
-        modes = state.get("modes")
-        if modes is not None:  # checked before anything is restored: a conflict changes nothing
-            saved, current = {"decide": bool(modes.get("decide")), "act_text": bool(modes.get("act_text"))}, {"decide": bool(self.decide), "act_text": bool(self.act_text)}
-            if saved != current: raise ValueError(f"loop modes {current} conflicts with checkpoint modes {saved}")
-        self.provenance_incomplete = modes is None
+        provenance = state.get("provenance") or {}
+        self.provenance_incomplete = bool(state["provenance_incomplete"]) if "provenance_incomplete" in state else bool(provenance["incomplete"]) if "incomplete" in provenance else "modes" not in state
         self.step_no, self.place = int(state.get("step", 0)), state.get("place")
         self.observation_stamp = state.get("observation_stamp")
         self.tile_px, self.move_frames = state.get("tile_px"), int(state.get("move_frames", 16))
