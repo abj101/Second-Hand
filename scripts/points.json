@@ -209,5 +209,30 @@
       }
     ],
     "wrong": []
+  },
+  {
+    "run": "m1_r7_resume115",
+    "step": 135,
+    "checkpoint": 130,
+    "truth": {
+      "map": 40,
+      "x": 4,
+      "y": 2
+    },
+    "situation": "lab: talk to OAK after the same reply",
+    "section": {
+      "label_re": "^talk\\ to\\ OAK",
+      "state": "failed"
+    },
+    "note_re": {
+      "label_re": "^talk\\ to\\ OAK",
+      "re": "same reply"
+    },
+    "wrong": [
+      {
+        "tool": "interact",
+        "label_re": "^talk\\ to\\ OAK"
+      }
+    ]
   }
 ]
