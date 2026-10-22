@@ -173,3 +173,37 @@ def test_start_in_occupied_is_still_routable(tmp_path):
     mem = Memory(tmp_path)
     _band(mem, "room", (0, 1), (4, 1))
     assert route(mem, "room", (0, 1), (4, 1), occupied=frozenset({(0, 1)})) == ["RIGHT"] * 4
+
+
+def test_route_detours_around_static_thing(tmp_path):
+    mem = Memory(tmp_path)
+    mem.upsert("entities", {"id": "rock", "place": "room", "kind": "rock", "tile": [2, 0]})
+    path = route(mem, "room", (0, 0), (4, 0))
+    assert path is not None and len(path) == 6
+    assert (2, 0) not in _walk((0, 0), path)
+
+
+def test_static_thing_in_only_corridor_uses_fallback(tmp_path):
+    mem = Memory(tmp_path)
+    for x in range(-1, 6):
+        tile(mem, "hall", (x, -1), floor=False); tile(mem, "hall", (x, 1), floor=False)
+    tile(mem, "hall", (-1, 0), floor=False); tile(mem, "hall", (5, 0), floor=False)
+    mem.upsert("entities", {"id": "sign", "place": "hall", "kind": "sign", "tile": [2, 0]})
+    assert route(mem, "hall", (0, 0), (4, 0)) == ["RIGHT"] * 4
+
+
+def test_static_thing_at_goal_is_reachable(tmp_path):
+    mem = Memory(tmp_path)
+    mem.upsert("entities", {"id": "sign", "place": "room", "kind": "sign", "tile": [4, 0]})
+    assert route(mem, "room", (0, 0), (4, 0)) == ["RIGHT"] * 4
+
+
+@pytest.mark.parametrize("entity", [
+    {"kind": "NPC: guard"}, {"kind": "exit"}, {"kind": "door", "name": "exit: doorway"},
+    {"kind": "dialogue box"}, {"kind": "rock", "state": "merged"},
+    {"kind": "rock", "status": "gone"}, {"kind": "rock", "place": "elsewhere"},
+])
+def test_route_ignores_non_static_or_inactive_entities(tmp_path, entity):
+    mem = Memory(tmp_path)
+    mem.upsert("entities", {"id": "thing", "place": "room", "tile": [2, 0], **entity})
+    assert route(mem, "room", (0, 0), (4, 0)) == ["RIGHT"] * 4

@@ -1782,13 +1782,13 @@ class PlanRecorder(StubModel):
         return super().ask(*args, **kwargs)
 
 
-def crate_scene(monkeypatch, tmp_path, goals=("sign",)):
-    """A sign three tiles north with a crate one tile north of the player, on the straight way to it. The fake walk stops at the crate."""
+def crate_scene(monkeypatch, tmp_path, goals=("sign",), crate_seen=True):
+    """A sign three tiles north with a crate one tile north of the player, on the straight way to it. The fake walk stops at the crate; crate_seen=False hides it from the perceiver (an unreported wall)."""
     from agent import loop as module
     from agent.space import DIRS
     env = GridEnv(); crate = (0, -1); seen = {"routes": [], "flags": [], "options": [], "rows": [], "acts": 0}
     monkeypatch.setattr(module, "perceive", lambda *_: ({"screen": "world", "text": [], "entities": [
-        {"name": "player", "kind": "player", "at": [.5, .5]}, {"name": "sign", "kind": "object", "at": [.5, 1 / 6]}, {"name": "crate", "kind": "object", "at": [.5, .5 - 1 / 9]}]}, reply({})))
+        {"name": "player", "kind": "player", "at": [.5, .5]}, {"name": "sign", "kind": "object", "at": [.5, 1 / 6]}, *([{"name": "crate", "kind": "object", "at": [.5, .5 - 1 / 9]}] if crate_seen else [])]}, reply({})))
     def act(model, per, focus, options, inputs, controls):
         seen["flags"].append(focus); seen["options"].append([o["label"] for o in options]); seen["rows"].append(options)
         goal = goals[min(seen["acts"], len(goals) - 1)]; seen["acts"] += 1
@@ -1810,15 +1810,15 @@ def crate_scene(monkeypatch, tmp_path, goals=("sign",)):
     return loop, model, seen
 
 
-def enclose(loop):
+def enclose(loop, place=None):
     """Known walls around the player on every side but the crate's: the only way to the sign is through the crate."""
-    place = loop.place
+    place = place or loop.place
     for x, y in [(-1, 0), (1, 0), (0, 1), (-1, 1), (1, 1), (-1, -1), (1, -1)]:
         loop.mem.upsert("tiles", {"id": f"{place}@{x},{y}", "place": place, "x": x, "y": y, "floor": False, "blocked": [], "pushed": [], "exit": None, "step": 1})
 
 
 def test_route_failure_reaches_planner_prompt_with_intent_stage_blocker_and_no_crossing(tmp_path, monkeypatch):
-    loop, model, _ = crate_scene(monkeypatch, tmp_path)
+    loop, model, _ = crate_scene(monkeypatch, tmp_path, crate_seen=False)
     loop.step(); cause = loop.cause
     packet = loop._evidence()
     assert "tried by place:" in packet and '"sign":{"failed":1}' in packet
@@ -1873,16 +1873,15 @@ def test_replan_trigger_cause_round_trips(tmp_path, monkeypatch):
 
 
 def test_repeated_destination_goes_around_a_known_blocker_when_a_detour_exists(tmp_path, monkeypatch):
-    loop, model, seen = crate_scene(monkeypatch, tmp_path)
-    loop.step(); assert next(iter(loop.fails.values()))["avoid"] == [0, -1]
+    loop, model, seen = crate_scene(monkeypatch, tmp_path)  # the crate is seen: the first route already goes around it
     row = loop.step()
-    assert row["skill"]["status"] == "done" and row["skill"]["inputs"] == len(seen["routes"][1]["dirs"])  # the revised route is walked, none into the crate
-    assert seen["routes"][1]["dirs"] != seen["routes"][0]["dirs"] and seen["routes"][1]["dirs"][0] != "UP"
+    assert row["skill"]["status"] == "done" and row["skill"]["inputs"] == len(seen["routes"][0]["dirs"])  # walked whole, none into the crate
+    assert seen["routes"][0]["dirs"][0] != "UP" and not any("avoid" in f for f in loop.fails.values())
 
 
 def test_repeated_destination_without_a_detour_is_a_zero_input_failure_and_options_are_untouched(tmp_path, monkeypatch):
     loop, model, seen = crate_scene(monkeypatch, tmp_path)
-    loop.step(); enclose(loop)
+    enclose(loop, "p_place"); loop.step()  # walled in from the start: the fallback route goes through the seen crate and stops there
     row = loop.step(); again = loop.step()
     assert len(seen["routes"]) == 1  # no skill ran after the first: nothing was pressed
     assert {k: row["skill"][k] for k in ("status", "reason", "inputs", "calls")} == {"status": "blocked", "reason": "no route avoids blocker", "inputs": 0, "calls": 0}
@@ -2121,7 +2120,7 @@ def test_no_model_calls_list_none(tmp_path, monkeypatch):
 
 def test_trace_skill_carries_failure_and_settled(tmp_path, monkeypatch):
     # m1_hf_checkpoint_1: the trace skill dict dropped failure/settled, so HF1/HF4 stage data never reached the trace
-    loop, model, seen = crate_scene(monkeypatch, tmp_path)
+    loop, model, seen = crate_scene(monkeypatch, tmp_path, crate_seen=False)
     row = loop.step()
     assert row["skill"]["failure"]["stage"] == "route" and "settled" in row["skill"]
 

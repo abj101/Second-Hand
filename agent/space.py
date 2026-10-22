@@ -37,7 +37,9 @@ def mark_exit(mem, place, tile, direction, to, arrive, step):
         row.update(exit={"dir": way, "to": dst, "arrive": list(dest), "src": source}, floor=True, step=step); _save(mem, row, old)
 def exit_to(mem, place, tile, direction): row = _get(mem, place, tile); edge = row.get("exit") if row else None; return edge if edge and edge.get("dir") == direction else None
 def route(mem, place, start, goal, strict=True, *, occupied=frozenset()):  # strict: an inferred exit (the guessed way back) is avoided too, unless no route avoids it; occupied: tiles held by actors
+    from agent.memory import ACTOR_KINDS, TRANSIENT, _is_exit, normalize_kind
     if goal in occupied: return None
+    static = {tuple(r["tile"]) for r in mem.rows("entities") if r.get("place") == place and r.get("tile") and r.get("state") != "merged" and r.get("status") != "gone" and normalize_kind(r.get("kind")) not in ACTOR_KINDS | TRANSIENT and not _is_exit(r.get("kind"), r.get("name"))} if strict else set()
     rows = [r for r in mem.rows("tiles") if r.get("place") == place]; xs = [start[0], goal[0], *(r["x"] for r in rows)]; ys = [start[1], goal[1], *(r["y"] for r in rows)]
     bounds = (min(xs) - 1, max(xs) + 1, min(ys) - 1, max(ys) + 1); queue = deque([(start, [])]); seen = {start}
     while queue:
@@ -48,7 +50,7 @@ def route(mem, place, start, goal, strict=True, *, occupied=frozenset()):  # str
             nxt = (at[0] + dx, at[1] + dy)
             cell = _get(mem, place, nxt)
             edge = row.get("exit") or {}
-            if direction in row.get("blocked", []) or (strict or edge.get("src") != "inferred") and direction == edge.get("dir") or nxt in seen or nxt in occupied or cell and cell.get("floor") is False and nxt != goal or not (bounds[0] <= nxt[0] <= bounds[1] and bounds[2] <= nxt[1] <= bounds[3]): continue
+            if direction in row.get("blocked", []) or (strict or edge.get("src") != "inferred") and direction == edge.get("dir") or nxt in seen or nxt in occupied or nxt in static and nxt != goal or cell and cell.get("floor") is False and nxt != goal or not (bounds[0] <= nxt[0] <= bounds[1] and bounds[2] <= nxt[1] <= bounds[3]): continue
             seen.add(nxt); queue.append((nxt, path + [direction]))
     return route(mem, place, start, goal, False, occupied=occupied) if strict else None
 def outward(mem, place, tile, placement=None):
