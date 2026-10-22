@@ -1,0 +1,84 @@
+[
+  {
+    "run": "m1_r11_boot",
+    "step": 117,
+    "checkpoint": 115,
+    "truth": {
+      "map": 40,
+      "x": 8,
+      "y": 2
+    },
+    "situation": "A1: no world entity lookup on a modal screen",
+    "absent": [
+      {
+        "tool": "interact",
+        "label_re": "^check [^ ,]{1,3}(,|$)"
+      }
+    ]
+  },
+  {
+    "run": "m1_r11_boot",
+    "step": 137,
+    "checkpoint": 135,
+    "truth": {
+      "map": 40,
+      "x": 5,
+      "y": 6
+    },
+    "situation": "S1: menu choice records the game's reply",
+    "right": [
+      {
+        "tool": "select",
+        "label_re": "^select RUN$"
+      }
+    ],
+    "note_re": {
+      "label_re": "^select RUN$",
+      "re": "no running"
+    }
+  },
+  {
+    "run": "m1_r11_boot",
+    "step": 116,
+    "checkpoint": 115,
+    "truth": {
+      "map": 40,
+      "x": 8,
+      "y": 2
+    },
+    "situation": "A2: walk onto the door before pushing",
+    "right": [
+      {
+        "tool": "approach",
+        "label_re": "^walk onto door \\(top wall\\)"
+      }
+    ],
+    "absent": [
+      {
+        "tool": "approach",
+        "label_re": "then press|press (UP|DOWN|LEFT|RIGHT) here"
+      }
+    ]
+  },
+  {
+    "run": "m1_r11_boot",
+    "step": 119,
+    "checkpoint": 115,
+    "truth": {
+      "map": 40,
+      "x": 7,
+      "y": 2
+    },
+    "situation": "A3: route failures annotate the unreached door",
+    "right": [
+      {
+        "tool": "approach",
+        "label_re": "^walk onto door"
+      }
+    ],
+    "note_re": {
+      "label_re": "^walk onto door",
+      "re": "not reached"
+    }
+  }
+]
