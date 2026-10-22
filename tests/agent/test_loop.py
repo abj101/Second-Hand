@@ -1523,6 +1523,33 @@ def test_repeated_reply_counts_as_did_nothing_for_the_interact_option(tmp_path, 
     assert loop.fails[second["choice"]["intent"]]["why"] == "same reply"
 
 
+@pytest.mark.parametrize(("first_text", "second_text", "same"), [
+    ("OAK: Now, RED, which POKéMON do", "OAK: Now, RED, which POKéMON do ▼", True),
+    ("A reply long enough to be cut off", "A reply long enough", True),
+    ("Oak: NEW   reply▶", "oak: new reply", True),
+    ("12345 different first", "12345 different second", False),
+    ("A reply that was shown", "", False),
+])
+def test_reply_matching_normalizes_pages_and_rejects_short_or_empty_text(tmp_path, monkeypatch, first_text, second_text, same):
+    from agent import loop as module
+    env, state = GridEnv(), {"text": []}
+    monkeypatch.setattr(module, "perceive", lambda *_: ({"screen": "world", "text": list(state["text"]), "entities": [
+        {"name": "player", "kind": "player", "at": [.5, .5]}, {"name": "sign", "kind": "object", "at": [.6, .5]}]}, reply({})))
+    monkeypatch.setattr(module, "act", lambda *a, **k: SimpleNamespace(place="", ops=[], action={"thing": 1, "verb": "interact"}, expect="text_appears", why="t", text=None))
+    responses = iter((first_text, second_text))
+    def read(ctx, aff, per, text=None, exit=False, **kwargs):
+        before = env.screenshot(); env.text_box = True; value = next(responses); state["text"] = [value] if value else []; after = env.screenshot()
+        return SimpleNamespace(status="done", reason="", inputs=1, calls=0, before=before, after=after, scroll=(0, 0), blank_seen=False, moves=[])
+    monkeypatch.setattr(module, "run_affordance", read)
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    loop.step()
+    env.text_box, state["text"] = False, []
+    second = loop.step()
+    if same: assert second["verdict"] == "failed"
+    assert (loop.fails.get(second["choice"]["intent"], {}).get("why") == "same reply") is same
+
+
 def test_repeated_reply_does_not_close_a_targeted_quest(tmp_path, monkeypatch):
     from agent import loop as module
     env, state = GridEnv(), {"text": []}

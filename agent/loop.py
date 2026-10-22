@@ -290,7 +290,9 @@ class Loop:
             new_text = next((t for t in after_per.get("text", []) if t not in per.get("text", [])), "")
             for effect in outcome["effects"]:
                 detail = outcome.get("to") if effect == "place_changes" else new_text if effect == "text_appears" else s["detail"] or effect
-                said = next((r for r in self.mem.rows("relations") if (r.get("s"), r.get("p"), r.get("o")) == (tid, PRED[effect], detail)), None) if effect == "text_appears" else None
+                normalize = lambda text: " ".join(str(text).replace("▼", "").replace("▶", "").split()).casefold()
+                new_reply = normalize(detail)
+                said = next((r for r in self.mem.rows("relations") if (r.get("s"), r.get("p")) == (tid, PRED[effect]) and (old_reply := normalize(r.get("o", ""))) and new_reply and (old_reply == new_reply or min(len(old_reply), len(new_reply)) >= 8 and (old_reply.startswith(new_reply) or new_reply.startswith(old_reply)))), None) if effect == "text_appears" else None
                 said_step = said["step"] if said else None  # relate() updates the stored row in place
                 repeated |= said_step is not None
                 rel = self.mem.relate(tid, PRED[effect], str(detail or ""),
