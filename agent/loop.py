@@ -186,8 +186,9 @@ class Loop:
             if resolved and (e or resolved["kind"] != "screen"):
                 ref = f"{'place' if resolved['kind'] == 'place' else 'thing'}:{resolved['id']}" if resolved.get("id") else None  # the name resolved to what it names
                 affs.append({"verb": "approach", "target": (e or {}).get("name", action["go_to"]), "at": (e or {}).get("at")}); targets.append(resolved.get("id")); intents.append(self._fail_key(place, "approach", affs[-1]["target"], ref=ref)); i = len(affs) - 1
-                t, act_route, refused = self._approach_route(place, e, player, proj, intents[-1])
-                travel_legs = self.world.plan(resolved, exit=own_pick.get("exit") if own_pick else None) if not e else None; action = None if travel_legs is None and not e else action
+                if action.get("push"): intents[-1] += f">{action['push']}"
+                t, act_route, refused = self._approach_route(place, e, player, proj, intents[-1], push=action.get("push"))
+                travel_legs = self.world.plan(resolved, exit=own_pick.get("exit") if own_pick else None, push=action.get("push")) if not e else None; action = None if travel_legs is None and not e else action
             else: action = None
         if action and "buttons" in action:
             affs.append({"verb": "buttons", "target": " ".join(action["buttons"])}); targets.append(None); intents.append(self._fail_key(place, "buttons", affs[-1]["target"])); i = len(affs) - 1
@@ -207,8 +208,9 @@ class Loop:
             if entity and verb in ("approach", "interact", "select", "click"):
                 aff = {"verb": verb, "target": entity.get("name", ""), "at": entity.get("at")}
                 affs.append(aff); targets.append(ident); intents.append(self._fail_key(place, verb, aff["target"], ref=f"thing:{ident}" if ident else None)); i = 0
+                if action.get("push"): intents[-1] += f">{action['push']}"
                 if verb == "approach":
-                    t, act_route, refused = self._approach_route(place, entity, player, proj, intents[-1])
+                    t, act_route, refused = self._approach_route(place, entity, player, proj, intents[-1], push=action.get("push"))
                 elif verb == "interact" and self.tile_px and player and not self.env.pointer:
                     t, act_route, refused = self._approach_route(place, entity, player, proj, intents[-1], beside=True)
             else: action = None
@@ -447,7 +449,7 @@ class Loop:
             return {"dirs": dirs, "push": push} if dirs is not None else None
         found = self.world.beside(place, self.pos, t)
         return {"dirs": found[2] + [found[1]], "push": push} if found else None
-    def _approach_route(self, place, entity, player, proj, intent, *, beside=False):
+    def _approach_route(self, place, entity, player, proj, intent, *, beside=False, push=None):
         t = proj(entity.get("at")) if entity and self.tile_px and player else None
         held = (self.fails.get(intent) or {}).get("avoid")
         if t is not None and not beside and entity.get("kind", "").casefold() == "exit":
@@ -460,10 +462,10 @@ class Loop:
                 if direction not in DIRS or max(abs(vx-dx), abs(vy-dy))>1: continue
                 dirs = route(self.mem, place, self.pos, (row["x"], row["y"]), occupied=self.world.occupied(place) | ({tuple(held)} if held else set()))
                 if dirs is not None: exits.append((len(dirs), dirs, direction))
-            if exits:
+            if exits and push is None:
                 _, dirs, push = min(exits)
                 return t, {"dirs": dirs, "push": push}, False
-        push = next(iter(push_dirs(self.mem, place, t, entity.get("placement"))), None) if t is not None else None
+        push = push or (next(iter(push_dirs(self.mem, place, t, entity.get("placement"))), None) if t is not None else None)
         result = self._screen_route(place, t, push, [tuple(held)] if held else (), beside=beside) if t is not None and (push or beside) else None
         return t, result, bool(t is not None and result is None or beside and t is None)
     def _unexplored(self, place, d=None):

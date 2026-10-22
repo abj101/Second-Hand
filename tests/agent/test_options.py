@@ -11,6 +11,34 @@ INPUTS = GridEnv().inputs()
 BUTTONS = f"free buttons: {', '.join(INPUTS)}"
 
 
+def test_uncrossed_exit_rows_offer_each_push_and_keep_tried_facts(tmp_path):
+    from agent.space import DIRS, push_failed
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, [{"name": "exit: doorway", "kind": "exit", "at": at(2, 0), "placement": "bottom wall"}])
+    rows = [o for o in world.options(per, "room", {}, 2, inputs=INPUTS) if o["ref"] == "exit:2,0"]
+    assert len(rows) == 4 and rows[0]["action"]["push"] == "DOWN" and all(o["state"] == "new" and o["notes"] == ["exit, never crossed"] for o in rows)
+    assert all("(bottom wall)" in o["label"] and o["label"].endswith(f"then press {o['action']['push']}") and o["intent_key"].endswith(f">{o['action']['push']}") for o in rows)
+    push_failed(mem, "room", (2, 0), "LEFT", 3)
+    row = mem.get("tiles", "room@2,0"); mem.upsert("tiles", {**row, "blocked": ["RIGHT"]})
+    rows = [o for o in world.options(per, "room", {}, 4, inputs=INPUTS) if o["ref"] == "exit:2,0"]
+    assert len(rows) == 4 and [o["state"] for o in rows] == ["new", "new", "failed", "failed"]
+    assert next(o for o in rows if o["action"]["push"] == "LEFT")["notes"][1] == "pressed LEFT: moved, no exit"
+    assert next(o for o in rows if o["action"]["push"] == "RIGHT")["notes"][1] == "pressed RIGHT: blocked"
+    for direction in DIRS: push_failed(mem, "room", (2, 0), direction, 5)
+    rows = [o for o in world.options(per, "room", {}, 6, inputs=INPUTS) if o["ref"] == "exit:2,0"]
+    assert len(rows) == 1 and rows[0]["state"] == "failed" and rows[0]["label"] == "go to doorway, 2 right" and rows[0]["notes"][0].startswith("exit failed: blocked ")
+
+
+def test_explicit_push_controls_screen_and_remembered_exit_routes(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    entity = {"name": "exit: doorway", "kind": "exit", "at": at(2, 0), "placement": "left wall"}
+    world, per = setup(mem, [entity]); loop = Loop(GridEnv(), StubModel([]), mem, "grid"); loop.world = world; loop.tile_px = 16
+    _, route, refused = loop._approach_route("room", entity, per["entities"][0], lambda _: (2, 0), "", push="DOWN")
+    assert not refused and route["push"] == "DOWN"
+    target = world.resolve("exit:2,0", {"screen": "world", "entities": []}, "room")
+    assert world.plan(target, push="DOWN")[-1]["push"] == "DOWN"
+
+
 def at(dx, dy):  # GridEnv(wander=True) geometry: the player's centre is (88, 72), tiles are 16 px
     return [(88 + 16 * dx) / 160, (72 + 16 * dy) / 144]
 

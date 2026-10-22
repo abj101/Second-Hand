@@ -1439,8 +1439,9 @@ def test_repeated_failure_flags_act_and_replans_once_on_new_evidence(tmp_path, m
     row = loop.step()  # ordinary failures remain visible to act and evidence, not triggers
     assert row["plan"] is None
     row = loop.step(); assert row["plan"] is None
-    failed = [o for o in seen_options[-1] if o["tool"] == "approach"]
-    assert failed and all(o["state"] == "failed" and "2×" in "; ".join(o["notes"]) for o in failed)
+    picked = {next(o["intent_key"] for o in opts if o["tool"] == "approach") for opts in seen_options}
+    approaches = [o for o in loop.world.options(loop.prev, loop.place, loop.fails, loop.step_no + 1, inputs=INPUTS) if o["tool"] == "approach"]
+    assert picked and all(o["state"] == "failed" and f"{loop.fails[o['intent_key']]['n']}×" in "; ".join(o["notes"]) if o["intent_key"] in picked else o["state"] == "new" for o in approaches)
 
 
 def test_act_known_places_are_navigable_named_places_only(tmp_path, monkeypatch):

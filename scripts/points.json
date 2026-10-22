@@ -76,7 +76,7 @@
     "right": [
       {
         "tool": "approach|go_to",
-        "label_re": "^go\\ to\\ rug,\\ 5\\ left,\\ 6\\ down$"
+        "label_re": "^go to rug, 5 left, 6 down, then press (?:UP|DOWN|LEFT|RIGHT)$"
       }
     ],
     "wrong": []

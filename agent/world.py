@@ -1009,9 +1009,9 @@ class World:
         ents, modal, fails = per.get("entities", []), per.get("screen") != "world", fails or {}
         live = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged"}
         def thing_ref(ident): return f"thing:{ident}" if ident else None
-        def option(tool, label, action, verb=None, target=None, ref=None, ident=None, door=None, note=None):
+        def option(tool, label, action, verb=None, target=None, ref=None, ident=None, door=None, note=None, push=None):
             ref = ref or thing_ref(ident)
-            key = fail_key(place, verb, target, inputs, ref) if verb and target is not None else None
+            key = fail_key(place, verb, target, inputs, f"{ref}>{push}" if push else ref) if verb and target is not None else None
             hit = fails.get(key) if key else None
             history = self.history(ref, place) if ref else {}
             notes = []
@@ -1071,6 +1071,20 @@ class World:
                 if history.get("status") == "verified": note = f"crossed {history['uses']}× → {self.place_label(history['dest'])}{suffix}"
                 elif history.get("status") == "refuted": note = f"exit failed: blocked {self._refuted(place, x['tile'])}×"
                 else: note = "exit, never crossed"
+                if not x["dir"] and x["status"] != "refuted":
+                    wall = x.get("placement"); here = (self.mem.get("tiles", f"{place}@{x['tile'][0]},{x['tile'][1]}") or {}) if x["tile"] else {}
+                    untried = push_dirs(self.mem, place, x["tile"], wall) if x["tile"] else list(DIRS)
+                    if not x["tile"] and wall: untried = list(dict.fromkeys([outward(self.mem, place, self.pos, wall), *untried]))
+                    tried = [d for d in dict.fromkeys(here.get("pushed", []) + here.get("blocked", [])) if d in DIRS]
+                    label = f"go to {self.label(ref, place)}"; key = _yx(x["tile"], label)
+                    for direction in [*untried, *tried] if untried else [None]:
+                        fact = "all four pushes tried" if direction is None else f"pressed {direction}: blocked" if direction in here.get("blocked", []) else f"pressed {direction}: moved, no exit" if direction in here.get("pushed", []) else "untried"
+                        text = f"{label}{f' ({wall})' if wall else ''}{self._where(x['tile'])}, then press {direction}" if direction else f"{label}, all four pushes tried"
+                        row = option(tool, text, {**action, "push": direction} if direction else action, "approach", target, ref, x["ident"], note="exit, never crossed", push=direction)
+                        if direction in tried: row["notes"].insert(1, fact)
+                        row["state"] = "failed" if direction is None or direction in tried or row["intent_key"] in fails else "new"
+                        exits.append((key, row))
+                    continue
                 label = f"{'go through' if history.get('uses') else 'go to'} {self.label(ref, place)}{self._where(x['tile'])}"
                 row = option(tool, label, action, "approach", target, ref, x["ident"], {"tile": list(tiles[0]), "to": dest} if tiles else None, note)
                 if beyond["dead_end"] and x["tile"] == beyond["through"]: row["notes"].insert(0, "everything unexplored from here is through this exit")
@@ -1186,7 +1200,7 @@ class World:
         seen = set()
         while (row := self.mem.get("places", pid)) and row.get("state") == "merged" and row.get("into") and pid not in seen: seen.add(pid); pid = row["into"]
         return pid
-    def plan(self, target, exit=None):  # exit: the chosen exit ({"tile", "to"}) travels through its own door
+    def plan(self, target, exit=None, push=None):  # exit: the chosen exit ({"tile", "to"}) travels through its own door
         if not target or not target.get("tile") or not self.current_place or not self.tile_px: return None
         path = self._through(exit, target["place"]) if exit and exit.get("tile") else self._paths(self.current_place).get(target["place"])
         if path is None: return None
@@ -1207,7 +1221,7 @@ class World:
         if dirs is None: return None
         if target["kind"] == "exit":
             exit_record = target.get("exit") or {}
-            push = next((door.get("dir") for door in exit_record.get("doors", []) if tuple(door["tile"]) == tile and door.get("dir")), None) or exit_record.get("dir") or next(iter(push_dirs(self.mem, p, tile, exit_record.get("placement"))), None)
+            push = push or next((door.get("dir") for door in exit_record.get("doors", []) if tuple(door["tile"]) == tile and door.get("dir")), None) or exit_record.get("dir") or next(iter(push_dirs(self.mem, p, tile, exit_record.get("placement"))), None)
             if push is None: return None
             if exit_record.get("to"): legs.append({"place": p, "dirs": dirs + [push], "push": None, "expect": exit_record["to"], "exit_tile": tile, "target": target})
             else: legs.append({"place": p, "dirs": dirs, "push": push, "expect": None, "cross": True, "exit_tile": tile, "target": target})
