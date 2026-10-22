@@ -633,13 +633,26 @@ def test_malformed_parse_gets_one_repair_and_resumes(tmp_path, monkeypatch):
     restored=Loop(loop.env,model,loop.mem,"grid"); restored.restore(loop.state()); row=restored.step()
     # One repair gets a call; the repair stays malformed and is not repeated.
     assert row["options"] == 0 and not restored.state()["repair_pending"] and restored.state()["repair_used"]
-    assert len(model.perceiver_prompts) == 2 and "previous JSON was empty or malformed" in model.perceiver_prompts[-1]
+    assert len(model.perceiver_prompts) == 3 and "previous JSON was empty or malformed" in model.perceiver_prompts[-1]
 
 def test_string_text_is_valid_perception(tmp_path):
     data=perception(); data["text"]="A visible dialogue line"
     loop=Loop(GridEnv(),StubModel([reply(data)]),Memory(tmp_path/"memory"),"grid")
     parsed,_,_,_=loop._see(loop.env.screenshot(),None)
     assert parsed["text"] == ["A visible dialogue line"] and not loop.parse_failed
+
+@pytest.mark.parametrize("second_data,failed", [({"screen":"world", "text":[], "entities":[{"kind":"player", "name":"Player", "at":[.5,.5]}]}, False), (None, True)])
+def test_malformed_perception_gets_one_reask(tmp_path, second_data, failed):
+    class Replies:
+        calls=0
+        def __init__(self): self.prompts=[]
+        def ask(self, system, prompt, *args, **kwargs):
+            self.calls += 1; self.prompts.append(prompt)
+            return SimpleNamespace(data=None if self.calls == 1 else second_data, text="not json")
+    model=Replies(); loop=Loop(GridEnv(),model,Memory(tmp_path/"memory"),"grid")
+    per, *_ = loop._see(loop.env.screenshot(),None)
+    assert model.calls == 2 and "Your last reply was not valid JSON:" in model.prompts[1]
+    assert loop.parse_failed is failed and per["screen"] == ("other" if failed else "world")
 
 def test_failed_parse_repair_is_not_repeated(tmp_path):
     class AlwaysMalformed(StubModel):

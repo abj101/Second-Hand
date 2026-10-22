@@ -99,6 +99,11 @@ class Loop:
         ctx = GENERAL + "\n" + load_brief(self.game) + ("\nThe previous JSON was empty or malformed. Retry with compact JSON containing string screen and list text and entities; no prose. Use empty lists only for genuinely absent content and report visible details only." if self.repair_pending else "")
         if marked: ctx += "\n" + CAPTION
         per, reply = perceive(self.model, for_model(image), ctx); data = reply.data
+        if data is None:
+            try: json.loads(getattr(reply, "text", ""))
+            except json.JSONDecodeError as parse_error: error = parse_error
+            else: error = ValueError("expected a JSON object")
+            per, reply = perceive(self.model, for_model(image), ctx + f"\nYour last reply was not valid JSON: {str(error)[:120]}. Reply again with compact valid JSON."); data = reply.data
         valid = isinstance(data, dict) and isinstance(data.get("screen"), str) and isinstance(data.get("text"), (list, str)) and isinstance(data.get("entities"), list)
         self.cached, self.cached_hash, self.cached_marked, self.cached_version = per, key, marked, self.prompt_version; self.repair_pending = False; self.parse_failed = not valid or not any((per["screen"], per["text"], per["entities"]))
         return per, key, False, []
