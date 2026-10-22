@@ -240,7 +240,7 @@ class World:
             neighbour = self.mem.get("tiles", f"{place}@{x - dx},{y - dy}")
             if neighbour and neighbour.get("floor") is True and direction in neighbour.get("blocked", []): blocked += 1
         here = self.mem.get("tiles", f"{place}@{x},{y}")
-        if here and here.get("floor") is True and outward(self.mem, place, tile) in here.get("blocked", []): blocked += 1
+        if here and here.get("floor") is True and not push_dirs(self.mem, place, tile): blocked += 1
         return blocked
     def _notes(self, ident):
         """Evidence shown after a remembered thing: refuted 'does_nothing' (walked into it) and repeated text."""

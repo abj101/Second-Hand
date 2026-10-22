@@ -149,7 +149,7 @@ def test_wall_neighbour_bump_refutes_exit_tile(tmp_path):
 
 def test_blocked_outward_push_refutes_floor_exit_tile(tmp_path):
     mem = Memory(tmp_path); room(mem)
-    mem.upsert("tiles", {"id": "room@4,0", "place": "room", "x": 4, "y": 0, "floor": True, "blocked": ["RIGHT"], "pushed": [], "exit": None, "step": 1})
+    mem.upsert("tiles", {"id": "room@4,0", "place": "room", "x": 4, "y": 0, "floor": True, "blocked": ["UP", "DOWN", "LEFT", "RIGHT"], "pushed": [], "exit": None, "step": 1})
     world, per = setup(mem, [])
     assert world._refuted("room", (4, 0)) == 1
 
@@ -160,3 +160,12 @@ def test_departure_crossing_prevents_refutation(tmp_path):
     world, per = setup(mem, [])
     world._cross("room", (2, 0), "hall", (0, 0), 2)
     assert world._refuted("room", (2, 0)) == 0
+
+
+def test_floor_exit_is_refuted_only_after_all_pushes_are_tried(tmp_path):
+    mem = Memory(tmp_path); room(mem); world, per = setup(mem, [])
+    row = {"id": "room@4,0", "place": "room", "x": 4, "y": 0, "floor": True, "blocked": ["RIGHT"], "pushed": [], "exit": None, "step": 1}
+    mem.upsert("tiles", row)
+    assert world._refuted("room", (4, 0)) == 0
+    mem.upsert("tiles", {**row, "pushed": ["UP", "DOWN", "LEFT"]})
+    assert world._refuted("room", (4, 0)) == 1
