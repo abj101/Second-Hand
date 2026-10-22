@@ -343,6 +343,7 @@ class Memory:
                 shown_kind = max(votes, key=votes.count)
                 if votes.count(shown_kind) >= 3: row["kind"] = shown_kind
             row.update(at=entity.get("at"), last=step, seen=row.get("seen", 0) + 1, status="seen", misses=0)
+            if _is_exit(kind, name) and entity.get("placement") in ("top wall", "bottom wall", "left wall", "right wall"): row["placement"] = entity["placement"]
             if tile is not None:
                 if _actor(row): row["tile"] = list(tile)
                 elif not row.get("tile") or tuple(row["tile"]) == tuple(tile): row["tile"] = list(tile); row.pop("pending_tile", None)

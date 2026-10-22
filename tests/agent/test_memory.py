@@ -3,6 +3,13 @@ import json
 from agent.memory import TRANSIENT, Memory, conf, normalize_kind
 
 
+def test_exit_keeps_latest_wall_placement(tmp_path):
+    mem = Memory(tmp_path)
+    for step, wall in enumerate(("bottom wall", "middle", "room edge", "screen edge", "left wall"), 1):
+        ident = mem.observe({"screen": "world", "entities": [{"kind": "exit", "name": "doorway", "at": [.5, .5], "placement": wall}]}, "room", step, {0: (0, 0)})[0]
+        assert mem.get("entities", ident)["placement"] == ("left wall" if step == 5 else "bottom wall")
+
+
 def test_upsert_restart_replay_and_unknown_store(tmp_path):
     mem = Memory(tmp_path)
     mem.upsert("odd_store", {"id": "x", "value": 1})

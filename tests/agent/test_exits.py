@@ -9,6 +9,12 @@ INFERRED = (2, 1, {"dir": "DOWN", "to": "hall", "arrive": [1, 0], "src": "inferr
 HALL = {"kind": "place", "place": "hall", "tile": (0, 0), "id": "hall", "stale": False}
 
 
+def test_exit_record_carries_perceived_wall(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, [{"name": "exit: doorway", "kind": "exit", "at": at(2, 0), "placement": "bottom wall"}])
+    assert world._exits("room", {"room"})[0]["placement"] == "bottom wall"
+
+
 def rooms_with(mem, doors):  # only the room and hall places, then the room's door tiles in the given order (insertion order is row order)
     mem.upsert("places", {"id": "room", "name": "Room", "screen": "world", "state": "place", "first": 1, "last": 1, "edges": []})
     mem.upsert("places", {"id": "hall", "name": "Hall", "screen": "world", "state": "place", "first": 1, "last": 1, "edges": []})

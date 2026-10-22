@@ -775,7 +775,7 @@ class World:
                              "arrive": edge.get("arrive"), "src": edge.get("src")})
         covered = {rec["tile"] for rec in recs}
         for row in [*(e for t, e in things.items() if t not in covered), *loose]:
-            recs.append({"tile": tuple(row["tile"]) if row.get("tile") else None, "dir": "", "dest": None, "pushed": False, "observed": False, "row": row})
+            recs.append({"tile": tuple(row["tile"]) if row.get("tile") else None, "dir": "", "dest": None, "pushed": False, "observed": False, "row": row, "placement": row.get("placement")})
         for rec in recs:
             row, dest, tile = rec["row"], rec["dest"], rec["tile"]
             rec.update(name=row.get("name"), ident=row.get("id"), idx=row.get("idx"))
@@ -803,7 +803,7 @@ class World:
                         "doors": [{"tile": m["tile"], "dir": m["dir"], "to": dest, "arrive": m.get("arrive"), "src": m.get("src")} for m in doors],
                         "name": name, "head": head, "idx": next((m["idx"] for m in g if m["idx"] is not None), None),
                         "ident": next((m["ident"] for m in g if m["ident"]), None), "pushed": bool(doors), "uses": uses, "last": max(steps, default=None),
-                        "status": status})
+                        "status": status, "placement": best["row"].get("placement")})
         return sorted(out, key=lambda x: _yx(x["tile"], x["name"] or x["dir"]))
 
     def view(self, goal_text, place):
