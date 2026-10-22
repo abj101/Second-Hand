@@ -10,7 +10,7 @@ from agent.brief import GENERAL, load_brief
 from agent.env_pyboy import PyBoyEnv, _INPUTS, find_rom
 from agent.loop import Loop
 from agent.memory import Memory
-from agent.model import ModelUnavailable, Ollama, Reply
+from agent.model import ModelUnavailable, Ollama, Reply, parse_json
 from agent.notebook import Notebook
 from agent.observer import for_model, wait_settled
 from agent.perceive import perceive
@@ -67,10 +67,11 @@ def main(argv=None):
     ap.add_argument("--strip-place",action="store_true",help="--om truth: a run recorded before the perceiver's place field")
     ap.add_argument("--from-step",type=int,help="--om branch/reliability/act-size: checkpoint step")
     ap.add_argument("--pick",help="--om branch: text of the option label to pick")
-    ap.add_argument("--om",choices=("places","cases","outcomes","truth","branch","talk","reliability","act-size"),help="OM replay eval; reliability: HF5 primitive + continuation check of --run at --from-step")
+    ap.add_argument("--om",choices=("places","cases","outcomes","truth","branch","talk","reliability","act-size","points"),help="OM replay eval; points: step-keyed replay at recorded decision points")
     ap.add_argument("--live",action="store_true",help="--om cases: spend the requests")
     ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)")
     ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)")
+    ap.add_argument("--max-inconclusive",type=int,default=3,help="--om points: maximum inconclusive cases for exit 0")
     ap.add_argument("--fresh",action="store_true",help="--om cases/outcomes: rebuild the replay snapshots")
     a=ap.parse_args(argv)
     if not a.om: ap.error("choose an --om replay mode")
@@ -778,6 +779,198 @@ def om_reliability(run, step):
         loop_mod.act = real_act; env.close()
     return _rel_finish(primitive, continuation, counter, before)
 
+# ---- recorded decision points: checkpoint restore + recorded model replies keyed by (step, role); no cache-key dependency
+POINTS = Path("scripts/points.json")
+POINTS_CAP = 20
+
+class PointsInconclusive(Exception): pass
+class PointsStop(Exception): pass
+
+class PointsStub:
+    """Small ordered cursor over the calls recorded for each (step, role)."""
+    def __init__(self, calls, trace, target, found):
+        self.responses, self.trace, self.target, self.found = defaultdict(list), trace, target, found
+        self.cursor, self.plan_extra, self.loop, self.options = defaultdict(int), 0, None, []
+        self.calls = self.seq = 0
+        for row in calls: self.responses[(row.get("step"), row.get("role"))].append(row)
+    def ask(self, system, user, images=(), schema=None, *, role=""):
+        self.calls += 1
+        step = self.loop.step_no + 1
+        if role == "act":
+            if step == self.target:
+                self.found["act_prompt"] = {"system": system, "user": user, "images": images, "schema": schema}
+                raise PointsStop()
+            action = (self.trace.get(step, {}).get("act") or {}).get("action")
+            props = (schema or {}).get("properties", {})
+            if "buttons" in props and isinstance(action, dict) and isinstance(action.get("buttons"), list):
+                return Reply("", {"buttons": action["buttons"]}, 0.0, None, None)
+            n = next((o["n"] for o in self.options if o.get("action") == action), None)
+            if n is None: raise PointsInconclusive(f"recorded choice not offered at {step}")
+            return Reply("", {"i": n, "why": "points: recorded choice"}, 0.0, None, None)
+        key = (step, role); at = self.cursor[key]; rows = self.responses.get(key, [])
+        if step == self.target and role == "plan":
+            self.found["plan_prompt"] = {"system": system, "user": user, "images": images, "schema": schema}
+        if at >= len(rows):
+            if role == "plan":
+                self.plan_extra += 1
+                return Reply("", {"ops": [], "why": ""}, 0.0, None, None)
+            raise PointsInconclusive("no recorded perception" if role == "perceiver" else f"no recorded {role} response at {step}")
+        self.cursor[key] += 1
+        row = rows[at]
+        raw = row.get("response", "")
+        data = raw if isinstance(raw, dict) else parse_json(str(raw or ""))
+        if data is None: raise PointsInconclusive(f"invalid recorded {role} response at {step}")
+        return Reply(str(raw) if isinstance(raw, str) else json.dumps(raw), data, 0.0, None, None)
+
+def points_truth_matches(actual, expected):
+    return all(actual.get(k) == expected.get(k) for k in ("map", "x", "y"))
+
+def points_divergence(step, actual, expected): return step if not points_truth_matches(actual, expected) else None
+
+def points_checks(case, options, goal="", plan_prompt=None):
+    """Return (name, ok, detail) checks for the case's optional assertions."""
+    rows = []
+    right = case.get("right", [])
+    if right:
+        matches = [(e, o) for e in right for o in options if hits(e, o.get("tool", ""), o.get("label", ""))]
+        rows.append(("right present", bool(matches), f"{len(matches)} matching option(s) across {len(right)} right pattern(s)"))
+    for entry in _point_entries(case.get("section")):
+        matches = [o for o in options if re.search(entry["label_re"], o.get("label", ""), re.I) and o.get("state") == entry["state"]]
+        rows.append(("section", bool(matches), f"{entry['label_re']} in {entry['state']}: {len(matches)} match(es)"))
+    for entry in _point_entries(case.get("note_re")):
+        matches = [o for o in options if re.search(entry["label_re"], o.get("label", ""), re.I) and re.search(entry["re"], " ".join(o.get("notes") or []), re.I)]
+        rows.append(("note_re", bool(matches), f"{entry['label_re']} notes / {entry['re']}: {len(matches)} match(es)"))
+    for pattern in _point_patterns(case.get("goal_re")):
+        line = next((line for line in goal.splitlines() if line.startswith("Goal:")), "")
+        rows.append(("goal_re", bool(re.search(pattern, line, re.I)), f"{pattern}: {line}"))
+    for pattern in _point_patterns(case.get("plan_re")):
+        if plan_prompt is None: rows.append(("plan_re", True, f"{pattern}: NOT APPLICABLE"))
+        else: rows.append(("plan_re", bool(re.search(pattern, plan_prompt, re.I)), f"{pattern}: {'matched' if re.search(pattern, plan_prompt, re.I) else 'not found'}"))
+    return rows
+
+def _point_entries(value): return value if isinstance(value, list) else [value] if isinstance(value, dict) else []
+def _point_patterns(value): return value if isinstance(value, list) else [value] if isinstance(value, str) else []
+
+def points_live_right(case, tool, label):
+    return (not case.get("right") or is_right(case, tool, label)) and not any(hits(e, tool, label) for e in case.get("wrong", []))
+
+def _points_case(case, live=False, counter=None):
+    run, step, checkpoint = case["run"], case["step"], case["checkpoint"]
+    src = Path("runs") / run; cp = src / "checkpoint" / f"{checkpoint:06d}"
+    trace_rows = _jsonl(src / "trace.jsonl"); trace = {r["step"]: r for r in trace_rows if "step" in r}
+    truth_rows = _jsonl(src / "truth.jsonl"); truth = {r["step"]: r for r in truth_rows if "step" in r}
+    calls = _jsonl(src / "calls.jsonl")
+    found = {"case": case, "first_divergence": None, "plan_extra": 0}; counter = counter if counter is not None else {"requests": 0}
+    missing = [name for name in ("memory", "pyboy.state", "harness.json") if not (cp / name).exists()]
+    if missing: raise PointsInconclusive(f"missing checkpoint evidence: {', '.join(missing)}")
+    if step not in truth or step not in trace: raise PointsInconclusive(f"missing recorded truth or trace at {step}")
+    try: harness = json.loads((cp / "harness.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e: raise PointsInconclusive(f"cannot read checkpoint harness: {e}") from e
+    try:
+        work = _hf5_path(f"points_{run}_{checkpoint:06d}_{step:06d}")
+        shutil.rmtree(work, ignore_errors=True); shutil.copytree(cp / "memory", work / "memory")
+        for name in ("pyboy.state", "harness.json"): shutil.copy2(cp / name, work / name)
+        env = PyBoyEnv(find_rom(), state=str(work / "pyboy.state")); env.tile_px = 16
+    except (OSError, ValueError) as e: raise PointsInconclusive(f"cannot start replay: {e}") from e
+    real = Ollama(OM_MODEL, cache_dir=MODEL_CACHE)
+    def no_http(payload): counter["requests"] += 1; raise OmAbort("HTTP attempted by the points replay")
+    real._post = no_http
+    before = _budget()
+    live_model = None
+    if live:
+        live_model = Ollama(OM_MODEL, cache_dir=MODEL_CACHE)
+        orig = live_model._post
+        def guarded(payload):
+            if counter["requests"] >= POINTS_CAP: raise run_agent.CallCap("points request cap (20)")
+            run_agent._ledger(Path("runs/m1_points"), None, POINTS_CAP)
+            counter["requests"] += 1
+            return orig(payload)
+        live_model._post = guarded
+    stub = PointsStub(calls, trace, step, found)
+    real_act = loop_mod.act
+    def capture_act(model, per, focus, options, *args, **kwargs):
+        stub.options = options
+        if stub.loop.step_no + 1 == step:
+            found["options"] = [{k: o.get(k) for k in ("n", "tool", "label", "state", "notes", "action")} for o in options]
+            found["goal"] = focus
+        return real_act(model, per, focus, options, *args, **kwargs)
+    loop_mod.act = capture_act
+    status, reason = "PASS", ""
+    try:
+        modes = harness.get("modes") or {}
+        loop = Loop(env, stub, Memory(work / "memory"), "pokemon_red",
+                    act_text=bool(modes.get("act_text", False)), decide=bool(modes.get("decide", False)))
+        stub.loop = loop
+        try: loop.restore(harness)
+        except ValueError as e: raise PointsInconclusive(f"cannot restore checkpoint harness: {e}") from e
+        for s in range(checkpoint + 1, step + 1):
+            expected = truth.get(s)
+            if expected is None: raise PointsInconclusive(f"missing recorded truth at {s}")
+            actual = truth_read(env)
+            if (divergence := points_divergence(s, actual, expected)) is not None:
+                found["first_divergence"] = divergence
+                raise PointsInconclusive(f"diverged at {s}: RAM ({actual.get('map')},{actual.get('x')},{actual.get('y')}) != recorded ({expected.get('map')},{expected.get('x')},{expected.get('y')})")
+            try: loop.step()
+            except PointsStop: break
+        else: raise PointsInconclusive(f"act capture did not occur at {step}")
+        found["plan_extra"] = stub.plan_extra
+        found["checks"] = points_checks(case, found.get("options", []), found.get("goal", ""), (found.get("plan_prompt") or {}).get("user"))
+        found["failed"] = [name for name, ok, _ in found["checks"] if not ok]
+        status = "FAIL" if found["failed"] else "PASS"
+        if live:
+            if case.get("plan_re") and found.get("plan_prompt"):
+                p = found["plan_prompt"]
+                plan_reply = live_model.ask(p["system"], p["user"], p["images"], p["schema"], role="plan")
+                found["live_plan_reply"] = getattr(plan_reply, "data", {}) or {}
+            p = found.get("act_prompt")
+            if p:
+                reply = live_model.ask(p["system"], p["user"], p["images"], p["schema"], role="act")
+                data = getattr(reply, "data", {}) or {}
+            else: data = {}
+            picked = data.get("i")
+            picked = int(picked) if isinstance(picked, str) and picked.strip().isdigit() else picked
+            option = next((o for o in found.get("options", []) if o.get("n") == picked), None)
+            found["live_choice"] = (option.get("tool"), option.get("label")) if option else ("none", "")
+            found["live_right"] = bool(option and points_live_right(case, *found["live_choice"]))
+            if not found["live_right"]: found["failed"].append("live_choice"); status = "FAIL"
+    except PointsInconclusive as e:
+        status, reason = "INCONCLUSIVE", str(e); found["plan_extra"] = stub.plan_extra
+    finally:
+        loop_mod.act = real_act; env.close()
+    found["status"], found["reason"] = status, reason
+    found["ledger_unchanged"] = before == _budget()
+    return found
+
+def om_points(live=False, max_inconclusive=3, steps=None):
+    cases = json.loads(POINTS.read_text(encoding="utf-8"))
+    if steps: cases = [c for c in cases if str(c["step"]) in steps.split(",")]
+    counter, before, results = {"requests": 0}, _budget(), []
+    for case in cases:
+        case_requests = counter["requests"]
+        try: result = _points_case(case, live, counter)
+        except (PointsInconclusive, OmAbort) as e: result = {"case": case, "status": "INCONCLUSIVE", "reason": str(e), "failed": [], "first_divergence": None, "plan_extra": 0}
+        result["requests"] = counter["requests"] - case_requests
+        results.append(result)
+        print(f"\ncase {case['run']} step {case['step']} — {case.get('situation', '')}: {result['status']}")
+        if result.get("reason"): print(f"  reason: {result['reason']}")
+        if result.get("first_divergence"): print(f"  first divergence: {result['first_divergence']}")
+        for name, ok, detail in result.get("checks", []): print(f"  {'PASS' if ok else 'FAIL'} {name}: {detail}")
+        for o in result.get("options", []): print(f"  option {o.get('n')}: {o.get('tool')} {o.get('label')!r} [{o.get('state')}] — {'; '.join(o.get('notes') or [])}")
+        if result.get("act_prompt"): print(f"  act prompt captured: {len(result['act_prompt'].get('system') or '') + len(result['act_prompt'].get('user') or '')} chars")
+        if result.get("plan_prompt"): print(f"  planner prompt captured: {len(result['plan_prompt'].get('user') or '')} chars")
+        if live and result.get("live_plan_reply"): print(f"  live plan: {result['live_plan_reply']}")
+        if live and "live_choice" in result: print(f"  live choice: {result['live_choice'][0]} {result['live_choice'][1]!r} -> {'right' if result['live_right'] else 'wrong'}")
+        if live: print(f"  live asks: {result['requests']}")
+    print("\ncase | status | failed checks | first divergence | plan_extra")
+    for r in results: print(f"{r['case']['run']}:{r['case']['step']} | {r['status']} | {', '.join(r.get('failed', [])) or '-'} | {r.get('first_divergence') or '-'} | {r.get('plan_extra', 0)}")
+    inconclusive = sum(r["status"] == "INCONCLUSIVE" for r in results)
+    unchanged = before == _budget()
+    print(f"requests={counter['requests']}; ledger unchanged={unchanged}")
+    ok = inconclusive <= max_inconclusive and not any(r["status"] == "FAIL" for r in results) and counter["requests"] <= POINTS_CAP
+    if not live: ok = ok and counter["requests"] == 0 and unchanged
+    print(f"POINTS: {'PASS' if ok else 'FAIL'} ({len(results)-inconclusive} PASS/FAIL, {inconclusive} INCONCLUSIVE; max {max_inconclusive})")
+    return 0 if ok else 1
+
 def om_main(a, ap):
     sys.stdout.reconfigure(encoding="utf-8")  # option labels carry arrows; a redirected cp1252 stdout cannot print them
     if a.live and a.dry: ap.error("--live and --dry are exclusive")
@@ -789,11 +982,13 @@ def om_main(a, ap):
     if a.om == "reliability":
         if a.from_step is None: ap.error("--om reliability requires --from-step")
         if not re.fullmatch(r"[A-Za-z0-9_-]+", a.run): ap.error("--run must be a run name")
+    if a.om == "points" and a.max_inconclusive < 0: ap.error("--max-inconclusive must be nonnegative")
     if a.om in ("places", "cases", "outcomes"): _old_perceiver()  # their recordings predate the place field
     try:
         if a.om == "talk": return om_talk(a.run)
         if a.om == "act-size": return om_act_size(a.run, a.from_step)
         if a.om == "reliability": return om_reliability(a.run, a.from_step)
+        if a.om == "points": return om_points(a.live, a.max_inconclusive, a.steps)
         return om_branch(a.run, a.from_step, a.pick) if a.om == "branch" else om_truth(a.run, no_names=a.strip_place, exact_exit=a.exact_exit) if a.om == "truth" else om_places() if a.om == "places" else om_outcomes(a.steps, a.fresh) if a.om == "outcomes" else om_cases(a.live, a.steps, a.fresh)
     except OmIncompatible as e: print(f"incompatible old replay / inconclusive: {e}", flush=True); return 2
     except OmAbort as e: print(f"ABORT: {e}", flush=True); return 2

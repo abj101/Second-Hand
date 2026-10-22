@@ -185,3 +185,89 @@ def test_om_act_size_measures_the_act_prompt_with_a_capturing_stub_and_no_reques
     loop.prev = None
     assert eval_act.om_act_size("fixture", 100) == 2
     assert "no cached perception" in capsys.readouterr().out
+
+def test_points_stub_returns_step_role_responses_in_order_then_stops_perceiver():
+    stub = eval_act.PointsStub([
+        {"step": 4, "role": "perceiver", "response": '{"screen":"menu"}'},
+        {"step": 4, "role": "perceiver", "response": '{"screen":"world"}'},
+    ], {}, 5, {})
+    stub.loop = type("Loop", (), {"step_no": 3})()
+    assert stub.ask("", "", role="perceiver").data["screen"] == "menu"
+    assert stub.ask("", "", role="perceiver").data["screen"] == "world"
+    with pytest.raises(eval_act.PointsInconclusive, match="no recorded perception"):
+        stub.ask("", "", role="perceiver")
+    assert isinstance(stub.calls, int) and stub.calls == 3
+
+def test_points_divergence_reports_first_mismatching_step():
+    actual = {4: {"map": 1, "x": 2, "y": 3}, 5: {"map": 1, "x": 4, "y": 3}, 6: {"map": 1, "x": 5, "y": 3}}
+    expected = {4: actual[4], 5: {"map": 1, "x": 3, "y": 3}, 6: actual[6]}
+    checked = []
+    first = next((s for s in range(4, 7) if (checked.append(s) or eval_act.points_divergence(s, actual[s], expected[s]) is not None)), None)
+    assert first == 5 and checked == [4, 5]
+
+def test_points_checks_cover_right_wrong_section_notes_goal_and_plan():
+    case = {
+        "right": [{"tool": "select", "label_re": "RED"}],
+        "wrong": [{"tool": "select", "label_re": "YES"}],
+        "section": {"label_re": "select RED", "state": "new"},
+        "note_re": {"label_re": "talk to OAK", "re": "same reply"},
+        "goal_re": "Goal: Pick RED",
+        "plan_re": "BALL",
+    }
+    options = [
+        {"tool": "select", "label": "select RED", "state": "new", "notes": []},
+        {"tool": "select", "label": "select YES", "state": "new", "notes": []},
+        {"tool": "approach", "label": "talk to OAK", "state": "failed", "notes": ["same reply"]},
+    ]
+    checks = eval_act.points_checks(case, options, "Goal: Pick RED\nBecause:", "Planner should choose BALL")
+    assert checks and all(ok for _, ok, _ in checks)
+    assert not eval_act.points_live_right(case, "select", "select YES")
+    assert eval_act.points_live_right(case, "select", "select RED")
+    assert eval_act.points_live_right({"right": [], "wrong": [{"tool": "select", "label_re": "YES"}]}, "select", "select RED")
+    not_applicable = eval_act.points_checks({"plan_re": "BALL"}, options, "", None)
+    assert not_applicable == [("plan_re", True, "BALL: NOT APPLICABLE")]
+
+def test_points_stub_captures_target_plan_prompt_even_when_recording_is_exhausted():
+    found = {}
+    stub = eval_act.PointsStub([], {}, 5, found)
+    stub.loop = type("Loop", (), {"step_no": 4})()
+    assert stub.ask("system", "planner text", role="plan").data == {"ops": [], "why": ""}
+    assert found["plan_prompt"]["user"] == "planner text" and stub.plan_extra == 1 and stub.calls == 1
+
+def test_points_case_restores_saved_modes_and_captures_target_without_rom(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    case = {"run": "fixture", "step": 1, "checkpoint": 0, "situation": "fixture", "right": [{"tool": "select", "label_re": "RED"}], "wrong": []}
+    cp = tmp_path / "runs" / "fixture" / "checkpoint" / "000000"
+    (cp / "memory").mkdir(parents=True)
+    (cp / "pyboy.state").write_bytes(b"state")
+    harness = {"step": 0, "modes": {"decide": True, "act_text": False}}
+    (cp / "harness.json").write_text(json.dumps(harness), encoding="utf-8")
+    run = cp.parents[1]
+    (run / "trace.jsonl").write_text(json.dumps({"step": 1, "act": {"action": {"thing": 0, "verb": "select"}}}) + "\n", encoding="utf-8")
+    (run / "truth.jsonl").write_text(json.dumps({"step": 1, "map": 7, "x": 2, "y": 3}) + "\n", encoding="utf-8")
+    (run / "calls.jsonl").write_text("", encoding="utf-8")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(eval_act, "_hf5_path", lambda name: scratch / name)
+    monkeypatch.setattr(eval_act, "find_rom", lambda: "fake-rom")
+    monkeypatch.setattr(eval_act, "truth_read", lambda env: {"map": 7, "x": 2, "y": 3})
+    monkeypatch.setattr(eval_act, "_budget", lambda: {})
+    monkeypatch.setattr(eval_act, "Ollama", lambda *a, **k: type("Model", (), {"_post": lambda self, payload: pytest.fail("dry fixture must not post")})())
+    monkeypatch.setattr(eval_act, "Memory", lambda path: object())
+    seen, envs = [], []
+    class Env:
+        tile_px = 16
+        def close(self): self.closed = True
+    class FakeLoop:
+        def __init__(self, env, model, mem, game, act_text=False, decide=False):
+            self.env, self.model, self.step_no = env, model, 0
+            seen.append((decide, act_text))
+            self.options = [{"n": 1, "tool": "select", "label": "select RED", "state": "new", "notes": [], "action": {"thing": 0, "verb": "select"}}]
+        def restore(self, state): self.step_no = state["step"]
+        def step(self): eval_act.loop_mod.act(self.model, {"screen": "menu", "text": [], "entities": []}, "Goal: Select RED\nHere: menu", self.options, [], "")
+    monkeypatch.setattr(eval_act, "PyBoyEnv", lambda *a, **k: envs.append(Env()) or envs[-1])
+    monkeypatch.setattr(eval_act, "Loop", FakeLoop)
+    result = eval_act._points_case(case)
+    assert seen == [(True, False)]
+    assert result["status"] == "PASS" and result["options"][0]["label"] == "select RED"
+    assert result["act_prompt"]["user"] and envs[0].closed
