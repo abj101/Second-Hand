@@ -434,3 +434,13 @@ def test_thing_quest_closes_entered_on_later_linked_move_but_ignores_other_place
     assert nb.observe(4, "place:inside") == ["q"]
     quest = nb.data["quests"][0]
     assert quest["status"] == "done" and quest["reason"] == "entered" and quest["closed"] == 4 and quest["by"] == "observe"
+
+
+def test_name_op_names_a_thing_from_cited_text(tmp_path):
+    named = []
+    nb = notebook(tmp_path, ref=lambda t: "thing:e1" if t == "e1" else None, name=lambda ident, text, key, step: named.append((ident, text, key, step)))
+    key = nb.heard(3, "Sign", "here", "A BALL OF FIRE")
+    rows = nb.apply_ops([{"op": "name", "key": "e1", "text": "Fire ball", "why": [key]}, {"op": "name", "key": "e1", "text": "Nope"},
+                         {"op": "name", "key": "zzz", "text": "X", "why": [key]}, {"op": "name", "key": "e1", "text": "", "why": [key]}], 4)
+    assert [r["result"] for r in rows][0] == "ok" and all(r["result"].startswith("error") for r in rows[1:])
+    assert named == [("e1", "Fire ball", key, 4)]

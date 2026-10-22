@@ -11,7 +11,7 @@ def _refs(value):
 
 
 class Notebook:
-    def __init__(self, root: Path, *, ref=None, canon=None, label=None, refs=None, ties=None, route=None, is_exit=None, leads_to=None) -> None:
+    def __init__(self, root: Path, *, ref=None, canon=None, label=None, refs=None, ties=None, route=None, is_exit=None, leads_to=None, name=None) -> None:
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
         self.file, self.history = root / "notebook.json", root / "notebook.history"
@@ -20,6 +20,7 @@ class Notebook:
         self.ties, self.route = ties or (lambda text: []), route or (lambda ref: None)
         self.is_exit = is_exit or (lambda ref: False)
         self.leads_to = leads_to or (lambda ref: [])
+        self.name = name or (lambda ident, text, key, step: None)  # applies a name the planner read in game text
         try:
             loaded = json.loads(self.file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -116,7 +117,15 @@ class Notebook:
             if resolved is None: return self._no_target(target)
             quest.update(target=resolved, retargeted=step)
             event["quest"] = quest
-        if op in ("add", "done", "drop", "reopen", "top", "target"):
+        elif op == "name":
+            text, refs = op_data.get("text"), _refs(op_data.get("why"))
+            resolved = self._resolve(key)
+            if resolved is None or not resolved.startswith("thing:"): return f'"{key}" names no known thing'
+            if not isinstance(text, str) or not text.strip() or len(text.strip()) > 40: return "text must be 1 to 40 characters"
+            if not refs or any(not isinstance(r, str) or not self._known_key(r) for r in refs): return "why must cite game-text keys"
+            event["name"] = {"thing": resolved, "text": text.strip(), "why": refs}
+            self.name(resolved.partition(":")[2], text.strip(), refs[0], step)
+        if op in ("add", "done", "drop", "reopen", "top", "target", "name"):
             return None
         return "unknown op"
 

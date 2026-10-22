@@ -43,7 +43,7 @@ class Loop:
         self.world = World(mem, self.tile_px); self.world.tracker.wrap(env)
         self.observation_stamp = self.observation_age_ms = None; self.live_invalidation_reason = None
         self.events, self.t5_armed = [], False  # t5_armed: T5 fires once per no-quest period, armed by a new T1/T2/T3 (nothing heard yet: nothing a plan could cite)
-        self.notebook = Notebook(mem.root, ref=self.world.ref, canon=self.world.canon, label=self.world.label, ties=self.world.ties, route=self.world.exit_route, is_exit=self.world.is_exit, leads_to=self.world.leads_to,
+        self.notebook = Notebook(mem.root, ref=self.world.ref, canon=self.world.canon, label=self.world.label, ties=self.world.ties, route=self.world.exit_route, is_exit=self.world.is_exit, leads_to=self.world.leads_to, name=lambda ident, text, key, step: self.mem.call(ident, text, step, tier="text", key=key),
                                  refs=lambda: [f"place:{p['id']}" for p in mem.rows("places") if p.get("state") != "merged"] + [f"thing:{e['id']}" for e in mem.rows("entities") if e.get("state") != "merged"])
         self.last_plan, self._plan_row = None, None
         self.conversation, self.text_for_trigger = {"place": None, "lines": []}, ""

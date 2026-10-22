@@ -8,10 +8,11 @@ SYSTEM = (
     "Each operation is applied in order or answered with an error; you see the results next time. "
     "A quest's why cites the game-text lines (t-keys) it comes from; put your reading of them in the quest text. "
     "Give a quest a target when it means being in a place or talking to someone the map names; it then closes by itself when that happens. "
-    "Close a quest with done or drop and a reason; the first open quest is worked on now, and top changes it. Return only JSON."
+    "Close a quest with done or drop and a reason; the first open quest is worked on now, and top changes it; "
+    "when game text names something you can see on the map, you may give that thing the name with op name, citing the text. Return only JSON."
 )
 REPLY = (
-    'Reply JSON: {"ops":[{"op":"add|done|drop|reopen|top|target","key":"id",'
+    'Reply JSON: {"ops":[{"op":"add|done|drop|reopen|top|target|name","key":"id",'
     '"text":"text","why":["t-key"],"target":"place-id or thing-id",'
     '"reason":"reason"}],"why":"why this plan"}. '
     "Use only fields needed by each operation; include at most 8 operations."
@@ -25,7 +26,7 @@ SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "op": {"type": "string", "enum": ["add", "done", "drop", "reopen", "top", "target"]},
+                    "op": {"type": "string", "enum": ["add", "done", "drop", "reopen", "top", "target", "name"]},
                     "key": {"type": "string", "maxLength": 40},
                     "text": {"type": "string"},
                     "why": {"oneOf": [
