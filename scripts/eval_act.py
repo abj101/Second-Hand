@@ -609,15 +609,18 @@ class _PlanCheckpointEnv:
     tile_px = 16
     def screenshot(self): return Image.new("RGB", (160, 144))
     def inputs(self): return _INPUTS
+    def press(self, *a, **k): pass  # the tracker wraps both; nothing is pressed at a checkpoint
+    def tick(self, *a, **k): pass
     def close(self): pass
 
 def _plan_checkpoint(run, step):
     cp = Path("runs") / run / "checkpoint" / f"{step:06d}"
     out = _qs6_scratch(f"checkpoint/{run}_{step}")
     shutil.rmtree(out, ignore_errors=True); shutil.copytree(cp / "memory", out / "memory")
-    env = _PlanCheckpointEnv()
-    loop = Loop(env, None, Memory(out / "memory"), "pokemon_red")
-    loop.restore(json.loads((cp / "harness.json").read_text(encoding="utf-8")))
+    env, harness = _PlanCheckpointEnv(), json.loads((cp / "harness.json").read_text(encoding="utf-8"))
+    modes = harness.get("modes") or {}
+    loop = Loop(env, None, Memory(out / "memory"), "pokemon_red", act_text=bool(modes.get("act_text", False)), decide=bool(modes.get("decide", False)))
+    loop.restore(harness)
     return loop, env
 
 def om_act_size(run, step):
