@@ -5,6 +5,27 @@ from agent.space import DIRS, exit_to, fold, frontier, mark_exit, outward, route
 from agent.world import World
 
 
+def test_push_dirs_prioritizes_wall_then_neighbour_exit_then_unknown_floor(tmp_path):
+    from agent.space import push_dirs
+    mem = Memory(tmp_path)
+    for pos in ((0, 0), (-1, 0), (1, 0), (0, -1)): tile(mem, "room", pos)
+    assert push_dirs(mem, "room", (0, 0))[0] == "DOWN"
+    tile(mem, "room", (1, 0), exit={"dir": "RIGHT", "src": "inferred"})
+    assert push_dirs(mem, "room", (0, 0))[:2] == ["RIGHT", "DOWN"]
+    assert push_dirs(mem, "room", (0, 0), "left wall")[:3] == ["LEFT", "RIGHT", "DOWN"]
+    tile(mem, "room", (0, 0), pushed=["RIGHT"], blocked=["DOWN"])
+    assert set(push_dirs(mem, "room", (0, 0))) == {"UP", "LEFT"}
+    tile(mem, "room", (0, 0), pushed=["RIGHT", "LEFT"], blocked=["DOWN", "UP"])
+    assert push_dirs(mem, "room", (0, 0)) == []
+
+
+def test_plan_exit_with_no_push_directions_has_no_route(tmp_path):
+    mem = Memory(tmp_path); mem.upsert("places", {"id": "room", "screen": "world", "state": "place"})
+    tile(mem, "room", (0, 0), blocked=list(DIRS))
+    world = World(mem, 16); world.current_place = "room"
+    assert world.plan({"kind": "exit", "place": "room", "tile": (0, 0)}) is None
+
+
 def tile(mem, place, pos, **values):
     mem.upsert("tiles", {"id": f"{place}@{pos[0]},{pos[1]}", "place": place, "x": pos[0], "y": pos[1], "floor": True, "blocked": [], "pushed": [], "exit": None, "step": 1, **values})
 

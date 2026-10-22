@@ -6,7 +6,7 @@ from itertools import pairwise
 from PIL import ImageDraw
 from agent.memory import ACTOR_KINDS, STATIC_GATE, TRANSIENT, _actor, _base, _distance, _is_exit as _memory_is_exit, _nameable, normalize_kind, place_aliases, place_name
 from agent.observer import changed, cut
-from agent.space import DIRS, exit_to, fold, frontier, mark_exit, outward, route, tile_of
+from agent.space import DIRS, exit_to, fold, frontier, mark_exit, outward, push_dirs, route, tile_of
 from agent.skills import SkillResult, approach, on_player, press
 from agent.track import Tracker
 
@@ -1200,7 +1200,8 @@ class World:
         if dirs is None: return None
         if target["kind"] == "exit":
             exit_record = target.get("exit") or {}
-            push = next((door.get("dir") for door in exit_record.get("doors", []) if tuple(door["tile"]) == tile and door.get("dir")), None) or exit_record.get("dir") or outward(self.mem, p, tile)
+            push = next((door.get("dir") for door in exit_record.get("doors", []) if tuple(door["tile"]) == tile and door.get("dir")), None) or exit_record.get("dir") or next(iter(push_dirs(self.mem, p, tile, exit_record.get("placement"))), None)
+            if push is None: return None
             if exit_record.get("to"): legs.append({"place": p, "dirs": dirs + [push], "push": None, "expect": exit_record["to"], "exit_tile": tile, "target": target})
             else: legs.append({"place": p, "dirs": dirs, "push": push, "expect": None, "cross": True, "exit_tile": tile, "target": target})
         else: legs.append({"place": p, "dirs": dirs + ([facing] if facing else []), "push": None, "expect": None, "target": target})

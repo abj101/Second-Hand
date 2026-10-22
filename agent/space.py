@@ -59,6 +59,12 @@ def outward(mem, place, tile, placement=None):
     if not floors: return "UP"
     cx = sum(r["x"] for r in floors) / len(floors); cy = sum(r["y"] for r in floors) / len(floors); dx, dy = tile[0] - cx, tile[1] - cy
     return ("RIGHT" if dx > 0 else "LEFT") if abs(dx) > abs(dy) else ("DOWN" if dy > 0 else "UP")
+def push_dirs(mem, place, tile, placement=None):
+    order = list(dict.fromkeys([outward(mem, place, tile), *DIRS])); here = _get(mem, place, tile) or {}
+    neighbours = {d: _get(mem, place, (tile[0]+dx, tile[1]+dy)) or {} for d, (dx, dy) in DIRS.items()}
+    order.sort(key=lambda d: (not bool(neighbours[d].get("exit")), neighbours[d].get("floor") is True))
+    wall = outward(mem, place, tile, placement) if placement in ("top wall", "bottom wall", "left wall", "right wall") else None
+    return [d for d in dict.fromkeys(([wall] if wall else []) + order) if d not in here.get("pushed", []) and d not in here.get("blocked", [])]
 def frontier(mem, place):
     result = []
     for row in mem.rows("tiles"):

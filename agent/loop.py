@@ -13,7 +13,7 @@ from agent.predict import PRED, effects, result as action_result
 from agent.skills import Ctx, SkillResult, press_seq, run_affordance, wait_until
 from agent.tasks import Stuck
 from agent.trace import Trace
-from agent.space import DIRS, outward, route
+from agent.space import DIRS, outward, push_dirs, route
 from agent.world import World, fail_key
 CAPTION = 'The sprite inside the red box is the player\'s own character (you); list it with kind "player".'
 def failure_cause(intent, label, stage, reason, tile=None, blocker=None):
@@ -462,7 +462,8 @@ class Loop:
             if exits:
                 _, dirs, push = min(exits)
                 return t, {"dirs": dirs, "push": push}, False
-        result = self._screen_route(place, t, outward(self.mem, place, t, None), [tuple(held)] if held else (), beside=beside) if t is not None else None
+        push = next(iter(push_dirs(self.mem, place, t, entity.get("placement"))), None) if t is not None else None
+        result = self._screen_route(place, t, push, [tuple(held)] if held else (), beside=beside) if t is not None and (push or beside) else None
         return t, result, bool(t is not None and result is None or beside and t is None)
     def _unexplored(self, place, d=None):
         routes = self.world.explore_dirs(place)
