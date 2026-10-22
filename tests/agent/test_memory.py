@@ -473,3 +473,13 @@ def test_exit_perception_never_joins_a_wall_on_its_tile(tmp_path):
     other = Memory(tmp_path / "wall_only")
     other_wall = other.observe({"entities": [wall]}, "p", 1, {0: (3, 3)})[0]
     assert other.observe({"entities": [{"name": "exit: path", "kind": "exit", "at": [.5, .5]}]}, "p", 2, {0: (3, 3)})[0] != other_wall
+
+
+def test_world_screen_item_keeps_its_tile_and_menu_item_keeps_its_name(tmp_path):
+    mem = Memory(tmp_path)
+    first = mem.observe({"screen": "world", "entities": [{"name": "ball", "kind": "item"}]}, "p", 1, {0: (3, 4)})[0]
+    assert mem.get("entities", first)["tile"] == [3, 4] and mem.get("entities", first)["place"] == "p"
+    assert mem.observe({"screen": "world", "entities": [{"name": "sphere", "kind": "item"}]}, "p", 2, {0: (3, 4)})[0] == first
+    potion = mem.observe({"screen": "menu", "entities": [{"name": "potion", "kind": "item"}]}, "m1", 3, {0: (3, 4)})[0]
+    assert mem.observe({"screen": "menu", "entities": [{"name": "potion", "kind": "item"}]}, "m2", 4, {0: (5, 5)})[0] == potion
+    assert not mem.get("entities", potion).get("tile")

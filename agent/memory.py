@@ -245,7 +245,7 @@ class Memory:
             nk, at = normalize_kind(kind), entity.get("at")
             if nk == "exit" and at and any(c <= .02 or c >= .98 for c in at[:2]):
                 continue
-            tile = tiles.get(i) if tiles and kind not in RECURRING else None
+            tile = tiles.get(i) if tiles and (perception.get("screen") == "world" or kind not in RECURRING) else None  # menu lines keep name identity; a world thing keeps its position whatever it is called
             entities.append((i, entity, name, kind, nk, tile))
 
         # Tile-less and recurring entities keep their name-based identity.
@@ -300,7 +300,7 @@ class Memory:
                 row = next((r for r in self.rows("entities") if r.get("place") == place and r.get("state") != "merged" and not _actor(r)
                             and r.get("tile") and tuple(r["tile"]) == tuple(tile) and _is_exit(r.get("kind"), r.get("name")) == _is_exit(kind, name)), None)
             if row is None:
-                recurring = kind in RECURRING
+                recurring = kind in RECURRING and tile is None
                 eid = self._id("entities", name)
                 is_actor = nk in ACTOR_KINDS or nk == "player"
                 near = []
