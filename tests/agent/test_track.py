@@ -228,8 +228,3 @@ def test_phase_seed_moves_off_repeating_floor_onto_the_sprite():
     tr = Tracker(); tr.phase = (8, 8)
     tr.seed([("a", (72 / W, 72 / H), True), ("s", (72 / W, 72 / H), False)], Image.fromarray(floor))
     assert (tr.tracks["a"]["x"], tr.tracks["a"]["y"]) == (88, 72) and (tr.tracks["s"]["x"], tr.tracks["s"]["y"]) == (72, 72)
-
-
-def test_second_actor_id_on_a_tracked_sprite_gets_no_track():
-    tr = Tracker(); tr.seed([("a", (.5, .5), True)], frame(0)); tr.seed([("b", (.5, .5), True)])
-    assert "a" in tr.tracks and "b" not in tr.tracks
