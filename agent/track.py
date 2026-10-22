@@ -41,6 +41,7 @@ class Tracker:
             x, y = self._snap(fx * w, fy * h); t = self.tracks.get(ident)
             if t and t["status"] == "live" and max(abs(t["x"] - x), abs(t["y"] - y)) <= self.tile_px / 2: t["actor"], t["own"] = actor, (0, 0); continue
             if actor and self.phase is not None: x, y = self._sprite_cell(x, y)
+            if actor and not (t and t["status"] == "live") and any(o["actor"] and o["status"] == "live" and max(abs(o["x"] - x), abs(o["y"] - y)) <= self.tile_px / 2 for o in self.tracks.values()): continue  # that sprite already has a track
             self.tracks[ident] = {"x": x, "y": y, "actor": actor, "status": "live", "lost": 0, "own": (0, 0), "patch": self._patch(x, y)}
     def near(self, at, used=()):
         """The live track within a tile of the screen fraction `at` (nearest first), or None."""
