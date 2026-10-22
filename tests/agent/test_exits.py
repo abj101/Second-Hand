@@ -87,7 +87,7 @@ def test_unverified_exit_three_tiles_away_stays_a_separate_possible_exit(tmp_pat
     mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
     world, per = setup(mem, [{"name": "exit: stairs", "kind": "exit", "at": at(-1, 0)}])
     labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS)]
-    assert any(l.startswith("go through RIGHT,") for l in labels) and any(l.startswith("go to stairs,") for l in labels)
+    assert any(l.startswith("go through RIGHT,") for l in labels) and any(l.startswith("walk onto stairs,") for l in labels)
 
 
 def test_two_verified_exits_with_different_destinations_next_to_each_other_stay_two(tmp_path):

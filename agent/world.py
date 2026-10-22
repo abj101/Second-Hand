@@ -1033,6 +1033,14 @@ class World:
                            and self.canon(f"place:{r.get('o')}") == dest)
                 notes.append(f"leads to {self.place_label(ident)} {uses}×")
             if hit: notes.append(f"{hit.get('why', '')} {hit.get('n', 0)}× (last step {hit.get('step', 0)})")
+            reach_place, reach_tile = ((self.mem.get("entities", ident) or {}).get("place") or place, self._tile(ident)) if ident else (place, None)
+            if ref and ref.startswith("exit:"):
+                try: reach_tile = tuple(map(int, ref.partition(":")[2].split(",")))
+                except ValueError: pass
+            elif ref and ref.startswith("place:") and (found := self.resolve(ref, per, place)):
+                reach_place, reach_tile = found["place"], found.get("tile")
+            if reach_tile and (reach := self.mem.get("reach", f"{reach_place}@{reach_tile[0]},{reach_tile[1]}")) and reach.get("n", 0):
+                at = reach.get("at", [0, 0]); notes.append(f"not reached: stopped at ({at[0]},{at[1]}) {reach['n']}× (last step {reach.get('last', 0)})")
             if history.get("talked"):
                 talked = history["talked"]
                 spoken = str(talked.get("text") or "")[:60]
@@ -1092,6 +1100,14 @@ class World:
                     if not x["tile"] and wall: untried = list(dict.fromkeys([outward(self.mem, place, self.pos, wall), *untried]))
                     tried = [d for d in dict.fromkeys(here.get("pushed", []) + here.get("blocked", [])) if d in DIRS]
                     label = f"go to {self.label(ref, place)}"; key = _yx(x["tile"], label)
+                    on_tile = bool(x["tile"] and self.current_place != self.mem.unplaced and tuple(self.pos) == tuple(x["tile"]))
+                    if x["tile"] and not on_tile:
+                        action = {"thing": x["idx"], "verb": "approach", "onto": True} if x["idx"] is not None else {"go_to": ref, "onto": True}
+                        row = option("approach", f"walk onto {self.label(ref, place)}{f' ({wall})' if wall else ''}{self._where(x['tile'])}", action, "approach", target, ref, x["ident"], note="exit, never crossed")
+                        row["notes"].extend(f"pressed {d}: {'blocked' if d in here.get('blocked', []) else 'moved, no exit'}" for d in tried)
+                        reach = self.mem.get("reach", f"{place}@{x['tile'][0]},{x['tile'][1]}")
+                        row["state"] = "failed" if row["intent_key"] in fails or reach and reach.get("n", 0) > 0 else "new"
+                        exits.append((key, row)); continue
                     for direction in [*untried, *tried] if untried else [None]:
                         fact = "all four pushes tried" if direction is None else f"pressed {direction}: blocked" if direction in here.get("blocked", []) else f"pressed {direction}: moved, no exit" if direction in here.get("pushed", []) else "untried"
                         text = f"{label}{f' ({wall})' if wall else ''}{self._where(x['tile'])}, then press {direction}" if direction else f"{label}, all four pushes tried"
@@ -1100,6 +1116,7 @@ class World:
                             facts = [f"toward the {wall}"] if wall and direction == outward(self.mem, place, x["tile"], wall) else []
                             facts.append(f"onto a known exit to {self.place_label(neighbour['exit'].get('to'))}" if neighbour.get("exit") else "back onto floor you walked" if neighbour.get("floor") is True else "onto ground not yet seen")
                             text += f": {', '.join(facts)}"
+                        if x["tile"] and on_tile: text = f"press {direction} here: {', '.join(facts)}" if direction else "all four pushes tried here"
                         row = option(tool, text, {**action, "push": direction} if direction else action, "approach", target, ref, x["ident"], note="exit, never crossed", push=direction)
                         if direction in tried: row["notes"].insert(1, fact)
                         row["state"] = "failed" if direction is None or direction in tried or row["intent_key"] in fails else "new"
@@ -1220,7 +1237,7 @@ class World:
         seen = set()
         while (row := self.mem.get("places", pid)) and row.get("state") == "merged" and row.get("into") and pid not in seen: seen.add(pid); pid = row["into"]
         return pid
-    def plan(self, target, exit=None, push=None):  # exit: the chosen exit ({"tile", "to"}) travels through its own door
+    def plan(self, target, exit=None, push=None, onto=False):  # exit: the chosen exit ({"tile", "to"}) travels through its own door
         if not target or not target.get("tile") or not self.current_place or not self.tile_px: return None
         path = self._through(exit, target["place"]) if exit and exit.get("tile") else self._paths(self.current_place).get(target["place"])
         if path is None: return None
@@ -1240,6 +1257,9 @@ class World:
         else: dirs = route(self.mem, p, pos, tile, occupied=self.occupied(p))
         if dirs is None: return None
         if target["kind"] == "exit":
+            if onto:
+                legs.append({"place": p, "dirs": dirs, "push": None, "expect": None, "target": target})
+                return legs
             exit_record = target.get("exit") or {}
             push = push or next((door.get("dir") for door in exit_record.get("doors", []) if tuple(door["tile"]) == tile and door.get("dir")), None) or exit_record.get("dir") or next(iter(push_dirs(self.mem, p, tile, exit_record.get("placement"))), None)
             if push is None: return None

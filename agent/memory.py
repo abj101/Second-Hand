@@ -126,6 +126,15 @@ class Memory:
             stream.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
         return row
 
+    def mark_unreached(self, place, tile, at, step):
+        x, y = map(int, tile); ident = f"{place}@{x},{y}"; row = self.get("reach", ident) or {"id": ident, "place": place, "tile": [x, y], "n": 0, "step": step}
+        return self.upsert("reach", {**row, "n": row.get("n", 0) + 1, "step": step, "last": step, "at": list(at)})
+
+    def mark_reached(self, place, tile, step):
+        x, y = map(int, tile); ident = f"{place}@{x},{y}"; row = self.get("reach", ident)
+        if row and row.get("n", 0) and step > row.get("last", 0): return self.upsert("reach", {**row, "n": 0, "step": step, "reached": step})
+        return row
+
     @staticmethod
     def screen_id(per):
         items = [str(e["name"]) for e in per.get("entities", []) if e.get("name") and e.get("selectable") is True]
