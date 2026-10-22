@@ -1,12 +1,25 @@
 """0-ask: how stable are entity ids over a recorded window, split by sprite kind (static vs character), plus mint quality.
 Usage: eval_identity.py <run-basename> --from S --to S [--reload]   (default: one no-reload replay from the first checkpoint)"""
 import argparse, sys, tempfile
+import numpy as np
 from collections import Counter, defaultdict
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent.memory import ACTOR_KINDS, Memory, _actor, _is_exit, normalize_kind
 
+SAME = .8  # patch score at which two cells show the same sprite (calibrated on r8's lab); the evaluator's own copy, not the agent's
 CENTER, NEAR = (8, 5), 12  # sprite centre offset in the 160x144 screen; px a perception may sit from "its" sprite
+
+def _score(a, b):  # share of equal grey levels among the pixels either patch draws; a flat patch scores 0
+    a, b = a // 32, b // 32; lit = (a != np.median(a)) | (b != np.median(b))
+    return float((a == b)[lit].mean()) if lit.sum() >= a.size / 8 else 0.0
+
+def _cell(world, tile):  # the 16x16 grey patch of the frame where the world says tile is, or None off screen
+    arr = world.tracker.arr
+    if arr is None or not world.pa: return None
+    h, w = arr.shape[:2]; px, py = world.tracker._snap(world.pa[0] * w, world.pa[1] * h)
+    x, y = round(px + (tile[0] - world.pos[0]) * 16), round(py + (tile[1] - world.pos[1]) * 16)
+    return arr[y - 8:y + 8, x - 8:x + 8].mean(axis=-1).astype(np.uint8) if 8 <= x <= w - 8 and 8 <= y <= h - 8 else None
 
 def cause(a, b):
     """Why the nearest-perception id of one sprite slot changed from a to b (dicts with id, actor, hit)."""
@@ -17,7 +30,7 @@ def cause(a, b):
     return "character, no track under it" if not b["hit"] else "other"
 
 class Tally:
-    def __init__(self): self.seq, self.where, self.near_mints, self.notile_mints = defaultdict(list), defaultdict(set), 0, 0
+    def __init__(self): self.seq, self.where, self.near_mints, self.notile_mints = defaultdict(list), defaultdict(set), 0, 0; self.near_list, self.remints = [], 0
     def see(self, key, absxy, info):  # key (map, slot); absxy: the sprite's position in map pixels, constant for a static sprite
         self.where[key].add(tuple(absxy)); self.seq[key].append(info)
     def result(self):
@@ -68,8 +81,11 @@ def measure(run, first, last, reload=False):
             if r["id"] in old: continue
             if not r.get("tile"): tally.notile_mints += 1; continue
             if _actor(r) or _is_exit(r.get("kind"), r.get("name")): continue
-            if any(o.get("place") == r.get("place") and o.get("tile") and o.get("state") != "merged" and not _actor(o) and not _is_exit(o.get("kind"), o.get("name"))
-                   and max(abs(o["tile"][0] - r["tile"][0]), abs(o["tile"][1] - r["tile"][1])) <= 2 for o in old.values()): tally.near_mints += 1
+            for o in old.values():
+                if o.get("place") != r.get("place") or not o.get("tile") or o.get("state") == "merged" or _actor(o) or _is_exit(o.get("kind"), o.get("name")) or max(abs(o["tile"][0] - r["tile"][0]), abs(o["tile"][1] - r["tile"][1])) > 2: continue
+                tally.near_mints += 1; a, b = _cell(world, r["tile"]), _cell(world, o["tile"])
+                if a is not None and b is not None and _score(a, b) >= SAME: tally.remints += 1; tally.near_list.append((s, r["id"], r.get("name"), r["tile"], o["id"]))
+                break
         centres = {x["slot"]: x for x in sprites(env) if x.get("slot")}
         if not centres: return
         hits, self_i, nearest = world._hits(per), _self_index(per, world), {}
@@ -89,7 +105,7 @@ def report(tally, off):
     res = tally.result()
     for kind, r in res.items():
         print(f"{kind}: switches={r['switches']} max records per slot={max(r['records'].values(), default=0)} causes={dict(r['causes'])}")
-    print(f"object mints within 2 tiles of an existing object row={tally.near_mints}")
+    print(f"object re-mints (a new row within 2 tiles whose cell shows the same sprite as that row)={tally.remints} of near mints={tally.near_mints}")
     print(f"mints with no tile on a world screen={tally.notile_mints}")
     print(f"replay diverged from recorded truth at {len(off)} steps (first {off[:3]})")
     print("requests=0")
