@@ -619,8 +619,7 @@ def _plan_checkpoint(run, step):
     out = _qs6_scratch(f"checkpoint/{run}_{step}")
     shutil.rmtree(out, ignore_errors=True); shutil.copytree(cp / "memory", out / "memory")
     env, harness = _PlanCheckpointEnv(), json.loads((cp / "harness.json").read_text(encoding="utf-8"))
-    modes = harness.get("modes") or {}
-    loop = Loop(env, None, Memory(out / "memory"), "pokemon_red", act_text=bool(modes.get("act_text", False)), decide=bool(modes.get("decide", False)))
+    loop = Loop(env, None, Memory(out / "memory"), "pokemon_red")
     loop.restore(harness)
     return loop, env
 
@@ -911,9 +910,7 @@ def _points_case(case, live=False, counter=None, no_cache=False):
     loop_mod.act = capture_act
     status, reason = "PASS", ""
     try:
-        modes = harness.get("modes") or {}
-        loop = Loop(env, stub, Memory(work / "memory"), "pokemon_red",
-                    act_text=bool(modes.get("act_text", False)), decide=bool(modes.get("decide", False)))
+        loop = Loop(env, stub, Memory(work / "memory"), "pokemon_red")
         stub.loop = loop
         try: loop.restore(harness)
         except ValueError as e: raise PointsInconclusive(f"cannot restore checkpoint harness: {e}") from e

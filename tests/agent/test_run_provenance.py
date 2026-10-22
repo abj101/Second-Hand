@@ -10,10 +10,10 @@ from agent.memory import Memory
 from agent.model import Ollama, _b64, load_image_ref
 from scripts import run_agent
 from tests.agent.fakes import GridEnv, StubModel
-from scripts.run_agent import append_manifest, flag_manifest, manifest_record, resolve_modes, source_fingerprint
+from scripts.run_agent import append_manifest, flag_manifest, manifest_record, source_fingerprint
 
 MANIFEST_KEYS = {"invocation", "t", "resume", "start_checkpoint", "from_step", "steps", "max_calls", "stage",
-                 "stage_b_cap", "model", "modes", "source", "provenance", "notes"}
+                 "stage_b_cap", "model", "modes", "dirty", "source", "provenance", "notes"}
 
 
 class _Response:
@@ -31,30 +31,7 @@ def _git(cwd, *args):
                           cwd=cwd, capture_output=True, check=True, text=True)
 
 
-def test_fresh_run_without_flags_is_false_and_silent():
-    assert resolve_modes(None, None, None) == ({"decide": False, "act_text": False}, [])
-
-
-def test_resume_restores_saved_modes_when_no_flags_given():
-    assert resolve_modes({"decide": True, "act_text": False}, None, None, resume=True) == ({"decide": True, "act_text": False}, [])
-
-
-def test_explicit_flag_that_conflicts_with_saved_mode_is_rejected():
-    with pytest.raises(ValueError, match="--no-decide"):
-        resolve_modes({"decide": True, "act_text": False}, False, None, resume=True)
-
-
-def test_legacy_checkpoint_resume_with_unspecified_flag_notes_it():
-    modes, notes = resolve_modes(None, True, None, resume=True)
-    assert modes == {"decide": True, "act_text": False}
-    assert len(notes) == 1 and notes[0].startswith("act_text")
-
-
-def test_legacy_checkpoint_with_explicit_flags_has_no_note():
-    assert resolve_modes(None, True, False, resume=True) == ({"decide": True, "act_text": False}, [])
-
-
-def test_resume_conflict_exits_before_any_input_or_env(tmp_path, monkeypatch):
+def test_removed_mode_flag_exits_before_any_input_or_env(tmp_path, monkeypatch):
     run = tmp_path / "run"; checkpoint = run / "checkpoint" / "000005"; checkpoint.mkdir(parents=True)
     (checkpoint / "harness.json").write_text(json.dumps({"modes": {"decide": True, "act_text": False}}))
     (run / "trace.jsonl").write_text('{"step": 5}\n')
@@ -70,15 +47,19 @@ def test_resume_conflict_exits_before_any_input_or_env(tmp_path, monkeypatch):
 def test_manifest_has_listed_keys_and_one_line_per_invocation(tmp_path):
     source = {"head": "abc", "dirty": {"agent/x.py": "00"}, "notes": []}
     record = manifest_record(resume=False, start_checkpoint=None, from_step=None, steps=3, max_calls=9, stage="a",
-                             stage_b_cap=180, model="m", modes={"decide": False, "act_text": True}, source=source)
+                             stage_b_cap=180, model="m", modes={"headless": True}, source=source)
     first = append_manifest(tmp_path, record); second = append_manifest(tmp_path, record)
 
     lines = [json.loads(line) for line in (tmp_path / "manifest.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [line["invocation"] for line in lines] == [1, 2] == [first["invocation"], second["invocation"]]
     assert set(lines[0]) == MANIFEST_KEYS
     assert lines[0]["source"] == {"head": "abc", "dirty": {"agent/x.py": "00"}} and lines[0]["provenance"] == "complete"
+    assert lines[0]["modes"] == {"headless": True} and lines[0]["dirty"] is True
+    clean = manifest_record(resume=False, start_checkpoint=None, from_step=None, steps=1, max_calls=1, stage=None, stage_b_cap=180,
+                            model="m", modes={"headless": False}, source={**source, "dirty": {"runs/x": "skipped"}})
+    assert clean["dirty"] is False
     assert manifest_record(resume=True, start_checkpoint="000005", from_step=5, steps=1, max_calls=1, stage=None, stage_b_cap=180,
-                           model="m", modes={"decide": True, "act_text": False},
+                           model="m", modes={"headless": False},
                            source={**source, "notes": ["git unavailable"]})["provenance"] == "incomplete"
 
     flag_manifest(tmp_path, 2, "calls.jsonl write failed")
@@ -123,7 +104,7 @@ def test_call_is_rebuilt_from_manifest_call_record_and_image_refs(tmp_path, monk
     system, user = "You decide.\n", "Frame: é"
     reply = client.ask(system, user, images, schema, role="act")
     append_manifest(run, manifest_record(resume=False, start_checkpoint=None, from_step=None, steps=1, max_calls=1, stage=None,
-                                         stage_b_cap=180, model="stub", modes={"decide": True, "act_text": False},
+                                         stage_b_cap=180, model="stub", modes={"headless": True},
                                          source={"head": "h", "dirty": {}, "notes": []}))
 
     # Rebuild from only the manifest line, the call record and the image refs.
@@ -152,7 +133,7 @@ ACTION = {"place": "", "notebook": [], "action": None, "text": None, "expect": "
 
 def _record(**overrides):
     fields = {"resume": False, "start_checkpoint": None, "from_step": None, "steps": 1, "max_calls": 5, "stage": None, "stage_b_cap": 180,
-              "model": "stub", "modes": {"decide": False, "act_text": False}, "source": {"head": "h", "dirty": {}, "notes": []}, **overrides}
+              "model": "stub", "modes": {"headless": False}, "source": {"head": "h", "dirty": {}, "notes": []}, **overrides}
     return manifest_record(**fields)
 
 
@@ -219,24 +200,28 @@ def _spy_runner(monkeypatch):
     return built, Saved
 
 
-def test_resume_hands_the_checkpoint_modes_to_the_loop_and_records_them(tmp_path, monkeypatch):
+def test_resume_ignores_checkpoint_modes_and_records_only_runtime_mode(tmp_path, monkeypatch):
     built, Saved = _spy_runner(monkeypatch)
     run = tmp_path / "run"
-    run_agent._checkpoint(Saved(), Loop(GridEnv(), StubModel([]), Memory(run / "memory"), "grid", decide=True), run)
+    loop = Loop(GridEnv(), StubModel([]), Memory(run / "memory"), "grid")
+    run_agent._checkpoint(Saved(), loop, run)
+    harness = run / "checkpoint" / "000000" / "harness.json"
+    state = json.loads(harness.read_text(encoding="utf-8")); state["modes"] = {"decide": True, "act_text": True}
+    harness.write_text(json.dumps(state), encoding="utf-8")
 
     assert run_agent.main(["--headless", "--resume", "--steps", "1", "--max-calls", "5", "--run", str(run)]) == 0
 
     kwargs, loop = built[-1]
-    assert kwargs == {"decide": True} and loop.provenance_incomplete is False and loop.invocation == 1
+    assert kwargs == {} and loop.provenance_incomplete is False and loop.invocation == 1
     manifest = json.loads((run / "manifest.jsonl").read_text(encoding="utf-8").splitlines()[-1])
-    assert manifest["modes"] == {"decide": True, "act_text": False, "headless": True} and manifest["provenance"] == "complete"
+    assert manifest["modes"] == {"headless": True} and "decide" not in manifest["modes"] and "act_text" not in manifest["modes"] and manifest["provenance"] == "complete"
 
 
 def test_resume_from_a_checkpoint_without_modes_is_incomplete_everywhere(tmp_path, monkeypatch):
     built, Saved = _spy_runner(monkeypatch)
     run = tmp_path / "run"
     root = run_agent._checkpoint(Saved(), Loop(GridEnv(), StubModel([]), Memory(run / "memory"), "grid"), run)
-    state = json.loads((root / "harness.json").read_text(encoding="utf-8")); state.pop("modes")
+    state = json.loads((root / "harness.json").read_text(encoding="utf-8")); state.pop("modes", None); state.pop("provenance"); state.pop("provenance_incomplete")
     (root / "harness.json").write_text(json.dumps(state), encoding="utf-8")
 
     assert run_agent.main(["--headless", "--resume", "--steps", "1", "--max-calls", "5", "--run", str(run)]) == 0
@@ -244,7 +229,7 @@ def test_resume_from_a_checkpoint_without_modes_is_incomplete_everywhere(tmp_pat
     _, loop = built[-1]
     assert loop.provenance_incomplete is True
     manifest = json.loads((run / "manifest.jsonl").read_text(encoding="utf-8").splitlines()[-1])
-    assert manifest["provenance"] == "incomplete" and any("no modes" in note for note in manifest["notes"])
+    assert manifest["provenance"] == "incomplete" and any("legacy" in note for note in manifest["notes"])
     harness = json.loads((run / "checkpoint" / "000001" / "harness.json").read_text(encoding="utf-8"))
     assert "modes" not in harness and harness["provenance"]["incomplete"] is True
 

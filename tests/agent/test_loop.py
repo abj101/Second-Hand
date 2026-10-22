@@ -1792,11 +1792,10 @@ def scripted_act(monkeypatch, script):
     return seen
 
 
-@pytest.mark.parametrize("decide", [False, True])
-def test_equivalent_resolved_intents_share_one_counter_and_interaction_is_its_own(tmp_path, monkeypatch, decide):
+def test_equivalent_resolved_intents_share_one_counter_and_interaction_is_its_own(tmp_path, monkeypatch):
     env = GridEnv(); npc_scene(monkeypatch, env)
     seen = scripted_act(monkeypatch, [("action", {"thing": 1, "verb": "approach"}), ("action", {"thing": 1, "verb": "approach"}), ("action", {"go_to": "npc"}), ("option", "talk to npc")])
-    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid", decide=decide)
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     for _ in range(4): loop.step()
     ident = loop.world.entity_ids[1]
@@ -2154,16 +2153,14 @@ class Asks:
     def ask(self, *args, **kwargs): self.seq += 1; return SimpleNamespace(data={"goals": [], "focus": "", "why": "stub"}, text="")
 
 
-def test_checkpoint_modes_round_trip_and_a_legacy_state_is_marked_incomplete(tmp_path):
+def test_saved_modes_are_ignored_and_legacy_state_is_marked_incomplete(tmp_path):
     env = GridEnv(); mem = Memory(tmp_path / "memory")
-    decided = Loop(env, StubModel([]), mem, "grid", decide=True)
-    state = json.loads(json.dumps(decided.state()))
-    assert state["modes"] == {"decide": True, "act_text": False}
-    resumed = Loop(env, StubModel([]), mem, "grid", decide=True); resumed.restore(state)
-    assert resumed.provenance_incomplete is False and resumed.state()["modes"] == state["modes"]
-
     plain = json.loads(json.dumps(Loop(env, StubModel([]), mem, "grid").state()))
-    legacy = {k: v for k, v in plain.items() if k != "modes"}  # a checkpoint written before modes were recorded
+    saved = {**plain, "modes": {"decide": True, "act_text": True}}
+    resumed = Loop(env, StubModel([]), mem, "grid"); resumed.restore(saved)
+    assert resumed.provenance_incomplete is False and "modes" not in resumed.state()
+
+    legacy = {k: v for k, v in plain.items() if k != "provenance_incomplete"}  # a checkpoint written before provenance was recorded
     old = Loop(GridEnv(), StubModel([reply(perception()), act_reply(None)]), Memory(tmp_path / "old" / "memory"), "grid"); old.restore(legacy)
     assert old.provenance_incomplete is True and "modes" not in old.state()
     row = old.step()
@@ -2171,18 +2168,6 @@ def test_checkpoint_modes_round_trip_and_a_legacy_state_is_marked_incomplete(tmp
 
     fresh = Loop(GridEnv(), StubModel([reply(perception()), act_reply(None)]), Memory(tmp_path / "fresh" / "memory"), "grid"); fresh.restore(plain)
     assert fresh.provenance_incomplete is False and "provenance_incomplete" not in fresh.step()
-
-def test_restore_rejects_constructor_modes_that_conflict_with_the_checkpoint_before_any_press(tmp_path):
-    class Recording(GridEnv):
-        def __init__(self): super().__init__(); self.presses = []
-        def press(self, key, *args, **kwargs): self.presses.append(key)
-    saved = json.loads(json.dumps(Loop(GridEnv(), StubModel([]), Memory(tmp_path / "saved" / "memory"), "grid", decide=True).state()))
-    env = Recording(); loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid", decide=False)
-    before = json.dumps(loop.state(), sort_keys=True, default=str)
-
-    with pytest.raises(ValueError, match="conflicts with checkpoint modes"): loop.restore(saved)
-
-    assert env.presses == [] and json.dumps(loop.state(), sort_keys=True, default=str) == before and loop.provenance_incomplete is False
 
 def test_trace_rows_list_the_model_calls_of_their_own_step(tmp_path):
     model = Counting([reply(perception()), act_reply(None), reply(perception()), act_reply(None)])
