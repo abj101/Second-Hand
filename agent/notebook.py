@@ -156,7 +156,6 @@ class Notebook:
                  "who": self.canon(who) if who else None}
         self.data["text"].append(value)
         events = [{"step": step, "op": "text", "value": value}]
-        events.extend(self.talked(step, who))
         self._save(events)
         return key
 

@@ -305,14 +305,15 @@ def _observe(run):
             actual[q["text"].split(" ", 1)[1] + f"@{q['closed']}"] = q["closed"]
         activate(step)
     failed = False
-    for item in schedule:
+    for n, item in enumerate(schedule):
         key = item["target"] + f"@{item['first']}"
-        found = actual.get(key)
-        print(f"{item['kind']} {item['target']}: expected={item['first']} closed={found}")
-        if found != item["first"]:
+        expected = "open" if item["kind"] == "talk" else item["first"]
+        found = next((q.get("status") for q in nb.data["quests"] if q.get("key") == f"observe_talk_{n}"), None) if item["kind"] == "talk" else actual.get(key)
+        print(f"{item['kind']} {item['target']}: expected={expected} result={found}")
+        if found != expected:
             failed = True
     if failed:
-        print("FAIL: every target must close on its first entry or says step")
+        print("FAIL: place targets must close on first entry; talk targets must stay open")
     return 1 if failed else 0
 
 

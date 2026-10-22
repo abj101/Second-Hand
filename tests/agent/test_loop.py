@@ -1033,7 +1033,8 @@ def test_text_from_target_thing_closes_talk_quest(tmp_path, monkeypatch):
     assert any(r.get("s") == "e_guide" and r.get("p") == "says" and r.get("step") == 1 for r in loop.mem.rows("relations"))
     loop.conversation = {"place": None, "lines": ["Guide: Welcome."], "who": "thing:e_guide"}
     loop._flush_conversation(2)
-    assert loop.notebook.data["quests"][0]["status"] == "done" and loop.notebook.observe(3, None) == ["guide"]
+    assert loop.notebook.data["quests"][0]["status"] == "open" and loop.notebook.observe(3, None) == []
+    assert loop.notebook.data["text"][-1]["text"] == "Welcome." and loop.notebook.data["text"][-1]["who"] == "thing:e_guide"
 
 
 def test_act_ops_never_change_notebook(tmp_path, monkeypatch):

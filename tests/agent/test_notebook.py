@@ -145,8 +145,9 @@ def test_observe_closes_canonical_place_on_arrival_and_thing_only_via_heard(tmp_
     assert nb.data["quests"][0]["reason"] == "reached" and nb.data["quests"][0]["by"] == "observe"
     assert nb.observe(4, "place:new") == []
     assert nb.heard(5, "Mira", "Library", "Here I am.", who="thing:merged") == "t2"
-    assert nb.data["quests"][1]["reason"] == "talked"
-    assert nb.observe(6, "place:new") == ["person"]
+    assert nb.data["quests"][1]["status"] == "open"
+    assert nb.data["text"][-1]["text"] == "Here I am." and nb.data["text"][-1]["who"] == "thing:mira"
+    assert nb.observe(6, "place:new") == []
     assert nb.data["quests"][2]["status"] == "open"
 
 
@@ -190,8 +191,9 @@ def test_observe_ignores_thing_quest_until_heard_from_target(tmp_path):
 
     nb.heard(4, "Mira", "Hall", "Hello.", who="thing:mira")
 
-    assert nb.data["quests"][0]["reason"] == "talked" and nb.data["quests"][0]["closed"] == 4
-    assert nb.observe(4, "place:hall") == ["q"]
+    assert nb.data["quests"][0]["status"] == "open"
+    assert nb.data["text"][-1]["text"] == "Hello." and nb.data["text"][-1]["who"] == "thing:mira"
+    assert nb.observe(4, "place:hall") == []
     assert nb.observe(5, "place:hall") == []
 
 
@@ -328,6 +330,7 @@ def test_closed_thing_quest_shows_current_label_and_who_said(tmp_path):
     nb.heard(1, "MOM", "kitchen", "Go find the professor.", who="thing:a")
     assert nb.apply_ops([add("q", target="person")], 2)[0]["result"] == "ok"
     nb.heard(39, "MOM", "kitchen", "Ah, you came back.", who="thing:a")
+    nb.talked(39, "thing:a")  # legacy closure evidence still renders with the current label
     assert nb.observe(39, None) == ["q"]
     nb.heard(44, "MOM", "room", "PROF next door is looking for you.", who="thing:a")
 
