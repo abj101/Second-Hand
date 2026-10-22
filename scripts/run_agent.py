@@ -13,7 +13,7 @@ from scripts.truth_pokered import read
 class CallCap(RuntimeError): pass
 MODEL = "gemma4:31b-cloud"
 MAX_HASHED_BYTES = 5 * 1024 * 1024
-TOTAL_CAP, M1_CAP = 4815, 4765  # persistent e3 ledger caps; raised only with user approval
+TOTAL_CAP, M1_CAP = 7854, 7804  # persistent e3 ledger caps; raised only with user approval
 def _flag(name, value):
     dashed = name.replace("_", "-"); return f"--{dashed}" if value else f"--no-{dashed}"
 def resolve_modes(saved: dict | None, decide: bool | None, act_text: bool | None, *, resume: bool = False) -> tuple[dict, list[str]]:
@@ -240,7 +240,7 @@ def _play(env, a, run, cp, state, boot, modes, invocation_row, cancelled=None):
             if len(clip) > 1: clip[0].save(run / "frames" / f"{row['step']:06d}_motion.gif", save_all=True, append_images=clip[2::2], duration=33, loop=0)
             choice = row.get("choice") or {}
             print(f"step={row['step']} place={row['place']} task={row['task']} choice={choice.get('verb')}:{choice.get('target')} verdict={row['verdict']} uncached={model.calls-old_calls} requests={invocation[0]-old_requests}", flush=True)
-            if loop.step_no % 25 == 0: _checkpoint(env, loop, run)
+            if loop.step_no % 5 == 0: _checkpoint(env, loop, run)
             truth=read(env)
             if a.stage == "a" and str(truth.get("player_name","")).casefold()=="hand" and str(truth.get("rival_name","")).casefold()=="blue" and truth.get("map")==0x26 and not truth.get("text_box"): break
             if a.stage in ("b", "p", "q") and truth.get("map")==0x00 or a.stage == "c" and truth.get("party",0)>=1: break
