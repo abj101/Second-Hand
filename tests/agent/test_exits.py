@@ -9,6 +9,25 @@ INFERRED = (2, 1, {"dir": "DOWN", "to": "hall", "arrive": [1, 0], "src": "inferr
 HALL = {"kind": "place", "place": "hall", "tile": (0, 0), "id": "hall", "stale": False}
 
 
+@pytest.mark.parametrize("misses", [1, 2])
+def test_crossed_exit_is_demoted_after_two_misses_and_crossing_resets_it(tmp_path, monkeypatch, misses):
+    from agent import world as module
+    from agent.skills import Ctx, SkillResult
+    from tests.agent.fakes import GridEnv, StubModel
+    mem = Memory(tmp_path); rooms_with(mem, [OBSERVED]); world, per = setup(mem, [])
+    env = GridEnv(); frame = env.screenshot(); ctx = Ctx(env, StubModel([]), 16)
+    monkeypatch.setattr(module, "approach", lambda *_a, **_k: SkillResult("blocked", "exit not crossed", 1, 0, frame, frame, (-16, 0), False, [{"dir": "RIGHT", "shift": (-16, 0)}], failure={"stage": "crossing", "reason": "exit not crossed"}))
+    leg = {"place": "room", "dirs": [], "push": "RIGHT", "expect": "hall", "exit_tile": (2, 0)}
+    for step in range(misses):
+        world.pos = (2, 0); world.travel(ctx, [leg], step + 2)
+    assert mem.get("crossings", "room@2,0>hall")["miss"] == misses and mem.get("tiles", "room@2,0")["pushed"] == ["RIGHT"]
+    assert world._exits("room", {"room", "hall"})[0]["status"] == ("refuted" if misses == 2 else "verified")
+    assert ("hall" in world._paths("room")) == (misses < 2)
+    assert any(o["label"].startswith("go through") for o in world.options(per, "room", {}, 5, inputs=INPUTS))
+    world._cross("room", (2, 0), "hall", (0, 0), 6)
+    assert mem.get("crossings", "room@2,0>hall")["miss"] == 0 and world._exits("room", {"room", "hall"})[0]["status"] == "verified"
+
+
 def test_exit_record_carries_perceived_wall(tmp_path):
     mem = Memory(tmp_path); room(mem)
     world, per = setup(mem, [{"name": "exit: doorway", "kind": "exit", "at": at(2, 0), "placement": "bottom wall"}])

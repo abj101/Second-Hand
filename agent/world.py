@@ -372,6 +372,7 @@ class World:
     def _count(self, place, at, other, step):  # one crossing counted on one side of an exit
         key = _cross_key(place, at, other)
         row = self.mem.get("crossings", key) or {"id": key, "n": 0}
+        if row.get("miss"): row = {**row, "miss": 0}
         self.mem.upsert("crossings", {**row, "n": row["n"] + 1, "last": step})
     def unseen_cross(self, src, dst, step):  # a place change first seen at the next observation: pos is still in src, so its exit tile is the one within 1
         hits = [r for r in self.mem.rows("tiles") if r.get("place") == src and (r.get("exit") or {}).get("to") == dst and max(abs(r["x"] - self.pos[0]), abs(r["y"] - self.pos[1])) <= 1]
@@ -523,7 +524,7 @@ class World:
         paths, queue = {start: []}, [start]
         for p in queue:
             for rec in (self._exits(p, live) if p in live else ()):
-                if rec["doors"] and rec["to"] not in paths and rec["to"] not in avoid: paths[rec["to"]] = [*paths[p], (p, rec)]; queue.append(rec["to"])
+                if rec["status"] != "refuted" and rec["doors"] and rec["to"] not in paths and rec["to"] not in avoid: paths[rec["to"]] = [*paths[p], (p, rec)]; queue.append(rec["to"])
         return paths
     def beyond(self, place, screen=()):
         """What lies beyond each verified exit of place: for every place reachable through it (never back through place), its unused
@@ -786,7 +787,7 @@ class World:
             row, dest, tile = rec["row"], rec["dest"], rec["tile"]
             rec.update(name=row.get("name"), ident=row.get("id"), idx=row.get("idx"))
             c = (self.mem.get("crossings", _cross_key(pid, tile, dest)) or {}) if tile and dest else {}
-            rec.update(n=c.get("n", 0), last=c.get("last"))
+            rec.update(n=c.get("n", 0), last=c.get("last"), miss=c.get("miss", 0))
             rec["alone"] = bool(rec["n"] or rec["observed"])
         groups = []  # ponytail: a twin is found by destination and Chebyshev distance 1 against the group's best record only
         for rec in sorted(recs, key=lambda r: (not r["alone"], not r["observed"], not r["pushed"], _yx(r["tile"], r["name"] or r["dir"]))):
@@ -803,8 +804,8 @@ class World:
             uses = max(sum(m["n"] for m in g), 1 if any(m["observed"] for m in g) else 0)
             name = best["name"] or next((m["name"] for m in g if m["name"]), None); dir_ = door["dir"]
             head = (name[5:].strip() if name.casefold().startswith("exit:") else name) if name else dir_
-            refuted = not uses and any(self._refuted(pid, m["tile"]) for m in g)
-            status = "verified" if uses else "refuted" if refuted else "unverified"
+            refuted = not uses and any(self._refuted(pid, m["tile"]) for m in g) or bool(doors) and all(m["miss"] >= 2 for m in doors)
+            status = "refuted" if refuted else "verified" if uses else "unverified"
             out.append({"tile": door["tile"], "dir": dir_, "dest": dest, "to": dest, "place": pid, "arrive": door.get("arrive"), "src": door.get("src"),
                         "doors": [{"tile": m["tile"], "dir": m["dir"], "to": dest, "arrive": m.get("arrive"), "src": m.get("src")} for m in doors],
                         "name": name, "head": head, "idx": next((m["idx"] for m in g if m["idx"] is not None), None),
@@ -1228,7 +1229,10 @@ class World:
                 if not is_cut and result.failure and result.failure.get("stage") == "route": return self._travel_result(results, "blocked", f"leg {n} route blocked", ctx)  # the route never reached the exit: not an exit mismatch
                 arrival = self._arrival(result.after, trace) if trace else None
                 edge = exit_to(self.mem, place, tuple(leg["exit_tile"]), leg["push"])
-                if not is_cut: return self._travel_result(results, "blocked", f"leg {n} exit mismatch", ctx)
+                if not is_cut:
+                    key = _cross_key(place, tuple(leg["exit_tile"]), leg["expect"]); row = self.mem.get("crossings", key) or {"id": key, "n": 0}
+                    self.mem.upsert("crossings", {**row, "miss": row.get("miss", 0) + 1}); push_failed(self.mem, place, tuple(leg["exit_tile"]), self._travel_push, step)
+                    return self._travel_result(results, "blocked", f"leg {n} exit mismatch", ctx)
                 if arrival and (arrival[2] in ("dialogue", "menu") or (self.mem.get("places", arrival[0]) or {}).get("screen") in ("dialogue", "menu")): return self._travel_result(results, "blocked", f"leg {n} modal opened", ctx)
                 wrong = arrival and arrival[0] != leg["expect"]
                 mismatch = wrong or not edge or edge.get("to") != leg["expect"] or arrival and tuple(edge["arrive"]) != arrival[1]
