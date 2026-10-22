@@ -16,9 +16,9 @@ def _run(root):
     run = root / "run"
     memory = run / "memory"
     _jsonl(memory / "places.jsonl", [
-        {"id": "p1", "name": "Bedroom", "state": "live"},
-        {"id": "p2", "name": "Hall", "state": "live"},
-        {"id": "p3", "name": "Kitchen", "state": "live"},
+        {"id": "p1", "name": "Bedroom", "state": "live", "screen": "world"},
+        {"id": "p2", "name": "Hall", "state": "live", "screen": "world"},
+        {"id": "p3", "name": "Kitchen", "state": "live", "screen": "world"},
     ])
     _jsonl(memory / "entities.jsonl", [{"id": "e1", "name": "Mom", "state": "live"}])
     _jsonl(memory / "relations.jsonl", [

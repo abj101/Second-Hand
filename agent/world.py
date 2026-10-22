@@ -587,16 +587,20 @@ class World:
     def ref(self, text):
         text = str(text or "").strip()
         if not text: return None
-        if text.startswith(("thing:", "exit:", "place:")) and self.known(text): return self.canon(text)
-        places = [p for p in self.mem.rows("places") if p.get("state") != "merged"]
+        if text.startswith(("thing:", "exit:", "place:")) and self.known(text):
+            ref = self.canon(text)
+            return ref if not ref.startswith("place:") or (self.mem.get("places", ref.split(":", 1)[1]) or {}).get("screen") == "world" else None
+        places = [p for p in self.mem.rows("places") if p.get("state") != "merged" and p.get("screen") == "world"]
         if any(p["id"] == text for p in places): return f"place:{text}"
-        if self.mem.get("places", text): return self.canon(f"place:{text}")
+        if self.mem.get("places", text):
+            ref = self.canon(f"place:{text}")
+            return ref if (self.mem.get("places", ref.split(":", 1)[1]) or {}).get("screen") == "world" else None
         maps = {p["id"] for p in places if p.get("screen") == "world"}  # things on a title or menu screen before any map are no targets
         if (row := self.mem.get("entities", text)) and row.get("place") in maps: return self.canon(f"thing:{text}")
         key = text.casefold()
         labelled = [p for p in places if self.place_label(p["id"]).casefold() == key]
         if len(labelled) == 1: return f"place:{labelled[0]['id']}"
-        if (match := re.search(r"\s+\[([^\[\]]+)\]$", text)) and self.mem.get("places", match[1]):
+        if (match := re.search(r"\s+\[([^\[\]]+)\]$", text)) and self.canon_place(match[1]) in maps:
             return self.canon(f"place:{match[1]}")
         named = [p for p in places if key in {n.casefold() for n in [place_name(p), *place_aliases(p)] if n}]
         if len(named) == 1: return f"place:{named[0]['id']}"

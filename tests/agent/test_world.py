@@ -11,6 +11,14 @@ def place(mem, id, name, first=1):
     mem.upsert("places", {"id": id, "name": name, "screen": "world", "state": "place", "first": first, "last": first, "edges": [], "visits": 1})  # memory always sets visits
 
 
+def test_only_navigable_places_resolve_as_targets(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Hall")
+    mem.upsert("places", {"id": "p_place_1", "screen": "title", "state": "candidate", "first": 1})
+    world = World(mem, 16)
+    assert all(world.ref(value) is None for value in ("p_place_1", "place:p_place_1", "place 1", "title [p_place_1]"))
+    assert world.ref("room") == world.ref("Hall") == world.ref("place:room") == "place:room"
+
+
 def entity(mem, id, name, place, tile, seen=2):
     mem.upsert("entities", {"id": id, "name": name, "kind": "object", "place": place, "tile": tile, "seen": seen})
 
