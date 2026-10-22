@@ -101,7 +101,8 @@ def test_modal_screen_offers_its_choices_then_free_input_and_no_go_to(tmp_path):
     opts = world.options(per, "room", {}, 5, inputs=INPUTS)
     assert [(o["tool"], o["label"]) for o in opts] == [("select", "select fight"), ("select", "select bag"), ("advance", "advance"), ("cancel", "cancel"), ("buttons", BUTTONS)]
     assert opts[0]["action"] == {"thing": 1, "verb": "select"} and opts[2]["action"] == {"verb": "advance"} and opts[-1]["action"] is None
-    assert all(o["ref"] for o in opts[:-1])
+    assert [o["ref"] for o in opts[:-1]] == [None, None, "modal:advance", "modal:cancel"]
+    assert [o["intent_key"] for o in opts[:-1]] == ["room|select|fight", "room|select|bag", "room|advance|modal:advance", "room|cancel|modal:cancel"]
     kb = Memory(tmp_path / "kb"); room(kb)
     world, per = setup(kb, [{"name": "keyboard", "kind": "keyboard", "at": [.5, .7]}, {"name": "letters", "kind": "menu_item", "at": [.4, .4], "selectable": True}], screen="keyboard")
     labels = [o["label"] for o in world.options(per, "room", {}, 5, inputs=INPUTS)]
