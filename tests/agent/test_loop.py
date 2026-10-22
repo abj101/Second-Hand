@@ -1475,6 +1475,24 @@ def test_act_known_places_are_navigable_named_places_only(tmp_path, monkeypatch)
     assert "Here: Hall" in seen["focus"] and all(o.get("ref") != "place:p_menu" for o in seen["options"])
 
 
+@pytest.mark.parametrize("place_name,marked", [("Hall", True), (None, False)])
+def test_act_focus_marks_picture_names_and_uses_recent_trace(tmp_path, monkeypatch, place_name, marked):
+    from agent import loop as module
+    seen = {}; mem = Memory(tmp_path / "memory")
+    mem.upsert("places", {"id":"p_hall", **({"name":place_name} if place_name else {}), "screen":"world", "state":"place", "visits":1, "last":1})
+    per = {"screen":"world", "place":place_name, "text":[], "entities":[{"name":"Player", "kind":"player", "at":[.5,.5]}]}
+    monkeypatch.setattr(module, "perceive", lambda *_: (per, reply(per)))
+    monkeypatch.setattr(module, "act", lambda model, per, focus, options, inputs, controls:
+                        (seen.update(focus=focus) or SimpleNamespace(action=None, why="", text=None, option=None)))
+    loop = Loop(GridEnv(), StubModel([]), mem, "grid"); loop.mem.match_place = lambda *a, **k: "p_hall"
+    loop.recent = [{"step":n, "choice":{"verb":"approach", "target":"door"}, "verdict":"blocked"} for n in range(1, 7)]
+
+    loop.step()
+
+    assert ("(a name read from the picture)" in seen["focus"]) is marked
+    assert "- step 3: approach door -> blocked" in seen["focus"] and "step 2: approach door" not in seen["focus"]
+
+
 def test_fail_key_merges_rewordings(tmp_path):
     loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
     key = loop._fail_key
@@ -1997,7 +2015,8 @@ def test_evidence_omits_removed_planner_reconciliation_fields(tmp_path):
 
     assert len(packet) <= 600
     assert "new places: p" in packet and "tried by place:" in packet
-    assert "steps since last progress: 20 (stall at 20)" in packet
+    from agent.tasks import STALL
+    assert f"steps since last progress: 20 (stall at {STALL * 2 ** loop.stuck.u})" in packet
     assert all(text not in packet for text in ("reconcile flags", "closed checks", "new text since last plan", "last stall changed nothing"))
 
 
