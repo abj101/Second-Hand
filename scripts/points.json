@@ -138,7 +138,7 @@
     "right": [
       {
         "tool": "interact",
-        "label_re": "^check\\ item\\ 1,\\ 5\\ right,\\ 1\\ down$"
+        "label_re": "^check\\ item\\ 1(\\ \\(or:\\ [^)]*\\))?,\\ 5\\ right,\\ 1\\ down$"
       }
     ],
     "wrong": []
