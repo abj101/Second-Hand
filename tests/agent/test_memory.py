@@ -483,3 +483,15 @@ def test_world_screen_item_keeps_its_tile_and_menu_item_keeps_its_name(tmp_path)
     potion = mem.observe({"screen": "menu", "entities": [{"name": "potion", "kind": "item"}]}, "m1", 3, {0: (3, 4)})[0]
     assert mem.observe({"screen": "menu", "entities": [{"name": "potion", "kind": "item"}]}, "m2", 4, {0: (5, 5)})[0] == potion
     assert not mem.get("entities", potion).get("tile")
+
+
+def test_called_claims_rank_by_tier(tmp_path):
+    mem = Memory(tmp_path); mem.upsert("entities", {"id": "a", "name": "x"}); mem.upsert("entities", {"id": "b", "name": "x", "called": "OLD"})
+    mem.call("a", "SIGN", 1, tier="text", key="t-1")
+    assert mem.get("entities", "a")["called"] == "SIGN" and mem.get("entities", "a")["called_src"] == {"tier": "text", "step": 1, "key": "t-1"}
+    mem.call("a", "OAK", 2)  # said replaces text
+    assert mem.get("entities", "a")["called"] == "OAK" and mem.get("entities", "a")["called_src"]["tier"] == "said"
+    mem.call("a", "LATE", 3, tier="text", key="t-2")  # text never replaces said
+    assert mem.get("entities", "a")["called"] == "OAK"
+    mem.call("b", "NEW", 4, tier="text", key="t-3")  # an old called with no called_src counts as said
+    assert mem.get("entities", "b")["called"] == "OLD"

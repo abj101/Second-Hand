@@ -12,6 +12,7 @@ TRANSIENT = frozenset({"player", "exit", "cursor", "dialogue_box", "ui_element",
 RECURRING = ("menu_item", "move", "item", "option")
 ACTOR_KINDS = {"person", "npc", "character", "enemy", "monster", "animal"}
 STATIC_GATE = 1
+CLAIM_TIERS = {"text": 0, "said": 1}
 
 
 def normalize_kind(kind: str) -> str:
@@ -125,11 +126,13 @@ class Memory:
             stream.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
         return row
 
-    def call(self, entity_id: str, name: str, step: int) -> dict | None:
+    def call(self, entity_id: str, name: str, step: int, tier: str = "said", key: str | None = None) -> dict | None:
+        """A name from the game, ranked: "text" (the planner read it in game text) < "said" (the game named the thing when the agent interacted with it).
+        A higher tier replaces a lower one; the first claim of a tier stays. A `called` with no `called_src` counts as said."""
         row, name = self.get("entities", entity_id), str(name or "").strip()
-        if not row or not name or row.get("called"):
+        if not row or not name or (row.get("called") and CLAIM_TIERS[tier] <= CLAIM_TIERS[(row.get("called_src") or {}).get("tier", "said")]):
             return row
-        return self.upsert("entities", {**row, "called": name})
+        return self.upsert("entities", {**row, "called": name, "called_src": {"tier": tier, "step": step, "key": key}})
 
     def _id(self, store: str, prefix: str) -> str:
         used = self._data.get(store, {})
