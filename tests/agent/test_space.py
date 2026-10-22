@@ -228,3 +228,32 @@ def test_route_ignores_non_static_or_inactive_entities(tmp_path, entity):
     mem = Memory(tmp_path)
     mem.upsert("entities", {"id": "thing", "place": "room", "tile": [2, 0], **entity})
     assert route(mem, "room", (0, 0), (4, 0)) == ["RIGHT"] * 4
+
+
+def test_failed_push_is_recorded_on_departure_and_next_plan_tries_another_direction(tmp_path):
+    from types import SimpleNamespace
+    from agent.space import push_failed
+    mem = Memory(tmp_path); mem.upsert("places", {"id": "room", "screen": "world", "state": "place"})
+    tile(mem, "room", (0, 0)); tile(mem, "room", (-1, 0))
+    world = World(mem, 16); world.current_place, world.pos = "room", (-1, 0)
+    target = {"kind": "exit", "place": "room", "tile": (0, 0), "exit": {"placement": "left wall"}}
+    assert world.plan(target)[-1]["push"] == "LEFT"
+    skill = SimpleNamespace(failure={"stage": "crossing", "push": "LEFT"}, moves=[{"dir": "RIGHT", "shift": (-16, 0)}, {"dir": "LEFT", "shift": (16, 0)}])
+    world.failed_push(skill, "room", (-1, 0), "LEFT", 2)
+    assert mem.get("tiles", "room@0,0")["pushed"] == ["LEFT"] and mem.get("tiles", "room@-1,0")["pushed"] == []
+    assert world.plan(target)[-1]["push"] != "LEFT"
+    before = (tmp_path / "tiles.jsonl").read_text()
+    push_failed(mem, "room", (0, 0), "LEFT", 3)
+    assert (tmp_path / "tiles.jsonl").read_text() == before
+    mark_exit(mem, "room", (0, 0), "LEFT", "hall", (0, 0), 4)
+    assert Memory(tmp_path).get("tiles", "room@0,0")["pushed"] == []
+
+
+def test_blocked_push_keeps_only_blocked_evidence(tmp_path):
+    from types import SimpleNamespace
+    from agent.space import push_dirs
+    mem = Memory(tmp_path); world = World(mem, 16)
+    skill = SimpleNamespace(failure={"stage": "crossing", "push": "LEFT"}, moves=[{"dir": "LEFT", "shift": (0, 0)}])
+    world.prepare(skill, "room", False, 1); world.failed_push(skill, "room", (0, 0), "LEFT", 1)
+    assert mem.get("tiles", "room@0,0")["blocked"] == ["LEFT"] and mem.get("tiles", "room@0,0")["pushed"] == []
+    assert "LEFT" not in push_dirs(mem, "room", (0, 0))

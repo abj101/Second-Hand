@@ -6,7 +6,7 @@ from itertools import pairwise
 from PIL import ImageDraw
 from agent.memory import ACTOR_KINDS, STATIC_GATE, TRANSIENT, _actor, _base, _distance, _is_exit as _memory_is_exit, _nameable, normalize_kind, place_aliases, place_name
 from agent.observer import changed, cut
-from agent.space import DIRS, exit_to, fold, frontier, mark_exit, outward, push_dirs, route, tile_of
+from agent.space import DIRS, exit_to, fold, frontier, mark_exit, outward, push_dirs, push_failed, route, tile_of
 from agent.skills import SkillResult, approach, on_player, press
 from agent.track import Tracker
 
@@ -347,6 +347,12 @@ class World:
             if scene_cut or skill.status != "done" or result["locked"]: break
         return result
 
+    def failed_push(self, skill, place, start, direction, step):
+        moves = skill.moves
+        if direction not in DIRS or not moves or not self.tile_px or place == self.mem.unplaced: return
+        tile = fold(self.mem, place, tuple(start), moves[:-1], self.tile_px, step, actors=self.actor_tiles)
+        shift = moves[-1].get("shift") if isinstance(moves[-1], dict) else moves[-1][1]
+        if shift not in ((0, 0), 0): push_failed(self.mem, place, tile, direction, step)
     def after(self, skill, place, next_place, scene_cut, step):  # call after prepare() for the same step
         if skill is self._travelled and not self._travel_open:
             self.current_place = next_place
@@ -1207,13 +1213,14 @@ class World:
         else: legs.append({"place": p, "dirs": dirs + ([facing] if facing else []), "push": None, "expect": None, "target": target})
         return legs
     def travel(self, ctx, legs, step, trace=None):
-        results, inputs, place = [], 0, self.current_place; self._travel_cut = self._travel_open = False  # open: a cut travel could not place; the loop re-identifies
+        results, inputs, place = [], 0, self.current_place; self._travel_cut = self._travel_open = False; self._travel_push = None  # open: a cut travel could not place; the loop re-identifies
         for n, leg in enumerate(legs, 1):
             if inputs >= TRAVEL_MAX_INPUTS: break
             if leg["place"] != place: return self._travel_result(results, "blocked", f"leg {n} unexpected place", ctx)
             result = approach(replace(ctx, max_inputs=min(ctx.max_inputs, TRAVEL_MAX_INPUTS-inputs)), self.pa, self.pa,
                               exit_target="exit" if leg.get("expect") or leg.get("cross") else None, route={"dirs": leg["dirs"], "push": leg.get("push")})
             if result.failure: result = replace(result, failure={**result.failure, "place": place})
+            self._travel_push = leg.get("push") or (leg["dirs"][-1] if leg.get("expect") and leg["dirs"] else None)
             results.append(result); inputs += result.inputs
             # the skill checks every press for a cut; first vs last frame of a long walk is a scroll, not a cut (m1_decide2 replay step 42)
             is_cut = result.reason == "scene cut" or result.blank_seen; self._travel_cut |= is_cut; self.pos = fold(self.mem, place, self.pos, result.moves[:-1] if is_cut and result.moves else result.moves, self.tile_px, step, actors=self.actor_tiles)

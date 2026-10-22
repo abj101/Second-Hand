@@ -257,7 +257,7 @@ class Loop:
              "player_fix": player_fix, "options": len(affs), "choice": row_choice, "aff": affs[choice.i] if choice else None, "tid": targets[choice.i] if choice else None,
              "detail": choice.detail if choice else None, "intent": intent, "unknown": unknown, "scene_cut": scene_cut,
              "exit_key": list(exit_key) if exit_key else None, "unseen_crossing": unseen_crossing, "cut_dir": cut_dir, "travel": travel_legs is not None, "route_len": len(act_route["dirs"]) if act_route else None,
-             "refused": refused, "pressed_from": list(pressed_from), "go_to": f'go_to "{a.action["go_to"]}": not in memory' if a.action and "go_to" in a.action and choice is None else None,
+             "refused": refused, "pressed_from": list(pressed_from), "push": self.world._travel_push if travel_legs is not None and choice else (act_route or {}).get("push"), "go_to": f'go_to "{a.action["go_to"]}": not in memory' if a.action and "go_to" in a.action and choice is None else None,
              "no_action": not a.action, "act": {"place": self.world.place_label(place), "why": a.why, "action": a.action},
              "option": {k: picked[k] for k in ("n", "tool", "label", "notes", "state")} if picked else None, "pick_key": picked.get("intent_key") if picked else None, "plan": self._plan_row,
              "probe": {"presses": probe["presses"], "locked": probe["locked"]} if probe is not None else None,
@@ -276,6 +276,7 @@ class Loop:
         except BaseException: self.cached = self.cached_hash = None; raise
         modal = {per.get("screen"), after_per.get("screen")} <= {"world", "dialogue", "menu"} and per.get("screen") != after_per.get("screen") and "world" in (per.get("screen"), after_per.get("screen")) and not (skill.blank_seen or skill.reason == "scene cut")
         scene_cut &= not modal
+        if not scene_cut and (getattr(skill, "failure", None) or {}).get("stage") == "crossing": self.world.failed_push(skill, place, s["pressed_from"], s.get("push"), self.step_no + 1)
         next_place = self.world.current_place if s["travel"] and not self.world._travel_open else place if modal else self.mem.match_place(after_per, self.step_no + 1, prev=place, cut=scene_cut or self.cut_carry, via=(aff.get("target") if aff else None), exit=exit_key, via_id=tid, frame=after, tile_px=self.tile_px)
         spatial = self.world.after(skill, place, next_place, scene_cut, self.step_no + 1)
         self.cut_carry = bool((scene_cut or self.cut_carry) and not (s["travel"] and not self.world._travel_open or not modal and after_per.get("screen") == "world"))

@@ -13,6 +13,22 @@ from agent.model import ModelUnavailable
 
 def reply(data): return type("Reply", (), {"data": data})()
 
+def test_uncrossed_screen_route_records_the_callers_push(tmp_path, monkeypatch):
+    from agent import loop as module
+    from agent.skills import SkillResult
+    env = GridEnv(); model = StubModel([])
+    per = {"screen": "world", "text": [], "entities": [{"name": "player", "kind": "player", "at": [.5, .5]}, {"name": "exit: doorway", "kind": "exit", "at": [.6, .5], "placement": "left wall"}]}
+    monkeypatch.setattr(module, "perceive", lambda *_: (per, reply({})))
+    monkeypatch.setattr(module, "act", lambda *a, **k: SimpleNamespace(place="", ops=[], action={"thing": 1, "verb": "approach"}, why="test", text=None))
+    def use(ctx, aff, per, **kwargs):
+        assert kwargs["route"]["push"] == "LEFT"
+        frame = env.screenshot()
+        return SkillResult("blocked", "exit not crossed", 2, 0, frame, frame, (0, 0), False, [{"dir": "RIGHT", "shift": (-16, 0)}, {"dir": "LEFT", "shift": (16, 0)}], failure={"stage": "crossing", "reason": "exit not crossed"})
+    monkeypatch.setattr(module, "run_affordance", use)
+    loop = Loop(env, model, Memory(tmp_path / "memory"), "grid"); loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    row = loop.step()
+    assert loop.mem.get("tiles", f"{row['place']}@1,0")["pushed"] == ["LEFT"]
+
 def act_reply(i=0, expect="screen_changes", verb="approach"):
     return reply({"i": 2 if i is None else 1, "why": "test"})
 def fake_act(i=0, expect="screen_changes", verb="approach"):

@@ -34,6 +34,7 @@ def mark_exit(mem, place, tile, direction, to, arrive, step):
         row = _get(mem, src, at) or _new(src, at, step)
         if source == "inferred" and (row.get("exit") or {}).get("src") == "observed": continue  # a guessed way back never replaces a crossed exit
         old = dict(row, blocked=list(row["blocked"]), pushed=list(row["pushed"]))
+        if source == "observed" and way in row["pushed"]: row["pushed"].remove(way)
         row.update(exit={"dir": way, "to": dst, "arrive": list(dest), "src": source}, floor=True, step=step); _save(mem, row, old)
 def exit_to(mem, place, tile, direction): row = _get(mem, place, tile); edge = row.get("exit") if row else None; return edge if edge and edge.get("dir") == direction else None
 def route(mem, place, start, goal, strict=True, *, occupied=frozenset()):  # strict: an inferred exit (the guessed way back) is avoided too, unless no route avoids it; occupied: tiles held by actors
@@ -65,6 +66,11 @@ def push_dirs(mem, place, tile, placement=None):
     order.sort(key=lambda d: (not bool(neighbours[d].get("exit")), neighbours[d].get("floor") is True))
     wall = outward(mem, place, tile, placement) if placement in ("top wall", "bottom wall", "left wall", "right wall") else None
     return [d for d in dict.fromkeys(([wall] if wall else []) + order) if d not in here.get("pushed", []) and d not in here.get("blocked", [])]
+def push_failed(mem, place, tile, direction, step):
+    if direction not in DIRS: return
+    row = _get(mem, place, tile) or _new(place, tile, step); before = dict(row, pushed=list(row["pushed"]))
+    if direction not in row["pushed"]: row["pushed"].append(direction); row["step"] = step
+    _save(mem, row, before)
 def frontier(mem, place):
     result = []
     for row in mem.rows("tiles"):
