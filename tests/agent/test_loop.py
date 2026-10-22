@@ -633,13 +633,26 @@ def test_malformed_parse_gets_one_repair_and_resumes(tmp_path, monkeypatch):
     restored=Loop(loop.env,model,loop.mem,"grid"); restored.restore(loop.state()); row=restored.step()
     # One repair gets a call; the repair stays malformed and is not repeated.
     assert row["options"] == 0 and not restored.state()["repair_pending"] and restored.state()["repair_used"]
-    assert len(model.perceiver_prompts) == 2 and "previous JSON was empty or malformed" in model.perceiver_prompts[-1]
+    assert len(model.perceiver_prompts) == 3 and "previous JSON was empty or malformed" in model.perceiver_prompts[-1]
 
 def test_string_text_is_valid_perception(tmp_path):
     data=perception(); data["text"]="A visible dialogue line"
     loop=Loop(GridEnv(),StubModel([reply(data)]),Memory(tmp_path/"memory"),"grid")
     parsed,_,_,_=loop._see(loop.env.screenshot(),None)
     assert parsed["text"] == ["A visible dialogue line"] and not loop.parse_failed
+
+@pytest.mark.parametrize("second_data,failed", [({"screen":"world", "text":[], "entities":[{"kind":"player", "name":"Player", "at":[.5,.5]}]}, False), (None, True)])
+def test_malformed_perception_gets_one_reask(tmp_path, second_data, failed):
+    class Replies:
+        calls=0
+        def __init__(self): self.prompts=[]
+        def ask(self, system, prompt, *args, **kwargs):
+            self.calls += 1; self.prompts.append(prompt)
+            return SimpleNamespace(data=None if self.calls == 1 else second_data, text="not json")
+    model=Replies(); loop=Loop(GridEnv(),model,Memory(tmp_path/"memory"),"grid")
+    per, *_ = loop._see(loop.env.screenshot(),None)
+    assert model.calls == 2 and "Your last reply was not valid JSON:" in model.prompts[1]
+    assert loop.parse_failed is failed and per["screen"] == ("other" if failed else "world")
 
 def test_failed_parse_repair_is_not_repeated(tmp_path):
     class AlwaysMalformed(StubModel):
@@ -1462,6 +1475,26 @@ def test_act_known_places_are_navigable_named_places_only(tmp_path, monkeypatch)
     assert "Here: Hall" in seen["focus"] and all(o.get("ref") != "place:p_menu" for o in seen["options"])
 
 
+@pytest.mark.parametrize("place_name,marked", [("Hall", True), (None, False)])
+def test_act_focus_marks_picture_names_and_uses_recent_trace(tmp_path, monkeypatch, place_name, marked):
+    from agent import loop as module
+    seen = {}; mem = Memory(tmp_path / "memory")
+    mem.upsert("places", {"id":"p_hall", **({"name":place_name} if place_name else {}), "screen":"world", "state":"place", "visits":1, "last":1})
+    per = {"screen":"world", "place":place_name, "text":[], "entities":[{"name":"Player", "kind":"player", "at":[.5,.5]}]}
+    monkeypatch.setattr(module, "perceive", lambda *_: (per, reply(per)))
+    monkeypatch.setattr(module, "act", lambda model, per, focus, options, inputs, controls:
+                        (seen.update(focus=focus) or SimpleNamespace(action=None, why="", text=None, option=None)))
+    monkeypatch.setattr(module, "_load", lambda _game: {"notes": ["When asked for a name, prefer a preset or default name over typing one.", "When asked whether to give a nickname, answer no.", "To leave a name keyboard, choose its end key."]})
+    loop = Loop(GridEnv(), StubModel([]), mem, "grid"); loop.mem.match_place = lambda *a, **k: "p_hall"
+    loop.recent = [{"step":n, "choice":{"verb":"approach", "target":"door"}, "verdict":"blocked"} for n in range(1, 7)]
+
+    loop.step()
+
+    assert ("(a name read from the picture)" in seen["focus"]) is marked
+    assert "- step 3: approach door -> blocked" in seen["focus"] and "step 2: approach door" not in seen["focus"]
+    assert "Game notes: When asked for a name, prefer a preset or default name over typing one. When asked whether to give a nickname, answer no. To leave a name keyboard, choose its end key." in seen["focus"]
+
+
 def test_fail_key_merges_rewordings(tmp_path):
     loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
     key = loop._fail_key
@@ -1984,7 +2017,8 @@ def test_evidence_omits_removed_planner_reconciliation_fields(tmp_path):
 
     assert len(packet) <= 600
     assert "new places: p" in packet and "tried by place:" in packet
-    assert "steps since last progress: 20 (stall at 20)" in packet
+    from agent.tasks import STALL
+    assert f"steps since last progress: 20 (stall at {STALL * 2 ** loop.stuck.u})" in packet
     assert all(text not in packet for text in ("reconcile flags", "closed checks", "new text since last plan", "last stall changed nothing"))
 
 

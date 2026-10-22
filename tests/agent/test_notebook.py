@@ -284,6 +284,15 @@ def test_render_focus_limits_recent_to_four_lines_of_120_chars(tmp_path):
     assert "note 0" not in "\n".join(recent) and "note 1" not in "\n".join(recent)
 
 
+def test_render_focus_uses_supplied_recent_trace_rows(tmp_path):
+    nb = notebook(tmp_path); nb.note(1, "Notebook log")
+
+    recent = nb.render_focus(lambda ref: ref, recent=["step 4: approach door -> blocked"])
+
+    assert "- step 4: approach door -> blocked" in recent
+    assert "Notebook log" not in recent
+
+
 def test_render_focus_empty_notebook_has_no_goal(tmp_path):
     nb = notebook(tmp_path)
 

@@ -11,7 +11,7 @@ from agent.perceive import perceive
 from agent.plan import plan
 from agent.predict import PRED, effects, result as action_result
 from agent.skills import Ctx, SkillResult, press_seq, run_affordance, wait_until
-from agent.tasks import Stuck
+from agent.tasks import STALL, Stuck
 from agent.trace import Trace
 from agent.space import DIRS, outward, push_dirs, route
 from agent.world import World, fail_key
@@ -99,6 +99,11 @@ class Loop:
         ctx = GENERAL + "\n" + load_brief(self.game) + ("\nThe previous JSON was empty or malformed. Retry with compact JSON containing string screen and list text and entities; no prose. Use empty lists only for genuinely absent content and report visible details only." if self.repair_pending else "")
         if marked: ctx += "\n" + CAPTION
         per, reply = perceive(self.model, for_model(image), ctx); data = reply.data
+        if data is None:
+            try: json.loads(getattr(reply, "text", ""))
+            except json.JSONDecodeError as parse_error: error = parse_error
+            else: error = ValueError("expected a JSON object")
+            per, reply = perceive(self.model, for_model(image), ctx + f"\nYour last reply was not valid JSON: {str(error)[:120]}. Reply again with compact valid JSON."); data = reply.data
         valid = isinstance(data, dict) and isinstance(data.get("screen"), str) and isinstance(data.get("text"), (list, str)) and isinstance(data.get("entities"), list)
         self.cached, self.cached_hash, self.cached_marked, self.cached_version = per, key, marked, self.prompt_version; self.repair_pending = False; self.parse_failed = not valid or not any((per["screen"], per["text"], per["entities"]))
         return per, key, False, []
@@ -171,7 +176,10 @@ class Loop:
         act_route = travel_legs = None; refused = False  # refused: no route to an on-screen target avoids the known blockers (occupied tiles, remembered avoid tile)
         options = self.world.options(per, place, self.fails, self.step_no + 1, inputs=list(self.env.inputs()),
                                      targets=(q["target"],) if (q := self.notebook.focused_quest()) and q.get("target") else ())  # failure history is in the option notes
-        focus = f"{self.notebook.render_focus(self.world.label)}\nHere: {self.world.here(place)}"
+        recent = [f"step {r.get('step')}: {(r.get('choice') or {}).get('verb', '')} {(r.get('choice') or {}).get('target') or ''} -> {r.get('verdict')}" for r in self.recent[-4:]]
+        place_row = self.mem.get("places", place) or {}; here = self.world.here(place)
+        if place_row.get("name"): here += " (a name read from the picture)"
+        focus = f"{self.notebook.render_focus(self.world.label, recent=recent)}\nHere: {here}\nGame notes: {' '.join(_load(self.game).get('notes', []))}"
         a = act(self.model, per, focus, options, list(self.env.inputs()), "\n".join(_load(self.game).get("controls", [])))
         picked = next((o for o in options if o["n"] == getattr(a, "option", None)), None)
         own_pick = picked if picked and picked.get("action") == a.action else None  # the option act picked, when its action is the one it answered with
@@ -536,7 +544,7 @@ class Loop:
         dump = lambda k, v: f"{k}:{json.dumps(v, ensure_ascii=False, separators=(',', ':'))}"
         lines = [fit("new places:", places[::-1], 60), fit("tried by place:", [dump(k, v) for k, v in reversed(tried.items())], 100),
                  fit("moves:", [dump(k, v) for k, v in reversed(moved.items())], 60), fit("failed attempts:", failed[::-1], 60, "; "),
-                 f"steps since last progress: {self.stuck.progress_n} (stall at 20)"]
+                 f"steps since last progress: {self.stuck.progress_n} (stall at {STALL * 2 ** self.stuck.u})"]
         lines = [line for line in lines if line]
         while len("\n".join(lines)) > 600: lines.pop()
         return "\n".join(lines)

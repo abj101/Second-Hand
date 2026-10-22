@@ -300,7 +300,7 @@ class Notebook:
         lines.extend(self._text_line(row) if i >= cut else self._text_line(row, 160) for i, row in enumerate(uncited))
         return "\n".join(lines)
 
-    def render_focus(self, label) -> str:
+    def render_focus(self, label, recent=None) -> str:
         quest = self.focused_quest()
         lines = []
         if quest:
@@ -321,6 +321,6 @@ class Notebook:
         text = lambda row, limit: f"{row.get('speaker') or 'text'}, step {row.get('step', '?')}: \"{row.get('text', '')}\""[:limit]
         newest = max(rows, key=lambda row: row.get("step", 0), default=None)
         cited = [text(row, None if row is newest else 160) for row in rows]  # newest whole while the focus block stays within 600 characters
-        tail = ["Recent:"] + [f"- step {entry.get('step')}: {entry.get('text')}"[:120] for entry in self.log[-4:]]
+        tail = ["Recent:"] + ([f"- {entry}"[:120] for entry in recent] if recent is not None else [f"- step {entry.get('step')}: {entry.get('text')}"[:120] for entry in self.log[-4:]])
         if len("\n".join(lines + cited + tail)) > 600: cited = [text(row, 160) for row in rows]
         return "\n".join(lines + cited + tail)
