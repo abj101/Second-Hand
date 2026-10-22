@@ -10,7 +10,7 @@ from agent.skills import SkillResult, approach, on_player, press
 from agent.track import Tracker
 
 TRAVEL_MAX_INPUTS = 120
-MISS_TO_STALE, MISS_TO_GONE, ACTOR_STALE_STEPS = 2, 4, 20
+MISS_TO_STALE, ACTOR_STALE_STEPS = 2, 20
 LANDMARKS_PER_PLACE, MAP_W, MAP_H, VIEW_TOKENS = 8, 21, 15, 500
 
 TYPING = {"keyboard", "input_field"}  # a text field on a modal screen: type
@@ -297,7 +297,7 @@ class World:
             if (row.get("place") == place and distinct and tier in ("interest", "landmark") and row.get("tile") and
                     mx0 <= row["tile"][0] <= mx1 and my0 <= row["tile"][1] <= my1):
                 misses = row.get("misses", 0) + 1
-                status = "gone" if misses >= MISS_TO_GONE else "stale" if misses >= MISS_TO_STALE else status
+                status = "stale" if misses >= MISS_TO_STALE else status
                 row = {**row, "misses": misses, "status": status}
             if row.get("status") != self.mem.get("entities", ident).get("status") or row.get("misses") != self.mem.get("entities", ident).get("misses"):
                 self.mem.upsert("entities", row)

@@ -86,6 +86,24 @@ def test_position_identity_relabels_co_visible_things_and_keeps_tracks(tmp_path)
     assert mem.get("entities", track)["kind"] == "npc"
 
 
+def test_static_tile_moves_only_after_two_agreeing_sightings(tmp_path):
+    mem = Memory(tmp_path)
+    static = mem.observe({"entities": [{"name": "sign", "kind": "object"}]}, "room", 1, {0: (4, 4)})[0]
+    mem.observe({"entities": [{"name": "sign", "kind": "object"}]}, "room", 2, {0: (5, 4)})
+    row = mem.get("entities", static)
+    assert row["tile"] == [4, 4] and row["pending_tile"] == [5, 4]
+    mem.observe({"entities": [{"name": "sign", "kind": "object"}]}, "room", 3, {0: (4, 4)})
+    assert mem.get("entities", static)["tile"] == [4, 4] and "pending_tile" not in mem.get("entities", static)
+    mem.observe({"entities": [{"name": "sign", "kind": "object"}]}, "room", 4, {0: (5, 4)})
+    assert mem.get("entities", static)["tile"] == [4, 4]
+    mem.observe({"entities": [{"name": "sign", "kind": "object"}]}, "room", 5, {0: (5, 4)})
+    assert mem.get("entities", static)["tile"] == [5, 4] and "pending_tile" not in mem.get("entities", static)
+
+    actor = mem.observe({"entities": [{"name": "guard", "kind": "npc"}]}, "room", 6, {0: (0, 0)})[0]
+    mem.observe({"entities": [{"name": "guard", "kind": "npc"}]}, "room", 7, {0: (1, 0)})
+    assert mem.get("entities", actor)["tile"] == [1, 0] and "pending_tile" not in mem.get("entities", actor)
+
+
 def test_normalize_kind_folds_spaces_and_ui_and_marks_transient_kinds():
     assert normalize_kind("dialogue box") == "dialogue_box" and normalize_kind("UI") == "ui_element" and normalize_kind("menu items") == "menu_item"
     assert {"dialogue_box", "ui_element", "menu_item"} <= TRANSIENT

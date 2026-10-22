@@ -324,10 +324,15 @@ class Memory:
             if kind not in row.setdefault("kinds", [row.get("kind", kind)]):
                 row["kinds"] = [*row["kinds"], kind]
             row.update(at=entity.get("at"), last=step, seen=row.get("seen", 0) + 1, status="seen", misses=0)
-            if tile is not None and (_actor(row) or not any(r["id"] != row["id"] and r.get("place") == place and r.get("state") != "merged" and not _actor(r)
-                                                             and r.get("tile") and tuple(r["tile"]) == tuple(tile) and _is_exit(r.get("kind"), r.get("name")) == _is_exit(row.get("kind"), row.get("name"))
-                                                             for r in self.rows("entities"))):  # one static record per tile and category: noise never drifts a record onto another's tile
-                row["tile"] = list(tile)
+            if tile is not None:
+                if _actor(row): row["tile"] = list(tile)
+                elif not row.get("tile") or tuple(row["tile"]) == tuple(tile): row["tile"] = list(tile); row.pop("pending_tile", None)
+                elif row.get("pending_tile") == list(tile):
+                    if not any(r["id"] != row["id"] and r.get("place") == place and r.get("state") != "merged" and not _actor(r)
+                               and r.get("tile") and tuple(r["tile"]) == tuple(tile) and _is_exit(r.get("kind"), r.get("name")) == _is_exit(row.get("kind"), row.get("name"))
+                               for r in self.rows("entities")): row["tile"] = list(tile)
+                    row.pop("pending_tile", None)
+                else: row["pending_tile"] = list(tile)
             result[i] = self.upsert("entities", row)["id"]
             used.add(result[i])
         return result

@@ -522,9 +522,10 @@ def test_evidence_counts_distinct_world_frames_and_restores_seen_entities(tmp_pa
     assert mem.get("entities", ident)["misses"] == 3 and mem.get("entities", ident)["status"] == "stale"
     world.observe_after({"screen": "world", "entities": [player, item]}, Image.new("RGB", (160, 144), "black"), False, "room", (160, 144), 7)
     assert mem.get("entities", ident)["status"] == "seen" and mem.get("entities", ident)["misses"] == 0
-    for step, color in zip(range(8, 12), ("white", "orange", "cyan", "gray")):
+    for step, color in zip(range(8, 14), ("white", "orange", "cyan", "gray", "pink", "brown")):
         world.observe_after({"screen": "world", "entities": [player]}, Image.new("RGB", (160, 144), color), False, "room", (160, 144), step)
-    assert mem.get("entities", ident)["misses"] == 4 and mem.get("entities", ident)["status"] == "gone"
+    assert mem.get("entities", ident)["misses"] == 6 and mem.get("entities", ident)["status"] == "stale"
+    assert any(o["ref"] == f"thing:{ident}" for o in world.options({"screen": "world", "entities": [player]}, "room", {}, 13, targets=[f"thing:{ident}"]))
 
 
 def test_seen_cells_union_the_full_view_rectangles(tmp_path):
