@@ -1369,8 +1369,9 @@ def test_option_pick_drives_grid_through_its_exit(tmp_path, monkeypatch):
     row = loop.step()
 
     assert row["option"]["n"] == 1 and row["option"]["state"] == "new"
-    assert row["option"]["label"].startswith("go to ") and row["option"]["notes"] == ["exit, never crossed"]
+    assert row["option"]["label"].startswith("walk onto ") and row["option"]["notes"] == ["exit, never crossed"]
     assert row["act"]["action"]["thing"] == 2 and row["choice"]["verb"] == "approach" and row["choice"]["target"] == "exit: door"
+    assert row["act"]["action"].get("onto") is True
     assert env.scene == 1
 
 def test_picking_unknown_exit_on_player_tile_sends_outward_key(tmp_path, monkeypatch):

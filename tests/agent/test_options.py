@@ -12,27 +12,36 @@ BUTTONS = f"free buttons: {', '.join(INPUTS)}"
 
 
 def test_uncrossed_exit_rows_offer_each_push_and_keep_tried_facts(tmp_path):
-    from agent.space import DIRS, push_failed
+    from agent.space import DIRS, push_failed, push_dirs
     mem = Memory(tmp_path); room(mem)
     world, per = setup(mem, [{"name": "exit: doorway", "kind": "exit", "at": at(2, 0), "placement": "bottom wall"}])
     rows = [o for o in world.options(per, "room", {}, 2, inputs=INPUTS) if o["ref"] == "exit:2,0"]
-    assert len(rows) == 4 and rows[0]["action"]["push"] == "DOWN" and all(o["state"] == "new" and o["notes"] == ["exit, never crossed"] for o in rows)
-    assert all("(bottom wall)" in o["label"] and f"then press {o['action']['push']}: " in o["label"] and o["intent_key"].endswith(f">{o['action']['push']}") for o in rows)
+    assert len(rows) == 1 and rows[0]["label"] == "walk onto doorway (bottom wall), 2 right"
+    assert rows[0]["action"] == {"thing": 1, "verb": "approach", "onto": True} and rows[0]["notes"] == ["exit, never crossed"]
     push_failed(mem, "room", (2, 0), "LEFT", 3)
     row = mem.get("tiles", "room@2,0"); mem.upsert("tiles", {**row, "blocked": ["RIGHT"]})
     rows = [o for o in world.options(per, "room", {}, 4, inputs=INPUTS) if o["ref"] == "exit:2,0"]
-    assert len(rows) == 4 and [o["state"] for o in rows] == ["new", "new", "failed", "failed"]
-    assert next(o for o in rows if o["action"]["push"] == "LEFT")["notes"][1] == "pressed LEFT: moved, no exit"
-    assert next(o for o in rows if o["action"]["push"] == "RIGHT")["notes"][1] == "pressed RIGHT: blocked"
+    assert len(rows) == 1 and rows[0]["state"] == "new" and rows[0]["action"] == {"thing": 1, "verb": "approach", "onto": True}
+    assert rows[0]["notes"] == ["exit, never crossed", "pressed LEFT: moved, no exit", "pressed RIGHT: blocked"]
+    failed = world.options(per, "room", {rows[0]["intent_key"]: {"n": 1, "why": "route blocked", "step": 4}}, 5, inputs=INPUTS)
+    walk = [o for o in failed if o["ref"] == "exit:2,0"]
+    assert len(walk) == 1 and walk[0]["state"] == "failed" and mem.get("tiles", "room@2,0")["pushed"] == ["LEFT"]
+    world.pos = (2, 0)
+    rows = [o for o in world.options(per, "room", {}, 5, inputs=INPUTS) if o["ref"] == "exit:2,0"]
+    assert [o["action"].get("push") for o in rows] == [*push_dirs(mem, "room", (2, 0), "bottom wall"), "LEFT", "RIGHT"]
+    assert all(o["label"].startswith(f"press {o['action']['push']} here:") and o["intent_key"].endswith(f">{o['action']['push']}") for o in rows)
+    assert rows[0]["notes"][0] == "exit, never crossed"
+    world.pos = (0, 0)
     for direction in DIRS: push_failed(mem, "room", (2, 0), direction, 5)
     rows = [o for o in world.options(per, "room", {}, 6, inputs=INPUTS) if o["ref"] == "exit:2,0"]
-    assert len(rows) == 1 and rows[0]["state"] == "failed" and rows[0]["label"] == "go to doorway, 2 right" and rows[0]["notes"][0].startswith("exit failed: blocked ")
+    assert len(rows) == 1 and rows[0]["state"] == "failed" and rows[0]["label"] == "go to doorway, 2 right"
 
 
 def test_uncrossed_exit_direction_facts_come_from_tile_memory(tmp_path):
     mem = Memory(tmp_path); room(mem)
     world, per = setup(mem, [{"name": "exit: doorway", "kind": "exit", "at": at(2, 2), "placement": "bottom wall"}])
     tile(mem, 3, 2, {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "inferred"})
+    world.pos = (2, 2)
     rows = {o["action"]["push"]: o for o in world.options(per, "room", {}, 2, inputs=INPUTS) if o["ref"] == "exit:2,2"}
     assert rows["DOWN"]["label"].endswith(": toward the bottom wall, onto ground not yet seen")
     assert rows["UP"]["label"].endswith(": back onto floor you walked")
@@ -48,6 +57,9 @@ def test_explicit_push_controls_screen_and_remembered_exit_routes(tmp_path):
     assert not refused and route["push"] == "DOWN"
     target = world.resolve("exit:2,0", {"screen": "world", "entities": []}, "room")
     assert world.plan(target, push="DOWN")[-1]["push"] == "DOWN"
+    assert world.plan(target, onto=True)[-1] == {"place": "room", "dirs": ["RIGHT", "RIGHT"], "push": None, "expect": None, "target": target}
+    _, onto_route, refused = loop._approach_route("room", entity, per["entities"][0], lambda _: (2, 0), "", onto=True)
+    assert not refused and onto_route == {"dirs": ["RIGHT", "RIGHT"], "push": None}
 
 
 def at(dx, dy):  # GridEnv(wander=True) geometry: the player's centre is (88, 72), tiles are 16 px
@@ -286,7 +298,7 @@ def test_two_room_exit_counts_only_departure_crossings(tmp_path):
 def test_perceived_exit_never_crossed_is_unverified_then_refuted_after_two_failed_tries(tmp_path):
     mem = Memory(tmp_path); room(mem)
     world, per = setup(mem, [{"name": "exit: wall", "kind": "exit", "at": at(1, -2)}])  # a floor tile the agent never crossed
-    assert any(o["label"].startswith("go to wall,") and "exit, never crossed" in o["notes"] for o in world.options(per, "room", {}, 3, inputs=INPUTS))
+    assert any(o["label"].startswith("walk onto wall,") and "exit, never crossed" in o["notes"] for o in world.options(per, "room", {}, 3, inputs=INPUTS))
     for x, direction in ((0, "RIGHT"), (2, "LEFT")):
         row = mem.get("tiles", f"room@{x},-2")
         mem.upsert("tiles", {**row, "blocked": [direction]})
@@ -449,7 +461,8 @@ def test_exit_on_the_players_own_tile_is_crossed_by_its_verified_push_or_not_off
     mat = [{"name": "exit: door mat", "kind": "exit", "at": at(0, 0)}]
     mem = Memory(tmp_path / "unverified"); room(mem)
     world, per = setup(mem, mat); world.pos = (0, 0)
-    assert not any(o["tool"] == "approach" and "door mat" in o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS))
+    rows = [o for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["ref"] == "exit:0,0"]
+    assert len(rows) == 4 and all(o["label"].startswith("press ") and " here:" in o["label"] for o in rows)
     mem = Memory(tmp_path / "verified"); room(mem); tile(mem, 0, 0, {"dir": "DOWN", "to": "hall", "arrive": [0, 0], "src": "observed"})
     world, per = setup(mem, mat); world.pos = (0, 0)
     row = next(o for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["ref"] == "exit:0,0")

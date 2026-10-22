@@ -285,10 +285,10 @@ def type_text(ctx: Ctx, text: str) -> SkillResult:
         if not all(press(erase) for _ in name): return _result("blocked", "input limit", inputs, calls, start.frame, frame, blank=blank)
         frame = _settled(ctx).frame
 @_tracked
-def run_affordance(ctx: Ctx, aff: dict, perception: dict, text: str | None = None, *, exit: bool = False, route: dict | None = None) -> SkillResult:
+def run_affordance(ctx: Ctx, aff: dict, perception: dict, text: str | None = None, *, exit: bool = False, route: dict | None = None, onto: bool = False) -> SkillResult:
     verb, target, at = aff.get("verb"), aff.get("target", ""), aff.get("at")
     player = next((e.get("at") for e in perception.get("entities", []) if e.get("kind", "").lower() == "player"), None)
-    if verb == "approach": return _pointer(ctx, at, target) if ctx.env.pointer else approach(ctx, at, player, exit_target=(target or "visible target") if exit else target if target.startswith("exit") else None, route=route)
+    if verb == "approach": return _pointer(ctx, at, target) if ctx.env.pointer else approach(ctx, at, player, exit_target=None if onto else (target or "visible target") if exit else target if target.startswith("exit") else None, route=route)
     if verb == "interact": return _pointer(ctx, at, target) if ctx.env.pointer else interact(ctx, at, player, route=route)
     if verb == "select":
         if not any(str(e.get("name", "")).casefold() == target.casefold() and e.get("selectable") is True for e in perception.get("entities", [])):

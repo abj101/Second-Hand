@@ -207,6 +207,16 @@ def test_exit_route_pushes_once():
     assert result.inputs == 1 and result.moves[0]["dir"] == "RIGHT"
 
 
+def test_onto_approach_does_not_set_exit_target(monkeypatch):
+    from agent import skills as module
+    seen = {}
+    frame = GridEnv().screenshot()
+    monkeypatch.setattr(module, "approach", lambda ctx, at, player, **kw: seen.update(kw) or module.SkillResult("done", "", 0, 0, frame, frame, (0, 0), False))
+    result = run_affordance(ctx(GridEnv()), {"verb": "approach", "target": "exit down", "at": point(GridEnv(), (10, 8))},
+                            {"entities": [{"kind": "player", "at": [.5, .5]}]}, onto=True)
+    assert seen == {"exit_target": None, "route": None} and result.status == "done"
+
+
 def test_blocked_exit_route_push_is_one_recorded_press():
     env = RecordingEnv(); env.player = (9, 8); env.walls.add((10, 8)); env.door = (-5, -5); env.npc = (-6, -6)
     result = run_affordance(ctx(env), {"verb": "approach", "at": point(env, (10, 8))},
