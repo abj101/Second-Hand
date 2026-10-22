@@ -1448,3 +1448,13 @@ def test_tied_exit_names_are_no_ref_but_list_candidates_and_route_through_their_
     assert world.ties("door") == []
     assert world.exit_route("thing:e_exit_stairs") == ("place:p_tiled", "place:p_room")
     assert world.exit_route("thing:e_exit_stairs_2") is None
+
+
+def test_unconfident_thing_label_shows_its_candidates(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room"); world = World(mem, 16)
+    mem.upsert("entities", {"id": "t", "name": "ball", "kind": "object", "place": "room", "tile": [1, 1], "recent_names": ["ball", "sphere", "table", "ball", "sphere"]})
+    assert world.label("thing:t") == "ball (or: sphere, table)"
+    mem.upsert("entities", {"id": "t", "name": "ball", "kind": "object", "place": "room", "tile": [1, 1], "recent_names": ["ball", "ball", "table", "ball", "ball", "sphere"]})
+    assert world.label("thing:t") == "ball"
+    mem.upsert("entities", {"id": "t", "name": "ball", "kind": "object", "place": "room", "tile": [1, 1], "called": "OAK", "recent_names": ["ball", "sphere"]})
+    assert world.label("thing:t") == "OAK"

@@ -1,5 +1,6 @@
 """Spatial state and bookkeeping for the act path."""
 import hashlib, json, re
+from collections import Counter
 from dataclasses import replace
 from itertools import pairwise
 from PIL import ImageDraw
@@ -739,7 +740,10 @@ class World:
         if history.get("called"): return history["called"]
         kind, _, ident = str(ref or "").partition(":")
         if kind == "place": return self.place_label(ident)
-        if kind == "thing": return (self.mem.get("entities", ident) or {}).get("name") or self.place_label(ident)
+        if kind == "thing":
+            row = self.mem.get("entities", ident) or {}; name, votes = row.get("name") or self.place_label(ident), row.get("recent_names", [])
+            others = [n for n, _ in Counter(v for v in votes if v != name).most_common(2)] if votes.count(name) < 3 else []  # unconfident: show the other names it was called lately
+            return f"{name} (or: {', '.join(others)})" if others else name
         if kind == "exit":
             try: tile = tuple(map(int, ident.split(",")))
             except ValueError: tile = None
