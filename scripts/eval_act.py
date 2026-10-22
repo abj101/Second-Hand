@@ -73,6 +73,7 @@ def main(argv=None):
     ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)")
     ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)")
     ap.add_argument("--max-inconclusive",type=int,default=3,help="--om points: maximum inconclusive cases for exit 0")
+    ap.add_argument("--points",type=Path,default=POINTS,help="--om points: decision-point cases file")
     ap.add_argument("--fresh",action="store_true",help="--om cases/outcomes: rebuild the replay snapshots")
     a=ap.parse_args(argv)
     if not a.om: ap.error("choose an --om replay mode")
@@ -850,6 +851,9 @@ def points_checks(case, options, goal="", plan_prompt=None):
     for entry in _point_entries(case.get("note_re")):
         matches = [o for o in options if re.search(entry["label_re"], o.get("label", ""), re.I) and re.search(entry["re"], " ".join(o.get("notes") or []), re.I)]
         rows.append(("note_re", bool(matches), f"{entry['label_re']} notes / {entry['re']}: {len(matches)} match(es)"))
+    for entry in _point_entries(case.get("absent")):
+        matches = [o for o in options if re.search(entry["label_re"], o.get("label", ""), re.I) and re.search(entry.get("tool", ".*"), o.get("tool", ""), re.I)]
+        rows.append(("absent", not matches, f"{entry['tool']} / {entry['label_re']}: {len(matches)} match(es)"))
     for pattern in _point_patterns(case.get("goal_re")):
         line = next((line for line in goal.splitlines() if line.startswith("Goal:")), "")
         rows.append(("goal_re", bool(re.search(pattern, line, re.I)), f"{pattern}: {line}"))
@@ -952,8 +956,8 @@ def _points_case(case, live=False, counter=None, no_cache=False):
     found["ledger_unchanged"] = before == _budget()
     return found
 
-def om_points(live=False, max_inconclusive=3, steps=None, no_cache=False):
-    cases = json.loads(POINTS.read_text(encoding="utf-8"))
+def om_points(live=False, max_inconclusive=3, steps=None, no_cache=False, points=POINTS):
+    cases = json.loads(Path(points).read_text(encoding="utf-8"))
     if steps: cases = [c for c in cases if str(c["step"]) in steps.split(",")]
     counter, before, results = {"requests": 0}, _budget(), []
     for case in cases:
@@ -1001,7 +1005,7 @@ def om_main(a, ap):
         if a.om == "talk": return om_talk(a.run)
         if a.om == "act-size": return om_act_size(a.run, a.from_step)
         if a.om == "reliability": return om_reliability(a.run, a.from_step)
-        if a.om == "points": return om_points(a.live, a.max_inconclusive, a.steps, a.no_cache)
+        if a.om == "points": return om_points(a.live, a.max_inconclusive, a.steps, a.no_cache, a.points)
         return om_branch(a.run, a.from_step, a.pick) if a.om == "branch" else om_truth(a.run, no_names=a.strip_place, exact_exit=a.exact_exit) if a.om == "truth" else om_places() if a.om == "places" else om_outcomes(a.steps, a.fresh) if a.om == "outcomes" else om_cases(a.live, a.steps, a.fresh)
     except OmIncompatible as e: print(f"incompatible old replay / inconclusive: {e}", flush=True); return 2
     except OmAbort as e: print(f"ABORT: {e}", flush=True); return 2

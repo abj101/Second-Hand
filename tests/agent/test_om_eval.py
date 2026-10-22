@@ -308,3 +308,28 @@ def test_points_perception_fallback_uses_last_prior_row_not_future():
         stub.ask("", "", role="perceiver")
     with pytest.raises(eval_act.PointsInconclusive, match="no recorded skill"):
         stub.ask("", "", role="skill")
+
+
+def test_absent_points_check_fails_on_match_and_passes_without_match():
+    case = {"absent": [{"tool": "approach", "label_re": "press here"}]}
+    assert eval_act.points_checks(case, [_opt(1, "approach", "press here")]) == [("absent", False, "approach / press here: 1 match(es)")]
+    assert eval_act.points_checks(case, [_opt(1, "approach", "walk to door")])[0][1]
+
+
+def test_eval_memory_on_a_tiny_run(tmp_path):
+    from scripts import eval_memory
+    run = tmp_path / "run"; memory = run / "memory"; memory.mkdir(parents=True)
+    (memory / "places.jsonl").write_text('{"id":"p","screen":"world"}\n', encoding="utf-8")
+    (memory / "entities.jsonl").write_text(
+        '{"id":"e","place":"p","name":"old","kind":"menu_item","last":1}\n'
+        '{"id":"e","place":"p","name":"new","kind":"menu_item","last":2}\n'
+        '{"id":"f","place":"p","name":"wall","kind":"wall","first":2}\n', encoding="utf-8")
+    rows = [
+        {"step": 1, "screen": "menu", "choice": {"intent": "i"}, "skill": {"failure": {"stage": "route"}}},
+        {"step": 2, "screen": "battle", "choice": {"intent": "i"}, "skill": {"failure": {"stage": "route"}}},
+        {"step": 3, "screen": "world", "choice": {"intent": "i"}, "skill": {"status": "done"}},
+        {"step": 4, "screen": "world", "skill": {"failure": {"stage": "crossing"}}},
+    ]
+    (run / "trace.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    assert eval_memory.analyze(run) == {"world": 2, "modal": 1, "minted": 1, "strict": 1, "loose": 1,
+                                         "route": 2, "crossing": 1, "steps": 4, "unreached": 1, "reached": 1}
