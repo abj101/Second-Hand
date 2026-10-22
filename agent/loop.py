@@ -179,7 +179,7 @@ class Loop:
         recent = [f"step {r.get('step')}: {(r.get('choice') or {}).get('verb', '')} {(r.get('choice') or {}).get('target') or ''} -> {r.get('verdict')}" for r in self.recent[-4:]]
         place_row = self.mem.get("places", place) or {}; here = self.world.here(place)
         if place_row.get("name"): here += " (a name read from the picture)"
-        focus = f"{self.notebook.render_focus(self.world.label, recent=recent)}\nHere: {here}"
+        focus = f"{self.notebook.render_focus(self.world.label, recent=recent)}\nHere: {here}\nGame notes: {' '.join(_load(self.game).get('notes', []))}"
         a = act(self.model, per, focus, options, list(self.env.inputs()), "\n".join(_load(self.game).get("controls", [])))
         picked = next((o for o in options if o["n"] == getattr(a, "option", None)), None)
         own_pick = picked if picked and picked.get("action") == a.action else None  # the option act picked, when its action is the one it answered with

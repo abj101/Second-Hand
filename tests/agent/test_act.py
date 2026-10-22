@@ -68,27 +68,28 @@ def test_type_followup_is_bounded_and_has_no_preferences():
 
 def test_act_shape_and_system_are_generic():
     assert [field.name for field in fields(Act)] == ["action", "text", "why", "option"]
-    assert len(SYSTEM.split(". ")) == 4
     assert all(word not in SYSTEM.casefold() for word in ("pokemon", "oak", "mom", "rug"))
+    assert len(SYSTEM) <= 1200
 
 
-def test_default_choices_clause_is_sent_and_changes_act_cache_key():
+def test_default_choices_are_in_focus_and_change_act_cache_key():
     from agent.model import Ollama
-    _, model = run({"why": "choose the offered name", "i": 1})
-    clause = "; pick a preset or default name or setting when offered instead of typing your own"
+    focus = "Goal: choose a name\nGame notes: When asked for a name, prefer a preset or default name over typing one."
+    model = Queue({"why": "choose the offered name", "i": 1})
+    act(model, PER, focus, OPTIONS, BUTTONS, "A: confirm")
     system, user, images, schema, role = model.calls[0]
-    assert clause in system and role == "act"
+    assert "Game notes: When asked for a name" in user and role == "act"
     cache = Ollama("test")
-    assert cache._key(system, user, images, schema) != cache._key(system.replace(clause, ""), user, images, schema)
+    assert cache._key(system, user, images, schema) != cache._key(system, user.replace("Game notes:", "Other notes:"), images, schema)
 
 
 def test_system_wall_clause_stays_in_the_third_sentence():
     assert "; to go through an exit on a wall, step onto it and press toward that wall" in SYSTEM.split(". ")[2]
 
 
-def test_system_declines_optional_naming_offers():
-    assert "answer no when asked whether to give or change a name or nickname" in SYSTEM and "end key" in SYSTEM
-    assert len(SYSTEM.split(". ")) == 4 and len(SYSTEM) <= 2000
+def test_system_omits_game_specific_naming_rules():
+    assert all(word not in SYSTEM.casefold() for word in ("nickname", "name keyboard", "end key"))
+    assert len(SYSTEM) <= 1200
 
 
 def test_world_menu_headers_mark_state_changes_and_modal_menus_get_none():

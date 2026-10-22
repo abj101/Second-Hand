@@ -1484,6 +1484,7 @@ def test_act_focus_marks_picture_names_and_uses_recent_trace(tmp_path, monkeypat
     monkeypatch.setattr(module, "perceive", lambda *_: (per, reply(per)))
     monkeypatch.setattr(module, "act", lambda model, per, focus, options, inputs, controls:
                         (seen.update(focus=focus) or SimpleNamespace(action=None, why="", text=None, option=None)))
+    monkeypatch.setattr(module, "_load", lambda _game: {"notes": ["When asked for a name, prefer a preset or default name over typing one.", "When asked whether to give a nickname, answer no.", "To leave a name keyboard, choose its end key."]})
     loop = Loop(GridEnv(), StubModel([]), mem, "grid"); loop.mem.match_place = lambda *a, **k: "p_hall"
     loop.recent = [{"step":n, "choice":{"verb":"approach", "target":"door"}, "verdict":"blocked"} for n in range(1, 7)]
 
@@ -1491,6 +1492,7 @@ def test_act_focus_marks_picture_names_and_uses_recent_trace(tmp_path, monkeypat
 
     assert ("(a name read from the picture)" in seen["focus"]) is marked
     assert "- step 3: approach door -> blocked" in seen["focus"] and "step 2: approach door" not in seen["focus"]
+    assert "Game notes: When asked for a name, prefer a preset or default name over typing one. When asked whether to give a nickname, answer no. To leave a name keyboard, choose its end key." in seen["focus"]
 
 
 def test_fail_key_merges_rewordings(tmp_path):
