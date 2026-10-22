@@ -15,6 +15,33 @@ STATIC_GATE = 1
 CLAIM_TIERS = {"text": 0, "said": 1}
 
 
+class Looks:
+    def __init__(self, path: Path, run: str):
+        self.path, self.run, self.rows, self.counts = Path(path), run, {}, {}
+        if self.path.exists():
+            with self.path.open(encoding="utf-8") as stream:
+                for line in stream:
+                    try:
+                        row = json.loads(line)
+                        if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"] not in self.rows:
+                            self.rows[row["id"]] = row; self._count(row)
+                    except (json.JSONDecodeError, UnicodeError): continue
+    def add(self, look, label, place, cell, step):
+        ident = f"{look}|{self.run}|{place}@{cell[0]},{cell[1]}|{label}"
+        if ident in self.rows: return self.rows[ident]
+        row = {"id": ident, "look": look, "label": label, "run": self.run, "place": place, "cell": list(cell), "step": step}
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as stream: stream.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+        self.rows[ident] = row
+        self._count(row)
+        return row
+    def _count(self, row):
+        counts = self.counts.setdefault(row["look"], set()); counts.add(row["label"])
+    def says(self, look):
+        labels = self.counts.get(look, ())
+        return next(iter(labels)) if len(labels) == 1 else "mixed" if labels else None
+
+
 def normalize_kind(kind: str) -> str:
     value = "_".join(str(kind or "").casefold().split(":", 1)[0].split())  # "dialogue box" == "dialogue_box"
     value = value[:-1] if value.endswith("s") else value
@@ -98,6 +125,7 @@ class Memory:
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self.looks = None
         self._data: dict[str, dict[str, dict]] = {}
         for path in self.root.glob("*.jsonl"):
             store = path.stem
@@ -116,6 +144,11 @@ class Memory:
 
     def rows(self, store: str) -> list[dict]:
         return list(self._data.get(store, {}).values())
+
+    def learn_look(self, place, cell, label, step):
+        if self.looks is None: return
+        row = self.get("looks", f"{place}@{cell[0]},{cell[1]}")
+        if row: self.looks.add(row["look"], label, place, cell, step)
 
     def upsert(self, store: str, row: dict) -> dict:
         if not re.fullmatch(r"[\w.-]+", store) or not isinstance(row.get("id"), str):

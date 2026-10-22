@@ -1,6 +1,28 @@
 import json
 
-from agent.memory import TRANSIENT, Memory, conf, normalize_kind
+from agent.memory import Looks, TRANSIENT, Memory, conf, normalize_kind
+
+
+def test_looks_load_deduplicates_and_reports_mixed_evidence(tmp_path):
+    path = tmp_path / "looks.jsonl"
+    row = {"id": "a|r|room@1,2|wall", "look": "a", "label": "wall", "run": "r", "place": "room", "cell": [1, 2], "step": 2}
+    path.write_text(json.dumps(row) + "\n" + json.dumps(row) + "\n", encoding="utf-8")
+    looks = Looks(path, "next")
+    assert looks.says("a") == "wall" and len(looks.rows) == 1
+    looks.add("a", "wall", "room", (1, 2), 3)
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 3
+    looks.add("a", "floor", "room", (2, 2), 4)
+    assert looks.says("a") == "mixed" and looks.says("missing") is None
+
+
+def test_learn_look_uses_only_a_seen_cell(tmp_path):
+    mem = Memory(tmp_path / "memory"); mem.looks = Looks(tmp_path / "game.jsonl", "run")
+    mem.learn_look("room", (1, 2), "wall", 1)
+    assert not (tmp_path / "game.jsonl").exists()
+    mem.upsert("looks", {"id": "room@1,2", "place": "room", "x": 1, "y": 2, "look": "same", "step": 1})
+    mem.learn_look("room", (1, 2), "wall", 2)
+    mem.learn_look("room", (1, 2), "floor", 3)
+    assert mem.looks.says("same") == "mixed"
 
 
 def test_exit_keeps_latest_wall_placement(tmp_path):

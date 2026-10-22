@@ -1,6 +1,6 @@
 import pytest
 
-from agent.memory import Memory
+from agent.memory import Looks, Memory
 from agent.space import DIRS, exit_to, fold, frontier, mark_exit, outward, route, tile_of
 from agent.world import World
 
@@ -78,6 +78,29 @@ def test_route_detours_around_wall_and_allows_unknown_goal(tmp_path):
     assert route(mem, "hall", (0, 0), (2, 0))[0] != "RIGHT"
     mem.get("tiles", "hall@0,0")["blocked"] = ["RIGHT", "UP", "DOWN", "LEFT"]
     assert route(mem, "hall", (0, 0), (2, 0)) is None
+
+
+def test_same_look_bump_avoids_wall_and_walking_makes_it_mixed(tmp_path):
+    mem = Memory(tmp_path / "memory"); mem.looks = Looks(tmp_path / "game.jsonl", "run")
+    for x in range(3):
+        for y in (-1, 0, 1): tile(mem, "hall", (x, y), floor=None if (x, y) == (1, 0) else True)
+    mem.upsert("looks", {"id": "hall@1,0", "place": "hall", "x": 1, "y": 0, "look": "wall-look", "step": 1})
+    mem.upsert("looks", {"id": "hall@1,1", "place": "hall", "x": 1, "y": 1, "look": "wall-look", "step": 1})
+    mem.learn_look("hall", (1, 0), "wall", 2)
+    assert route(mem, "hall", (0, 0), (2, 0))[0] != "RIGHT"
+    mem.learn_look("hall", (1, 1), "floor", 3)
+    assert mem.looks.says("wall-look") == "mixed"
+    assert route(mem, "hall", (0, 0), (2, 0))[0] == "RIGHT"
+
+
+def test_look_wall_fallback_keeps_a_route_when_it_is_the_only_corridor(tmp_path):
+    mem = Memory(tmp_path / "memory"); mem.looks = Looks(tmp_path / "game.jsonl", "run")
+    for x in range(-1, 4):
+        for y in range(-1, 2): tile(mem, "hall", (x, y), floor=None if y == 0 and 0 <= x <= 2 and x != 1 else False)
+    tile(mem, "hall", (1, 0), floor=None)
+    mem.upsert("looks", {"id": "hall@1,0", "place": "hall", "x": 1, "y": 0, "look": "wall-look", "step": 1})
+    mem.learn_look("hall", (1, 0), "wall", 2)
+    assert route(mem, "hall", (0, 0), (2, 0)) == ["RIGHT", "RIGHT"]
 
 
 def test_outward_and_frontier_skip_pushed_and_blocked(tmp_path):

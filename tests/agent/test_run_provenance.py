@@ -212,7 +212,7 @@ def test_resume_ignores_checkpoint_modes_and_records_only_runtime_mode(tmp_path,
     assert run_agent.main(["--headless", "--resume", "--steps", "1", "--max-calls", "5", "--run", str(run)]) == 0
 
     kwargs, loop = built[-1]
-    assert kwargs == {} and loop.provenance_incomplete is False and loop.invocation == 1
+    assert kwargs == {"looks": Path("runs/looks/pokemon_red.jsonl")} and loop.provenance_incomplete is False and loop.invocation == 1
     manifest = json.loads((run / "manifest.jsonl").read_text(encoding="utf-8").splitlines()[-1])
     assert manifest["modes"] == {"headless": True} and "decide" not in manifest["modes"] and "act_text" not in manifest["modes"] and manifest["provenance"] == "complete"
 

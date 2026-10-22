@@ -15,8 +15,10 @@ def fold(mem, place, pos, moves, tile_px, step, actors: frozenset[tuple[int, int
         if (shift == (0, 0) or shift == 0) and (here[0] + DIRS[direction][0], here[1] + DIRS[direction][1]) in actors: continue
         row = _get(mem, place, here) or _new(place, here, step); before = dict(row, blocked=list(row["blocked"]), pushed=list(row["pushed"]))
         if row["floor"] is not True: row["floor"] = True; row["step"] = step
+        mem.learn_look(place, here, "floor", step)
         if shift == (0, 0) or shift == 0:
             if direction not in row["blocked"]: row["blocked"].append(direction); row["step"] = step
+            dx, dy = DIRS[direction]; mem.learn_look(place, (here[0] + dx, here[1] + dy), "wall", step)
             _save(mem, row, before); continue
         if direction in row["blocked"]: row["blocked"].remove(direction)
         sx, sy = DIRS[direction]; shift = (shift, 0) if isinstance(shift, int) and sx else (0, shift) if isinstance(shift, int) else shift
@@ -25,6 +27,7 @@ def fold(mem, place, pos, moves, tile_px, step, actors: frozenset[tuple[int, int
             here = (here[0] + sx, here[1] + sy); floor = _get(mem, place, here) or _new(place, here, step)
             old = dict(floor, blocked=list(floor["blocked"]), pushed=list(floor["pushed"]))
             if floor["floor"] is not True: floor["floor"] = True; floor["step"] = step
+            mem.learn_look(place, here, "floor", step)
             _save(mem, floor, old)
         _save(mem, row, before)
     return here
@@ -41,6 +44,12 @@ def route(mem, place, start, goal, strict=True, *, occupied=frozenset()):  # str
     from agent.memory import ACTOR_KINDS, TRANSIENT, _is_exit, normalize_kind
     if goal in occupied: return None
     static = {tuple(r["tile"]) for r in mem.rows("entities") if r.get("place") == place and r.get("tile") and r.get("state") != "merged" and r.get("status") != "gone" and normalize_kind(r.get("kind")) not in ACTOR_KINDS | TRANSIENT and not _is_exit(r.get("kind"), r.get("name"))} if strict else set()
+    if strict:
+        for look in mem.rows("looks"):
+            at = (look["x"], look["y"]); tile = _get(mem, place, at) or {}
+            store = getattr(mem, "looks", None)
+            if look.get("place") == place and at != goal and tile.get("floor") is not True and not tile.get("exit") and store and store.says(look["look"]) == "wall": static.add(at)
+    # ponytail: O(cells) look scan per call; cache per step if routing gets slow.
     rows = [r for r in mem.rows("tiles") if r.get("place") == place]; xs = [start[0], goal[0], *(r["x"] for r in rows)]; ys = [start[1], goal[1], *(r["y"] for r in rows)]
     bounds = (min(xs) - 1, max(xs) + 1, min(ys) - 1, max(ys) + 1); queue = deque([(start, [])]); seen = {start}
     while queue:

@@ -1328,6 +1328,34 @@ def test_record_view_counts_only_new_seen_cells(tmp_path):
     assert world.novel == 0
 
 
+def test_record_view_files_visible_cell_looks_only_when_enabled(tmp_path):
+    from PIL import Image
+    from agent.memory import Looks
+
+    mem = Memory(tmp_path / "memory"); place(mem, "room", "room")
+    frame = Image.new("RGB", (160, 144), "black")
+    world = World(mem, 16); world.mem.looks = Looks(tmp_path / "game.jsonl", "run")
+    world._record_view({"screen": "world", "entities": []}, frame, False, "room", (160, 144), 1, [.5, .5], {})
+    rows = mem.rows("looks")
+    assert len(rows) == 89 and all(len(r["look"]) == 16 for r in rows) and mem.get("looks", "room@0,0") is None
+
+    plain = Memory(tmp_path / "plain"); place(plain, "room", "room")
+    World(plain, 16)._record_view({"screen": "world", "entities": []}, frame, False, "room", (160, 144), 1, [.5, .5], {})
+    assert not plain.rows("looks") and not (tmp_path / "plain" / "looks.jsonl").exists()
+
+
+def test_world_view_marks_a_learned_wall_look_with_x(tmp_path):
+    from agent.memory import Looks
+
+    mem = Memory(tmp_path / "memory"); place(mem, "room", "room")
+    mem.looks = Looks(tmp_path / "game.jsonl", "run")
+    mem.upsert("looks", {"id": "room@1,0", "place": "room", "x": 1, "y": 0, "look": "wall-look", "step": 1})
+    mem.looks.add("wall-look", "wall", "room", (1, 0), 1)
+    world = World(mem, 16); world.current_place, world.pos = "room", (0, 0)
+    view = world.view("", "room")
+    assert "x" in view and ", x looks like a wall" in view
+
+
 SYMMETRIES = [lambda x, y: (x, y), lambda x, y: (y, x), lambda x, y: (-x, y), lambda x, y: (x, -y),
               lambda x, y: (-x, -y), lambda x, y: (-y, x), lambda x, y: (y, -x), lambda x, y: (-y, -x)]
 

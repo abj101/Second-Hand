@@ -24,8 +24,11 @@ def failure_cause(intent, label, stage, reason, tile=None, blocker=None):
     elif stage == "crossing": text += "; crossing attempted"
     return text
 class Loop:
-    def __init__(self, env, model, mem, game):
+    def __init__(self, env, model, mem, game, looks=None):
         self.env, self.model, self.mem, self.game = env, model, mem, game
+        if looks is not None:
+            from agent.memory import Looks
+            self.mem.looks = Looks(looks, run=self.mem.root.parent.name)
         self.flags = []
         self.trace = Trace(mem.root.parent / "trace.jsonl"); self.step_no = 0
         self.place = None; self.prev = None; self.tile_px = getattr(env, "tile_px", None)

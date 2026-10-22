@@ -285,6 +285,15 @@ class World:
         if rect:
             x0, y0, x1, y1 = rect
             mx0, my0, mx1, my1 = x0 + 1, y0 + 1, x1 - 1, y1 - 1
+            if self.mem.looks is not None and frame is not None and world_screen and not modal_screen and self.tile_px:
+                # ponytail: assumes the pixel grid starts at (0,0) when settled; V0 matched all 1,083 frames, but scrolling-phase games need tracker phase.
+                gray, t = frame.convert("L"), self.tile_px
+                for x in range(x0, x1 + 1):
+                    for y in range(y0, y1 + 1):
+                        if (x, y) == tuple(self.pos) or (x, y) in self.actor_tiles: continue
+                        ident = f"{place}@{x},{y}"; look = hashlib.blake2b(gray.crop(((x - x0) * t, (y - y0) * t, (x - x0 + 1) * t, (y - y0 + 1) * t)).tobytes(), digest_size=8).hexdigest()
+                        old = self.mem.get("looks", ident)
+                        if not old or old.get("look") != look: self.mem.upsert("looks", {"id": ident, "place": place, "x": x, "y": y, "look": look, "step": step})
         matched = set(ids.values()) if place in live else set()
         for row in self.mem.rows("entities"):
             if row.get("place") not in live: continue
@@ -905,6 +914,7 @@ class World:
             legend.append(legend_line)
             legend_refs[symbol] = f"thing:{(rec or {}).get('ident') or e['id']}"
             legend_lines[symbol] = legend_line
+        has_look_wall = False
         for y in range(y0, y1 + 1):
             row = []
             for x in range(x0, x1 + 1):
@@ -915,10 +925,13 @@ class World:
                         source = cells.get((x - dx, y - dy), {})
                         if d in source.get("blocked", []):
                             glyph = "#"; break
-                if glyph is None: glyph = "." if tile.get("floor") is True else "," if f"{x},{y}" in seen_cells else " "
+                if glyph is None:
+                    look = self.mem.get("looks", f"{place}@{x},{y}"); store = getattr(self.mem, "looks", None); learned = store.says(look["look"]) if look and store else None
+                    if tile.get("floor") is not True and learned == "wall": glyph = "x"; has_look_wall = True
+                    else: glyph = "." if tile.get("floor") is True else "," if f"{x},{y}" in seen_cells else " "
                 row.append(glyph)
             lines.append("".join(row))
-        lines.append("Map: . walked, , seen, # blocked side, E exit already used, @ you; letters mark things and landmarks (kind exit = seen, not yet used)")
+        lines.append("Map: . walked, , seen, x looks like a wall, # blocked side, E exit already used, @ you; letters mark things and landmarks (kind exit = seen, not yet used)" if has_look_wall else "Map: . walked, , seen, # blocked side, E exit already used, @ you; letters mark things and landmarks (kind exit = seen, not yet used)")
         far = self.beyond(place)  # ponytail: no screen things here; view's live set is navigable places, so a through exit missing from the table prints nothing
         for e in exit_rows:  # beyond suffix on this place's exits only; other places' exits show status alone
             lines.append(f"E at ({e['tile'][0]},{e['tile'][1]}) {exit_text(e, far['exits'].get(e['tile']))}")
