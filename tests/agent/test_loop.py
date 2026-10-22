@@ -2093,6 +2093,21 @@ def test_flagged_menu_choice_picked_by_number_reads_menu_once_and_selects(tmp_pa
     assert row["skill"]["status"] == "done" and row["skill"]["calls"] == 1
 
 
+def test_selected_non_world_item_records_new_screen_reply(tmp_path, monkeypatch):
+    from agent import loop as module
+    env = Keys(); menu = {"screen": "battle", "text": ["SCORE 01 READY"], "entities": [
+        {"name": "RUN", "kind": "menu_item", "at": [.3, .4], "selectable": True},
+    ]}; after = {**menu, "text": ["SCORE 01", "Choice unavailable."]}
+    model = Roles([pick_reply(1), reply({"items": ["RUN"], "cursor": 0, "layout": "vertical"})])
+    loop = Loop(env, model, Memory(tmp_path / "memory"), "grid")
+    seen = iter([menu, after])
+    monkeypatch.setattr(loop, "_see", lambda *_a, **_k: (next(seen), "frame", False, []))
+    row = loop.step()
+    screen = loop.mem.get("screens", "battle|RUN")
+    assert row["choice"]["verb"] == "select" and row["choice"]["target"] == "RUN"
+    assert screen["replies"]["RUN"] == [{"step": 1, "text": "Choice unavailable."}]
+
+
 def chosen(action, expect="screen_changes", why="test"):
     return SimpleNamespace(place="", ops=[], action=action, expect=expect, why=why, text=None)
 

@@ -126,6 +126,22 @@ class Memory:
             stream.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
         return row
 
+    @staticmethod
+    def screen_id(per):
+        items = [str(e["name"]) for e in per.get("entities", []) if e.get("name") and e.get("selectable") is True]
+        return f"{per.get('screen')}|{'|'.join(sorted(items))}" if per.get("screen") != "world" and items else None
+    def observe_screen(self, per, step):
+        ident = self.screen_id(per)
+        if not ident: return None
+        items = [str(e["name"]) for e in per.get("entities", []) if e.get("name") and e.get("selectable") is True]
+        row = self.get("screens", ident) or {"id": ident, "screen": per["screen"], "items": items, "seen": 0, "first": step, "replies": {}}
+        return self.upsert("screens", {**row, "items": items, "seen": row["seen"] + 1, "last": step})
+    def screen_reply(self, ident, item, step, text):
+        row = self.get("screens", ident)
+        if not row or item not in row["items"]: return
+        replies = dict(row.get("replies", {})); replies[item] = [*replies.get(item, []), {"step": step, "text": str(text)[:80]}][-3:]
+        self.upsert("screens", {**row, "replies": replies})
+
     def call(self, entity_id: str, name: str, step: int, tier: str = "said", key: str | None = None) -> dict | None:
         """A name from the game, ranked: "text" (the planner read it in game text) < "said" (the game named the thing when the agent interacted with it).
         A claim of the same or a higher tier replaces the old one; a lower tier never does. A `called` with no `called_src` counts as said."""

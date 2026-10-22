@@ -1056,10 +1056,16 @@ class World:
         free_label = "free buttons" + (f": {', '.join(inputs)}" if inputs else "")
         if modal:
             choices = [(i, e) for i, e in enumerate(ents) if e.get("name") and e.get("selectable") is True and normalize_kind(e.get("kind")) not in FURNITURE | TYPING]
-            rows = [option("select", f"select {e['name']}", {"thing": i, "verb": "select"}, "select", e["name"], thing_ref(self.entity_ids.get(i)))
-                    for i, e in sorted(choices, key=lambda ie: _yx(ie[1].get("at"), ie[1]["name"]))]
+            screen = self.mem.get("screens", self.mem.screen_id(per)) or {}
+            rows = []
+            for i, e in sorted(choices, key=lambda ie: _yx(ie[1].get("at"), ie[1]["name"])):
+                row = option("select", f"select {e['name']}", {"thing": i, "verb": "select"}, "select", e["name"], thing_ref(self.entity_ids.get(i)))
+                if (replies := screen.get("replies", {}).get(e["name"])): row["notes"].append(f'chosen step {replies[-1]["step"]}: "{replies[-1]["text"]}"')
+                rows.append(row)
             rows += [option("advance", "advance", {"verb": "advance"}, "advance", "", "modal:advance"), option("cancel", "cancel", {"verb": "cancel"}, "cancel", "", "modal:cancel")]
-            if any(normalize_kind(e.get("kind")) in TYPING for e in ents): rows.append(option("type", "type text into the field", {"verb": "type"}, "type", "", "modal:type"))
+            if any(normalize_kind(e.get("kind")) in TYPING for e in ents):
+                rows.append(option("type", "type text into the field", {"verb": "type"}, "type", "", "modal:type"))
+                rows[-1]["notes"].append("typing costs about 3 presses per letter")
             rows.append(free(free_label))
         else:
             on = set(self.entity_ids.get(i) for i in range(len(ents))) - {None}
