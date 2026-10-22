@@ -239,6 +239,7 @@ class Memory:
         entities, result, used = [], {}, set()
         for i, entity in enumerate(perception.get("entities", [])):
             name, kind = str(entity.get("name", "")).strip(), str(entity.get("kind", "unknown"))
+            if kind.casefold() == "player": kind = "unknown"
             if not name:
                 continue
             nk, at = normalize_kind(kind), entity.get("at")
@@ -321,8 +322,20 @@ class Memory:
                                         "near": near}) + "\n")
             elif name != row.get("name") and name not in row.get("aliases", []):
                 row["aliases"] = [*row.get("aliases", []), name]
+            if str(row.get("kind", "")).casefold() == "player": row["kind"] = "unknown"
             if kind not in row.setdefault("kinds", [row.get("kind", kind)]):
                 row["kinds"] = [*row["kinds"], kind]
+            recent_names = [*row.get("recent_names", []), name][-6:]
+            row["recent_names"] = recent_names
+            shown_name = max(recent_names, key=recent_names.count)
+            if recent_names.count(shown_name) >= 3 and shown_name != row.get("name"):
+                if row.get("name") and row["name"] not in row.get("aliases", []): row["aliases"] = [*row.get("aliases", []), row["name"]]
+                row["name"] = shown_name
+            recent_kinds = ["unknown" if str(k).casefold() == "player" else k for k in row.get("recent_kinds", [])]
+            recent_kinds = [*recent_kinds, kind][-6:]
+            row["recent_kinds"] = recent_kinds
+            shown_kind = max(recent_kinds, key=recent_kinds.count)
+            if recent_kinds.count(shown_kind) >= 3: row["kind"] = shown_kind
             row.update(at=entity.get("at"), last=step, seen=row.get("seen", 0) + 1, status="seen", misses=0)
             if tile is not None:
                 if _actor(row): row["tile"] = list(tile)

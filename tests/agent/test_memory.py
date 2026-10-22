@@ -104,6 +104,54 @@ def test_static_tile_moves_only_after_two_agreeing_sightings(tmp_path):
     assert mem.get("entities", actor)["tile"] == [1, 0] and "pending_tile" not in mem.get("entities", actor)
 
 
+def test_entity_names_and_kinds_follow_recent_majority(tmp_path):
+    mem = Memory(tmp_path)
+    frame = lambda name: {"entities": [{"name": name, "kind": "npc"}]}
+    ident = mem.observe(frame("guard"), "room", 1, {0: (2, 2)})[0]
+    for step, name in enumerate(("odd label", "guard", "guard", "guard", "guard"), 2):
+        assert mem.observe(frame(name), "room", step, {0: (2, 2)})[0] == ident
+    row = mem.get("entities", ident)
+    assert row["recent_names"] == ["guard", "odd label", "guard", "guard", "guard", "guard"]
+    assert row["name"] == "guard" and "odd label" in row["aliases"]
+
+    next_mem = Memory(tmp_path / "switch")
+    ident = next_mem.observe(frame("old name"), "room", 1, {0: (2, 2)})[0]
+    next_mem.call(ident, "Game name", 1)
+    for step, name in enumerate(("new name", "old name", "new name", "new name", "new name"), 2):
+        next_mem.observe(frame(name), "room", step, {0: (2, 2)})
+    row = next_mem.get("entities", ident)
+    assert row["name"] == "new name" and {"old name", "new name"} <= set(row["aliases"])
+    assert row["called"] == "Game name" and row["recent_names"] == ["old name", "new name", "old name", "new name", "new name", "new name"]
+
+    kinds = Memory(tmp_path / "kinds")
+    per = lambda kind: {"entities": [{"name": "sign", "kind": kind}]}
+    ident = kinds.observe(per("object"), "room", 1, {0: (2, 2)})[0]
+    for step, kind in enumerate(("furniture", "object", "furniture"), 2):
+        kinds.observe(per(kind), "room", step, {0: (2, 2)})
+    assert kinds.get("entities", ident)["kind"] == "object"
+    kinds.observe(per("furniture"), "room", 5, {0: (2, 2)})
+    assert kinds.get("entities", ident)["kind"] == "furniture"
+    for step in range(7, 13): kinds.observe(per("object"), "room", step, {0: (2, 2)})
+    assert kinds.get("entities", ident)["kind"] == "object" and kinds.get("entities", ident)["recent_kinds"] == ["object"] * 6
+
+
+def test_nonself_player_kind_is_unknown_and_old_rows_still_update(tmp_path):
+    mem = Memory(tmp_path)
+    frame = lambda kind: {"entities": [{"name": "poster", "kind": kind}]}
+    ident = mem.observe(frame("player"), "room", 1, {0: (2, 2)})[0]
+    for step in range(2, 7): mem.observe(frame("player"), "room", step, {0: (2, 2)})
+    row = mem.get("entities", ident)
+    assert row["kind"] == "unknown" and "player" not in row["recent_kinds"]
+
+    old = Memory(tmp_path / "old")
+    ident = old.observe({"entities": [{"name": "crate", "kind": "object"}]}, "room", 1, {0: (3, 3)})[0]
+    row = old.get("entities", ident); row.pop("recent_names"); row.pop("recent_kinds"); old.upsert("entities", row)
+    assert old.observe({"entities": [{"name": "box", "kind": "object"}]}, "room", 2, {0: (3, 3)})[0] == ident
+    row = old.get("entities", ident)
+    assert row["name"] == "crate" and row["aliases"] == ["box"] and row["seen"] == 2
+    assert row["recent_names"] == ["box"] and row["recent_kinds"] == ["object"]
+
+
 def test_normalize_kind_folds_spaces_and_ui_and_marks_transient_kinds():
     assert normalize_kind("dialogue box") == "dialogue_box" and normalize_kind("UI") == "ui_element" and normalize_kind("menu items") == "menu_item"
     assert {"dialogue_box", "ui_element", "menu_item"} <= TRANSIENT
