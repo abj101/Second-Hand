@@ -1,0 +1,95 @@
+[
+  {
+    "run": "m1_r3b_live_150_20261021_150630",
+    "step": 18,
+    "checkpoint": 0,
+    "truth": {"map": 38, "x": 3, "y": 6},
+    "situation": "Player name menu",
+    "right": [{"tool": "select", "label_re": "^select RED$"}],
+    "wrong": [{"tool": "select", "label_re": "^select NEW NAME$"}]
+  },
+  {
+    "run": "m1_r3b_live_150_20261021_150630",
+    "step": 24,
+    "checkpoint": 0,
+    "truth": {"map": 38, "x": 3, "y": 6},
+    "situation": "Rival name menu",
+    "right": [{"tool": "select", "label_re": "^select BLUE$"}],
+    "wrong": [{"tool": "select", "label_re": "^select NEW NAME$"}]
+  },
+  {
+    "run": "m1_r3b_live_150_20261021_150630",
+    "step": 36,
+    "checkpoint": 25,
+    "truth": {"map": 38, "x": 2, "y": 4},
+    "situation": "2F, leave by the stairs",
+    "right": [{"tool": "approach|go_to", "label_re": "stairs"}],
+    "wrong": []
+  },
+  {
+    "run": "m1_r3b_live_150_20261021_150630",
+    "step": 51,
+    "checkpoint": 50,
+    "truth": {"map": 37, "x": 6, "y": 1},
+    "situation": "1F, leave by the door mat or rug toward map 0",
+    "right": [{"tool": "approach|go_to", "label_re": "door mat|rug|exit"}],
+    "wrong": []
+  },
+  {
+    "run": "m1_r3b_live_150_20261021_150630",
+    "step": 112,
+    "checkpoint": 100,
+    "truth": {"map": 40, "x": 4, "y": 2},
+    "situation": "Lab, after OAK asks which POKéMON to choose",
+    "right": [{"tool": "interact", "label_re": "display case|ball|sphere|table"}],
+    "wrong": [{"tool": "interact", "label_re": "talk to OAK"}],
+    "plan_re": "BALL"
+  },
+  {
+    "run": "m1_r3b_live_150_20261021_150630",
+    "step": 139,
+    "checkpoint": 125,
+    "truth": {"map": 40, "x": 4, "y": 5},
+    "situation": "Lab talk loop, repeated OAK interaction",
+    "section": [{"label_re": "talk to OAK", "state": "failed"}],
+    "note_re": [{"label_re": "talk to OAK", "re": "same reply"}],
+    "right": [],
+    "wrong": [{"tool": "interact", "label_re": "talk to OAK"}]
+  },
+  {
+    "run": "m1_r4_resume100",
+    "step": 119,
+    "checkpoint": 100,
+    "truth": {"map": 40, "x": 7, "y": 4},
+    "situation": "Lab, ball reachable",
+    "right": [{"tool": "interact", "label_re": "ball"}],
+    "wrong": []
+  },
+  {
+    "run": "m1_r4_resume100",
+    "step": 126,
+    "checkpoint": 125,
+    "truth": {"map": 40, "x": 7, "y": 4},
+    "situation": "Give a nickname?",
+    "right": [{"tool": "select", "label_re": "^select NO$"}],
+    "wrong": [{"tool": "select", "label_re": "^select YES$"}]
+  },
+  {
+    "run": "m1_w8_live_150",
+    "step": 114,
+    "checkpoint": 100,
+    "truth": {"map": 40, "x": 7, "y": 4},
+    "situation": "Name keyboard; choose its ED end key",
+    "right": [{"tool": "select", "label_re": "ED|END|OK"}],
+    "wrong": [{"tool": ".*", "label_re": "select [A-Z]$|advance"}]
+  },
+  {
+    "run": "m1_r4_resume100",
+    "step": 136,
+    "checkpoint": 125,
+    "truth": {"map": 40, "x": 9, "y": 5},
+    "situation": "After the starter, leave by the doorway toward map 0",
+    "right": [{"tool": "approach|go_to", "label_re": "doorway|exit"}],
+    "wrong": []
+  }
+]
