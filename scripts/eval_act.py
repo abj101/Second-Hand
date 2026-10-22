@@ -69,6 +69,7 @@ def main(argv=None):
     ap.add_argument("--pick",help="--om branch: text of the option label to pick")
     ap.add_argument("--om",choices=("places","cases","outcomes","truth","branch","talk","reliability","act-size","points"),help="OM replay eval; points: step-keyed replay at recorded decision points")
     ap.add_argument("--live",action="store_true",help="--om cases: spend the requests")
+    ap.add_argument("--no-cache",action="store_true",help="--om points --live: make fresh model requests")
     ap.add_argument("--dry",action="store_true",help="--om cases: no requests (the default)")
     ap.add_argument("--steps",help="--om cases: comma-separated case steps to run (default all)")
     ap.add_argument("--max-inconclusive",type=int,default=3,help="--om points: maximum inconclusive cases for exit 0")
@@ -791,7 +792,8 @@ class PointsStub:
     def __init__(self, calls, trace, target, found):
         self.responses, self.trace, self.target, self.found = defaultdict(list), trace, target, found
         self.cursor, self.plan_extra, self.loop, self.options = defaultdict(int), 0, None, []
-        self.calls = self.seq = 0
+        self.calls = self.seq = self.perception_fallback = 0
+        self.perceptions = [r for r in calls if r.get("role") == "perceiver"]
         for row in calls: self.responses[(row.get("step"), row.get("role"))].append(row)
     def ask(self, system, user, images=(), schema=None, *, role=""):
         self.calls += 1
@@ -814,9 +816,14 @@ class PointsStub:
             if role == "plan":
                 self.plan_extra += 1
                 return Reply("", {"ops": [], "why": ""}, 0.0, None, None)
-            raise PointsInconclusive("no recorded perception" if role == "perceiver" else f"no recorded {role} response at {step}")
-        self.cursor[key] += 1
-        row = rows[at]
+            prior = next((r for r in reversed(self.perceptions) if r.get("step", step + 1) <= step), None) if role == "perceiver" else None
+            if prior is None: raise PointsInconclusive("no recorded perception" if role == "perceiver" else f"no recorded {role} response at {step}")
+            self.perception_fallback += 1
+            if self.perception_fallback > 2: raise PointsInconclusive("perception fallback > 2")
+            row = prior
+        else:
+            self.cursor[key] += 1
+            row = rows[at]
         raw = row.get("response", "")
         data = raw if isinstance(raw, dict) else parse_json(str(raw or ""))
         if data is None: raise PointsInconclusive(f"invalid recorded {role} response at {step}")
@@ -854,7 +861,7 @@ def _point_patterns(value): return value if isinstance(value, list) else [value]
 def points_live_right(case, tool, label):
     return (not case.get("right") or is_right(case, tool, label)) and not any(hits(e, tool, label) for e in case.get("wrong", []))
 
-def _points_case(case, live=False, counter=None):
+def _points_case(case, live=False, counter=None, no_cache=False):
     run, step, checkpoint = case["run"], case["step"], case["checkpoint"]
     src = Path("runs") / run; cp = src / "checkpoint" / f"{checkpoint:06d}"
     trace_rows = _jsonl(src / "trace.jsonl"); trace = {r["step"]: r for r in trace_rows if "step" in r}
@@ -878,7 +885,7 @@ def _points_case(case, live=False, counter=None):
     before = _budget()
     live_model = None
     if live:
-        live_model = Ollama(OM_MODEL, cache_dir=MODEL_CACHE)
+        live_model = Ollama(OM_MODEL, cache_dir=None if no_cache else MODEL_CACHE)
         orig = live_model._post
         def guarded(payload):
             if counter["requests"] >= POINTS_CAP: raise run_agent.CallCap("points request cap (20)")
@@ -936,22 +943,24 @@ def _points_case(case, live=False, counter=None):
     except PointsInconclusive as e:
         status, reason = "INCONCLUSIVE", str(e); found["plan_extra"] = stub.plan_extra
     finally:
+        found["perception_fallback"] = stub.perception_fallback
         loop_mod.act = real_act; env.close()
     found["status"], found["reason"] = status, reason
     found["ledger_unchanged"] = before == _budget()
     return found
 
-def om_points(live=False, max_inconclusive=3, steps=None):
+def om_points(live=False, max_inconclusive=3, steps=None, no_cache=False):
     cases = json.loads(POINTS.read_text(encoding="utf-8"))
     if steps: cases = [c for c in cases if str(c["step"]) in steps.split(",")]
     counter, before, results = {"requests": 0}, _budget(), []
     for case in cases:
         case_requests = counter["requests"]
-        try: result = _points_case(case, live, counter)
+        try: result = _points_case(case, live, counter, no_cache)
         except (PointsInconclusive, OmAbort) as e: result = {"case": case, "status": "INCONCLUSIVE", "reason": str(e), "failed": [], "first_divergence": None, "plan_extra": 0}
         result["requests"] = counter["requests"] - case_requests
         results.append(result)
         print(f"\ncase {case['run']} step {case['step']} — {case.get('situation', '')}: {result['status']}")
+        print(f"  perception_fallback={result.get('perception_fallback', 0)}")
         if result.get("reason"): print(f"  reason: {result['reason']}")
         if result.get("first_divergence"): print(f"  first divergence: {result['first_divergence']}")
         for name, ok, detail in result.get("checks", []): print(f"  {'PASS' if ok else 'FAIL'} {name}: {detail}")
@@ -973,6 +982,7 @@ def om_points(live=False, max_inconclusive=3, steps=None):
 
 def om_main(a, ap):
     sys.stdout.reconfigure(encoding="utf-8")  # option labels carry arrows; a redirected cp1252 stdout cannot print them
+    if a.no_cache and (a.om != "points" or not a.live): ap.error("--no-cache requires --om points --live")
     if a.live and a.dry: ap.error("--live and --dry are exclusive")
     if a.om in ("talk", "act-size") and not re.fullmatch(r"[A-Za-z0-9_-]+", a.run): ap.error("--run must be a run name")
     if a.om == "talk":
@@ -988,7 +998,7 @@ def om_main(a, ap):
         if a.om == "talk": return om_talk(a.run)
         if a.om == "act-size": return om_act_size(a.run, a.from_step)
         if a.om == "reliability": return om_reliability(a.run, a.from_step)
-        if a.om == "points": return om_points(a.live, a.max_inconclusive, a.steps)
+        if a.om == "points": return om_points(a.live, a.max_inconclusive, a.steps, a.no_cache)
         return om_branch(a.run, a.from_step, a.pick) if a.om == "branch" else om_truth(a.run, no_names=a.strip_place, exact_exit=a.exact_exit) if a.om == "truth" else om_places() if a.om == "places" else om_outcomes(a.steps, a.fresh) if a.om == "outcomes" else om_cases(a.live, a.steps, a.fresh)
     except OmIncompatible as e: print(f"incompatible old replay / inconclusive: {e}", flush=True); return 2
     except OmAbort as e: print(f"ABORT: {e}", flush=True); return 2
