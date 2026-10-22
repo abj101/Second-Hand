@@ -735,6 +735,17 @@ def test_called_thing_name_resolves_and_ties(tmp_path):
     assert {ident for ident, _ in world.ties("oak")} == {"thing:scientist", "thing:scientist_2"}
 
 
+def test_name_shared_across_places_resolves_to_the_one_here(tmp_path):
+    mem = Memory(tmp_path); place(mem, "town", "Town"); place(mem, "lab", "Lab")
+    for ident, at in (("e_oak", "town"), ("e_customer", "lab")):
+        entity(mem, ident, "man", at, (0, 0)); mem.upsert("entities", {**mem.get("entities", ident), "called": "OAK"})
+    world = World(mem, 16); world.current_place = "lab"
+
+    assert world.ref("OAK") == "thing:e_customer" and world.ties("OAK") == []
+    entity(mem, "e_oak_2", "man", "lab", (1, 0)); mem.upsert("entities", {**mem.get("entities", "e_oak_2"), "called": "OAK"})
+    assert world.ref("OAK") is None and len(world.ties("OAK")) == 3
+
+
 def test_world_view_lists_all_place_exits_before_any_other_place_things(tmp_path):
     mem = Memory(tmp_path); place(mem, "here", "Atrium")
     for name in ("North", "South", "West"):

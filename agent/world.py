@@ -601,8 +601,10 @@ class World:
     def _named_things(self, text):  # live things on a world map whose name or alias is text
         maps = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged" and p.get("screen") == "world"}
         key = str(text or "").strip().casefold()
-        return [e for e in self.mem.rows("entities") if e.get("state") != "merged" and e.get("place") in maps
-                and key in {str(n).casefold() for n in [e.get("name"), e.get("called"), *e.get("aliases", [])] if n}]
+        things = [e for e in self.mem.rows("entities") if e.get("state") != "merged" and e.get("place") in maps
+                  and key in {str(n).casefold() for n in [e.get("name"), e.get("called"), *e.get("aliases", [])] if n}]
+        here = [e for e in things if e["place"] == self.current_place]
+        return here if len(things) > 1 and len(here) == 1 else things  # a name shared across places means the one here
 
     def ties(self, text):  # a name that several things share, which ref() cannot pick: each candidate's ref with its place's label
         things = self._named_things(text)
