@@ -812,11 +812,11 @@ def test_loop_act_uses_world_facts_active_quests_and_labels(tmp_path, monkeypatc
     mem.upsert("tiles", {"id": "home@0,0", "place": "home", "x": 0, "y": 0, "floor": True, "blocked": [], "pushed": [], "exit": {"dir": "RIGHT", "to": "p_world", "arrive": [1, 0]}, "step": 1})
     entity(mem, "chest", "Chest", "home", [1, 0]); mem.upsert("entities", {**mem.get("entities", "chest"), "tier": "landmark"})
     entity(mem, "oak", "Oak", "home", [2, 0]); mem.upsert("entities", {**mem.get("entities", "oak"), "tier": "landmark"})
-    per = {"screen": "world", "text": [], "entities": [{"name": "Player", "kind": "player", "at": [.5, .5]},
-                                                                  {"name": "Chest", "kind": "object", "at": [.6, .5]}]}
-    env = GridEnv(); model = StubModel([SimpleNamespace(data=per), SimpleNamespace(data=per)]); loop = Loop(env, model, mem, "grid")
+    per = {"screen": "world", "text": [], "entities": [{"name": "Player", "kind": "player", "at": [550, 500]},
+                                                                  {"name": "Chest", "kind": "object", "at": [650, 500]}]}
+    env = GridEnv(wander=True); model = StubModel([SimpleNamespace(data=per), SimpleNamespace(data=per)]); loop = Loop(env, model, mem, "grid")
     loop.place, loop.prev_frame = "home", env.screenshot()
-    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    loop.world.self_spot, loop.world._self_from_motion = [.55, .5], True
     t1 = loop.notebook.heard(0, None, "Home", "Chest is in Home.")
     loop.notebook.apply_ops([{"op": "add", "key": "find_chest", "text": "Find Chest", "why": [t1]}, {"op": "top", "key": "find_chest"}], 0)
     seen = {}

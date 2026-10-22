@@ -6,7 +6,7 @@ from agent.brief import GENERAL, _load, load_brief
 from agent.decide import Choice
 from agent.memory import _key
 from agent.notebook import Notebook
-from agent.observer import _blank, cut, for_model, wait_settled
+from agent.observer import _blank, cut, for_model, snap, wait_settled
 from agent.perceive import perceive
 from agent.plan import plan
 from agent.predict import PRED, effects, result as action_result
@@ -193,10 +193,20 @@ class Loop:
             affs.append({"verb": "buttons", "target": " ".join(action["buttons"])}); targets.append(None); intents.append(self._fail_key(place, "buttons", affs[-1]["target"])); i = len(affs) - 1
         if action and "thing" in action:
             n, verb = action["thing"], action.get("verb")
-            if type(n) is int and 0 <= n < len(per.get("entities", [])) and verb in ("approach", "interact", "select", "click"):
-                entity = per["entities"][n]
+            ident, entity = None, None
+            if type(n) is int and 0 <= n < len(per.get("entities", [])):
+                entity, ident = per["entities"][n], self.world.entity_ids.get(n)
+            elif isinstance(n, str) and n.startswith("thing:"):
+                ref = self.world.canon(n)
+                if ref and ref.startswith("thing:"):
+                    ident = ref.partition(":")[2]; row = self.mem.get("entities", ident)
+                    if row and row.get("place") == place and row.get("status") != "gone":
+                        anchor = snap(self.world.pa, self.world.size, self.tile_px) if row.get("tile") and self.world.pa and self.tile_px and self.world.size else None
+                        at = [anchor[i] + (row["tile"][i] - self.world.pos[i]) * self.tile_px / self.world.size[i] for i in (0, 1)] if anchor else None
+                        entity = {**row, "at": at}
+            if entity and verb in ("approach", "interact", "select", "click"):
                 aff = {"verb": verb, "target": entity.get("name", ""), "at": entity.get("at")}
-                affs.append(aff); targets.append((ident := self.world.entity_ids.get(n))); intents.append(self._fail_key(place, verb, aff["target"], ref=f"thing:{ident}" if ident else None)); i = 0
+                affs.append(aff); targets.append(ident); intents.append(self._fail_key(place, verb, aff["target"], ref=f"thing:{ident}" if ident else None)); i = 0
                 if verb == "approach":
                     t, act_route, refused = self._approach_route(place, entity, player, proj, intents[-1])
                 elif verb == "interact" and self.tile_px and player and not self.env.pointer:

@@ -1065,10 +1065,18 @@ class World:
                 if beyond["dead_end"] and x["tile"] == beyond["through"]: row["notes"].insert(0, "everything unexplored from here is through this exit")
                 exits.append((_yx(x["tile"], label), row))
             plain_groups, listed = {}, set()
-            for i, e in enumerate(ents):
-                kind, name, ident = normalize_kind(e.get("kind")), e.get("name"), self.entity_ids.get(i)
+            candidates = [(i, e, self.entity_ids.get(i)) for i, e in enumerate(ents)]
+            rect = self._view_rect(self.pa, self.size) if self.size else None
+            if rect:
+                x0, y0, x1, y1 = rect
+                candidates.extend((-1, r, r["id"]) for r in self.mem.rows("entities")
+                                  if r.get("place") == place and r.get("tile") and x0 <= r["tile"][0] <= x1 and y0 <= r["tile"][1] <= y1
+                                  and r["id"] not in on and r["id"] not in listed and r.get("state") != "merged" and r.get("status") != "gone"
+                                  and normalize_kind(r.get("kind")) not in TRANSIENT | ACTOR_KINDS and not _actor(r) and not _is_exit(r))
+            for i, e, ident in candidates:
+                kind, name = normalize_kind(e.get("kind")), e.get("name")
                 if not name or kind in TRANSIENT or _is_exit(e) or (ident and ident in listed): continue  # two perceptions of one thing (one tile, one id) are one row
-                if self.size is not None and on_player(e.get("at"), player_at, self.size, self.tile_px): continue
+                if i >= 0 and self.size is not None and on_player(e.get("at"), player_at, self.size, self.tile_px): continue
                 listed.add(ident)
                 ref, where = thing_ref(ident), self._where(self._tile(ident))
                 history = self.history(ref, place) if ref else {}
@@ -1078,7 +1086,7 @@ class World:
                     plain_groups.setdefault(name.casefold(), []).append((i, e, ident, ref, where))
                     continue
                 label = f"talk to {self.label(ref)}{where}" if kind in ACTOR_KINDS else f"check {self.label(ref)}{where}"
-                row = option("interact", label, {"thing": i, "verb": "interact"}, "interact", target, ref, ident)
+                row = option("interact", label, {"thing": i if i >= 0 else ref, "verb": "interact"}, "interact", target, ref, ident)
                 (actors if kind in ACTOR_KINDS else things).append((_yx(self._tile(ident) or e.get("at"), name), row))
             for group in plain_groups.values():
                 group.sort(key=lambda item: (sum(abs(a - b) for a, b in zip(self._tile(item[2]) or self.pos, self.pos)), _yx(self._tile(item[2]), item[1].get("name"))))
@@ -1086,13 +1094,13 @@ class World:
                 name = self.label(ref) if ref else e["name"]
                 shown = f"{name} (nearest of {len(group)})" if len(group) > 1 else name
                 label = f"check {shown}{where}"
-                row = option("interact", label, {"thing": i, "verb": "interact"}, "interact", e["name"], ref, ident)
+                row = option("interact", label, {"thing": i if i >= 0 else ref, "verb": "interact"}, "interact", e["name"], ref, ident)
                 things.append((_yx(self._tile(ident) or e.get("at"), name), row))
             actors = [row for _, row in sorted(actors, key=lambda t: t[0])]
             things = [row for _, row in sorted(things, key=lambda t: t[0])]
             far_groups, goal = {}, {self.canon(t) for t in targets}
             for r in self.mem.rows("entities"):
-                if r.get("place") != place or not r.get("tile") or not r.get("name") or r["id"] in on or r.get("status") == "gone" or normalize_kind(r.get("kind")) in TRANSIENT or _is_exit(r): continue
+                if r.get("place") != place or not r.get("tile") or not r.get("name") or r["id"] in on or r["id"] in listed or r.get("status") == "gone" or normalize_kind(r.get("kind")) in TRANSIENT or _is_exit(r): continue
                 ref = f"thing:{r['id']}"
                 history = self.history(ref, place)
                 if not history.get("talked") and history.get("checked") is None and not history.get("walked_into") and fail_key(place, "approach", ref, inputs, ref) not in fails:

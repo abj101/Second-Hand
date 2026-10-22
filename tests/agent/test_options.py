@@ -499,9 +499,29 @@ def test_failed_rows_follow_new_rows_and_free_buttons_stay_last(tmp_path):
 
 def test_off_screen_static_thing_with_no_history_has_no_row(tmp_path):
     mem = Memory(tmp_path); room(mem)
-    mem.upsert("entities", {"id": "crate1", "name": "crate", "kind": "furniture", "place": "room", "tile": [2, 2], "status": "remembered", "last": 1, "seen": 1})
+    mem.upsert("entities", {"id": "crate1", "name": "crate", "kind": "furniture", "place": "room", "tile": [20, 20], "status": "remembered", "last": 1, "seen": 1})  # outside the 10×9 viewport
     world, per = setup(mem, [])
     assert not [o for o in world.options(per, "room", {}, 9, inputs=INPUTS) if "crate" in o["label"]]
+
+
+def test_in_view_remembered_static_uses_the_seen_check_option(tmp_path):
+    from copy import deepcopy
+
+    mem = Memory(tmp_path); room(mem)
+    world, seen_per = setup(mem, [{"name": "shelf", "kind": "furniture", "at": at(1, 0)}])
+    ident = world.entity_ids[1]
+    seen = next(o for o in world.options(seen_per, "room", {}, 2, inputs=INPUTS) if o.get("ref") == f"thing:{ident}")
+    missing_per = {"screen": "world", "text": [], "entities": [player()]}
+    world.before(missing_per, "room", "room", (160, 144), 3)
+    ids = dict(world.entity_ids); before = deepcopy(missing_per)
+    world.history = lambda ref, place=None: {"checked": "nothing"} if ref == f"thing:{ident}" else {}
+    rows = [o for o in world.options(missing_per, "room", {}, 3, inputs=INPUTS) if o.get("ref") == f"thing:{ident}"]
+
+    assert len(rows) == 1
+    remembered = rows[0]
+    assert remembered["label"] == seen["label"] == "check shelf, 1 right"
+    assert remembered["action"] == {"thing": f"thing:{ident}", "verb": "interact"}
+    assert missing_per == before and world.entity_ids == ids
 
 
 def test_off_screen_static_thing_with_history_or_failure_keeps_its_row(tmp_path):

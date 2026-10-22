@@ -1118,6 +1118,42 @@ def test_focused_off_screen_static_quest_target_stays_in_menu(tmp_path, monkeypa
     assert any(row.get("ref") == "thing:crate1" for row in menus[0])
 
 
+def test_in_view_remembered_thing_ref_executes_beside_and_keeps_its_id(tmp_path, monkeypatch):
+    from agent import loop as module
+    from agent import skills
+    from agent.space import tile_of
+
+    class Recording(GridEnv):
+        def __init__(self): super().__init__(); self.keys = []
+        def press(self, key, frames=8, on_frame=None): self.keys.append(key); super().press(key, frames, on_frame)
+    env = Recording(); loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.mem.upsert("places", {"id": "room", "name": "Room", "screen": "world", "state": "place", "visits": 1})
+    for x in range(6, 11):
+        for y in range(6, 11): loop.mem.upsert("tiles", {"id": f"room@{x},{y}", "place": "room", "x": x, "y": y, "floor": True, "blocked": [], "pushed": [], "step": 1})
+    loop.mem.upsert("entities", {"id": "shelf1", "name": "shelf", "kind": "furniture", "place": "room", "tile": [9, 8], "status": "remembered", "last": 1, "seen": 1})
+    loop.mem.match_place = lambda *args, **kwargs: "room"
+    loop.world.current_place = loop.place = "room"
+    loop.world.pos = (8, 8)
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    per = {"screen": "world", "text": [], "entities": [{"kind": "player", "name": "player", "at": [.5, .5]}]}
+    monkeypatch.setattr(module, "perceive", lambda *_: (per, reply(per)))
+    monkeypatch.setattr(module, "cut", lambda *_a, **_k: False)
+    monkeypatch.setattr(skills, "cut", lambda *_a, **_k: False)
+    monkeypatch.setattr(module, "act", lambda *_a, **_k: SimpleNamespace(
+        place="", ops=[], action={"thing": "thing:shelf1", "verb": "interact"}, expect="screen_changes", why="check", text=None))
+    seen, run = {}, module.run_affordance
+    def capture(ctx, aff, *args, **kwargs):
+        seen.update(aff=aff, route=kwargs.get("route"))
+        return run(ctx, aff, *args, **kwargs)
+    monkeypatch.setattr(module, "run_affordance", capture)
+
+    row = loop.step()
+
+    assert seen["aff"] == {"verb": "interact", "target": "shelf", "at": [.55, .5]}
+    assert tile_of(seen["aff"]["at"], [.5, .5], (8, 8), (160, 144), 16) == (9, 8)
+    assert seen["route"] and "A" in env.keys and row["choice"]["id"] == "shelf1"
+
+
 def test_planner_prioritizes_game_text_and_checks_it_before_throttle(tmp_path):
     loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
     loop.notebook.data["quests"] = [{"key": "g", "text": "explore", "status": "open"}]
