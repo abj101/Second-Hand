@@ -289,7 +289,6 @@ class Loop:
                     verb=aff["verb"])
                 if said_step is not None:
                     self.mem.upsert("relations", {**rel, "why": f"says the same as before (step {said_step})"})  # ponytail: a note on the says row, not a new relation kind
-                    self.notebook._save(self.notebook.talked(self.step_no + 1, f"thing:{tid}"))
                 if effect == "text_appears":
                     self.conversation["who"] = f"thing:{tid}"  # the dialogue it starts is that thing's
                     entity = self.mem.get("entities", tid)

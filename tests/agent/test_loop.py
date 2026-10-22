@@ -1487,7 +1487,7 @@ def test_repeated_reply_counts_as_did_nothing_for_the_interact_option(tmp_path, 
     assert loop.fails[second["choice"]["intent"]]["why"] == "same reply"
 
 
-def test_repeated_reply_closes_quest_for_thing_and_marks_progress(tmp_path, monkeypatch):
+def test_repeated_reply_does_not_close_a_targeted_quest(tmp_path, monkeypatch):
     from agent import loop as module
     env, state = GridEnv(), {"text": []}
     monkeypatch.setattr(module, "perceive", lambda *_: ({"screen": "world", "text": list(state["text"]), "entities": [
@@ -1507,9 +1507,10 @@ def test_repeated_reply_closes_quest_for_thing_and_marks_progress(tmp_path, monk
     row = loop.step()
 
     quest = loop.notebook.data["quests"][0]
-    assert row["verdict"] == "progress"
-    assert quest["status"] == "done" and quest["reason"] == "talked" and quest["closed"] == 2
-    assert any(event["kind"] == "T3" and event["step"] == 2 for event in loop.events)
+    assert quest["status"] == "open"
+    assert row["verdict"] == "failed"
+    assert loop.fails[row["choice"]["intent"]]["why"] == "same reply"
+    assert not any(event["kind"] == "T3" and event["step"] == 2 for event in loop.events)
 
 
 def test_successful_use_clears_a_refuted_thing_in_place(tmp_path, monkeypatch):
