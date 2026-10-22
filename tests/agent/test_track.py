@@ -220,3 +220,11 @@ def test_live_snapshot_and_wait_consume_exact_returned_sequences_during_race():
     waited = env.wait_frame(snapshot, timeout=1)
     assert waited.frame_seq == 3 and seen == [1, 2, 3]
     assert tracker.live_seq == 3
+
+
+def test_phase_seed_moves_off_repeating_floor_onto_the_sprite():
+    floor = np.tile(blocks(16, 16, 4), (9, 10, 1)).astype(np.uint8)  # one floor tile repeated over the whole screen
+    floor[64:80, 80:96] = SPRITE  # a sprite one tile right of the perceived cell (72, 72)
+    tr = Tracker(); tr.phase = (8, 8)
+    tr.seed([("a", (72 / W, 72 / H), True), ("s", (72 / W, 72 / H), False)], Image.fromarray(floor))
+    assert (tr.tracks["a"]["x"], tr.tracks["a"]["y"]) == (88, 72) and (tr.tracks["s"]["x"], tr.tracks["s"]["y"]) == (72, 72)

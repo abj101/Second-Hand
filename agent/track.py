@@ -1,6 +1,7 @@
 """Object tracks: pixels keep one id per thing between perceptions (0 requests). The vision model names things; this follows them.
 Every emulated frame goes through Tracker.update (wrap() hooks an env). A static track moves with the camera only; an actor track also
 centres on the pixels that changed beyond the camera shift near it (its own motion); lost = still and its patch is gone."""
+from collections import Counter
 from types import SimpleNamespace
 
 import numpy as np
@@ -22,6 +23,15 @@ class Tracker:
     def _patch(self, x, y):
         h, w = self.arr.shape[:2]; r = self.tile_px // 2; x, y = round(x), round(y)
         return self.arr[y - r:y + r, x - r:x + r] if r <= x <= w - r and r <= y <= h - r else None
+    def _sprite_cell(self, x, y):
+        """The perceived cell, else its nearest neighbour whose patch is not background (a patch that repeats elsewhere on the sprite grid this frame)."""
+        # ponytail: repeated-patch test; a unique floor tile beside a sprite can win, swap for a sprite mask if one is available
+        t, (px, py), (h, w) = self.tile_px, self.phase, self.arr.shape[:2]
+        grid = Counter(p.tobytes() for i in range(int(-px // t), int((w - px) // t) + 1) for j in range(int(-py // t), int((h - py) // t) + 1) if (p := self._patch(px + i * t, py + j * t)) is not None)
+        for dx, dy in sorted(((a, b) for a in (-1, 0, 1) for b in (-1, 0, 1)), key=lambda d: d[0] ** 2 + d[1] ** 2):
+            p = self._patch(x + dx * t, y + dy * t)
+            if p is not None and grid[p.tobytes()] == 1: return x + dx * t, y + dy * t
+        return x, y
     def seed(self, items, frame=None):
         """items: (id, (fx, fy) screen fractions, is_actor). A live track near its perceived point stays as is; else it restarts there."""
         if frame is not None: self.frame, self.arr = frame, np.asarray(frame).astype(np.int16)
@@ -30,6 +40,7 @@ class Tracker:
         for ident, (fx, fy), actor in items:
             x, y = self._snap(fx * w, fy * h); t = self.tracks.get(ident)
             if t and t["status"] == "live" and max(abs(t["x"] - x), abs(t["y"] - y)) <= self.tile_px / 2: t["actor"], t["own"] = actor, (0, 0); continue
+            if actor and self.phase is not None: x, y = self._sprite_cell(x, y)
             self.tracks[ident] = {"x": x, "y": y, "actor": actor, "status": "live", "lost": 0, "own": (0, 0), "patch": self._patch(x, y)}
     def near(self, at, used=()):
         """The live track within a tile of the screen fraction `at` (nearest first), or None."""
