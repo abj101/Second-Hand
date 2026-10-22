@@ -1084,6 +1084,11 @@ class World:
                     for direction in [*untried, *tried] if untried else [None]:
                         fact = "all four pushes tried" if direction is None else f"pressed {direction}: blocked" if direction in here.get("blocked", []) else f"pressed {direction}: moved, no exit" if direction in here.get("pushed", []) else "untried"
                         text = f"{label}{f' ({wall})' if wall else ''}{self._where(x['tile'])}, then press {direction}" if direction else f"{label}, all four pushes tried"
+                        if direction and x["tile"]:
+                            dx, dy = DIRS[direction]; neighbour = self.mem.get("tiles", f"{place}@{x['tile'][0]+dx},{x['tile'][1]+dy}") or {}
+                            facts = [f"toward the {wall}"] if wall and direction == outward(self.mem, place, x["tile"], wall) else []
+                            facts.append(f"onto a known exit to {self.place_label(neighbour['exit'].get('to'))}" if neighbour.get("exit") else "back onto floor you walked" if neighbour.get("floor") is True else "onto ground not yet seen")
+                            text += f": {', '.join(facts)}"
                         row = option(tool, text, {**action, "push": direction} if direction else action, "approach", target, ref, x["ident"], note="exit, never crossed", push=direction)
                         if direction in tried: row["notes"].insert(1, fact)
                         row["state"] = "failed" if direction is None or direction in tried or row["intent_key"] in fails else "new"

@@ -82,6 +82,10 @@ def test_default_choices_clause_is_sent_and_changes_act_cache_key():
     assert cache._key(system, user, images, schema) != cache._key(system.replace(clause, ""), user, images, schema)
 
 
+def test_system_wall_clause_stays_in_the_third_sentence():
+    assert "; to go through an exit on a wall, step onto it and press toward that wall" in SYSTEM.split(". ")[2]
+
+
 def test_system_declines_optional_naming_offers():
     assert "answer no when asked whether to give or change a name or nickname" in SYSTEM and "end key" in SYSTEM
     assert len(SYSTEM.split(". ")) == 4 and len(SYSTEM) <= 2000

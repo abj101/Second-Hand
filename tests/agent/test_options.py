@@ -17,7 +17,7 @@ def test_uncrossed_exit_rows_offer_each_push_and_keep_tried_facts(tmp_path):
     world, per = setup(mem, [{"name": "exit: doorway", "kind": "exit", "at": at(2, 0), "placement": "bottom wall"}])
     rows = [o for o in world.options(per, "room", {}, 2, inputs=INPUTS) if o["ref"] == "exit:2,0"]
     assert len(rows) == 4 and rows[0]["action"]["push"] == "DOWN" and all(o["state"] == "new" and o["notes"] == ["exit, never crossed"] for o in rows)
-    assert all("(bottom wall)" in o["label"] and o["label"].endswith(f"then press {o['action']['push']}") and o["intent_key"].endswith(f">{o['action']['push']}") for o in rows)
+    assert all("(bottom wall)" in o["label"] and f"then press {o['action']['push']}: " in o["label"] and o["intent_key"].endswith(f">{o['action']['push']}") for o in rows)
     push_failed(mem, "room", (2, 0), "LEFT", 3)
     row = mem.get("tiles", "room@2,0"); mem.upsert("tiles", {**row, "blocked": ["RIGHT"]})
     rows = [o for o in world.options(per, "room", {}, 4, inputs=INPUTS) if o["ref"] == "exit:2,0"]
@@ -27,6 +27,17 @@ def test_uncrossed_exit_rows_offer_each_push_and_keep_tried_facts(tmp_path):
     for direction in DIRS: push_failed(mem, "room", (2, 0), direction, 5)
     rows = [o for o in world.options(per, "room", {}, 6, inputs=INPUTS) if o["ref"] == "exit:2,0"]
     assert len(rows) == 1 and rows[0]["state"] == "failed" and rows[0]["label"] == "go to doorway, 2 right" and rows[0]["notes"][0].startswith("exit failed: blocked ")
+
+
+def test_uncrossed_exit_direction_facts_come_from_tile_memory(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, [{"name": "exit: doorway", "kind": "exit", "at": at(2, 2), "placement": "bottom wall"}])
+    tile(mem, 3, 2, {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "inferred"})
+    rows = {o["action"]["push"]: o for o in world.options(per, "room", {}, 2, inputs=INPUTS) if o["ref"] == "exit:2,2"}
+    assert rows["DOWN"]["label"].endswith(": toward the bottom wall, onto ground not yet seen")
+    assert rows["UP"]["label"].endswith(": back onto floor you walked")
+    assert rows["RIGHT"]["label"].endswith(": onto a known exit to Hall")
+    assert all(o["notes"] == ["exit, never crossed"] for o in rows.values())
 
 
 def test_explicit_push_controls_screen_and_remembered_exit_routes(tmp_path):
