@@ -19,6 +19,25 @@ def test_upsert_restart_replay_and_unknown_store(tmp_path):
     assert restarted.rows("odd_store") == [{"id": "x", "value": 2}]
 
 
+def test_screen_store_keys_by_item_set_keeps_order_and_three_latest_replies(tmp_path):
+    mem = Memory(tmp_path)
+    per = {"screen": "battle", "entities": [
+        {"name": "RUN", "selectable": True}, {"name": "ITEM", "selectable": True},
+    ]}
+    row = mem.observe_screen(per, 1)
+    assert row["id"] == "battle|ITEM|RUN" and row["items"] == ["RUN", "ITEM"]
+    mem.screen_reply(row["id"], "RUN", 1, "one")
+    mem.screen_reply(row["id"], "RUN", 2, "two")
+    mem.screen_reply(row["id"], "RUN", 3, "three")
+    mem.screen_reply(row["id"], "RUN", 4, "four")
+    other = mem.observe_screen({"screen": "battle", "entities": [{"name": "RUN", "selectable": True}]}, 5)
+    assert other["id"] == "battle|RUN" and other["items"] == ["RUN"]
+    assert mem.get("screens", row["id"])["replies"]["RUN"] == [
+        {"step": 2, "text": "two"}, {"step": 3, "text": "three"}, {"step": 4, "text": "four"},
+    ]
+    assert Memory(tmp_path).get("screens", row["id"])["seen"] == 1
+
+
 def test_places_cut_mints_and_modal_keeps_place(tmp_path):
     mem = Memory(tmp_path)
     a = mem.match_place({"screen": "world", "entities": [{"name": "Oak", "kind": "npc"}]}, 1,

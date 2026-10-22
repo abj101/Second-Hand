@@ -330,6 +330,13 @@ class Loop:
             "settle_frames": {"before": s["before_waited"], "after": after_set.waited},
             }
         self.step_no += 1
+        screen = self.mem.observe_screen(per, self.step_no)
+        if screen and choice and choice.get("verb") == "select":
+            before_text = per.get("text", []); before_text = [before_text] if isinstance(before_text, str) else before_text
+            after_lines = after_per.get("text", []); after_lines = [after_lines] if isinstance(after_lines, str) else after_lines
+            before_text = " ".join(" ".join(map(str, before_text)).split()).casefold()
+            new_text = next((t for t in after_lines if (line := " ".join(str(t).split()).casefold()) and line not in before_text), "")
+            if new_text: self.mem.screen_reply(screen["id"], choice.get("target"), self.step_no, new_text)
         after.save(self.mem.root.parent / row["after"])
         drift_fix = self.world.observe_after(after_per, after, after_reused, next_place, after.size, self.step_no, skill=skill)
         closed = self.notebook.observe(self.step_no, f"place:{next_place}" if next_place else None)

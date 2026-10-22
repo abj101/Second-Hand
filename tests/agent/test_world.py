@@ -221,11 +221,11 @@ def test_title_screen_things_get_no_tiles_so_the_first_map_does_not_inherit_them
     world = World(mem, 16); world.self_spot, world._self_from_motion = [.5, .5], True
     title = {"screen": "title", "entities": [{"name": "logo text", "kind": "text", "at": [.7, .5]}]}
     _, tiles, ids = world.before(title, "p_start", None, (160, 144), 1)
-    assert tiles == {} and "tile" not in mem.get("entities", ids[0])
+    assert tiles == {} and ids == {} and mem.rows("entities") == []
     mem.upsert("places", {**mem.get("places", "p_start"), "screen": "world"})  # the first map frame promotes the placeholder (no cut)
     room = {"screen": "world", "entities": [{"name": "cabinet", "kind": "object", "at": [.7, .5]}]}
     _, tiles, room_ids = world.before(room, "p_start", "p_start", (160, 144), 2)
-    assert tiles == {0: (2, 0)} and room_ids[0] != ids[0]
+    assert tiles == {0: (2, 0)} and mem.get("entities", room_ids[0])["tile"] == [2, 0]
 
 
 def test_pre_map_things_are_no_refs_and_reentry_lands_on_the_matched_exit_arrival(tmp_path):
@@ -974,6 +974,43 @@ def test_anchor_transient_dialogue_box_is_screen_and_not_in_view(tmp_path):
     row = next(r for r in mem.rows("entities") if r["name"] == "dialogue box")
     assert row["anchor"] == "screen" and row["transient"] is True
     assert "HUD dialogue box" not in world.view("", "room")
+
+
+def test_world_dialogue_overlay_still_observes_room_things(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room"); world = World(mem, 16)
+    per = {"screen": "world", "entities": [
+        {"name": "player", "kind": "player", "at": [.5, .5]},
+        {"name": "Coin", "kind": "object", "at": [.6, .5]},
+        {"name": "Text box", "kind": "dialogue_box", "at": [.5, .9]},
+    ]}
+    world.before(per, "room", None, (160, 144), 1)
+    ident = world.entity_ids[1]
+    assert mem.get("entities", ident)["tile"] == [2, 0]
+
+
+@pytest.mark.parametrize("screen,entities", [
+    ("battle", [{"name": "hp_bar", "kind": "hp_bar"}, {"name": "button", "kind": "button"}]),
+    ("keyboard", [{"name": "keyboard", "kind": "keyboard"}, {"name": "button", "kind": "button"}]),
+])
+def test_non_world_before_skips_world_entity_observation(tmp_path, monkeypatch, screen, entities):
+    mem = Memory(tmp_path); place(mem, "room", "Room"); world = World(mem, 16)
+    old = {"id": "thing:old", "name": "old", "kind": "object", "place": "room", "tile": [1, 1], "seen": 1}
+    mem.upsert("entities", old)
+    before = mem.rows("entities")
+    monkeypatch.setattr(mem, "observe", lambda *a, **k: pytest.fail("modal screen reached Memory.observe"))
+    per = {"screen": screen, "entities": entities}
+    world.before(per, "room", None, (160, 144), 1)
+    assert world._tiles(per, [0.5, 0.5], (160, 144), "room") == {}
+    assert world.entity_ids == {} and mem.rows("entities") == before
+
+
+def test_non_world_after_skips_world_entity_observation(tmp_path, monkeypatch):
+    mem = Memory(tmp_path); place(mem, "room", "Room"); world = World(mem, 16)
+    world.entity_ids = {0: "thing:stale"}
+    world.entity_tiles = {"thing:known": (0, 0)}
+    monkeypatch.setattr(mem, "observe", lambda *a, **k: pytest.fail("modal screen reached Memory.observe"))
+    world.observe_after({"screen": "battle", "entities": [{"name": "button", "kind": "button"}]}, None, False, "room", (160, 144), 1)
+    assert world.entity_ids == {} and world.entity_tiles == {"thing:known": (0, 0)}
 
 def test_anchor_hud_change_is_flagged_in_view(tmp_path):
     mem = Memory(tmp_path); env = GridEnv(hud=True); world = World(mem, 16)

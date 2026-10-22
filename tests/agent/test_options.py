@@ -101,11 +101,28 @@ def test_modal_screen_offers_its_choices_then_free_input_and_no_go_to(tmp_path):
     opts = world.options(per, "room", {}, 5, inputs=INPUTS)
     assert [(o["tool"], o["label"]) for o in opts] == [("select", "select fight"), ("select", "select bag"), ("advance", "advance"), ("cancel", "cancel"), ("buttons", BUTTONS)]
     assert opts[0]["action"] == {"thing": 1, "verb": "select"} and opts[2]["action"] == {"verb": "advance"} and opts[-1]["action"] is None
-    assert all(o["ref"] for o in opts[:-1])
+    assert [o["ref"] for o in opts[:-1]] == [None, None, "modal:advance", "modal:cancel"]
+    assert [o["intent_key"] for o in opts[:-1]] == ["room|select|fight", "room|select|bag", "room|advance|modal:advance", "room|cancel|modal:cancel"]
     kb = Memory(tmp_path / "kb"); room(kb)
     world, per = setup(kb, [{"name": "keyboard", "kind": "keyboard", "at": [.5, .7]}, {"name": "letters", "kind": "menu_item", "at": [.4, .4], "selectable": True}], screen="keyboard")
     labels = [o["label"] for o in world.options(per, "room", {}, 5, inputs=INPUTS)]
     assert labels == ["select letters", "advance", "cancel", "type text into the field", BUTTONS]
+
+
+def test_modal_select_row_shows_latest_screen_reply(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, [{"name": "RUN", "kind": "menu_item", "at": [.3, .4], "selectable": True}], screen="battle")
+    mem.upsert("screens", {"id": "battle|RUN", "screen": "battle", "items": ["RUN"], "seen": 1, "first": 1, "last": 1,
+                            "replies": {"RUN": [{"step": 7, "text": "Choice unavailable."}]}})
+    row = next(o for o in world.options(per, "room", {}, 8) if o["tool"] == "select")
+    assert row["notes"] == ['chosen step 7: "Choice unavailable."']
+
+
+def test_keyboard_type_row_notes_typing_cost(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, [{"name": "keyboard", "kind": "keyboard", "at": [.5, .7]}], screen="keyboard")
+    row = next(o for o in world.options(per, "room", {}, 5) if o["tool"] == "type")
+    assert row["notes"] == ["typing costs about 3 presses per letter"]
 
 
 def labels_on(tmp_path, entities, screen):

@@ -17,6 +17,9 @@ LANDMARKS_PER_PLACE, MAP_W, MAP_H, VIEW_TOKENS = 8, 21, 15, 500
 TYPING = {"keyboard", "input_field"}  # a text field on a modal screen: type
 FURNITURE = {"player", "dialogue_box", "text", "logo", "cursor"}  # screen chrome: never a choice on a modal screen
 
+def modal(per):
+    return per.get("screen") != "world" or any(normalize_kind(e.get("kind")) in {"dialogue_box", "menu", "keyboard", "input_field"} for e in per.get("entities", []))
+
 def fail_key(place, verb, target, inputs=(), ref=None):
     """Intent key "place|family|subject", the one key Loop.fails, the option notes and the trace share. Presses: family buttons, direction keys
     collapse (else the first button). Other actions: family approach for walking (approach, go_to, explore), else the verb (interact, select,
@@ -102,7 +105,7 @@ class World:
         self_i = self._self_index(per, size)
         return {**per, "entities": [{"name": ""} if i == self_i else e for i, e in enumerate(per.get("entities", []))]}
     def _tiles(self, per, anchor, size, place):
-        if (self.mem.get("places", place) or {}).get("screen") != "world" or place == self.mem.unplaced: return {}  # a title or menu screen before any map has no world tiles: its things keep text identity
+        if per.get("screen") != "world" or (self.mem.get("places", place) or {}).get("screen") != "world" or place == self.mem.unplaced: return {}  # a title or menu screen before any map has no world tiles: its things keep text identity
         entities = per.get("entities", [])
         self_i = self._self_index(per, size)
         valid = lambda e: isinstance(e.get("at"), list) and len(e["at"]) == 2
@@ -159,13 +162,14 @@ class World:
         proj = lambda at: tile_of(at, pa, self.pos, size, self.tile_px) if pa and self.tile_px and isinstance(at, list) and len(at) == 2 else None
         tiles = self._tiles(per, pa, size, place)
         observed = self._observation(per, size)
-        ids = self.entity_ids if per is self._observed_per else self.mem.observe(observed, place, step, tiles, self._hits(observed))
+        ids = {} if per.get("screen") != "world" else self.entity_ids if per is self._observed_per else self.mem.observe(observed, place, step, tiles, self._hits(observed))
         self._observed_per = per; self._follow(per, ids)
         self.actor_tiles = frozenset(tiles[i] for i, e in enumerate(per.get("entities", [])) if i in tiles and self._actor(ids.get(i), e))
-        self.entity_ids, self.entity_tiles = ids, {ids[i]: p for i, p in tiles.items() if i in ids}
+        self.entity_ids = ids
+        if per.get("screen") == "world": self.entity_tiles = {ids[i]: p for i, p in tiles.items() if i in ids}
         self.entities = [{"id": ids.get(i), "name": e.get("name"), "kind": e.get("kind"), "at": e.get("at")}
                          for i, e in enumerate(per.get("entities", []))]
-        self._tiers(per, place, ids)
+        if per.get("screen") == "world": self._tiers(per, place, ids)
         return proj, tiles, ids
     def _hits(self, per):  # entity index -> id of the live pixel track under it (within a tile)
         if not self.tile_px or self.tracker.arr is None: return {}
@@ -259,22 +263,22 @@ class World:
         return (x0, y0, x0 + width - 1, y0 + height - 1)
     def _record_view(self, per, frame, reused, place, size, step, anchor, ids):
         self.novel = 0
+        if per.get("screen") != "world": return
         live = {r["id"] for r in self.mem.rows("places") if r.get("state") != "merged"}
         rect = self._view_rect(anchor, size) if place in live and place != self.mem.unplaced else None
         world_screen = per.get("screen") == "world"
-        modal = any(normalize_kind(e.get("kind")) in {"dialogue_box", "menu", "keyboard", "input_field"}
-                    for e in per.get("entities", []))
+        modal_screen = modal(per)
         if rect and world_screen:
             x0, y0, x1, y1 = rect
             seen = self.mem.get("seen", place) or {"id": place, "cells": [], "step": step}
             cells = set(seen.get("cells", [])); added = {f"{x},{y}" for x in range(x0, x1 + 1) for y in range(y0, y1 + 1)} - cells
             self.novel = len(added)
             past = {"LEFT": lambda i: (x0 - 1, y0 + i), "RIGHT": lambda i: (x1 + 1, y0 + i), "UP": lambda i: (x0 + i, y0 - 1), "DOWN": lambda i: (x0 + i, y1 + 1)}
-            edge = _open_edge(frame, self.tile_px) if frame is not None and not modal else {}
+            edge = _open_edge(frame, self.tile_px) if frame is not None and not modal_screen else {}
             was = set(seen.get("open", [])); opened = {"%d,%d" % past[d](i) for d, idx in edge.items() for i in idx} - was
             if added or opened: self.mem.upsert("seen", {"id": place, "cells": sorted(cells | added), "open": sorted(was | opened), "step": step})
         distinct = False
-        if rect and world_screen and not modal and not reused:
+        if rect and world_screen and not modal_screen and not reused:
             digest = hashlib.sha256(frame.tobytes()).hexdigest()
             distinct = self._last_miss_hash.get(place) != digest
             if distinct: self._last_miss_hash[place] = digest
@@ -439,14 +443,13 @@ class World:
         player = next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         aa = self.self_spot if self._self_from_motion else self._anchor(per, size) if player else None
         tiles = self._tiles(per, aa, size, place)
-        drift_fix, ids = None, self.entity_ids
+        drift_fix, ids = None, {} if per.get("screen") != "world" else self.entity_ids
         observed = self._observation(per, size)
         world_screen = False
         if not reused:
-            entities = per.get("entities", [])
-            modal = any(normalize_kind(e.get("kind")) in {"dialogue_box", "menu", "keyboard", "input_field"} for e in entities)
-            world_screen = per.get("screen") == "world" and not modal
-            ids = self.mem.observe(observed, place, step, tiles, self._hits(observed))
+            modal_screen = modal(per)
+            world_screen = per.get("screen") == "world" and not modal_screen
+            if per.get("screen") == "world": ids = self.mem.observe(observed, place, step, tiles, self._hits(observed))
         if not reused and world_screen and place and self.tile_px:
             current = {ids[i]: t for i, t in tiles.items() if i in ids}
             walked = self.tracker.moved()
@@ -495,10 +498,12 @@ class World:
                     else: self._closure = (other, off, tuple(self.pos))
                 else: self._closure = None
             else: self._closure = None
-        self._screen_things(per, frame, place, size, step)
-        self._tiers(per, place, self.entity_ids)
+        if per.get("screen") == "world":
+            self._screen_things(per, frame, place, size, step)
+            self._tiers(per, place, self.entity_ids)
         self._record_view(per, frame, reused, place, size, step, aa, self.entity_ids)
-        self.entity_tiles = {self.entity_ids[i]: p for i, p in tiles.items() if i in self.entity_ids}; self._travelled = None
+        if per.get("screen") == "world": self.entity_tiles = {self.entity_ids[i]: p for i, p in tiles.items() if i in self.entity_ids}
+        self._travelled = None
         return drift_fix
 
     def state(self):
@@ -1051,10 +1056,16 @@ class World:
         free_label = "free buttons" + (f": {', '.join(inputs)}" if inputs else "")
         if modal:
             choices = [(i, e) for i, e in enumerate(ents) if e.get("name") and e.get("selectable") is True and normalize_kind(e.get("kind")) not in FURNITURE | TYPING]
-            rows = [option("select", f"select {e['name']}", {"thing": i, "verb": "select"}, "select", e["name"], thing_ref(self.entity_ids.get(i)))
-                    for i, e in sorted(choices, key=lambda ie: _yx(ie[1].get("at"), ie[1]["name"]))]
+            screen = self.mem.get("screens", self.mem.screen_id(per)) or {}
+            rows = []
+            for i, e in sorted(choices, key=lambda ie: _yx(ie[1].get("at"), ie[1]["name"])):
+                row = option("select", f"select {e['name']}", {"thing": i, "verb": "select"}, "select", e["name"], thing_ref(self.entity_ids.get(i)))
+                if (replies := screen.get("replies", {}).get(e["name"])): row["notes"].append(f'chosen step {replies[-1]["step"]}: "{replies[-1]["text"]}"')
+                rows.append(row)
             rows += [option("advance", "advance", {"verb": "advance"}, "advance", "", "modal:advance"), option("cancel", "cancel", {"verb": "cancel"}, "cancel", "", "modal:cancel")]
-            if any(normalize_kind(e.get("kind")) in TYPING for e in ents): rows.append(option("type", "type text into the field", {"verb": "type"}, "type", "", "modal:type"))
+            if any(normalize_kind(e.get("kind")) in TYPING for e in ents):
+                rows.append(option("type", "type text into the field", {"verb": "type"}, "type", "", "modal:type"))
+                rows[-1]["notes"].append("typing costs about 3 presses per letter")
             rows.append(free(free_label))
         else:
             on = set(self.entity_ids.get(i) for i in range(len(ents))) - {None}
