@@ -306,12 +306,13 @@ class Notebook:
                                  f" (done when: {label(target)} speaks to you)")
                 else: done_when = f" (done when: you enter {label(target)})"
             lines.extend([f"Goal: {quest['text']}{done_when}", "Because:"])
-            lines.extend(
-                f"{row.get('speaker') or 'text'}, step {row.get('step', '?')}: \"{row.get('text', '')}\""[:160]
-                for row in self._game_text_for([quest])[:3]
-            )
+            rows = self._game_text_for([quest])[:3]
         else:
             lines.extend(["Goal: (none)", "Because:"])
-        lines.append("Recent:")
-        lines.extend(f"- step {entry.get('step')}: {entry.get('text')}"[:120] for entry in self.log[-4:])
-        return "\n".join(lines)
+            rows = []
+        text = lambda row, limit: f"{row.get('speaker') or 'text'}, step {row.get('step', '?')}: \"{row.get('text', '')}\""[:limit]
+        newest = max(rows, key=lambda row: row.get("step", 0), default=None)
+        cited = [text(row, None if row is newest else 160) for row in rows]  # newest whole while the focus block stays within 600 characters
+        tail = ["Recent:"] + [f"- step {entry.get('step')}: {entry.get('text')}"[:120] for entry in self.log[-4:]]
+        if len("\n".join(lines + cited + tail)) > 600: cited = [text(row, 160) for row in rows]
+        return "\n".join(lines + cited + tail)

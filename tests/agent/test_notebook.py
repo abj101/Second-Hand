@@ -226,10 +226,22 @@ def test_render_focus_labels_target_and_limits_cited_text(tmp_path, target, name
     because = rendered.split("Because:\n", 1)[1].split("\nRecent:", 1)[0].splitlines()
 
     assert f"Goal: Quest q (done when: {done_when})" in rendered
-    assert len(because) == 1 and len(because[0]) == 160
-    assert because[0].startswith('Mira, step 1: "Find the archive.')
+    assert len(because) == 1 and because[0] == f'Mira, step 1: "{cited}"'
     assert "Uncited text" not in rendered
     assert "Recent note" in rendered
+
+
+def test_render_focus_shows_newest_cited_text_whole_and_cuts_older(tmp_path):
+    nb = notebook(tmp_path)
+    nb.heard(1, "Mira", "Hall", "old " + "x" * 220)
+    nb.heard(2, "Mira", "Hall", "new " + "y" * 280)
+    nb.apply_ops([{**add("q"), "why": ["t1", "t2"]}], 3)
+
+    because = nb.render_focus(lambda ref: ref).split("Because:\n", 1)[1].split("\nRecent:", 1)[0].splitlines()
+
+    assert len(because) == 2 and len(because[0]) == 160
+    assert because[0].startswith('Mira, step 1: "old xxx')
+    assert because[1] == 'Mira, step 2: "new ' + "y" * 280 + '"'
 
 
 def test_crossed_exit_evidence_says_went_through(tmp_path):
