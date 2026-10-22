@@ -19,7 +19,7 @@
   {
     "run": "m1_r11_boot",
     "step": 137,
-    "checkpoint": 135,
+    "checkpoint": 130,
     "truth": {
       "map": 40,
       "x": 5,
