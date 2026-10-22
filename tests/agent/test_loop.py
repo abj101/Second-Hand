@@ -548,9 +548,9 @@ def test_blocked_with_novelty_still_counts_as_failure(tmp_path, monkeypatch):
 
     first = loop.step()
     intent = first["choice"]["intent"]
-    assert first["verdict"] == "progress" and intent not in loop.fails
+    assert first["verdict"] == "changed" and intent not in loop.fails
     second = loop.step()
-    assert second["verdict"] == "progress" and loop.fails[intent]["n"] == 1
+    assert second["verdict"] == "changed" and loop.fails[intent]["n"] == 1
     options = loop.world.options(per, loop.place, loop.fails, 3, inputs=list(loop.env.inputs()))
     option = next(o for o in options if o.get("intent_key") == intent)
     assert option["state"] == "failed" and any("1×" in note for note in option["notes"])

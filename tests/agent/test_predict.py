@@ -27,7 +27,8 @@ def test_effect_basis_uses_pixels_or_model_lists():
 
 
 def test_result_prioritizes_novelty_then_failure_then_no_change():
-    assert classify("blocked", ["no_change"], True) == "progress"
+    assert classify("blocked", ["no_change"], True) == "changed"
+    assert classify("failed", ["view_scrolled"], True) == "changed"
     assert classify("failed", ["screen_changes"], False) == "failed"
     assert classify("done", ["no_change"], False) == "no_change"
     assert classify("done", ["screen_changes"], False) == "changed"
@@ -46,7 +47,7 @@ def test_m1_surprises_score_novelty_without_entity_churn():
     unmoved = [r for r in surprises if r["moved"] is False]
     assert len(unmoved) == 13
     assert all(outcomes[r["step"]] == "failed" for r in unmoved)
-    assert outcomes[100] == "progress"
+    assert outcomes[100] == "changed"
     step_105 = next(r for r in surprises if r["step"] == 105)
     assert step_105["moved"] is True and step_105["skill"]["status"] == "done"
     assert tuple(step_105["scroll"]) != (0, 0) and outcomes[105] == "progress"

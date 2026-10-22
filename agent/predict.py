@@ -10,8 +10,8 @@ PRED = {"place_changes": "leads_to", "text_appears": "says", "screen_changes": "
 
 
 def result(status: str, effects: list[str], novel: bool) -> str:
+    if status in ("blocked", "failed"): return "changed" if novel else "failed"
     if novel: return "progress"
-    if status in ("blocked", "failed"): return "failed"
     if effects == ["no_change"]: return "no_change"
     return "changed"
 

@@ -181,7 +181,7 @@ def test_duplicate_exit_records_pick_the_observed_door_and_the_failure_note_foll
 
     key = first["choice"]["intent"]
     assert ("RIGHT", (10, 8)) in env.presses and all(p[1] != (10, 9) for p in env.presses)  # crossed from the observed door only
-    assert first["verdict"] == "progress" and key not in loop.fails
+    assert first["verdict"] == "changed" and key not in loop.fails
 
     retry = loop.step()  # repeat the same blocked crossing after its first view exposed new rows
     assert retry["choice"]["intent"] == key and retry["verdict"] == "failed" and loop.fails[key]["n"] == 1
