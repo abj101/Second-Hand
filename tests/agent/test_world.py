@@ -790,17 +790,17 @@ def test_world_view_labels_other_place_detail_bundle(tmp_path):
     assert lines[lines.index("Things: Hall") + 1] == "  Thing: Chest remembered"
 
 
-def test_memory_call_keeps_first_name_and_world_uses_called_name(tmp_path):
+def test_memory_call_newer_same_tier_name_replaces_and_world_uses_called_name(tmp_path):
     mem = Memory(tmp_path); place(mem, "room", "Room")
     entity(mem, "person", "person", "room", [1, 0])
     mem.call("person", "MOM", 41)
     mem.call("person", "MOTHER", 42)
-    assert mem.get("entities", "person")["called"] == "MOM"
+    assert mem.get("entities", "person")["called"] == "MOTHER"
 
     mem.upsert("entities", {**mem.get("entities", "person"), "kind": "npc", "tier": "interest", "status": "seen"})
     world = World(mem, 16); world.current_place = "room"
-    assert "Thing A MOM" in world.view("", "room")
-    assert world.resolve("mom", {"entities": []}, "room")["id"] == "person"
+    assert "Thing A MOTHER" in world.view("", "room")
+    assert world.resolve("mother", {"entities": []}, "room")["id"] == "person"
 
 
 def test_loop_act_uses_world_facts_active_quests_and_labels(tmp_path, monkeypatch):

@@ -493,5 +493,7 @@ def test_called_claims_rank_by_tier(tmp_path):
     assert mem.get("entities", "a")["called"] == "OAK" and mem.get("entities", "a")["called_src"]["tier"] == "said"
     mem.call("a", "LATE", 3, tier="text", key="t-2")  # text never replaces said
     assert mem.get("entities", "a")["called"] == "OAK"
+    mem.call("a", "OAK2", 5)  # a newer said replaces an older said
+    assert mem.get("entities", "a")["called"] == "OAK2"
     mem.call("b", "NEW", 4, tier="text", key="t-3")  # an old called with no called_src counts as said
     assert mem.get("entities", "b")["called"] == "OLD"

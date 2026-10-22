@@ -128,9 +128,9 @@ class Memory:
 
     def call(self, entity_id: str, name: str, step: int, tier: str = "said", key: str | None = None) -> dict | None:
         """A name from the game, ranked: "text" (the planner read it in game text) < "said" (the game named the thing when the agent interacted with it).
-        A higher tier replaces a lower one; the first claim of a tier stays. A `called` with no `called_src` counts as said."""
+        A claim of the same or a higher tier replaces the old one; a lower tier never does. A `called` with no `called_src` counts as said."""
         row, name = self.get("entities", entity_id), str(name or "").strip()
-        if not row or not name or (row.get("called") and CLAIM_TIERS[tier] <= CLAIM_TIERS[(row.get("called_src") or {}).get("tier", "said")]):
+        if not row or not name or (row.get("called") and CLAIM_TIERS[tier] < CLAIM_TIERS[(row.get("called_src") or {}).get("tier", "said")]):
             return row
         return self.upsert("entities", {**row, "called": name, "called_src": {"tier": tier, "step": step, "key": key}})
 
