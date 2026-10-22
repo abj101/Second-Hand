@@ -1011,7 +1011,7 @@ def test_place_target_closes_after_observation_without_planner_call(tmp_path, mo
     assert row["verdict"] == "progress" and loop.stuck.progress_n == 0
 
 
-def test_text_from_target_thing_closes_talk_quest(tmp_path, monkeypatch):
+def test_text_from_target_thing_keeps_talk_quest_open_and_records_who(tmp_path, monkeypatch):
     from agent import loop as module
     per = {"screen": "world", "text": [], "entities": [
         {"kind": "player", "name": "player", "at": [.5, .5]},
