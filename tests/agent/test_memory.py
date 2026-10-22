@@ -86,6 +86,23 @@ def test_position_identity_relabels_co_visible_things_and_keeps_tracks(tmp_path)
     assert mem.get("entities", track)["kind"] == "npc"
 
 
+def test_position_identity_keeps_actor_and_static_classes_separate(tmp_path):
+    mem = Memory(tmp_path)
+    static = mem.observe({"entities": [{"name": "item 1", "kind": "object"}]}, "room", 1, {0: (2, 2)})[0]
+    actor = mem.observe({"entities": [{"name": "clerk", "kind": "npc"}]}, "room", 2, {0: (2, 2)})[0]
+    assert actor != static
+    assert mem.observe({"entities": [{"name": "item 1", "kind": "object"}]}, "room", 3, {0: (2, 2)})[0] == static
+    assert mem.observe({"entities": [{"name": "clerk", "kind": "npc"}]}, "room", 4, {0: (3, 2)})[0] == actor
+
+    # A pixel-track hit still keeps its identity, but another-class vote cannot change its kind.
+    tracked = mem.observe({"entities": [{"name": "poster", "kind": "object"}]}, "room", 5, {0: (5, 5)})[0]
+    for step in range(6, 9):
+        assert mem.observe({"entities": [{"name": "person", "kind": "npc"}]}, "room", step,
+                           {0: (5, 5)}, {0: tracked})[0] == tracked
+    row = mem.get("entities", tracked)
+    assert row["kind"] == "object" and "npc" in row["kinds"] and row["recent_kinds"] == ["object", "npc", "npc", "npc"]
+
+
 def test_static_tile_moves_only_after_two_agreeing_sightings(tmp_path):
     mem = Memory(tmp_path)
     static = mem.observe({"entities": [{"name": "sign", "kind": "object"}]}, "room", 1, {0: (4, 4)})[0]

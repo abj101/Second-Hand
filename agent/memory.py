@@ -278,7 +278,7 @@ class Memory:
             if hit and hit.get("place") == place and hit.get("state") != "merged" and _is_exit(hit.get("kind"), hit.get("name")) == exit_:  # a track never turns a passage into its walker
                 pairs.append(((-1,), i, hit))
             for row in rows:
-                if row.get("place") != place or row.get("state") == "merged" or not row.get("tile") or _is_exit(row.get("kind"), row.get("name")) != exit_:
+                if row.get("place") != place or row.get("state") == "merged" or not row.get("tile") or _is_exit(row.get("kind"), row.get("name")) != exit_ or _actor(row) != is_actor:
                     continue
                 d = max(abs(tile[0] - row["tile"][0]), abs(tile[1] - row["tile"][1]))
                 gate = min(4, 1 + max(0, step - row.get("last", step)) // 4) if (
@@ -331,11 +331,14 @@ class Memory:
             if recent_names.count(shown_name) >= 3 and shown_name != row.get("name"):
                 if row.get("name") and row["name"] not in row.get("aliases", []): row["aliases"] = [*row.get("aliases", []), row["name"]]
                 row["name"] = shown_name
+            row_actor = _actor(row)
             recent_kinds = ["unknown" if str(k).casefold() == "player" else k for k in row.get("recent_kinds", [])]
             recent_kinds = [*recent_kinds, kind][-6:]
             row["recent_kinds"] = recent_kinds
-            shown_kind = max(recent_kinds, key=recent_kinds.count)
-            if recent_kinds.count(shown_kind) >= 3: row["kind"] = shown_kind
+            votes = [k for k in recent_kinds if _actor({"kind": k}) == row_actor]
+            if votes:
+                shown_kind = max(votes, key=votes.count)
+                if votes.count(shown_kind) >= 3: row["kind"] = shown_kind
             row.update(at=entity.get("at"), last=step, seen=row.get("seen", 0) + 1, status="seen", misses=0)
             if tile is not None:
                 if _actor(row): row["tile"] = list(tile)

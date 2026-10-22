@@ -184,6 +184,7 @@ def test_player_label_off_self_spot_keeps_the_actor_id_and_kind(tmp_path):
     world = World(mem, 16); world.self_spot, world._self_from_motion = [.5, .5], True
     per = {"screen": "world", "entities": [{"name": "player", "kind": "player", "at": [.7, .5]}]}
 
+    world.fix_player(per, (160, 144))
     _, tiles, ids = world.before(per, "room", None, (160, 144), 3)
 
     assert tiles == {0: (2, 0)} and ids == {0: "npc"}
