@@ -157,11 +157,11 @@ class World:
         # ponytail: fixed red outline and offsets from the 2026-10-13 test; pick a contrasting colour per frame if a colour game hides it.
         ImageDraw.Draw(image).rectangle([x - 9, y - 10, x + 9, y + 9], outline="red", width=1)
         return image, True
-    def before(self, per, place, prior, size, step):
+    def before(self, per, place, prior, size, step, frame=None):
         self.current_place, self.size = place, size
         if per.get("screen") == "world": self.name(place, per.get("place"), step)
         if prior and place != prior:
-            self.pos, self.drift, self.drift_ref = self._locate(place), None, None
+            self.pos, self.drift, self.drift_ref = self._locate(place, frame), None, None
             self._observed_per = None; self.tracker.clear()
         player = next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         pa = self.self_spot if self._self_from_motion else self._anchor(per, size) if player else None
@@ -408,13 +408,16 @@ class World:
         return f", {_away(self.pos, tile)}" if tile and self.current_place != self.mem.unplaced else ""
     def _seen_at(self, place):
         hit = getattr(self.mem, "arrival", None)
-        return tuple(hit[1]) if hit and hit[0] == place else None
+        return (tuple(hit[1]), hit[2]) if hit and hit[0] == place else None
     def _locate(self, place, frame=None):
         """Where you stand on entering place: the tile the identifying match handed over, else a stored view of place, else unknown.
         ponytail: an unknown position (Memory.unplaced) stops tiles, folding and new views until a stored view of the place matches; a place
         with no view near any tile you can reach stays unplaced, add a re-anchor on a crossed exit if that happens"""
-        tile = self._seen_at(place)
-        if tile is None and frame is not None and self.tile_px and (hit := self.mem.seen_view(frame, None, None, self.tile_px, only=place)): tile = tuple(hit[1])
+        arrival = self._seen_at(place); tile = arrival[0] if arrival else None
+        if frame is not None and self.tile_px and (tile is None or arrival and arrival[1] == "inferred") and (hit := self.mem.seen_view(frame, None, None, self.tile_px, only=place)):
+            view = tuple(hit[1])
+            if arrival and arrival[1] == "inferred" and view != tile and (row := self.mem.get("tiles", getattr(self.mem, "arrival_exit", None))): self.mem.upsert("tiles", {**row, "exit": {**row["exit"], "arrive": list(view), "src": "observed"}})
+            tile = view
         self.mem.unplaced = None if tile is not None else place
         return tile if tile is not None else self.pos
     def mark_exit(self, place, direction, to, arrive, step):
@@ -1136,18 +1139,18 @@ class World:
                     wall = x.get("placement"); here = (self.mem.get("tiles", f"{place}@{x['tile'][0]},{x['tile'][1]}") or {}) if x["tile"] else {}
                     untried = push_dirs(self.mem, place, x["tile"], wall) if x["tile"] else list(DIRS)
                     if not x["tile"] and wall: untried = list(dict.fromkeys([outward(self.mem, place, self.pos, wall), *untried]))
-                    tried = [d for d in dict.fromkeys(here.get("pushed", []) + here.get("blocked", [])) if d in DIRS]
+                    tried = [d for d in dict.fromkeys(here.get("pushed", []) + here.get("blocked", []) + here.get("held", [])) if d in DIRS]
                     label = f"go to {self.label(ref, place)}"; key = _yx(x["tile"], label)
                     on_tile = bool(x["tile"] and self.current_place != self.mem.unplaced and tuple(self.pos) == tuple(x["tile"]))
                     if x["tile"] and not on_tile:
                         action = {"thing": x["idx"], "verb": "approach", "onto": True} if x["idx"] is not None else {"go_to": ref, "onto": True}
                         row = option("approach", f"walk onto {self.label(ref, place)}{f' ({wall})' if wall else ''}{self._where(x['tile'])}", action, "approach", target, ref, x["ident"], note="exit, never crossed")
-                        row["notes"].extend(f"pressed {d}: {'blocked' if d in here.get('blocked', []) else 'moved, no exit'}" for d in tried)
+                        row["notes"].extend(f"pressed {d}: {'blocked' if d in here.get('blocked', []) else 'someone stood there' if d in here.get('held', []) else 'moved, no exit'}" for d in tried)
                         reach = self.mem.get("reach", f"{place}@{x['tile'][0]},{x['tile'][1]}")
                         row["state"] = "failed" if row["intent_key"] in fails or reach and reach.get("n", 0) > 0 else "new"
                         exits.append((key, row)); continue
                     for direction in [*untried, *tried] if untried else [None]:
-                        fact = "all four pushes tried" if direction is None else f"pressed {direction}: blocked" if direction in here.get("blocked", []) else f"pressed {direction}: moved, no exit" if direction in here.get("pushed", []) else "untried"
+                        fact = "all four pushes tried" if direction is None else f"pressed {direction}: blocked" if direction in here.get("blocked", []) else f"pressed {direction}: someone stood there" if direction in here.get("held", []) else f"pressed {direction}: moved, no exit" if direction in here.get("pushed", []) else "untried"
                         text = f"{label}{f' ({wall})' if wall else ''}{self._where(x['tile'])}, then press {direction}" if direction else f"{label}, all four pushes tried"
                         if direction and x["tile"]:
                             dx, dy = DIRS[direction]; neighbour = self.mem.get("tiles", f"{place}@{x['tile'][0]+dx},{x['tile'][1]+dy}") or {}

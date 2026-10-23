@@ -12,8 +12,10 @@ def fold(mem, place, pos, moves, tile_px, step, actors: frozenset[tuple[int, int
         if move is None: continue
         direction, shift = (move.get("dir"), move.get("shift")) if isinstance(move, dict) else move
         if direction not in DIRS or shift is None: continue
-        if (shift == (0, 0) or shift == 0) and (here[0] + DIRS[direction][0], here[1] + DIRS[direction][1]) in actors: continue
-        row = _get(mem, place, here) or _new(place, here, step); before = dict(row, blocked=list(row["blocked"]), pushed=list(row["pushed"]))
+        row = _get(mem, place, here) or _new(place, here, step); before = dict(row, blocked=list(row["blocked"]), pushed=list(row["pushed"]), **({"held": list(row["held"])} if "held" in row else {}))
+        if (shift == (0, 0) or shift == 0) and (here[0] + DIRS[direction][0], here[1] + DIRS[direction][1]) in actors:
+            if direction not in row.get("held", []): row.setdefault("held", []).append(direction); row["step"] = step
+            _save(mem, row, before); continue
         if row["floor"] is not True: row["floor"] = True; row["step"] = step
         mem.learn_look(place, here, "floor", step)
         if shift == (0, 0) or shift == 0:
@@ -21,6 +23,7 @@ def fold(mem, place, pos, moves, tile_px, step, actors: frozenset[tuple[int, int
             dx, dy = DIRS[direction]; mem.learn_look(place, (here[0] + dx, here[1] + dy), "wall", step)
             _save(mem, row, before); continue
         if direction in row["blocked"]: row["blocked"].remove(direction)
+        if direction in row.get("held", []): row["held"].remove(direction)
         sx, sy = DIRS[direction]; shift = (shift, 0) if isinstance(shift, int) and sx else (0, shift) if isinstance(shift, int) else shift
         dx, dy = (round(-v / tile_px) for v in shift); count = max(abs(dx), abs(dy)); sx = (dx > 0) - (dx < 0); sy = (dy > 0) - (dy < 0)
         for _ in range(count):
@@ -74,7 +77,7 @@ def push_dirs(mem, place, tile, placement=None):
     neighbours = {d: _get(mem, place, (tile[0]+dx, tile[1]+dy)) or {} for d, (dx, dy) in DIRS.items()}
     order.sort(key=lambda d: (not bool(neighbours[d].get("exit")), neighbours[d].get("floor") is True))
     wall = outward(mem, place, tile, placement) if placement in ("top wall", "bottom wall", "left wall", "right wall") else None
-    return [d for d in dict.fromkeys(([wall] if wall else []) + order) if d not in here.get("pushed", []) and d not in here.get("blocked", [])]
+    return [d for d in dict.fromkeys(([wall] if wall else []) + order) if d not in here.get("pushed", []) and d not in here.get("blocked", []) and d not in here.get("held", [])]
 def push_failed(mem, place, tile, direction, step):
     if direction not in DIRS: return
     row = _get(mem, place, tile) or _new(place, tile, step); before = dict(row, pushed=list(row["pushed"]))

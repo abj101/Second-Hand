@@ -23,6 +23,30 @@ def entity(mem, id, name, place, tile, seen=2):
     mem.upsert("entities", {"id": id, "name": name, "kind": "object", "place": place, "tile": tile, "seen": seen})
 
 
+def test_held_push_refutes_exit_after_every_direction_was_tried(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room")
+    mem.upsert("tiles", {"id": "room@0,0", "place": "room", "x": 0, "y": 0, "floor": True,
+                         "blocked": ["DOWN"], "pushed": ["LEFT", "RIGHT"], "held": ["UP"], "exit": None, "step": 1})
+    entity(mem, "hatch", "exit: hatch", "room", [0, 0])
+    world = World(mem, 16)
+
+    assert world._refuted("room", (0, 0)) == 1
+    assert world._exits("room", {"room"})[0]["status"] == "refuted"
+
+
+def test_held_push_is_shown_as_tried_in_exit_options(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room")
+    mem.upsert("tiles", {"id": "room@0,0", "place": "room", "x": 0, "y": 0, "floor": True,
+                         "blocked": ["DOWN"], "pushed": ["LEFT"], "held": ["UP"], "exit": None, "step": 1})
+    entity(mem, "hatch", "exit: hatch", "room", [0, 0])
+    world = World(mem, 16); world.current_place, world.pos = "room", (0, 0)
+
+    row = next(o for o in world.options({"screen": "world", "entities": []}, "room", {}, 2)
+               if o.get("action", {}).get("push") == "UP")
+
+    assert row["state"] == "failed" and "pressed UP: someone stood there" in row["notes"]
+
+
 def test_fix_player_swaps_entity_near_locked_self_spot(tmp_path):
     world = World(Memory(tmp_path), 16); world.self_spot, world._self_from_motion = [.5, .5], True
     player = {"name": "Guide", "kind": "player", "at": [.75, .5]}
@@ -254,6 +278,76 @@ def test_known_place_without_arrival_evidence_is_unplaced_until_a_view_matches(t
     assert mem.unplaced == "b"
     _, tiles, _ = world.before({"screen": "world", "entities": [{"name": "desk", "kind": "object", "at": [.7, .5]}]}, "b", "b", (160, 144), 2)
     assert tiles == {}  # no guessed tile: nothing is placed at a wrong position
+
+
+def test_inferred_arrival_uses_matching_view_and_corrects_its_exit(tmp_path):
+    import numpy as np
+    from PIL import Image
+    mem = Memory(tmp_path); place(mem, "a", "A"); place(mem, "b", "B")
+    row = {"id": "a@1,0", "place": "a", "x": 1, "y": 0, "floor": True, "blocked": [], "pushed": [],
+           "exit": {"dir": "RIGHT", "to": "b", "arrive": [4, 5], "src": "inferred"}, "step": 1}
+    mem.upsert("tiles", row); mem.arrival = ("b", (4, 5), "inferred"); mem.arrival_exit = row["id"]
+    frame = Image.fromarray(np.random.default_rng(7).integers(1, 4, (144, 160), dtype=np.uint8) * 80); mem.remember_view("b", (7, 8), frame)
+    world = World(mem, 16)
+
+    world.before({"screen": "world", "entities": []}, "b", "a", (160, 144), 2, frame=frame)
+
+    assert world.pos == (7, 8) and mem.get("tiles", row["id"])["exit"] == {"dir": "RIGHT", "to": "b", "arrive": [7, 8], "src": "observed"}
+
+
+def test_observed_arrival_keeps_its_tile_when_a_view_matches_elsewhere(tmp_path):
+    import numpy as np
+    from PIL import Image
+    mem = Memory(tmp_path); place(mem, "a", "A"); place(mem, "b", "B")
+    mem.arrival = ("b", (4, 5), "observed")
+    frame = Image.fromarray(np.random.default_rng(7).integers(1, 4, (144, 160), dtype=np.uint8) * 80); mem.remember_view("b", (7, 8), frame)
+    world = World(mem, 16)
+
+    world.before({"screen": "world", "entities": []}, "b", "a", (160, 144), 2, frame=frame)
+
+    assert world.pos == (4, 5)
+
+
+def test_inferred_arrival_without_view_keeps_its_tile(tmp_path):
+    from PIL import Image
+    mem = Memory(tmp_path); place(mem, "a", "A"); place(mem, "b", "B")
+    mem.arrival = ("b", (4, 5), "inferred")
+    world = World(mem, 16)
+
+    world.before({"screen": "world", "entities": []}, "b", "a", (160, 144), 2, frame=Image.new("RGB", (160, 144), "red"))
+
+    assert world.pos == (4, 5)
+
+
+def test_inferred_arrival_without_exit_id_uses_view_without_correction(tmp_path):
+    import numpy as np
+    from PIL import Image
+    mem = Memory(tmp_path); place(mem, "a", "A"); place(mem, "b", "B")
+    row = {"id": "a@1,0", "place": "a", "x": 1, "y": 0, "floor": True, "blocked": [], "pushed": [],
+           "exit": {"dir": "RIGHT", "to": "b", "arrive": [4, 5], "src": "inferred"}, "step": 1}
+    mem.upsert("tiles", row); mem.arrival = ("b", (4, 5), "inferred")
+    frame = Image.fromarray(np.random.default_rng(7).integers(1, 4, (144, 160), dtype=np.uint8) * 80); mem.remember_view("b", (7, 8), frame)
+    world = World(mem, 16)
+
+    world.before({"screen": "world", "entities": []}, "b", "a", (160, 144), 2, frame=frame)
+
+    assert world.pos == (7, 8) and mem.get("tiles", row["id"])["exit"] == row["exit"]
+
+
+def test_inferred_arrival_correction_updates_only_the_matched_exit(tmp_path):
+    import numpy as np
+    from PIL import Image
+    mem = Memory(tmp_path); place(mem, "a", "A"); place(mem, "b", "B")
+    for ident, x, direction, arrive in (("a@0,0", 0, "RIGHT", [4, 5]), ("a@1,0", 1, "LEFT", [6, 7])):
+        mem.upsert("tiles", {"id": ident, "place": "a", "x": x, "y": 0, "floor": True, "blocked": [], "pushed": [],
+                              "exit": {"dir": direction, "to": "b", "arrive": arrive, "src": "inferred"}, "step": 1})
+    frame = Image.fromarray(np.random.default_rng(7).integers(1, 4, (144, 160), dtype=np.uint8) * 80); mem.remember_view("b", (8, 9), frame)
+    assert mem.match_place({"screen": "world", "entities": []}, 2, prev="a", cut=True, exit=(1, 0, "LEFT")) == "b"
+    world = World(mem, 16)
+
+    world.before({"screen": "world", "entities": []}, "b", "a", (160, 144), 3, frame=frame)
+
+    assert mem.get("tiles", "a@0,0")["exit"]["arrive"] == [4, 5] and mem.get("tiles", "a@1,0")["exit"] == {"dir": "LEFT", "to": "b", "arrive": [8, 9], "src": "observed"}
 
 
 def test_place_refs_round_trip_printed_labels(tmp_path):
