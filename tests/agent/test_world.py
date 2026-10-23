@@ -256,6 +256,76 @@ def test_known_place_without_arrival_evidence_is_unplaced_until_a_view_matches(t
     assert tiles == {}  # no guessed tile: nothing is placed at a wrong position
 
 
+def test_inferred_arrival_uses_matching_view_and_corrects_its_exit(tmp_path):
+    import numpy as np
+    from PIL import Image
+    mem = Memory(tmp_path); place(mem, "a", "A"); place(mem, "b", "B")
+    row = {"id": "a@1,0", "place": "a", "x": 1, "y": 0, "floor": True, "blocked": [], "pushed": [],
+           "exit": {"dir": "RIGHT", "to": "b", "arrive": [4, 5], "src": "inferred"}, "step": 1}
+    mem.upsert("tiles", row); mem.arrival = ("b", (4, 5), "inferred"); mem.arrival_exit = row["id"]
+    frame = Image.fromarray(np.random.default_rng(7).integers(1, 4, (144, 160), dtype=np.uint8) * 80); mem.remember_view("b", (7, 8), frame)
+    world = World(mem, 16)
+
+    world.before({"screen": "world", "entities": []}, "b", "a", (160, 144), 2, frame=frame)
+
+    assert world.pos == (7, 8) and mem.get("tiles", row["id"])["exit"] == {"dir": "RIGHT", "to": "b", "arrive": [7, 8], "src": "observed"}
+
+
+def test_observed_arrival_keeps_its_tile_when_a_view_matches_elsewhere(tmp_path):
+    import numpy as np
+    from PIL import Image
+    mem = Memory(tmp_path); place(mem, "a", "A"); place(mem, "b", "B")
+    mem.arrival = ("b", (4, 5), "observed")
+    frame = Image.fromarray(np.random.default_rng(7).integers(1, 4, (144, 160), dtype=np.uint8) * 80); mem.remember_view("b", (7, 8), frame)
+    world = World(mem, 16)
+
+    world.before({"screen": "world", "entities": []}, "b", "a", (160, 144), 2, frame=frame)
+
+    assert world.pos == (4, 5)
+
+
+def test_inferred_arrival_without_view_keeps_its_tile(tmp_path):
+    from PIL import Image
+    mem = Memory(tmp_path); place(mem, "a", "A"); place(mem, "b", "B")
+    mem.arrival = ("b", (4, 5), "inferred")
+    world = World(mem, 16)
+
+    world.before({"screen": "world", "entities": []}, "b", "a", (160, 144), 2, frame=Image.new("RGB", (160, 144), "red"))
+
+    assert world.pos == (4, 5)
+
+
+def test_inferred_arrival_without_exit_id_uses_view_without_correction(tmp_path):
+    import numpy as np
+    from PIL import Image
+    mem = Memory(tmp_path); place(mem, "a", "A"); place(mem, "b", "B")
+    row = {"id": "a@1,0", "place": "a", "x": 1, "y": 0, "floor": True, "blocked": [], "pushed": [],
+           "exit": {"dir": "RIGHT", "to": "b", "arrive": [4, 5], "src": "inferred"}, "step": 1}
+    mem.upsert("tiles", row); mem.arrival = ("b", (4, 5), "inferred")
+    frame = Image.fromarray(np.random.default_rng(7).integers(1, 4, (144, 160), dtype=np.uint8) * 80); mem.remember_view("b", (7, 8), frame)
+    world = World(mem, 16)
+
+    world.before({"screen": "world", "entities": []}, "b", "a", (160, 144), 2, frame=frame)
+
+    assert world.pos == (7, 8) and mem.get("tiles", row["id"])["exit"] == row["exit"]
+
+
+def test_inferred_arrival_correction_updates_only_the_matched_exit(tmp_path):
+    import numpy as np
+    from PIL import Image
+    mem = Memory(tmp_path); place(mem, "a", "A"); place(mem, "b", "B")
+    for ident, x, direction, arrive in (("a@0,0", 0, "RIGHT", [4, 5]), ("a@1,0", 1, "LEFT", [6, 7])):
+        mem.upsert("tiles", {"id": ident, "place": "a", "x": x, "y": 0, "floor": True, "blocked": [], "pushed": [],
+                              "exit": {"dir": direction, "to": "b", "arrive": arrive, "src": "inferred"}, "step": 1})
+    frame = Image.fromarray(np.random.default_rng(7).integers(1, 4, (144, 160), dtype=np.uint8) * 80); mem.remember_view("b", (8, 9), frame)
+    assert mem.match_place({"screen": "world", "entities": []}, 2, prev="a", cut=True, exit=(1, 0, "LEFT")) == "b"
+    world = World(mem, 16)
+
+    world.before({"screen": "world", "entities": []}, "b", "a", (160, 144), 3, frame=frame)
+
+    assert mem.get("tiles", "a@0,0")["exit"]["arrive"] == [4, 5] and mem.get("tiles", "a@1,0")["exit"] == {"dir": "LEFT", "to": "b", "arrive": [8, 9], "src": "observed"}
+
+
 def test_place_refs_round_trip_printed_labels(tmp_path):
     mem = Memory(tmp_path); place(mem, "p_room", "Name"); place(mem, "p_x", "Name"); place(mem, "p_place_3", "", 3)
     place(mem, "p_unique", "Only"); place(mem, "p_old", "Old")

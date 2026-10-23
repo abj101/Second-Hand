@@ -127,7 +127,7 @@ class Loop:
         self.place, self.pending_cut, self.pending_via, self.pending_key = place, False, None, None
         self.cut_carry = is_cut and per.get("screen") != "world"  # match_place keeps the place on a non-world screen: the cut waits for a world one
         size = before.size
-        proj = self.world.before(per, place, prior, size, self.step_no + 1)[0]
+        proj = self.world.before(per, place, prior, size, self.step_no + 1, frame=before)[0]
         drift_fix = None
         probe = None
         if per.get("screen") == "world" and not modal and not self.world._self_from_motion and self.tile_px:

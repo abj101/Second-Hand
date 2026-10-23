@@ -97,7 +97,7 @@ def test_first_map_is_minted_and_the_run_start_place_keeps_only_pre_map_screens(
 
     place = mem.match_place({"screen": "world", "entities": []}, 2, prev=placeholder, cut=False)
 
-    assert place != placeholder and mem.get("places", place)["screen"] == "world" and mem.arrival == (place, (0, 0))
+    assert place != placeholder and mem.get("places", place)["screen"] == "world" and mem.arrival == (place, (0, 0), "new")
     assert mem.get("places", placeholder).get("screen") is None  # title and intro records never become things of the first map
 
 
@@ -379,11 +379,11 @@ def test_revisit_recognised_by_stored_view_with_tile_scroll(tmp_path):
     mem.remember_view(up, (0, 0), view(0, 0))
     down = mem.match_place({"screen": "world", "entities": [{"name": "table", "kind": "object"}]}, 2, prev=up, cut=True,
                            frame=Image.fromarray(rng.integers(1, 4, (144, 160), dtype=np.uint8) * 80), tile_px=16)
-    assert down != up and mem.arrival == (down, (0, 0))  # a new place starts where you stand
+    assert down != up and mem.arrival == (down, (0, 0), "new")  # a new place starts where you stand
     # back upstairs, one tile right of the stored view, perceiver names differ: pixels still say it's `up`
     back = mem.match_place({"screen": "world", "entities": [{"name": "machine", "kind": "object"}]}, 3, prev=down, cut=True,
                            frame=view(1, 0), tile_px=16)
-    assert back == up and mem.arrival == (up, (1, 0))
+    assert back == up and mem.arrival == (up, (1, 0), "view")
 
 
 def test_views_agree_vetoes_merging_different_rooms(tmp_path):
