@@ -329,10 +329,6 @@ class Loop:
                     self.mem.upsert("relations", {**rel, "why": f"says the same as before (step {said_step})"})  # ponytail: a note on the says row, not a new relation kind
                 if effect == "text_appears":
                     self.conversation["who"] = f"thing:{tid}"  # the dialogue it starts is that thing's
-                    entity = self.mem.get("entities", tid)
-                    speaker = re.match(r"^([A-Z][A-Za-z.' -]{0,19}):\s*", new_text)
-                    if entity and self.world._actor(tid, entity) and speaker and sum(c.isalpha() for c in speaker.group(1)) >= 2:
-                        self.mem.call(tid, speaker.group(1), self.step_no + 1)
             if skill.status == "done" and next_place == place and aff.get("verb") in ("interact", "approach"):
                 thing = self.world.canon(f"thing:{tid}").split(":", 1)[1]
                 for ref in self.world.leads_to(f"thing:{thing}"):
@@ -470,6 +466,9 @@ class Loop:
         speaker = match.group(1) if match and sum(c.isalpha() for c in match.group(1)) >= 2 else None
         if speaker: joined = joined[match.end():]
         place = self.conversation["place"]
+        who = self.conversation.get("who")
+        kind, _, ident = (who or "").partition(":")
+        if speaker and kind == "thing" and self.world._actor(ident, {}): self.mem.call(ident, speaker, step)
         self.text_for_trigger = joined
         self.notebook.heard(step, speaker, self.world.place_label(place) if place else "?", joined, who=self.conversation.get("who"))
         self._event("T1", f"new game text: {joined[:200]}", step)
