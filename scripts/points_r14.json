@@ -1,0 +1,31 @@
+[
+  {
+    "run": "m1_r13_boot",
+    "checkpoint": 210,
+    "step": 211,
+    "situation": "G1 unplannable exit stays offered with a route note",
+    "note_re": [{"label_re": "^go through door mat", "re": "no known route"}]
+  },
+  {
+    "run": "m1_r13_boot",
+    "checkpoint": 205,
+    "step": 208,
+    "situation": "G5 return exit is named by its destination",
+    "absent": [{"tool": ".*", "label_re": "^go to UP,"}],
+    "right": [{"label_re": "^go (to|through) shop"}]
+  },
+  {
+    "run": "m1_r13_boot",
+    "checkpoint": 205,
+    "step": 209,
+    "situation": "G2 re-entry uses the original lab frame",
+    "text_re": "Here: [^\\n]*\\(0,8\\)"
+  },
+  {
+    "run": "m1_r13_boot",
+    "checkpoint": 160,
+    "step": 161,
+    "situation": "G3 character push counts as tried",
+    "absent": [{"tool": ".*", "label_re": "^press DOWN here"}]
+  }
+]

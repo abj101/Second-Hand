@@ -820,7 +820,8 @@ class World:
             row, dest, tile = rec["row"], rec["dest"], rec["tile"]
             rec.update(name=row.get("name"), ident=row.get("id"), idx=row.get("idx"))
             c = (self.mem.get("crossings", _cross_key(pid, tile, dest)) or {}) if tile and dest else {}
-            rec.update(n=c.get("n", 0), last=c.get("last"), miss=c.get("miss", 0))
+            partner = (self.mem.get("crossings", _cross_key(dest, tuple(rec["arrive"]), pid)) or {}) if dest and rec.get("arrive") else {}
+            rec.update(n=c.get("n", 0) + partner.get("n", 0), last=max((v for v in (c.get("last"), partner.get("last")) if v is not None), default=None), miss=c.get("miss", 0))
             rec["alone"] = bool(rec["n"] or rec["observed"])
         groups = []  # ponytail: a twin is found by destination and Chebyshev distance 1 against the group's best record only
         for rec in sorted(recs, key=lambda r: (not r["alone"], not r["observed"], not r["pushed"], _yx(r["tile"], r["name"] or r["dir"]))):
@@ -836,7 +837,7 @@ class World:
             steps = [m["last"] for m in g if m["n"] and m["last"] is not None]
             uses = max(sum(m["n"] for m in g), 1 if any(m["observed"] for m in g) else 0)
             name = best["name"] or next((m["name"] for m in g if m["name"]), None); dir_ = door["dir"]
-            head = (name[5:].strip() if name.casefold().startswith("exit:") else name) if name else dir_
+            head = (name[5:].strip() if name.casefold().startswith("exit:") else name) if name else self.place_label(dest) if dest else dir_
             refuted = not uses and any(self._refuted(pid, m["tile"]) for m in g) or bool(doors) and all(m["miss"] >= 2 for m in doors)
             status = "refuted" if refuted else "verified" if uses else "unverified"
             out.append({"tile": door["tile"], "dir": dir_, "dest": dest, "to": dest, "place": pid, "arrive": door.get("arrive"), "src": door.get("src"),
@@ -1160,7 +1161,10 @@ class World:
                         exits.append((key, row))
                     continue
                 label = f"{'go through' if history.get('uses') else 'go to'} {self.label(ref, place)}{self._where(x['tile'])}"
-                row = option(tool, label, action, "approach", target, ref, x["ident"], {"tile": list(tiles[0]), "to": dest} if tiles else None, note)
+                door = {"tile": list(tiles[0]), "to": dest} if tiles else None
+                resolved = self.resolve(action["go_to"], per, place) if action.get("go_to") else None
+                row = option(tool, label, action, "approach", target, ref, x["ident"], door, note)
+                if action.get("go_to") and self.plan(resolved, exit=door) is None: row["notes"].append("no known route from here (remembered walls block every path)")
                 if beyond["dead_end"] and x["tile"] == beyond["through"]: row["notes"].insert(0, "everything unexplored from here is through this exit")
                 exits.append((_yx(x["tile"], label), row))
             plain_groups, listed = {}, set()

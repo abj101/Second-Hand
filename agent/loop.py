@@ -172,7 +172,7 @@ class Loop:
             view = self.world.view(self._goal_text(), place)
         affs, targets, intents = [], [], []  # intents: each affordance's intent key, resolved before input
         choice, player = None, next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
-        act_route = travel_legs = None; refused = False  # refused: no route to an on-screen target avoids the known blockers (occupied tiles, remembered avoid tile)
+        act_route = travel_legs = None; refused = None  # route refusal reason; no route avoids the known blockers
         options = self.world.options(per, place, self.fails, self.step_no + 1, inputs=list(self.env.inputs()),
                                      targets=(q["target"],) if (q := self.notebook.focused_quest()) and q.get("target") else ())  # failure history is in the option notes
         recent = [f"step {r.get('step')}: {(r.get('choice') or {}).get('verb', '')} {(r.get('choice') or {}).get('target') or ''} -> {r.get('verdict')}" for r in self.recent[-4:]]
@@ -195,8 +195,10 @@ class Loop:
                 ref = f"{'place' if resolved['kind'] == 'place' else 'thing'}:{resolved['id']}" if resolved.get("id") else None  # the name resolved to what it names
                 affs.append({"verb": "approach", "target": (e or {}).get("name", action["go_to"]), "at": (e or {}).get("at")}); targets.append(resolved.get("id")); intents.append(self._fail_key(place, "approach", affs[-1]["target"], ref=ref)); i = len(affs) - 1
                 if action.get("push"): intents[-1] += f">{action['push']}"
-                onto = bool(action.get("onto")); t, act_route, refused = self._approach_route(place, e, player, proj, intents[-1], push=action.get("push"), onto=onto)
-                travel_legs = self.world.plan(resolved, exit=own_pick.get("exit") if own_pick else None, push=action.get("push"), onto=action.get("onto", False)) if not e else None; action = None if travel_legs is None and not e else action
+                onto = bool(action.get("onto")); t, act_route, blocked = self._approach_route(place, e, player, proj, intents[-1], push=action.get("push"), onto=onto)
+                refused = "no route avoids blocker" if blocked else None
+                travel_legs = self.world.plan(resolved, exit=own_pick.get("exit") if own_pick else None, push=action.get("push"), onto=action.get("onto", False)) if not e else None
+                if travel_legs is None and not e: refused = "no known route"
             else: action = None
         if action and "buttons" in action:
             affs.append({"verb": "buttons", "target": " ".join(action["buttons"])}); targets.append(None); intents.append(self._fail_key(place, "buttons", affs[-1]["target"])); i = len(affs) - 1
@@ -220,9 +222,11 @@ class Loop:
                 affs.append(aff); targets.append(ident); intents.append(self._fail_key(place, verb, aff["target"], ref=f"thing:{ident}" if ident else None)); i = 0
                 if action.get("push"): intents[-1] += f">{action['push']}"
                 if verb == "approach":
-                    t, act_route, refused = self._approach_route(place, entity, player, proj, intents[-1], push=action.get("push"), onto=action.get("onto", False))
+                    t, act_route, blocked = self._approach_route(place, entity, player, proj, intents[-1], push=action.get("push"), onto=action.get("onto", False))
+                    refused = "no route avoids blocker" if blocked else None
                 elif verb == "interact" and self.tile_px and player and not self.env.pointer:
-                    t, act_route, refused = self._approach_route(place, entity, player, proj, intents[-1], beside=True)
+                    t, act_route, blocked = self._approach_route(place, entity, player, proj, intents[-1], beside=True)
+                    refused = "no route beside target" if blocked else None
             else: action = None
         if action and action.get("verb") in ("advance", "cancel", "type"):
             aff = {"verb": action["verb"], "target": "", "at": None}
@@ -263,7 +267,7 @@ class Loop:
             push = act_route.get("push") if screen_target.get("kind", "").casefold() == "exit" or str(screen_target.get("name", "")).casefold().startswith("exit:") else None
             travel_legs = [{"place": place, "dirs": act_route["dirs"], "push": push, "expect": None, "cross": bool(push), "exit_tile": t, "target": {"kind": "screen", "tile": t}}]
         try:
-            skill = SkillResult("blocked", "no route beside target" if choice and affs[choice["i"]].get("verb") == "interact" else "no route avoids blocker", 0, 0, before, before, (0, 0), False, failure={"stage": "route", "reason": "no route beside target" if choice and affs[choice["i"]].get("verb") == "interact" else "no route avoids blocker", "direction": None}) if refused else self.world.travel(skillctx, travel_legs, self.step_no + 1, self.trace) if travel_legs is not None and choice else wait_until(skillctx) if not affs or choice is None else press_seq(skillctx, affs[choice["i"]]["target"].split()) if affs[choice["i"]].get("verb") == "buttons" else run_affordance(skillctx, affs[choice["i"]], per, text=choice["text"], exit=False, **({"onto": True} if onto else {}), **({"route": act_route} if act_route else {}))
+            skill = SkillResult("blocked", refused, 0, 0, before, before, (0, 0), False, failure={"stage": "route", "reason": refused, "direction": None}) if refused else self.world.travel(skillctx, travel_legs, self.step_no + 1, self.trace) if travel_legs is not None and choice else wait_until(skillctx) if not affs or choice is None else press_seq(skillctx, affs[choice["i"]]["target"].split()) if affs[choice["i"]].get("verb") == "buttons" else run_affordance(skillctx, affs[choice["i"]], per, text=choice["text"], exit=False, **({"onto": True} if onto else {}), **({"route": act_route} if act_route else {}))
         except BaseException: self.pending_cut, self.pending_via, self.pending_key = cut(before, self.env.screenshot()), affs[choice["i"]].get("target") if choice else None, intent; self.cached = self.cached_hash = None; raise
         if choice and skill.status == "done" and affs[choice["i"]].get("verb") in ("approach", "interact") and choice["i"] < len(targets) and targets[choice["i"]]:
             self.world._promote([targets[choice["i"]]])
