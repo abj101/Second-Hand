@@ -11,6 +11,18 @@ def place(mem, id, name, first=1):
     mem.upsert("places", {"id": id, "name": name, "screen": "world", "state": "place", "first": first, "last": first, "edges": [], "visits": 1})  # memory always sets visits
 
 
+def test_merge_carries_departure_and_arrival_crossing_counts(tmp_path):
+    mem = Memory(tmp_path); world = World(mem, 16)
+    for pid in ("src", "dst", "hall"): place(mem, pid, pid)
+    mem.upsert("tiles", {"id": "src@1,0", "place": "src", "x": 1, "y": 0, "floor": True, "blocked": [], "pushed": [], "exit": {"dir": "RIGHT", "to": "hall", "arrive": [0, 0]}, "step": 1})
+    for ident, n, last in (("src@1,0>hall", 2, 3), ("dst@3,1>hall", 3, 2), ("hall@9,9>src", 1, 4)):
+        mem.upsert("crossings", {"id": ident, "n": n, "last": last})
+    world.merge("src", "dst", 5, (2, 1)); world.current_place, world.pos = "dst", (0, 0)
+    assert mem.get("crossings", "dst@3,1>hall") == {"id": "dst@3,1>hall", "n": 5, "last": 3}
+    assert mem.get("crossings", "hall@9,9>dst")["n"] == 1 and mem.get("crossings", "src@1,0>hall")["n"] == 2
+    assert any("crossed 5×" in " ".join(row.get("notes", [])) for row in world.options({"screen": "world", "entities": []}, "dst", {}, 5))
+
+
 def test_only_navigable_places_resolve_as_targets(tmp_path):
     mem = Memory(tmp_path); place(mem, "room", "Hall")
     mem.upsert("places", {"id": "p_place_1", "screen": "title", "state": "candidate", "first": 1})

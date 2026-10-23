@@ -1397,6 +1397,12 @@ class World:
     def merge(self, src, dst, step, offset):
         if src == dst: return True
         dx, dy = offset
+        for row in self.mem.rows("crossings"):
+            origin, other = row["id"].split(">", 1); place, tile = origin.split("@", 1)
+            if place != src and other != src: continue
+            x, y = map(int, tile.split(",")); key = _cross_key(dst if place == src else place, (x + dx, y + dy) if place == src else (x, y), dst if other == src else other)
+            saved = self.mem.get("crossings", key) or {}
+            self.mem.upsert("crossings", {**row, "id": key, "n": row.get("n", 0) + saved.get("n", 0), "last": max(row.get("last", 0), saved.get("last", 0))})
         entities = self.mem.rows("entities")
         left = [e for e in entities if e.get("place") == src and e.get("state") != "merged"]
         for t in self.mem.rows("tiles"):
