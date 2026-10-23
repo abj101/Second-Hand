@@ -245,6 +245,23 @@ def test_plain_thing_focus_stays_open_until_done(tmp_path):
     assert "(target: Mira; close this quest with done when it is achieved)" in rendered
 
 
+def test_focus_target_shows_a_text_name_as_a_guess(tmp_path):
+    from agent.loop import Loop
+    from agent.memory import Memory
+    from tests.agent.fakes import GridEnv, StubModel
+    mem = Memory(tmp_path / "memory")
+    mem.upsert("places", {"id": "hall", "name": "Hall", "screen": "world", "state": "place"})
+    mem.upsert("entities", {"id": "person", "name": "NPC", "kind": "npc", "place": "hall"})
+    loop = Loop(GridEnv(), StubModel([]), mem, "grid")
+    key = loop.notebook.heard(1, None, "Hall", "The sign says PROF.")
+    loop.notebook.apply_ops([{**add("q", target="thing:person"), "why": [key]}], 2)
+    mem.call("person", "PROF", 3, tier="text")
+
+    rendered = loop.notebook.render_focus(loop.world.label)
+
+    assert "(target: NPC, maybe PROF; close this quest with done when it is achieved)" in rendered
+
+
 def test_render_focus_shows_newest_cited_text_whole_and_cuts_older(tmp_path):
     nb = notebook(tmp_path)
     nb.heard(1, "Mira", "Hall", "old " + "x" * 220)
@@ -433,9 +450,26 @@ def test_thing_quest_closes_entered_on_later_linked_move_but_ignores_other_place
 
 def test_name_op_names_a_thing_from_cited_text(tmp_path):
     named = []
-    nb = notebook(tmp_path, ref=lambda t: "thing:e1" if t == "e1" else None, name=lambda ident, text, key, step: named.append((ident, text, key, step)))
+    nb = notebook(tmp_path, ref=lambda t: "thing:e1" if t == "e1" else None, name=lambda ref, text, key, step: named.append((ref.partition(":")[2], text, key, step)))
     key = nb.heard(3, "Sign", "here", "A BALL OF FIRE")
     rows = nb.apply_ops([{"op": "name", "key": "e1", "text": "Fire ball", "why": [key]}, {"op": "name", "key": "e1", "text": "Nope"},
                          {"op": "name", "key": "zzz", "text": "X", "why": [key]}, {"op": "name", "key": "e1", "text": "", "why": [key]}], 4)
     assert [r["result"] for r in rows][0] == "ok" and all(r["result"].startswith("error") for r in rows[1:])
     assert named == [("e1", "Fire ball", key, 4)]
+
+
+def test_name_op_names_a_place_and_resolves_its_guess(tmp_path):
+    from agent.loop import Loop
+    from agent.memory import Memory
+    from tests.agent.fakes import GridEnv, StubModel
+    mem = Memory(tmp_path / "memory")
+    mem.upsert("places", {"id": "hall", "name": "Hall", "screen": "world", "state": "place"})
+    loop = Loop(GridEnv(), StubModel([]), mem, "grid")
+    key = loop.notebook.heard(1, None, "Hall", "A sign says LAB.")
+
+    result = loop.notebook.apply_ops([{"op": "name", "key": "place:hall", "text": "LAB", "why": [key]}], 2)
+
+    assert result[0]["result"] == "ok"
+    assert loop.world.ref("LAB") == "place:hall"
+    assert loop.world.label("place:hall") == "Hall, maybe LAB"
+    assert loop.notebook.apply_ops([{"op": "name", "key": "unknown", "text": "X", "why": [key]}], 3)[0]["result"] == 'error: "unknown" names no known thing or place'

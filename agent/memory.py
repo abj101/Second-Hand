@@ -184,13 +184,13 @@ class Memory:
         replies = dict(row.get("replies", {})); replies[item] = [*replies.get(item, []), {"step": step, "text": str(text)[:80]}][-3:]
         self.upsert("screens", {**row, "replies": replies})
 
-    def call(self, entity_id: str, name: str, step: int, tier: str = "said", key: str | None = None) -> dict | None:
+    def call(self, entity_id: str, name: str, step: int, tier: str = "said", key: str | None = None, store: str = "entities") -> dict | None:
         """A name from the game, ranked: "text" (the planner read it in game text) < "said" (the game named the thing when the agent interacted with it).
         A claim of the same or a higher tier replaces the old one; a lower tier never does. A `called` with no `called_src` counts as said."""
-        row, name = self.get("entities", entity_id), str(name or "").strip()
+        row, name = self.get(store, entity_id), str(name or "").strip()
         if not row or not name or (row.get("called") and CLAIM_TIERS[tier] < CLAIM_TIERS[(row.get("called_src") or {}).get("tier", "said")]):
             return row
-        return self.upsert("entities", {**row, "called": name, "called_src": {"tier": tier, "step": step, "key": key}})
+        return self.upsert(store, {**row, "called": name, "called_src": {"tier": tier, "step": step, "key": key}})
 
     def _id(self, store: str, prefix: str) -> str:
         used = self._data.get(store, {})

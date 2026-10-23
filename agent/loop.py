@@ -43,7 +43,7 @@ class Loop:
         self.world = World(mem, self.tile_px); self.world.tracker.wrap(env)
         self.observation_stamp = self.observation_age_ms = None; self.live_invalidation_reason = None
         self.events, self.t5_armed = [], False  # t5_armed: T5 fires once per no-quest period, armed by a new T1/T2/T3 (nothing heard yet: nothing a plan could cite)
-        self.notebook = Notebook(mem.root, ref=self.world.ref, canon=self.world.canon, label=self.world.label, ties=self.world.ties, route=self.world.exit_route, is_exit=self.world.is_exit, leads_to=self.world.leads_to, name=lambda ident, text, key, step: self.mem.call(ident, text, step, tier="text", key=key),
+        self.notebook = Notebook(mem.root, ref=self.world.ref, canon=self.world.canon, label=self.world.label, ties=self.world.ties, route=self.world.exit_route, is_exit=self.world.is_exit, leads_to=self.world.leads_to, name=lambda ref, text, key, step: self.mem.call(ref.partition(":")[2], text, step, tier="text", key=key, store="places" if ref.startswith("place:") else "entities"),
                                  refs=lambda: [f"place:{p['id']}" for p in mem.rows("places") if p.get("state") != "merged"] + [f"thing:{e['id']}" for e in mem.rows("entities") if e.get("state") != "merged"])
         self.last_plan, self._plan_row = None, None
         self.conversation, self.text_for_trigger = {"place": None, "lines": []}, ""
@@ -329,10 +329,6 @@ class Loop:
                     self.mem.upsert("relations", {**rel, "why": f"says the same as before (step {said_step})"})  # ponytail: a note on the says row, not a new relation kind
                 if effect == "text_appears":
                     self.conversation["who"] = f"thing:{tid}"  # the dialogue it starts is that thing's
-                    entity = self.mem.get("entities", tid)
-                    speaker = re.match(r"^([A-Z][A-Za-z.' -]{0,19}):\s*", new_text)
-                    if entity and self.world._actor(tid, entity) and speaker and sum(c.isalpha() for c in speaker.group(1)) >= 2:
-                        self.mem.call(tid, speaker.group(1), self.step_no + 1)
             if skill.status == "done" and next_place == place and aff.get("verb") in ("interact", "approach"):
                 thing = self.world.canon(f"thing:{tid}").split(":", 1)[1]
                 for ref in self.world.leads_to(f"thing:{thing}"):
@@ -470,6 +466,9 @@ class Loop:
         speaker = match.group(1) if match and sum(c.isalpha() for c in match.group(1)) >= 2 else None
         if speaker: joined = joined[match.end():]
         place = self.conversation["place"]
+        who = self.conversation.get("who")
+        kind, _, ident = (who or "").partition(":")
+        if speaker and kind == "thing" and self.world._actor(ident, {}): self.mem.call(ident, speaker, step)
         self.text_for_trigger = joined
         self.notebook.heard(step, speaker, self.world.place_label(place) if place else "?", joined, who=self.conversation.get("who"))
         self._event("T1", f"new game text: {joined[:200]}", step)

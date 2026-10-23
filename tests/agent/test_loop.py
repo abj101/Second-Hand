@@ -1345,7 +1345,25 @@ def test_actor_speaker_name_attaches_after_new_text(tmp_path, monkeypatch):
     loop.step()
 
     actor = next(row for row in loop.mem.rows("entities") if row.get("name") == "person")
-    assert actor["called"] == "MOM"
+    assert "called" not in actor
+    loop.mem.call(actor["id"], "TEACHER", 1, tier="text")
+    loop.conversation = {"place": None, "lines": ["MOM: Hello", "there."], "who": f"thing:{actor['id']}"}
+    loop._flush_conversation(2)
+    actor = loop.mem.get("entities", actor["id"])
+    assert actor["called"] == "MOM" and actor["called_src"] == {"tier": "said", "step": 2, "key": None}
+
+
+def test_conversation_without_speaker_keeps_a_text_name_as_a_guess(tmp_path):
+    from agent.loop import Loop
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.mem.upsert("entities", {"id": "person", "name": "person", "kind": "npc", "place": "room"})
+    loop.mem.call("person", "PROF", 1, tier="text")
+    loop.conversation = {"place": None, "lines": ["Hello there.", "How are you?"], "who": "thing:person"}
+
+    loop._flush_conversation(2)
+
+    assert loop.mem.get("entities", "person")["called"] == "PROF"
+    assert loop.mem.get("entities", "person")["called_src"]["tier"] == "text"
 
 
 

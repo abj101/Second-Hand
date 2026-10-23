@@ -745,6 +745,27 @@ def test_called_thing_name_resolves_and_ties(tmp_path):
     assert {ident for ident, _ in world.ties("oak")} == {"thing:scientist", "thing:scientist_2"}
 
 
+def test_text_tier_name_is_shown_as_a_guess_in_options_and_view(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room")
+    per = {"screen": "world", "text": [], "entities": [{"name": "player", "kind": "player", "at": [.5, .5]}, {"name": "NPC", "kind": "npc", "at": [.6, .5]}]}
+    world = World(mem, 16); world.before(per, "room", None, (160, 144), 1)
+    ident = next(iter(world.entity_ids.values())); mem.call(ident, "PROF", 2, tier="text")
+
+    assert world.label(f"thing:{ident}") == "NPC, maybe PROF"
+    assert any("talk to NPC, maybe PROF" in row["label"] for row in world.options(per, "room", {}, 2, inputs=GridEnv().inputs()))
+    assert "NPC, maybe PROF" in world.view("", "room")
+
+
+def test_said_and_legacy_called_names_are_shown_without_maybe(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room")
+    entity(mem, "npc", "NPC", "room", [1, 0])
+    mem.call("npc", "PROF", 2)
+    world = World(mem, 16)
+    assert world.label("thing:npc") == "PROF"
+    mem.upsert("entities", {**mem.get("entities", "npc"), "called_src": None})
+    assert world.label("thing:npc") == "PROF"
+
+
 def test_name_shared_across_places_resolves_to_the_one_here(tmp_path):
     mem = Memory(tmp_path); place(mem, "town", "Town"); place(mem, "lab", "Lab")
     for ident, at in (("e_oak", "town"), ("e_customer", "lab")):

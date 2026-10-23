@@ -632,7 +632,7 @@ class World:
         if len(labelled) == 1: return f"place:{labelled[0]['id']}"
         if (match := re.search(r"\s+\[([^\[\]]+)\]$", text)) and self.canon_place(match[1]) in maps:
             return self.canon(f"place:{match[1]}")
-        named = [p for p in places if key in {n.casefold() for n in [place_name(p), *place_aliases(p)] if n}]
+        named = [p for p in places if key in {n.casefold() for n in [place_name(p), p.get("called"), *place_aliases(p)] if n}]
         if len(named) == 1: return f"place:{named[0]['id']}"
         things = self._named_things(text)
         if len(things) == 1: return f"thing:{things[0]['id']}"
@@ -751,6 +751,11 @@ class World:
         tile = (incoming[0].get("exit") or {}).get("arrive") if incoming else next(((r["x"], r["y"]) for r in self.mem.rows("tiles") if r.get("place") == p["id"] and r.get("floor") is True), None)
         return {"kind": "place", "place": p["id"], "tile": tuple(tile) if tile else None, "id": p["id"], "stale": False}
 
+    def _shown(self, row, base):
+        called = row.get("called")
+        if not called: return base
+        return f"{base}, maybe {called}" if (row.get("called_src") or {}).get("tier") == "text" else called
+
     def place_label(self, place):
         rows = [p for p in self.mem.rows("places") if p.get("state") != "merged"]
         row = self.mem.get("places", place)
@@ -758,9 +763,9 @@ class World:
         name = place_name(row)
         if not name:  # ponytail: unnamed reads "place <n>", n = the id's numeric suffix (minted ids: place, place_2, ...)
             n = place.rsplit("_", 1)[-1]
-            return f"place {n if n.isdigit() else 1}"
+            return self._shown(row, f"place {n if n.isdigit() else 1}")
         duplicates = sum(place_name(p).casefold() == name.casefold() for p in rows) > 1
-        return f"{name} [{place}]" if duplicates else name
+        return self._shown(row, f"{name} [{place}]" if duplicates else name)
 
     def here(self, place):
         if not place: return self.place_label(place)
@@ -777,14 +782,12 @@ class World:
 
     def label(self, ref, place=None):  # place: where an exit ref's tile lies (exit refs carry no place); default the current place
         ref = self.canon(ref)
-        history = self.history(ref, place)
-        if history.get("called"): return history["called"]
         kind, _, ident = str(ref or "").partition(":")
         if kind == "place": return self.place_label(ident)
         if kind == "thing":
             row = self.mem.get("entities", ident) or {}; name, votes = row.get("name") or self.place_label(ident), row.get("recent_names", [])
             others = [n for n, _ in Counter(v for v in votes if v != name).most_common(2)] if votes.count(name) < 3 else []  # unconfident: show the other names it was called lately
-            return f"{name} (or: {', '.join(others)})" if others else name
+            return self._shown(row, f"{name} (or: {', '.join(others)})" if others else name)
         if kind == "exit":
             try: tile = tuple(map(int, ident.split(",")))
             except ValueError: tile = None
@@ -926,8 +929,8 @@ class World:
             status = e.get("status", "remembered")
             last = f"last seen {tuple(e['tile'])} step {e.get('last', 0)}; may have moved" if status == "stale" else f"{status} step {e.get('last', 0)}"
             count = len(e["_members"])
-            called = next((member.get("called") for member in e["_members"] if member.get("called")), None)
-            name = rec["head"] if rec else f"{called or e['name']} ×{count}" if count > 1 else called or e.get("name", e["id"])
+            named = next((member for member in e["_members"] if member.get("called")), e)
+            name = rec["head"] if rec else self._shown(named, e["name"]) + (f" ×{count}" if count > 1 else "")
             nearest = f" (nearest {tuple(e['tile'])})" if count > 1 else ""
             legend_line = f"{'Thing' if tier(e) == 'interest' else 'Landmark'} {symbol} {name} {tuple(e['tile'])} {normalize_kind(e.get('kind'))} {last}{nearest}{self._notes(e['id'])}"
             legend.append(legend_line)
@@ -973,10 +976,10 @@ class World:
             tile = tuple(nearest["tile"]) if nearest else "?"
             status = best.get("status", "remembered")
             if len(group) > 1:
-                current_detail.append(f"Thing: {best.get('called') or base} ×{len(group)} {status} (nearest {tile})")
+                current_detail.append(f"Thing: {self._shown(best, base)} ×{len(group)} {status} (nearest {tile})")
             else:
                 last = f"last seen {tile} step {best.get('last', 0)}; may have moved" if status == "stale" else f"{status} step {best.get('last', 0)}"
-                current_detail.append(f"Thing: {best.get('called') or best.get('name', best['id'])} {tile} {normalize_kind(best.get('kind'))} {last}{self._notes(best['id'])}")
+                current_detail.append(f"Thing: {self._shown(best, best.get('name', best['id']))} {tile} {normalize_kind(best.get('kind'))} {last}{self._notes(best['id'])}")
 
         paths = self._paths(place)
         words = {w.strip(".,!?;:()[]{}\"'") for w in goal.split() if w.strip(".,!?;:()[]{}\"'")}
@@ -1005,13 +1008,13 @@ class World:
                 best = max(group, key=lambda e: (status_rank.get(e.get("status", "remembered"), 0), e.get("last", 0), e["id"]))
                 tile_rows = [e for e in group if e.get("tile")]
                 nearest = min(tile_rows, key=lambda e: (sum(abs(e["tile"][i] - self.pos[i]) for i in (0, 1)), e["id"])) if tile_rows else None
-                called = next((e.get("called") for e in group if e.get("called")), None)
+                named = next((e for e in group if e.get("called")), best)
                 if len(group) > 1:
-                    rendered.append(f"  Thing: {called or base} ×{len(group)} {best.get('status', 'remembered')} (nearest {tuple(nearest['tile']) if nearest else '?'})")
+                    rendered.append(f"  Thing: {self._shown(named, base)} ×{len(group)} {best.get('status', 'remembered')} (nearest {tuple(nearest['tile']) if nearest else '?'})")
                 else:
                     status = best.get("status", "remembered")
                     fact = f"last seen {tuple(best['tile']) if best.get('tile') else '?'} step {best.get('last', 0)}; may have moved" if status == "stale" else status
-                    rendered.append(f"  Thing: {best.get('called') or best.get('name', best['id'])} {fact}{self._notes(best['id'])}")
+                    rendered.append(f"  Thing: {self._shown(best, best.get('name', best['id']))} {fact}{self._notes(best['id'])}")
             place_things[pid] = [*rendered, f"  Edges: {len(other_edges)} untried ({other_unseen} into unseen)"]
 
         # ponytail: the local legend resolves every drawn letter; raise the cap only if real maps outgrow it.
