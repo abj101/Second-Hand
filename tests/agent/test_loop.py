@@ -296,10 +296,10 @@ def test_a_cut_seen_on_a_dialogue_screen_reidentifies_at_the_next_world_screen(t
     loop.env.screenshot = lambda: first.copy()
     loop.cut_carry = True  # the cut was seen on the dialogue screen
     loop.step()
-    assert loop.place == "room" and loop.cut_carry  # a dialogue is a state of the place: the cut waits
+    assert loop.place == "room" and loop.cut_carry and loop.world.unsettled  # a dialogue is a state of the place: the cut waits
     loop.env.screenshot = lambda: second.copy()
     loop.step()
-    assert loop.place != "room" and not loop.cut_carry  # the first world screen is matched as a new place
+    assert loop.place != "room" and not loop.cut_carry and not loop.world.unsettled  # the first world screen is matched as a new place
 
 def test_cut_before_frame_suppresses_marker_and_same_raw_after_frame_reuses(tmp_path, monkeypatch):
     from PIL import Image

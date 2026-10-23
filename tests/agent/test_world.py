@@ -201,6 +201,13 @@ def test_here_names_the_thing_that_leads_into_the_place(tmp_path):
     assert world.here("inside") == "Room with counters, entered through large house door"
 
 
+def test_here_says_when_the_place_is_unsettled(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room"); world = World(mem, 16)
+    assert world.here("room") == "Room"
+    world.unsettled = True
+    assert world.here("room") == "Room: the scene changed under the text; where you are is not known yet"
+
+
 def test_world_before_does_not_store_a_dialogue_place_name(tmp_path):
     mem = Memory(tmp_path); place(mem, "room", "Room")
     world = World(mem, 16)
