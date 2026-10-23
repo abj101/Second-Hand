@@ -85,7 +85,7 @@ def place_aliases(row: dict | None) -> list[str]:
 
 # ponytail: calibrated on Red's house 1F/2F (same floor >=.958 within 4 tiles, other floor <=.789);
 # pixel-identical interiors in different towns (Poke Centers) will match: add a graph-consistency check then.
-VIEW_MATCH, VIEW_REACH = .9, 4
+VIEW_MATCH, VIEW_REACH = .9, 6
 
 
 def _thumb(frame) -> np.ndarray:
@@ -250,7 +250,7 @@ class Memory:
     def seen_view(self, frame, screen: str, exclude: str | None, tile_px: int | None, only: str | None = None):
         """(place, tile) of the known view this frame matches, allowing whole-tile camera scroll; `only` = look up where you are in that place."""
         q, best, step = _thumb(frame), None, (tile_px or 0) // 2
-        reach = range(-VIEW_REACH, VIEW_REACH + 1) if step else (0,)
+        reach = sorted(range(-VIEW_REACH, VIEW_REACH + 1), key=abs) if step else (0,)
         for v in self.rows("views"):
             place, (ox, oy), row = self._home(v["place"])
             # views are only stored on world screens, so no screen-type check: a place first seen under a dialogue box keeps type "dialogue" (m1_gp5: bedroom re-minted on return)
