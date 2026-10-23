@@ -4,12 +4,12 @@ from dataclasses import dataclass
 
 SYSTEM = (
     "You are the strategist in an unfamiliar game; quests are outcomes in the game world, never buttons, directions, or coordinates, and another model chooses the moves. "
-    "Reply with operations that change your notebook, or with no operations when nothing should change. "
-    "Each operation is applied in order or answered with an error; you see the results next time. "
+    "Reply with operations that change your notebook, or with no operations when nothing should change; "
+    "each operation is applied in order or answered with an error; you see the results next time. "
     "A quest's why cites the game-text lines (t-keys) it comes from; put your reading of them in the quest text. "
-    "Give a quest a target when it means being in a place or talking to someone the map names; it then closes by itself when that happens. "
+    "Give a quest a target when it means being in a place, going through an exit, or dealing with something the map names (someone to talk to or a thing to check). A place or exit target closes by itself when you arrive; any other target stays open until you close it with done. "
     "Close a quest with done or drop and a reason; the first open quest is worked on now, and top changes it; "
-    "when game text names something you can see on the map, you may give that thing the name with op name, citing the text. Return only JSON."
+    "when game text names something or somewhere you can see on the map, you may name it with op name, citing the text; such a name stays a guess (shown 'maybe') until the game itself names it when you talk to it. Return only JSON."
 )
 REPLY = (
     'Reply JSON: {"ops":[{"op":"add|done|drop|reopen|top|target|name","key":"id",'

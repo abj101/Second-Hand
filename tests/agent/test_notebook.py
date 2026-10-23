@@ -210,7 +210,7 @@ def test_place_quest_targeted_while_in_place_closes_only_on_arrival(tmp_path):
 
 
 @pytest.mark.parametrize(("target", "name", "done_when"), [
-    ("thing:person", "Mira", "Mira speaks to you"),
+    ("thing:person", "Mira", "target: Mira; close this quest with done when it is achieved"),
     ("thing:exit", "doorway", "you go through doorway"),
     ("thing:building", "large house", "you enter large house"),
     ("place:hall", "Hall", "you enter Hall"),
@@ -227,10 +227,22 @@ def test_render_focus_labels_target_and_limits_cited_text(tmp_path, target, name
     rendered = nb.render_focus(lambda ref: name)
     because = rendered.split("Because:\n", 1)[1].split("\nRecent:", 1)[0].splitlines()
 
-    assert f"Goal: Quest q (done when: {done_when})" in rendered
+    expected = f"Goal: Quest q ({done_when})" if target == "thing:person" else f"Goal: Quest q (done when: {done_when})"
+    assert expected in rendered
     assert len(because) == 1 and because[0] == f'Mira, step 1: "{cited}"'
     assert "Uncited text" not in rendered
     assert "Recent note" in rendered
+
+
+def test_plain_thing_focus_stays_open_until_done(tmp_path):
+    nb = notebook(tmp_path, ref=lambda value: value)
+    key = nb.heard(0, None, "here", "Look at Mira.")
+    nb.apply_ops([{**add("q", target="thing:person"), "why": [key]}], 1)
+
+    rendered = nb.render_focus(lambda ref: "Mira")
+
+    assert "speaks to you" not in rendered
+    assert "(target: Mira; close this quest with done when it is achieved)" in rendered
 
 
 def test_render_focus_shows_newest_cited_text_whole_and_cuts_older(tmp_path):

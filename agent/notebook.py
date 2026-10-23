@@ -311,7 +311,7 @@ class Notebook:
                 if kind == "thing":
                     done_when = (f" (done when: you go through {label(target)})" if self.is_exit(target) else
                                  f" (done when: you enter {label(target)})" if self.leads_to(target) else
-                                 f" (done when: {label(target)} speaks to you)")
+                                 f" (target: {label(target)}; close this quest with done when it is achieved)")
                 else: done_when = f" (done when: you enter {label(target)})"
             lines.extend([f"Goal: {quest['text']}{done_when}", "Because:"])
             rows = self._game_text_for([quest])[:3]
