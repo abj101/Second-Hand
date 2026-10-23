@@ -10,7 +10,7 @@ from agent.space import DIRS, exit_to, fold, frontier, mark_exit, outward, push_
 from agent.skills import SkillResult, approach, on_player, press
 from agent.track import Tracker
 
-TRAVEL_MAX_INPUTS = 120
+TRAVEL_MAX_INPUTS, BUMPS = 120, 3
 MISS_TO_STALE, ACTOR_STALE_STEPS = 2, 20
 LANDMARKS_PER_PLACE, MAP_W, MAP_H, VIEW_TOKENS = 8, 21, 15, 500
 
@@ -363,7 +363,7 @@ class World:
     def failed_push(self, skill, place, start, direction, step):
         moves = skill.moves
         if direction not in DIRS or not moves or not self.tile_px or place == self.mem.unplaced: return
-        tile = fold(self.mem, place, tuple(start), moves[:-1], self.tile_px, step, actors=self.actor_tiles)
+        tile = self._travel_push_from if skill is self._travelled and self._travel_push_from is not None else fold(self.mem, place, tuple(start), moves[:-1], self.tile_px, step, actors=self.actor_tiles)  # a travelled skill is already folded: use the tile it pressed from
         shift = moves[-1].get("shift") if isinstance(moves[-1], dict) else moves[-1][1]
         if shift not in ((0, 0), 0): push_failed(self.mem, place, tile, direction, step)
     def after(self, skill, place, next_place, scene_cut, step):  # call after prepare() for the same step
@@ -1281,17 +1281,35 @@ class World:
         else: legs.append({"place": p, "dirs": dirs + ([facing] if facing else []), "push": None, "expect": None, "target": target})
         return legs
     def travel(self, ctx, legs, step, trace=None):
-        results, inputs, place = [], 0, self.current_place; self._travel_cut = self._travel_open = False; self._travel_push = None  # open: a cut travel could not place; the loop re-identifies
+        results, inputs, place, bumps = [], 0, self.current_place, 0; self._travel_cut = self._travel_open = False; self._travel_push = self._travel_push_from = None; self._travel_bumps = 0; self._travel_screen_leg = len(legs) == 1 and (legs[0].get("target") or {}).get("kind") == "screen"  # open: a cut travel could not place; the loop re-identifies
         for n, leg in enumerate(legs, 1):
             if inputs >= TRAVEL_MAX_INPUTS: break
             if leg["place"] != place: return self._travel_result(results, "blocked", f"leg {n} unexpected place", ctx)
-            result = approach(replace(ctx, max_inputs=min(ctx.max_inputs, TRAVEL_MAX_INPUTS-inputs)), self.pa, self.pa,
-                              exit_target="exit" if leg.get("expect") or leg.get("cross") else None, route={"dirs": leg["dirs"], "push": leg.get("push")})
-            if result.failure: result = replace(result, failure={**result.failure, "place": place})
-            self._travel_push = leg.get("push") or (leg["dirs"][-1] if leg.get("expect") and leg["dirs"] else None)
-            results.append(result); inputs += result.inputs
-            # the skill checks every press for a cut; first vs last frame of a long walk is a scroll, not a cut (m1_decide2 replay step 42)
-            is_cut = result.reason == "scene cut" or result.blank_seen; self._travel_cut |= is_cut; self.pos = fold(self.mem, place, self.pos, result.moves[:-1] if is_cut and result.moves else result.moves, self.tile_px, step, actors=self.actor_tiles)
+            current = leg
+            while True:
+                result = approach(replace(ctx, max_inputs=min(ctx.max_inputs, TRAVEL_MAX_INPUTS-inputs)), self.pa, self.pa,
+                                  exit_target="exit" if current.get("expect") or current.get("cross") else None, route={"dirs": current["dirs"], "push": current.get("push")})
+                if result.failure: result = replace(result, failure={**result.failure, "place": place})
+                self._travel_push = current.get("push") or (current["dirs"][-1] if current.get("expect") and current["dirs"] else None)
+                results.append(result); inputs += result.inputs
+                # the skill checks every press for a cut; first vs last frame of a long walk is a scroll, not a cut (m1_decide2 replay step 42)
+                is_cut = result.reason == "scene cut" or result.blank_seen; self._travel_cut |= is_cut; self.pos = fold(self.mem, place, self.pos, result.moves[:-1], self.tile_px, step, actors=self.actor_tiles); self._travel_push_from = self.pos  # the tile the last press was made from
+                if not is_cut and result.moves: self.pos = fold(self.mem, place, self.pos, result.moves[-1:], self.tile_px, step, actors=self.actor_tiles)
+                target = current.get("target") or {}; target_tile = target.get("tile"); directions = [m.get("dir") if isinstance(m, dict) else m[0] for m in result.moves]
+                screen_facing = not current.get("push") and not current.get("cross") and target.get("kind") == "screen" and target_tile and current["dirs"] and directions == current["dirs"] and tuple(self.pos[i] + DIRS[current["dirs"][-1]][i] for i in (0, 1)) == tuple(target_tile)
+                if result.reason != "route blocked" or is_cut or not result.failure or result.failure.get("stage") != "route" or self._facing_target(current, result) or screen_facing: break
+                bumps += 1; self._travel_bumps = bumps
+                if bumps >= BUMPS or inputs >= TRAVEL_MAX_INPUTS: break
+                target = current.get("exit_tile") or (current.get("target") or {}).get("tile")
+                if target is None: break
+                target = tuple(target); target_kind = (current.get("target") or {}).get("kind")
+                if target_kind == "memory" or not current.get("push") and target in self.occupied(place):
+                    found = self.beside(place, self.pos, target)
+                    dirs = found[2] + [found[1]] if found else None
+                else: dirs = route(self.mem, place, self.pos, target, occupied=self.occupied(place))
+                if dirs is None: break
+                if current.get("expect") and not current.get("push") and current["dirs"]: dirs = dirs + [current["dirs"][-1]]
+                current = {**current, "dirs": dirs}
             if leg.get("expect"):
                 if not is_cut and result.failure and result.failure.get("stage") == "route": return self._travel_result(results, "blocked", f"leg {n} route blocked", ctx)  # the route never reached the exit: not an exit mismatch
                 arrival = self._arrival(result.after, trace) if trace else None
@@ -1312,9 +1330,9 @@ class World:
                 self._cross(place, tuple(leg["exit_tile"]), leg["expect"], arrive, step)
                 self.pos, place = arrive, leg["expect"]
                 self._land(place)
-            elif result.status != "done" and not (result.reason == "route blocked" and self._facing_target(leg, result)):
+            elif result.status != "done" and not (result.reason == "route blocked" and (self._facing_target(current, result) or screen_facing)):
                 return self._travel_result(results, result.status, f"leg {n} {result.reason or result.status}", ctx)
-            if result.reason == "scene cut" and not leg.get("expect"): self._travel_open = True; return self._travel_result(results, "done", f"leg {n} scene cut", ctx)  # a real cut, not a failure; the loop re-identifies the place
+            if is_cut and not leg.get("expect"): self._travel_open = True; return self._travel_result(results, "done", f"leg {n} scene cut", ctx)  # a real cut, not a failure; the loop re-identifies the place
         self.current_place = place
         if inputs >= TRAVEL_MAX_INPUTS and len(results) < len(legs): return self._travel_result(results, "blocked", f"leg {len(results)+1} input limit", ctx)
         return self._travel_result(results, "done", "", ctx)
@@ -1331,12 +1349,14 @@ class World:
     def _travel_result(self, results, status, reason, ctx, failure=None):
         moves = [m for r in results for m in r.moves]
         # a done travel has no failure: an accepted final facing press is blocked in its skill but not a failure here
-        failure = (failure or next((r.failure for r in results if r.failure), None)) if status == "blocked" else None
+        failure = (failure or (results[-1].failure if results else None)) if status == "blocked" else None
+        if status == "blocked" and getattr(self, "_travel_screen_leg", False) and reason.startswith("leg 1 "): reason = reason[6:]
         if failure:
             step_dir = DIRS.get(failure.get("direction")); ahead = (self.pos[0] + step_dir[0], self.pos[1] + step_dir[1]) if step_dir else None
             blockers = [i for i, t in self.entity_tiles.items() if ahead and tuple(t) == ahead]
-            failure = {**failure, "tile": tuple(self.pos), **({"blocker_id": blockers[0]} if len(blockers) == 1 else {})}
-        self._travelled = SkillResult(status, f"travel: {reason}" if reason else "", sum(r.inputs for r in results), sum(r.calls for r in results), results[0].before if results else ctx.env.screenshot(), results[-1].after if results else ctx.env.screenshot(), tuple(map(sum, zip(*(r.scroll for r in results)))) if results else (0, 0), any(r.blank_seen for r in results), moves, next((m.get("self_at") for m in reversed(moves) if isinstance(m, dict) and m.get("self_at") is not None), None), failure, settled=all(r.settled is not False for r in results)); return self._travelled
+            failure = {**failure, "tile": tuple(self.pos), **({"blocker_id": blockers[0]} if len(blockers) == 1 else {}), **({"bumps": BUMPS} if getattr(self, "_travel_bumps", 0) >= BUMPS else {})}
+        screen_leg = getattr(self, "_travel_screen_leg", False); reason = "scene cut" if screen_leg and status == "done" and reason.endswith("scene cut") else f"travel: {reason}" if reason and not (status == "blocked" and screen_leg) else reason
+        self._travelled = SkillResult(status, reason, sum(r.inputs for r in results), sum(r.calls for r in results), results[0].before if results else ctx.env.screenshot(), results[-1].after if results else ctx.env.screenshot(), tuple(map(sum, zip(*(r.scroll for r in results)))) if results else (0, 0), any(r.blank_seen for r in results), moves, next((m.get("self_at") for m in reversed(moves) if isinstance(m, dict) and m.get("self_at") is not None), None), failure, settled=all(r.settled is not False for r in results)); self._travelled.bumps = getattr(self, "_travel_bumps", 0); return self._travelled
     def name(self, place, name, step):
         row, name = self.mem.get("places", place), str(name or "").strip()
         if row and row.get("screen") == "world" and _nameable(name): self.mem.name_place(place, name, step)

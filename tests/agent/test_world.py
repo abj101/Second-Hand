@@ -1187,8 +1187,8 @@ def _route_world(mem, env):  # player starts at (8, 8); callers route it towards
 
 @pytest.mark.parametrize("guarded", [True, False])
 @pytest.mark.parametrize("key, dx, dy", ROUTE_DIRS)
-def test_route_blocked_expect_leg_is_not_an_exit_mismatch(tmp_path, key, dx, dy, guarded):
-    from tests.agent.fakes import GridEnv
+def test_route_blocked_expect_leg_is_not_an_exit_mismatch(tmp_path, monkeypatch, key, dx, dy, guarded):
+    from tests.agent.fakes import GridEnv; from agent import world as world_module
 
     mem = Memory(tmp_path); place(mem, "room", "room"); place(mem, "hall", "hall")
     blocker, exit_tile = (8 + 2 * dx, 8 + 2 * dy), (8 + 3 * dx, 8 + 3 * dy)
@@ -1197,6 +1197,7 @@ def test_route_blocked_expect_leg_is_not_an_exit_mismatch(tmp_path, key, dx, dy,
     exit_before = mem.get("tiles", f"room@{exit_tile[0]},{exit_tile[1]}")["exit"]
     env = GridEnv(); env.door, env.npc = (-5, -5), blocker
     world, ctx = _route_world(mem, env); world.entity_tiles = {"guard": blocker} if guarded else {}
+    monkeypatch.setattr(world_module, "route", lambda *_a, **_k: None)  # this case asserts the no-detour route failure; R1 detours are covered separately
     legs = [{"place": "room", "dirs": [key] * 3, "push": key, "expect": "hall", "exit_tile": exit_tile},
             {"place": "hall", "dirs": ["LEFT"], "push": None}]
 
@@ -1224,6 +1225,69 @@ def test_route_blocked_travel_folds_each_move_once_and_prepare_does_not_refold(t
     world.prepare(result, "room", False, 2)
 
     assert world.pos == (8 + dx, 8 + dy)
+
+
+def _walled_leg(mem, env):  # a hidden wall at (9, 8) across the two-step route to (10, 8)
+    env.door, env.npc = (-5, -5), (-6, -6); env.walls.add((9, 8)); place(mem, "room", "room")
+    return _route_world(mem, env), [{"place": "room", "dirs": ["RIGHT", "RIGHT"], "push": None, "target": {"kind": "screen", "tile": (10, 8)}}]
+
+
+def test_every_travelled_move_is_folded_exactly_once(tmp_path, monkeypatch):
+    from tests.agent.fakes import GridEnv; from agent import world as world_module
+
+    folded, real = [], world_module.fold
+    monkeypatch.setattr(world_module, "fold", lambda mem, place, pos, moves, *a, **k: (folded.append(len(moves)), real(mem, place, pos, moves, *a, **k))[1])
+    (world, ctx), legs = _walled_leg(Memory(tmp_path), GridEnv())
+    result = world.travel(ctx, legs, 1)
+
+    assert result.bumps >= 1 and len(result.moves) > 2 and sum(folded) == len(result.moves)
+
+
+def test_wall_bumped_mid_route_is_recorded_and_the_next_attempt_goes_around_it(tmp_path):
+    from tests.agent.fakes import GridEnv
+
+    mem = Memory(tmp_path); (world, ctx), legs = _walled_leg(mem, GridEnv())
+    result = world.travel(ctx, legs, 1)
+
+    assert result.status == "done" and result.bumps >= 1 and world.pos == (10, 8) and ctx.env.player == (10, 8)
+    assert "RIGHT" in mem.get("tiles", "room@8,8")["blocked"]
+
+
+def test_three_bumps_end_the_travel_blocked_with_bumps_three(tmp_path, monkeypatch):
+    from PIL import Image; from agent.skills import SkillResult; from agent import world as world_module; from tests.agent.fakes import GridEnv
+
+    frame, calls = Image.new("RGB", (8, 8), "red"), []
+    monkeypatch.setattr(world_module, "approach", lambda *_a, **_k: calls.append(1) or SkillResult("blocked", "route blocked", 0, 0, frame, frame, (0, 0), False, [], failure={"stage": "route", "reason": "route blocked", "direction": "RIGHT"}))
+    mem = Memory(tmp_path); place(mem, "room", "room"); world, ctx = _route_world(mem, GridEnv())
+    result = world.travel(ctx, [{"place": "room", "dirs": ["RIGHT", "RIGHT"], "push": None, "target": {"kind": "screen", "tile": (10, 8)}}], 1)
+
+    assert result.status == "blocked" and result.failure["bumps"] == 3 and len(calls) == 3
+
+
+def test_crossing_failure_from_the_exit_tile_marks_that_tile_pushed(tmp_path, monkeypatch):
+    from PIL import Image; from agent.skills import SkillResult; from agent import world as world_module; from tests.agent.fakes import GridEnv
+
+    frame, mem = Image.new("RGB", (8, 8), "red"), Memory(tmp_path); place(mem, "room", "room")
+    moves = [("RIGHT", (-16, 0)), ("RIGHT", (-16, 0))]
+    monkeypatch.setattr(world_module, "approach", lambda *_a, **_k: SkillResult("blocked", "exit not crossed", 2, 0, frame, frame, (0, 0), False, moves, failure={"stage": "crossing", "reason": "exit not crossed", "direction": "RIGHT"}))
+    world, ctx = _route_world(mem, GridEnv())
+    result = world.travel(ctx, [{"place": "room", "dirs": ["RIGHT", "RIGHT"], "push": "RIGHT"}], 1)
+    world.failed_push(result, "room", (8, 8), "RIGHT", 2)
+
+    assert result.failure["stage"] == "crossing" and world.pos == (10, 8)
+    assert "RIGHT" in mem.get("tiles", "room@9,8")["pushed"] and "RIGHT" not in (mem.get("tiles", "room@10,8") or {}).get("pushed", [])
+
+
+def test_scene_cut_mid_route_ends_the_leg_as_before(tmp_path, monkeypatch):
+    from PIL import Image; from agent.skills import SkillResult; from agent import world as world_module; from tests.agent.fakes import GridEnv
+
+    frame, mem = Image.new("RGB", (8, 8), "red"), Memory(tmp_path); place(mem, "room", "room")
+    moves = [("RIGHT", (-16, 0)), ("RIGHT", (-16, 0))]
+    monkeypatch.setattr(world_module, "approach", lambda *_a, **_k: SkillResult("done", "scene cut", 2, 0, frame, frame, (0, 0), False, moves))
+    world, ctx = _route_world(mem, GridEnv())
+    result = world.travel(ctx, [{"place": "room", "dirs": ["RIGHT", "RIGHT"], "push": None}], 1)
+
+    assert result.status == "done" and result.reason.endswith("scene cut") and world._travel_open and world.pos == (9, 8)
 
 
 @pytest.mark.parametrize("actor", [True, False])

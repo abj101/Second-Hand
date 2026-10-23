@@ -255,6 +255,14 @@ class Loop:
                          for t in tracker.tracks.values() if t["status"] == "live" and t["actor"] and
                          (px is None or max(abs(t["x"] - px), abs(t["y"] - py)) > r))
         skillctx = Ctx(self.env, self.model, self.tile_px, self.move_frames, actor_boxes=actor_boxes); pressed_from = tuple(self.world.pos)
+        if choice and travel_legs is None and act_route is not None and affs[choice["i"]].get("verb") == "approach":
+            t = target_tile
+            if t is None:
+                t = tuple(self.world.pos)
+                for direction in act_route["dirs"]: t = (t[0] + DIRS[direction][0], t[1] + DIRS[direction][1])
+            screen_target = next((e for e in per.get("entities", []) if e.get("name") == affs[choice["i"]].get("target")), {})
+            push = act_route.get("push") if screen_target.get("kind", "").casefold() == "exit" or str(screen_target.get("name", "")).casefold().startswith("exit:") else None
+            travel_legs = [{"place": place, "dirs": act_route["dirs"], "push": push, "expect": None, "cross": bool(push), "exit_tile": t, "target": {"kind": "screen", "tile": t}}]
         try:
             skill = SkillResult("blocked", "no route beside target" if choice and affs[choice["i"]].get("verb") == "interact" else "no route avoids blocker", 0, 0, before, before, (0, 0), False, failure={"stage": "route", "reason": "no route beside target" if choice and affs[choice["i"]].get("verb") == "interact" else "no route avoids blocker", "direction": None}) if refused else self.world.travel(skillctx, travel_legs, self.step_no + 1, self.trace) if travel_legs is not None and choice else wait_until(skillctx) if not affs or choice is None else press_seq(skillctx, affs[choice["i"]]["target"].split()) if affs[choice["i"]].get("verb") == "buttons" else run_affordance(skillctx, affs[choice["i"]], per, text=choice["text"], exit=False, **({"onto": True} if onto else {}), **({"route": act_route} if act_route else {}))
         except BaseException: self.pending_cut, self.pending_via, self.pending_key = cut(before, self.env.screenshot()), affs[choice["i"]].get("target") if choice else None, intent; self.cached = self.cached_hash = None; raise
@@ -337,7 +345,7 @@ class Loop:
             if world_exit: self.world.mark_exit(place, cut_dir, next_place, self.world.pos, self.step_no+1)
         row = {"step": self.step_no + 1, "t": time.time(), "place": place, "screen": per.get("screen"),
             "task": None, "frame": s["frame"], "after": f"frames/{self.step_no+1:06d}_after.png", "options": s["options"],
-            "choice": choice, "pred": None, "used": [], "skill": {"status": skill.status, "reason": skill.reason, "inputs": skill.inputs, "calls": skill.calls, "failure": getattr(skill, "failure", None), "settled": getattr(skill, "settled", None)},
+            "choice": choice, "pred": None, "used": [], "skill": {"status": skill.status, "reason": skill.reason, "inputs": skill.inputs, "calls": skill.calls, "failure": getattr(skill, "failure", None), "settled": getattr(skill, "settled", None), **({"bumps": skill.bumps} if getattr(skill, "bumps", 0) else {})},
             "outcome": outcome, "verdict": "unobservable", "calls": self.model.calls-calls, "ms": int((time.perf_counter()-start)*1000), "shortcut": None,
             "ranker": None, "perception_reused": s["reused"], "frame_hash": s["frame_hash"], "marked": s["marked"],
             "scene_cut": scene_cut, "next_place": next_place, "verified_edge": verified_edge, "view_ids": [], "tile": self.world.pos if self.tile_px else None, "drift_fix": None, "player_fix": player_fix, "entities": self.world.entities, "scroll": spatial["scroll"], **({"exit": list(exit_key)} if scene_cut and not modal and next_place != place and exit_key else {}),
