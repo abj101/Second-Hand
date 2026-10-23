@@ -246,6 +246,13 @@ def test_points_text_checks_match_focus_line_and_planner_view():
         ("text_re", False, r"Things here:.*(ball|sphere|item): planner view not captured"),
     ]
 
+def test_points_text_checks_accept_real_map_view_without_planner_call():
+    case = {"text_re": r"Here: room \(2,1\)", "text_absent": "wrong place"}
+    checks = eval_act.points_checks(case, [], map_view="Here: room (2,1)\nMap: @ you")
+    assert all(ok for _, ok, _ in checks)
+    assert not any(ok for _, ok, _ in eval_act.points_checks(case, [], "Here: room (2,1)"))
+
+
 def test_points_stub_captures_target_plan_prompt_even_when_recording_is_exhausted():
     found = {}
     stub = eval_act.PointsStub([], {}, 5, found)

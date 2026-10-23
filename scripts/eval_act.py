@@ -837,7 +837,7 @@ def points_truth_matches(actual, expected):
 
 def points_divergence(step, actual, expected): return step if not points_truth_matches(actual, expected) else None
 
-def points_checks(case, options, goal="", plan_prompt=None):
+def points_checks(case, options, goal="", plan_prompt=None, map_view=None):
     """Return (name, ok, detail) checks for the case's optional assertions."""
     rows = []
     right = case.get("right", [])
@@ -860,8 +860,8 @@ def points_checks(case, options, goal="", plan_prompt=None):
         if plan_prompt is None: rows.append(("plan_re", True, f"{pattern}: NOT APPLICABLE"))
         else: rows.append(("plan_re", bool(re.search(pattern, plan_prompt, re.I)), f"{pattern}: {'matched' if re.search(pattern, plan_prompt, re.I) else 'not found'}"))
     focus = next((line for line in goal.splitlines() if line.startswith("Goal:")), "")
-    has_view = bool(plan_prompt and "Map and memory: " in plan_prompt)
-    view = plan_prompt.split("Map and memory: ", 1)[1].split("\nText on screen now:", 1)[0] if has_view else ""
+    has_view = map_view is not None or bool(plan_prompt and "Map and memory: " in plan_prompt)
+    view = map_view if map_view is not None else plan_prompt.split("Map and memory: ", 1)[1].split("\nText on screen now:", 1)[0] if has_view else ""
     text = f"{focus}\n{view}"
     for pattern in _point_patterns(case.get("text_absent")):
         matched = re.search(pattern, text, re.I | re.S) is not None
@@ -916,6 +916,7 @@ def _points_case(case, live=False, counter=None, no_cache=False):
         if stub.loop.step_no + 1 == step:
             found["options"] = [{k: o.get(k) for k in ("n", "tool", "label", "state", "notes", "action")} for o in options]
             found["goal"] = focus
+            if (case.get("text_re") or case.get("text_absent")) and not found.get("plan_prompt"): found["map_view"] = stub.loop.world.view(stub.loop._goal_text(), stub.loop.place)
         return real_act(model, per, focus, options, *args, **kwargs)
     loop_mod.act = capture_act
     status, reason = "PASS", ""
@@ -935,7 +936,7 @@ def _points_case(case, live=False, counter=None, no_cache=False):
             except PointsStop: break
         else: raise PointsInconclusive(f"act capture did not occur at {step}")
         found["plan_extra"] = stub.plan_extra
-        found["checks"] = points_checks(case, found.get("options", []), found.get("goal", ""), (found.get("plan_prompt") or {}).get("user"))
+        found["checks"] = points_checks(case, found.get("options", []), found.get("goal", ""), (found.get("plan_prompt") or {}).get("user"), found.get("map_view"))
         found["failed"] = [name for name, ok, _ in found["checks"] if not ok]
         status = "FAIL" if found["failed"] else "PASS"
         if live:
