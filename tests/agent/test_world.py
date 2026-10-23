@@ -875,6 +875,7 @@ def test_evidence_actor_stales_after_twenty_steps(tmp_path):
     npc = {"name": "Guide", "kind": "npc", "at": [.4, .5]}
     _, _, ids = world.before({"screen": "world", "entities": [player, npc], "text": []}, "room", None, (160, 144), 1)
     ident = ids[1]
+    world.pos = (100, 0)  # Keep this test about off-screen aging, not in-view absence.
     place(mem, "other", "other")
     mem.upsert("entities", {"id": "remote", "name": "Remote", "kind": "object", "place": "other", "status": "seen", "misses": 0, "last": 1})
     mem.upsert("entities", {"id": "remote_npc", "name": "Remote NPC", "kind": "npc", "place": "other", "status": "remembered", "misses": 0, "last": 1})
@@ -908,6 +909,7 @@ def test_evidence_actor_is_remembered_then_stale_after_twenty_steps(tmp_path):
     player = {"name": "Player", "kind": "player", "at": [.5, .5]}
     npc = {"name": "Guide", "kind": "npc", "at": [.4, .5]}
     ident = world.before({"screen": "world", "entities": [player, npc], "text": []}, "room", None, (160, 144), 1)[2][1]
+    world.pos = (100, 0)  # Keep this test about off-screen aging, not in-view absence.
     world.observe_after({"screen": "world", "entities": [player]}, Image.new("RGB", (160, 144), "red"), False, "room", (160, 144), 2)
     assert mem.get("entities", ident)["status"] == "remembered"
     world.observe_after({"screen": "world", "entities": [player]}, Image.new("RGB", (160, 144), "blue"), False, "room", (160, 144), 20)
@@ -1591,12 +1593,47 @@ def test_offered_remembered_rows_resolve_and_plan(tmp_path):
             assert world.reachable(o["action"]["go_to"], per, "room")
 
 
+def test_remembered_actor_row_says_when_it_was_last_seen(tmp_path):
+    mem, world, per = _remembered_scene(tmp_path, {(-2, 0), (-1, 0), (0, 0), (1, 0)})
+    world.size, world.pa = (16, 16), (.5, .5)  # one-tile view at (-2, 0): Guide is truly off-screen
+    mem.upsert("entities", {"id": "guide", "name": "Guide", "kind": "npc", "place": "room", "tile": [1, 0], "status": "remembered", "tier": "interest", "last": 2})
+
+    row = next(o for o in world.options(per, "room", {}, 9) if o.get("ref") == "thing:guide")
+
+    assert ", last seen 7 steps ago" in row["label"]
+
+
 def test_actor_in_the_way_keeps_a_remembered_row(tmp_path):
     mem, world, per = _remembered_scene(tmp_path, {(-2, 0), (-1, 0), (0, 0), (1, 0)})
     world.actor_tiles = frozenset({(-1, 0)})  # the only corridor is held by an actor
 
     assert any(o["label"].startswith("go to fern") for o in world.options(per, "room", {}, 5, targets=("thing:fern",)))
     assert world.reachable("thing:fern", per, "room") and world.actor_tiles == frozenset({(-1, 0)})
+
+
+def test_actor_absent_from_current_view_is_gone_but_static_thing_is_remembered(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    for ident, name, kind in (("guide", "Guide", "npc"), ("sign", "Sign", "object")):
+        mem.upsert("entities", {"id": ident, "name": name, "kind": kind, "place": "room", "tile": [0, 0], "status": "remembered", "tier": "interest", "last": 1})
+    world = World(mem, 16)
+    per = {"screen": "world", "text": [], "entities": [{"name": "Player", "kind": "player", "at": [.5, .5]}]}
+    world.before(per, "room", None, (160, 144), 5)
+    rows = world.options(per, "room", {}, 5)
+
+    assert mem.get("entities", "guide")["status"] == "gone"
+    assert mem.get("entities", "sign")["status"] == "remembered"
+    assert not any(o.get("ref") == "thing:guide" and o["tool"] == "go_to" for o in rows)
+
+
+def test_dialogue_overlay_does_not_mark_in_view_actor_gone(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    mem.upsert("entities", {"id": "guide", "name": "Guide", "kind": "npc", "place": "room", "tile": [0, 0], "status": "remembered", "tier": "interest", "last": 1})
+    world = World(mem, 16)
+    per = {"screen": "world", "text": [], "entities": [{"name": "Player", "kind": "player", "at": [.5, .5]}, {"name": "Text box", "kind": "dialogue_box", "at": [.5, .9]}]}
+
+    world.before(per, "room", None, (160, 144), 5)
+
+    assert mem.get("entities", "guide")["status"] == "remembered"
 
 
 def test_tied_exit_names_are_no_ref_but_list_candidates_and_route_through_their_door(tmp_path):

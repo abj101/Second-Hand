@@ -551,7 +551,8 @@ def test_menu_replay_counts_only_repeated_novel_blocks_and_success_clears(tmp_pa
 
 def test_tied_remembered_things_sort_without_comparing_rows(tmp_path):  # regression: equal sort keys used to compare row dicts (TypeError)
     mem = Memory(tmp_path); room(mem)
-    for n in range(2): mem.upsert("entities", {"id": f"ghost{n}", "name": "crate", "kind": "person", "place": "room", "tile": [1, 2], "status": "remembered", "last": 1, "seen": 1})
+    for y in range(3, 23): tile(mem, 1, y)
+    for n in range(2): mem.upsert("entities", {"id": f"ghost{n}", "name": "crate", "kind": "person", "place": "room", "tile": [1, 22], "status": "remembered", "last": 1, "seen": 1})
     world, per = setup(mem, [])
     opts = world.options(per, "room", {}, 9, inputs=INPUTS)
     assert [o["n"] for o in opts] == list(range(1, len(opts) + 1))
@@ -560,7 +561,9 @@ def test_tied_remembered_things_sort_without_comparing_rows(tmp_path):  # regres
 
 def test_off_screen_things_with_one_name_are_one_row_to_the_nearest(tmp_path):
     mem = Memory(tmp_path); room(mem)
-    for n, tile in enumerate(([2, 2], [-2, 1], [0, 2])): mem.upsert("entities", {"id": f"post{n}", "name": "post", "kind": "person", "place": "room", "tile": tile, "status": "remembered", "last": 1, "seen": 1})
+    for x in (-2, 0, 2):
+        for y in range(3, 23): tile(mem, x, y)
+    for n, spot in enumerate(([2, 22], [-2, 21], [0, 22])): mem.upsert("entities", {"id": f"post{n}", "name": "post", "kind": "person", "place": "room", "tile": spot, "status": "remembered", "last": 1, "seen": 1})
     world, per = setup(mem, [])
     rows = [o for o in world.options(per, "room", {}, 9, inputs=INPUTS) if "post" in o["label"]]
     assert len(rows) == 1 and "(nearest of 3)" in rows[0]["label"] and rows[0]["action"] == {"go_to": "thing:post2"}
@@ -616,7 +619,8 @@ def test_off_screen_static_thing_with_history_or_failure_keeps_its_row(tmp_path)
 
 def test_off_screen_actor_with_no_history_keeps_its_row(tmp_path):
     mem = Memory(tmp_path); room(mem)
-    mem.upsert("entities", {"id": "mom1", "name": "mom", "kind": "person", "place": "room", "tile": [2, 2], "status": "remembered", "last": 1, "seen": 1})
+    for y in range(3, 23): tile(mem, 2, y)
+    mem.upsert("entities", {"id": "mom1", "name": "mom", "kind": "person", "place": "room", "tile": [2, 22], "status": "remembered", "last": 1, "seen": 1})
     world, per = setup(mem, [])
     assert [o for o in world.options(per, "room", {}, 9, inputs=INPUTS) if "mom" in o["label"]]
 

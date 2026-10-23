@@ -163,7 +163,7 @@ class World:
         tiles = self._tiles(per, pa, size, place)
         observed = self._observation(per, size)
         ids = {} if per.get("screen") != "world" else self.entity_ids if per is self._observed_per else self.mem.observe(observed, place, step, tiles, self._hits(observed))
-        self._observed_per = per; self._follow(per, ids)
+        self._observed_per = per; self._follow(per, ids, pa, size)
         self.actor_tiles = frozenset(tiles[i] for i, e in enumerate(per.get("entities", [])) if i in tiles and self._actor(ids.get(i), e))
         self.entity_ids = ids
         if per.get("screen") == "world": self.entity_tiles = {ids[i]: p for i, p in tiles.items() if i in ids}
@@ -186,7 +186,7 @@ class World:
             if d <= self.tile_px and i not in hits and ident not in used:
                 hits[i] = ident; used.add(ident)
         return hits
-    def _follow(self, per, ids):  # seed tracks for what was just perceived; a track lost in view for a while (no text box over it) means the thing left: "gone"
+    def _follow(self, per, ids, anchor=None, size=None):  # seed tracks for what was just perceived; a track lost in view for a while (no text box over it) means the thing left: "gone"
         self.tracker.seed([(ids[i], e["at"], self._actor(ids[i], e)) for i, e in enumerate(per.get("entities", []))
                            if i in ids and self._actor(ids[i], e) and e.get("kind", "").casefold() != "player" and isinstance(e.get("at"), list) and len(e["at"]) == 2])
         if per.get("screen") != "world" or per.get("text") or any(e.get("kind") == "dialogue_box" for e in per.get("entities", [])): return
@@ -194,6 +194,12 @@ class World:
             self.tracker.tracks.pop(ident)
             row = self.mem.get("entities", ident)
             if row and row.get("status") != "gone": self.mem.upsert("entities", {**row, "status": "gone"})
+        if anchor and size and (rect := self._view_rect(anchor, size)):
+            x0, y0, x1, y1 = rect; visible = set(ids.values())
+            tracked = {ident for ident, track in self.tracker.tracks.items() if track["status"] == "live"}
+            for row in self.mem.rows("entities"):
+                if row.get("place") == self.current_place and row.get("state") != "merged" and row.get("status") != "gone" and row.get("tile") and x0 <= row["tile"][0] <= x1 and y0 <= row["tile"][1] <= y1 and row["id"] not in visible | tracked and self._actor(row["id"], row):
+                    self.mem.upsert("entities", {**row, "status": "gone"})
     def _promote(self, ids):
         for ident in ids:
             row = self.mem.get("entities", ident)
@@ -482,7 +488,7 @@ class World:
                 else: self.drift, self.drift_ref = drift, anchor if drift else None
         if not reused:
             self.entity_ids = ids
-            self._observed_per = per; self._follow(per, self.entity_ids)
+            self._observed_per = per; self._follow(per, self.entity_ids, aa, size)
         if not reused:
             stored = any(self.mem._home(v["place"])[0] == place and
                          tuple(v["pos"][i] + self.mem._home(v["place"])[1][i] for i in (0, 1)) == tuple(self.pos)
@@ -1201,7 +1207,7 @@ class World:
                 if r is None: continue
                 tile, ref = tuple(r["tile"]), f"thing:{r['id']}"
                 shown = f"{self.label(ref)} (nearest of {len(group)})" if len(group) > 1 else self.label(ref)
-                label = f"go to {shown}, not on screen{self._where(tile)}"
+                label = f"go to {shown}, not on screen{self._where(tile)}" + (f", last seen {step - r.get('last', step)} steps ago" if self._actor(r["id"], r) else "")
                 row = option("go_to", label, {"go_to": ref}, "approach", ref, ref, r["id"])
                 remembered.append((_yx(tile, r["name"]), row))
             remembered = [row for _, row in sorted(remembered, key=lambda t: t[0])]
