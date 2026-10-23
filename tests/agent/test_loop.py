@@ -13,6 +13,17 @@ from agent.model import ModelUnavailable
 
 def reply(data): return type("Reply", (), {"data": data})()
 
+def approach_stub(monkeypatch, run):
+    from agent import world as module
+    from agent import loop as loop_module
+    from agent.skills import SkillResult
+    def normalize(result):
+        return result if isinstance(result, SkillResult) else SkillResult(result.status, result.reason, result.inputs, result.calls, result.before, result.after, result.scroll, result.blank_seen, getattr(result, "moves", []), getattr(result, "self_at", None), getattr(result, "failure", None), getattr(result, "settled", None))
+    def approach(ctx, target, player, *, exit_target=None, route=None):
+        return normalize(run(ctx, {"verb": "approach", "target": ""}, {"screen": "world", "entities": []}, exit=exit_target, route=route))
+    monkeypatch.setattr(loop_module, "run_affordance", lambda ctx, aff, per, **kwargs: normalize(run(ctx, aff, per, **kwargs)))
+    monkeypatch.setattr(module, "approach", approach)
+
 def test_uncrossed_screen_route_records_the_callers_push(tmp_path, monkeypatch):
     from agent import loop as module
     from agent.skills import SkillResult
@@ -24,7 +35,7 @@ def test_uncrossed_screen_route_records_the_callers_push(tmp_path, monkeypatch):
         assert kwargs["route"]["push"] == "LEFT"
         frame = env.screenshot()
         return SkillResult("blocked", "exit not crossed", 2, 0, frame, frame, (0, 0), False, [{"dir": "RIGHT", "shift": (-16, 0)}, {"dir": "LEFT", "shift": (16, 0)}], failure={"stage": "crossing", "reason": "exit not crossed"})
-    monkeypatch.setattr(module, "run_affordance", use)
+    approach_stub(monkeypatch, use)
     loop = Loop(env, model, Memory(tmp_path / "memory"), "grid"); loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     row = loop.step()
     assert loop.mem.get("tiles", f"{row['place']}@1,0")["pushed"] == ["LEFT"]
@@ -73,11 +84,13 @@ def test_thing_approach_to_wall_exit_routes_and_records_blocked_push(tmp_path, m
     loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     routed = {}
-    run = module.run_affordance
-    def capture(ctx, aff, *args, **kwargs):
-        routed["route"] = kwargs.get("route")
-        return run(ctx, aff, *args, **kwargs)
-    monkeypatch.setattr(module, "run_affordance", capture)
+    from agent import world as world_module
+    monkeypatch.setattr(world_module, "route", lambda *_a, **_k: None)  # keep this fixture's single blocked push; detour behavior is tested separately
+    approach = world_module.approach
+    def capture(ctx, target, player, *, exit_target=None, route=None):
+        routed["route"] = route
+        return approach(ctx, target, player, exit_target=exit_target, route=route)
+    monkeypatch.setattr(world_module, "approach", capture)
 
     row = loop.step()
 
@@ -328,7 +341,7 @@ def test_stationary_two_fresh_frames_confirm_drift(tmp_path, monkeypatch, views)
     def still(*a,**k):
         before=env.screenshot(); env.phase+=1; after=env.screenshot()
         return SimpleNamespace(status="done",reason="",inputs=0,calls=0,before=before,after=after,scroll=(0,0),blank_seen=False,moves=[])
-    monkeypatch.setattr(module, "run_affordance", still)
+    approach_stub(monkeypatch, still)
     loop = Loop(env, StubModel([]), Memory(tmp_path/"memory"), "grid")
     if not views: monkeypatch.setattr(loop.mem, "seen_view", lambda *a, **k: None)  # no stored view matches: entity drift decides
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
@@ -466,10 +479,10 @@ def test_interact_scroll_with_new_text_is_not_a_cut(tmp_path, monkeypatch):
 def test_modal_overlay_at_step_start_keeps_place(tmp_path, monkeypatch):
     from agent import loop as loop_module
     env = GridEnv()
-    world = perception(); world["screen"] = "world"
+    world = {"screen": "world", "text": [], "entities": [{"kind": "player", "name": "Hand", "at": [.5, .5]}, {"kind": "object", "name": "Lamp", "at": [.6, .5]}]}
     dialogue = perception(); dialogue["screen"] = "dialogue"
     model = StubModel([reply(world), reply(world), reply(dialogue)])
-    monkeypatch.setattr(loop_module, "act", fake_act(0))
+    monkeypatch.setattr(loop_module, "act", fake_act(1))
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     monkeypatch.setattr(loop_module, "cut", lambda *args: True)
@@ -480,7 +493,7 @@ def test_modal_overlay_at_step_start_keeps_place(tmp_path, monkeypatch):
         moves[0] += 1; frame = env.screenshot()
         return SimpleNamespace(status="done", reason="", inputs=1, calls=0,
                                before=before, after=frame, scroll=(0, 0), blank_seen=False)
-    monkeypatch.setattr(loop_module, "run_affordance", stay)
+    approach_stub(monkeypatch, stay)
     first = loop.step()
     env.scene = 0
     second = loop.step()
@@ -489,17 +502,17 @@ def test_modal_overlay_at_step_start_keeps_place(tmp_path, monkeypatch):
 def test_explicit_transition_into_dialogue_keeps_place(tmp_path, monkeypatch):  # was ..._creates_place: dialogue is a state, not a place
     from agent import loop as loop_module
     env = GridEnv()
-    world = perception(); world["screen"] = "world"
+    world = {"screen": "world", "text": [], "entities": [{"kind": "player", "name": "Hand", "at": [.5, .5]}, {"kind": "exit", "name": "exit: door", "at": [.6, .5]}]}
     dialogue = perception(); dialogue["screen"] = "dialogue"
     model = StubModel([reply(world), reply(dialogue)])
-    monkeypatch.setattr(loop_module, "act", fake_act(0))
+    monkeypatch.setattr(loop_module, "act", fake_act(1))
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     def transition(ctx, aff, per, text=None, exit=False, route=None):
         before = env.screenshot(); env.scene = 1; after = env.screenshot()
         return SimpleNamespace(status="done", reason="scene cut", inputs=1, calls=0,
                                before=before, after=after, scroll=(0, 0), blank_seen=False)
-    monkeypatch.setattr(loop_module, "run_affordance", transition)
+    approach_stub(monkeypatch, transition)
     row = loop.step()
     assert row["scene_cut"] and row["next_place"] == row["place"] and "place_changes" not in row["outcome"]["effects"]
 
@@ -507,17 +520,17 @@ def test_explicit_transition_into_dialogue_keeps_place(tmp_path, monkeypatch):  
 def test_directional_world_exit_into_new_place_is_place_changes(tmp_path, monkeypatch, screen, moves, expect):
     from agent import loop as loop_module
     env = GridEnv()
-    world = perception(); world["screen"] = "world"
+    world = {"screen": "world", "text": [], "entities": [{"kind": "player", "name": "Hand", "at": [.5, .5]}, {"kind": "exit", "name": "exit: door", "at": [.6, .5]}]}
     dest = perception(); dest["screen"] = screen; dest["entities"] = [{"kind": "tree", "name": "Oak", "at": [500, 500]}]
     model = StubModel([reply(world), reply(dest)])
-    monkeypatch.setattr(loop_module, "act", fake_act(0))
+    monkeypatch.setattr(loop_module, "act", fake_act(1))
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     def transition(ctx, aff, per, text=None, exit=False, route=None):
         before = env.screenshot(); env.scene = 1; after = env.screenshot()
         return SimpleNamespace(status="done", reason="scene cut", inputs=1, calls=0, moves=moves,
                                before=before, after=after, scroll=(0, 0), blank_seen=False)
-    monkeypatch.setattr(loop_module, "run_affordance", transition)
+    approach_stub(monkeypatch, transition)
     row = loop.step()
     assert row["scene_cut"] and (row["next_place"] != row["place"]) == (screen == "world")  # only a navigable screen is a new place
     assert ("place_changes" in row["outcome"]["effects"]) == expect
@@ -536,7 +549,7 @@ def test_blocked_exit_without_novelty_reports_failed(tmp_path, monkeypatch):
         before = env.screenshot(); env.scene = 1; after = env.screenshot()
         return SimpleNamespace(status="blocked", reason="exit not crossed", inputs=8, calls=0,
                                before=before, after=after, scroll=(0, 0), blank_seen=False)
-    monkeypatch.setattr(loop_module, "run_affordance", blocked)
+    approach_stub(monkeypatch, blocked)
     row = loop.step()
     assert row["pred"] is None and row["used"] == []
     assert "screen_changes" in row["outcome"]["effects"] and row["verdict"] == "failed"
@@ -739,12 +752,11 @@ def test_tracked_approach_scroll_does_not_split_but_real_cuts_do(tmp_path, monke
 
     def run_case(root, verb="approach", reason="", blank=False):
         env = GridEnv(); before = env.screenshot()
-        start = perception(); start["screen"] = "world"
-        destination = perception(); destination["screen"] = "world"
-        destination["entities"] += [{"kind":"object", "name":"new landmark", "at":[.2,.2]}, {"kind":"exit", "name":"exit: door", "at":[500,500]}]
+        start = {"screen": "world", "text": [], "entities": [{"kind": "player", "name": "Hand", "at": [.5, .5]}, {"kind": "exit", "name": "exit: door", "at": [.6, .5]}]}
+        destination = {"screen": "world", "text": [], "entities": [{"kind": "player", "name": "Hand", "at": [.5, .5]}, {"kind":"object", "name":"new landmark", "at":[.2,.2]}, {"kind":"exit", "name":"exit: door", "at":[500,500]}]}
         if verb == "interact": destination["text"] = ["Visible dialogue"]
         model = StubModel([reply(start), reply(destination)])
-        monkeypatch.setattr(loop_module, "act", fake_act(0, verb=verb))
+        monkeypatch.setattr(loop_module, "act", fake_act(1, verb=verb))
         mem = Memory(root/"memory"); loop = Loop(env, model, mem, "grid")
         loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True  # no self-locating probe presses
 
@@ -752,9 +764,10 @@ def test_tracked_approach_scroll_does_not_split_but_real_cuts_do(tmp_path, monke
             env.scene = 1; after = env.screenshot()
             assert observer_cut(before, after)
             return SimpleNamespace(status="done", reason=reason, inputs=7, calls=0,
-                                   before=before, after=after, scroll=(112,0), blank_seen=blank)
+                                   before=before, after=after, scroll=(112,0), blank_seen=blank, moves=[(route.get("push") or route["dirs"][-1], (0, 0))] if reason == "scene cut" or blank else [])
 
-        monkeypatch.setattr(loop_module, "run_affordance", move)
+        if verb == "approach": approach_stub(monkeypatch, move)
+        else: monkeypatch.setattr(loop_module, "run_affordance", move)
         return loop, mem, loop.step()
 
     loop, mem, row = run_case(tmp_path/"tracked")
@@ -1172,9 +1185,9 @@ def test_in_view_remembered_thing_ref_executes_beside_and_keeps_its_id(tmp_path,
     monkeypatch.setattr(module, "act", lambda *_a, **_k: SimpleNamespace(
         place="", ops=[], action={"thing": "thing:shelf1", "verb": "interact"}, expect="screen_changes", why="check", text=None))
     seen, run = {}, module.run_affordance
-    def capture(ctx, aff, *args, **kwargs):
-        seen.update(aff=aff, route=kwargs.get("route"))
-        return run(ctx, aff, *args, **kwargs)
+    def capture(ctx, aff, per, *, route=None, **kwargs):
+        seen.update(aff=aff, route=route)
+        return run(ctx, aff, per, route=route, **kwargs)
     monkeypatch.setattr(module, "run_affordance", capture)
 
     row = loop.step()
@@ -1471,7 +1484,7 @@ def test_repeated_failure_flags_act_and_replans_once_on_new_evidence(tmp_path, m
     monkeypatch.setattr(module, "act", act)
     def blocked(ctx, aff, per, **k):
         frame = env.screenshot(); return SimpleNamespace(status="blocked", reason="wall", inputs=1, calls=0, before=frame, after=frame, scroll=(0, 0), blank_seen=False, moves=[])
-    monkeypatch.setattr(module, "run_affordance", blocked)
+    approach_stub(monkeypatch, blocked)
     loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     loop.notebook.data["quests"] = [{"key": "q", "text": "explore", "status": "open"}]
@@ -1664,7 +1677,7 @@ def test_successful_use_clears_a_refuted_thing_in_place(tmp_path, monkeypatch):
     def use(ctx, aff, per, text=None, exit=False, **kwargs):  # the thing works this time: the screen changes
         before = env.screenshot(); env.text_box = True; after = env.screenshot()
         return SimpleNamespace(status="done", reason="", inputs=1, calls=0, before=before, after=after, scroll=(0, 0), blank_seen=False, moves=[])
-    monkeypatch.setattr(module, "run_affordance", use)
+    approach_stub(monkeypatch, use)
     loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     for _ in range(3): loop.step()
@@ -1771,7 +1784,7 @@ def test_go_to_unexplored_direction_walks_route_and_marks_new_view(tmp_path, mon
     monkeypatch.setattr(module, "perceive", lambda *_: (per, reply({})))
     monkeypatch.setattr(module, "act", lambda *a, **k: SimpleNamespace(place="", ops=[], action={"go_to": "unexplored", "dir": "RIGHT"}, expect="screen_changes", why="explore", text=None))
     loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
-    loop.world._self_from_motion = True
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     route = {"dirs": ["RIGHT"] * 4, "to": (0, 0)}
     loop.world.explore_dirs = lambda place: {"RIGHT": route}
 
@@ -1798,7 +1811,8 @@ def test_on_screen_npc_routes_beside_it_facing_it_around_another_actor(tmp_path,
         frame = ctx.env.screenshot()
         return SimpleNamespace(status="done", reason="", inputs=0, calls=0,
                                before=frame, after=frame, scroll=(0, 0), blank_seen=False, moves=[])
-    monkeypatch.setattr(module, "run_affordance", run)
+    if action.get("verb") == "interact": monkeypatch.setattr(module, "run_affordance", run)
+    else: approach_stub(monkeypatch, run)
 
     loop.step()
 
@@ -1829,7 +1843,7 @@ def fail_affordance(monkeypatch, env, *, status="blocked", reason="wall", failur
     def run(ctx, aff, per, **kwargs):
         frame = env.screenshot()
         return SimpleNamespace(status=status, reason=reason, inputs=1, calls=0, before=frame, after=frame, scroll=(0, 0), blank_seen=False, moves=[], failure=failure)
-    monkeypatch.setattr(module, "run_affordance", run)
+    approach_stub(monkeypatch, run)
 
 
 def npc_scene(monkeypatch, env, **result):
@@ -1907,7 +1921,7 @@ def test_route_stage_failure_is_no_evidence_about_the_exit(tmp_path, monkeypatch
     def use(ctx, aff, per, **kwargs):  # the crossing works this time: the screen changes
         before = env.screenshot(); env.text_box = True; after = env.screenshot()
         return SimpleNamespace(status="done", reason="", inputs=1, calls=0, before=before, after=after, scroll=(0, 0), blank_seen=False, moves=[], failure=None)
-    monkeypatch.setattr(module, "run_affordance", use)
+    approach_stub(monkeypatch, use)
     row = loop.step()
     assert row["outcome"]["effects"] != ["no_change"]
     assert next(r for r in loop.mem.rows("relations") if r["id"] == dn[0]["id"])["state"] == "live"
@@ -1934,16 +1948,21 @@ def crate_scene(monkeypatch, tmp_path, goals=("sign",), crate_seen=True):
         seen["flags"].append(focus); seen["options"].append([o["label"] for o in options]); seen["rows"].append(options)
         goal = goals[min(seen["acts"], len(goals) - 1)]; seen["acts"] += 1
         return SimpleNamespace(place="", ops=[], action={"go_to": goal}, expect="place_changes", why="t", text=None)
+    at = [8, 8]; crate = (8, 7)
     def run(ctx, aff, per, *, route=None, **kwargs):
-        frame = ctx.env.screenshot(); seen["routes"].append(route); at = (0, 0)
+        frame = ctx.env.screenshot(); seen["routes"].append(route); moves = []
         for direction in route["dirs"]:
             step = (at[0] + DIRS[direction][0], at[1] + DIRS[direction][1])
             if step == crate:
-                return SimpleNamespace(status="blocked", reason="route blocked", inputs=1, calls=0, before=frame, after=frame, scroll=(0, 0), blank_seen=False, moves=[],
+                moves.append({"dir": direction, "shift": (0, 0)})
+                return SimpleNamespace(status="blocked", reason="route blocked", inputs=len(moves), calls=0, before=frame, after=frame, scroll=(0, 0), blank_seen=False, moves=moves,
                                        failure={"stage": "route", "reason": "route blocked", "direction": direction})
-            at = step
-        return SimpleNamespace(status="done", reason="", inputs=len(route["dirs"]), calls=0, before=frame, after=frame, scroll=(0, 0), blank_seen=False, moves=[], failure=None)
-    monkeypatch.setattr(module, "act", act); monkeypatch.setattr(module, "run_affordance", run)
+            at[:] = step; moves.append({"dir": direction, "shift": (-16 * DIRS[direction][0], -16 * DIRS[direction][1])})
+        return SimpleNamespace(status="done", reason="", inputs=len(route["dirs"]), calls=0, before=frame, after=frame, scroll=(0, 0), blank_seen=False, moves=moves, failure=None)
+    monkeypatch.setattr(module, "act", act); approach_stub(monkeypatch, run)
+    if not crate_seen:
+        from agent import world as world_module
+        monkeypatch.setattr(world_module, "route", lambda *_a, **_k: None)
     model = PlanRecorder()
     loop = Loop(env, model, Memory(tmp_path / "memory"), "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
