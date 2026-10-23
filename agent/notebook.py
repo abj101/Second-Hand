@@ -66,6 +66,8 @@ class Notebook:
     def _apply(self, op, key, step, op_data, event):
         quests = self.data["quests"]
         quest = next((q for q in quests if q.get("key") == key), None)
+        if op in ("done", "drop", "top", "target") and (not quest or quest.get("status") != "open"):
+            return f"{key} is not a quest yet; add it first" if not quest else f"{key} is closed ({quest['status']} at step {quest.get('closed')}); reopen it first"
         if op == "add":
             if any(q.get("key") == key for q in quests): return "key is already used"
             text, why = op_data.get("text"), op_data.get("why")
@@ -84,8 +86,6 @@ class Notebook:
             event["quest"] = value
         elif op in ("done", "drop"):
             reason = op_data.get("reason")
-            if not quest: return f"{key} is not a quest yet; add it first"
-            if quest.get("status") != "open": return f"{key} is closed ({quest['status']} at step {quest.get('closed')}); reopen it first"
             why = op_data.get("why")
             if not reason and isinstance(why, str) and why.strip(): reason = why
             if not isinstance(reason, str) or not reason.strip(): return "reason is empty (a sentence, not t-keys)" if isinstance(why, list) else "reason is empty"
@@ -101,15 +101,11 @@ class Notebook:
             quest.update(status="open", closed=None, by=None, reason=reason, reopened=step)
             event["quest"] = quest
         elif op == "top":
-            if not quest: return f"{key} is not a quest yet; add it first"
-            if quest.get("status") != "open": return f"{key} is closed ({quest['status']} at step {quest.get('closed')}); reopen it first"
             quests.remove(quest)
             quests.insert(0, quest)
             event["quest"] = quest
         elif op == "target":
             target = op_data.get("target")
-            if not quest: return f"{key} is not a quest yet; add it first"
-            if quest.get("status") != "open": return f"{key} is closed ({quest['status']} at step {quest.get('closed')}); reopen it first"
             if target is None: return "target is missing"
             resolved = self._resolve(target)
             if resolved is None: return self._no_target(target)
@@ -149,7 +145,7 @@ class Notebook:
                     event["key"] = key
                     op_data = raw
                     error = self._apply(op, key, step, op_data, event)
-                result = f"error: {error}" if error else "ok"
+                result = f"error: {error}" if error else event.get("result", "ok")
                 row = {"op": op, "key": key if isinstance(key, str) else None, "result": result}
                 rows.append(row)
                 event["result"] = result

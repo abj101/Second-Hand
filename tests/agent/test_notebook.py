@@ -514,4 +514,4 @@ def test_name_of_another_place_reports_its_label(tmp_path):
 
     result = loop.notebook.apply_ops([{"op": "name", "key": "place:lab", "text": "LAB", "why": [key]}], 2)
 
-    assert result[0]["result"] == "ok (named Laboratory, not where you are)"
+    assert result[0]["result"] == "ok (named Laboratory, maybe LAB, not where you are)"
