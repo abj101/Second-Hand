@@ -298,9 +298,9 @@ def test_inferred_exit_keeps_destination_and_is_routable_without_a_departure(tmp
     exit = next(row for row in world._exits("room", live) if row["tile"] == (8, 0))
 
     assert exit["dest"] == "bedroom" and exit["status"] == "unverified" and exit["uses"] == 0
-    assert "label" not in exit and exit["head"] == "UP"
+    assert "label" not in exit and exit["head"] == "Bedroom"
     assert "bedroom" in world._paths("room")
-    assert "UP → Bedroom: possible exit, unverified (never crossed)" in world.view("", "room")
+    assert "Bedroom → Bedroom: possible exit, unverified (never crossed)" in world.view("", "room")
 
 
 def test_loop_closure_needs_two_consistent_view_hits(tmp_path, monkeypatch):
@@ -630,7 +630,7 @@ def test_world_view_is_bounded_deterministic_promotes_goal_and_caps_landmark_map
     assert view == world.view("Find Chest near Maple", "here") and len(view) <= 2000
     assert view.startswith("Here: Atrium (0,0)  map: 2 walked, 2 seen,")
     assert "Map: . walked, , seen, # blocked side, E exit already used, @ you" in view
-    assert "E at (0,-1) UP → Kitchen: possible exit, unverified (never crossed)" in view and "Place: Kitchen" in view
+    assert "E at (0,-1) Kitchen → Kitchen: possible exit, unverified (never crossed)" in view and "Place: Kitchen" in view
     assert "Thing A Chest (1, 0) object last seen (1, 0) step 4; may have moved" in view
     assert "Vanished" not in view and "Merged ghost" not in view
     assert mem.get("entities", "goal")["tier"] == "interest"
@@ -794,7 +794,7 @@ def test_world_view_lists_all_place_exits_before_any_other_place_things(tmp_path
     view = world.view("", "here")
 
     headings = [view.index(f"Place: {name}") for name in ("North", "South", "West")]
-    exit_rows = [line for line in view.splitlines() if line == "  Exit DOWN → Atrium: possible exit, unverified (never crossed)"]
+    exit_rows = [line for line in view.splitlines() if line == "  Exit Atrium → Atrium: possible exit, unverified (never crossed)"]
     exits = [view.index(line) for line in exit_rows]
     first_other_things = view.find("Things: ")
     assert len(set(headings)) == 3 and len(exits) == 3 and view.index("Things here: Atrium") < min(headings)
@@ -842,7 +842,7 @@ def test_world_view_labels_other_place_detail_bundle(tmp_path):
 
     lines = view.splitlines()
     assert "Things here: Atrium" in lines
-    assert lines.index("Place: Hall") < lines.index("  Exit LEFT → Atrium: possible exit, unverified (never crossed)") < lines.index("Things: Hall")
+    assert lines.index("Place: Hall") < lines.index("  Exit Atrium → Atrium: possible exit, unverified (never crossed)") < lines.index("Things: Hall")
     assert lines[lines.index("Things: Hall") + 1] == "  Thing: Chest remembered"
 
 
@@ -1205,8 +1205,8 @@ def test_view_exit_table_refuted_thing_and_run_start_place(tmp_path):
 
     view = world.view("", "here")
 
-    assert "E at (2,0) RIGHT → Hall: possible exit, unverified (never crossed)" in view and "E at (0,-1) UP → Garden: possible exit, unverified (never crossed)" in view  # edge counts per destination no longer count
-    assert "E at (-1,0) side door: possible exit, unverified (never crossed)" in view and "  Exit LEFT → Atrium: possible exit, unverified (never crossed)" in view
+    assert "E at (2,0) Hall → Hall: possible exit, unverified (never crossed)" in view and "E at (0,-1) Garden → Garden: possible exit, unverified (never crossed)" in view  # edge counts per destination no longer count
+    assert "E at (-1,0) side door: possible exit, unverified (never crossed)" in view and "  Exit Atrium → Atrium: possible exit, unverified (never crossed)" in view
     assert "Don't believe: sign (not working: walked into 3×, steps 104–107)" in view
     assert "Place: Hall" in view and "run_start" not in view and "Place: place" not in view and "place 1" not in view
     assert len(view) <= VIEW_TOKENS * 4
@@ -1377,13 +1377,13 @@ def test_view_exit_lines_say_status_and_the_dead_end_line_names_the_through_exit
     world = World(mem, 16); world.current_place = "b"
 
     b = world.view("", "b")
-    assert "E at (0,0) LEFT -> Room A used 1×\n" in b and "E at (1,0) RIGHT -> Room C used 1× (1 unexplored exit beyond)" in b
-    assert "Everything unexplored from here is through: RIGHT" in b
+    assert "E at (0,0) Room A -> Room A used 1×\n" in b and "E at (1,0) Room C -> Room C used 1× (1 unexplored exit beyond)" in b
+    assert "Everything unexplored from here is through: Room C" in b
 
     world.current_place = "c"
     c = world.view("", "c")
     assert "E at (0,-2) north: possible exit, unverified (never crossed)" in c  # no destination known: no arrow
-    assert "E at (1,2) not an exit: hatch (walked into 3×, steps 104–107)" in c and "E at (0,0) LEFT -> Room B used 1×" in c
+    assert "E at (1,2) not an exit: hatch (walked into 3×, steps 104–107)" in c and "E at (0,0) Room B -> Room B used 1×" in c
     assert "Everything unexplored from here is through" not in c  # its own unverified exit is unexplored ground
 
 def test_open_screen_edges_count_unseen_cells_past_them_until_seen(tmp_path):

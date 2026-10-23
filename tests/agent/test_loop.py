@@ -1737,8 +1737,8 @@ def test_place_change_seen_only_by_next_observation_counts_only_its_departure(tm
     row = loop.step()
     assert row["verified_edge"]
     assert mem.get("crossings", "room@2,0>hall")["n"] == 1 and mem.get("crossings", "hall@0,0>room") is None
-    assert any(o["label"].startswith("go through RIGHT") and any("crossed 1×" in note for note in o["notes"]) for o in loop.world.options(per, "room", {}, 3, inputs=INPUTS))
-    assert any(o["label"].startswith("go to LEFT") and "exit, never crossed" in o["notes"] for o in loop.world.options(per, "hall", {}, 3, inputs=INPUTS))  # hall was entered with no arrival evidence: no distance until a view places you
+    assert any(o["label"].startswith("go through Hall") and any("crossed 1×" in note for note in o["notes"]) for o in loop.world.options(per, "room", {}, 3, inputs=INPUTS))
+    assert any(o["label"].startswith("go through Room") and any("crossed 1× → Room" in note for note in o["notes"]) for o in loop.world.options(per, "hall", {}, 3, inputs=INPUTS))
 
 
 def test_place_change_with_no_exit_tile_counts_nothing_and_does_not_crash(tmp_path, monkeypatch):

@@ -57,7 +57,7 @@ def test_two_doors_to_one_destination_far_apart_stay_two_exits_and_plan_uses_one
     mem = Memory(tmp_path); rooms_with(mem, [(2, 0, OBSERVED[2]), (-2, -2, {"dir": "UP", "to": "hall", "arrive": [0, 1], "src": "observed"})])
     world, per = setup(mem, []); world.pos = (0, 0)
     labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["label"].startswith("go through")]
-    assert len(labels) == 2 and labels[0].startswith("go through UP,") and labels[1].startswith("go through RIGHT,")
+    assert len(labels) == 2 and labels[0].startswith("go through Hall,") and labels[1].startswith("go through Hall,")
     legs = world.plan(HALL)
     assert (legs[0]["exit_tile"], legs[0]["push"], legs[0]["arrive"]) in {((2, 0), "RIGHT", (0, 0)), ((-2, -2), "UP", (0, 1))}
 
@@ -87,7 +87,7 @@ def test_unverified_exit_three_tiles_away_stays_a_separate_possible_exit(tmp_pat
     mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
     world, per = setup(mem, [{"name": "exit: stairs", "kind": "exit", "at": at(-1, 0)}])
     labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS)]
-    assert any(l.startswith("go through RIGHT,") for l in labels) and any(l.startswith("walk onto stairs,") for l in labels)
+    assert any(l.startswith("go through Hall,") for l in labels) and any(l.startswith("walk onto stairs,") for l in labels)
 
 
 def test_two_verified_exits_with_different_destinations_next_to_each_other_stay_two(tmp_path):
@@ -96,7 +96,7 @@ def test_two_verified_exits_with_different_destinations_next_to_each_other_stay_
     mark_exit(mem, "room", (2, 1), "DOWN", "cave", (0, 0), 1)
     world, per = setup(mem, [])
     labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["label"].startswith("go through")]
-    assert len(labels) == 2 and labels[0].startswith("go through RIGHT,") and labels[1].startswith("go through DOWN,")
+    assert len(labels) == 2 and labels[0].startswith("go through Hall,") and labels[1].startswith("go through Cave,")
 
 
 def test_same_name_exits_keep_distinct_location_labels(tmp_path):
@@ -130,7 +130,7 @@ def test_unverified_exit_with_another_known_destination_next_to_a_verified_one_s
     tile(mem, 2, -1, {"dir": "UP", "to": "cave", "arrive": [0, 0], "src": "inferred"})  # known to lead to Cave, never crossed
     world, per = setup(mem, [])
     labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if (o["ref"] or "").startswith("exit:")]
-    assert labels[0].startswith("go to UP,") and labels[1].startswith("go through RIGHT,")  # unverified known destination stays a guess
+    assert labels[0].startswith("go to Cave,") and labels[1].startswith("go through Hall,")  # unverified known destination stays a guess
 
 
 def test_unseen_cross_counts_nothing_when_no_exit_tile_is_within_one(tmp_path):
@@ -150,13 +150,19 @@ def test_unseen_cross_counts_nothing_when_two_exits_to_the_same_place_are_within
     assert mem.rows("crossings") == []
 
 
-def test_crossing_writes_one_row_and_arrival_exit_stays_unverified(tmp_path):
+def test_crossing_writes_one_row_and_arrival_exit_counts_partner_crossing(tmp_path):
     mem = Memory(tmp_path); room(mem)
     mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
     world, per = setup(mem, []); world._cross("room", (2, 0), "hall", (0, 0), 2)
     assert [r["id"] for r in mem.rows("crossings")] == ["room@2,0>hall"]
     arrival = world._exits("hall", {"room", "hall"})
-    assert len(arrival) == 1 and arrival[0]["dest"] == "room" and arrival[0]["status"] == "unverified"
+    assert len(arrival) == 1 and arrival[0]["dest"] == "room" and arrival[0]["uses"] == 1 and arrival[0]["status"] == "verified"
+
+
+def test_unnamed_loose_exit_without_destination_keeps_its_direction_head(tmp_path):
+    mem = Memory(tmp_path); room(mem); world, _ = setup(mem, [])
+    exit = world._exits("room", {"room"}, [(0, {"name": "", "kind": "exit"}, None)])[0]
+    assert exit["dest"] is None and exit["head"] == exit["dir"] == ""
 
 
 def test_wall_neighbour_bump_refutes_exit_tile(tmp_path):

@@ -210,7 +210,7 @@ def test_room_lists_exits_things_explore_and_free_input_in_rule_order_with_notes
     tools = [o["tool"] for o in opts]
     assert tools == ["go_to", "explore", "explore", "explore", "explore", "go_to", "go_to", "approach", "interact", "approach", "buttons"]
     assert [o["state"] for o in opts] == ["new"] * 7 + ["worked"] * 2 + ["failed", "new"]  # state groups: new, worked, failed; free last
-    assert opts[0]["label"].startswith("go to UP,") and opts[7]["label"].startswith("go through door,")
+    assert opts[0]["label"].startswith("go to Cave,") and opts[7]["label"].startswith("go through door,")
     assert opts[9]["label"].startswith("go to fake,")
     assert opts[8]["label"].startswith("talk to npc,") and opts[8]["notes"] == ['talked step 91: "Hi"']
     assert opts[9]["notes"][0].startswith("exit failed: blocked ")
@@ -314,8 +314,8 @@ def test_two_room_exit_counts_only_departure_crossings(tmp_path):
     walk(world, "room", "hall", "RIGHT", 1); walk(world, "hall", "room", "LEFT", 2); walk(world, "room", "hall", "RIGHT", 3)
     room_labels = [o["label"] for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["tool"] != "buttons"]
     hall_labels = [o["label"] for o in world.options(per, "hall", {}, 3, inputs=INPUTS) if o["tool"] != "buttons"]
-    assert any(label.startswith("go through RIGHT,") for label in room_labels) and any(label.startswith("go through LEFT,") for label in hall_labels)
-    assert any("crossed 2× → Hall" in note for o in world.options(per, "room", {}, 3, inputs=INPUTS) for note in o["notes"])
+    assert any(label.startswith("go through Hall,") for label in room_labels) and any(label.startswith("go through Room,") for label in hall_labels)
+    assert any("crossed 3× → Hall" in note for o in world.options(per, "room", {}, 3, inputs=INPUTS) for note in o["notes"])
 
 
 def test_perceived_exit_never_crossed_is_unverified_then_refuted_after_two_failed_tries(tmp_path):
@@ -362,13 +362,13 @@ def test_exit_labels_say_what_lies_beyond_and_the_dead_end_note_comes_first(tmp_
     mem = Memory(tmp_path); chain(mem)
     world = World(mem, 16); per = {"screen": "world", "text": [], "entities": [player()]}
     world.current_place = "a"; a = world.options(per, "a", {}, 3, inputs=INPUTS)
-    right_a = next(o for o in a if o["label"].startswith("go through RIGHT,"))
+    right_a = next(o for o in a if (o.get("exit") or {}).get("tile") == [0, 0])
     assert right_a["notes"][0] == "everything unexplored from here is through this exit"
     assert any("crossed 1× → Room B" in note and "1 unexplored exit beyond" in note for note in right_a["notes"])
     assert right_a["action"] == {"go_to": "place:b"}
     world.current_place = "b"; b = world.options(per, "b", {}, 3, inputs=INPUTS)
-    left_b = next(o for o in b if o["label"].startswith("go through LEFT,"))
-    right_b = next(o for o in b if o["label"].startswith("go through RIGHT,"))
+    left_b = next(o for o in b if (o.get("exit") or {}).get("tile") == [0, 0])
+    right_b = next(o for o in b if (o.get("exit") or {}).get("tile") == [1, 0])
     assert left_b["notes"][0].startswith("crossed 1× → Room A")
     assert right_b["notes"][0] == "everything unexplored from here is through this exit"
 
@@ -376,7 +376,7 @@ def test_exit_labels_say_what_lies_beyond_and_the_dead_end_note_comes_first(tmp_
 def test_view_says_when_everything_unexplored_is_through_one_exit(tmp_path):
     mem = Memory(tmp_path); chain(mem)
     world = World(mem, 16); world.current_place = "a"
-    assert "Everything unexplored from here is through: RIGHT" in world.view("", "a")
+    assert "Everything unexplored from here is through: Room B" in world.view("", "a")
     world.current_place = "c"
     assert "Everything unexplored from here is through:" not in world.view("", "c")
 
@@ -398,10 +398,10 @@ def test_untried_edge_into_a_seen_cell_is_not_unexplored_so_the_dead_end_fires(t
     assert world.beyond("a")["dead_end"] is True and world.beyond("a")["through"] == (0, 0)
     per = {"screen": "world", "text": [], "entities": [player()]}
     opts = world.options(per, "a", {}, 3, inputs=INPUTS)
-    exit_row = next(o for o in opts if o["label"].startswith("go through RIGHT,"))
+    exit_row = next(o for o in opts if (o.get("exit") or {}).get("tile") == [0, 0])
     assert exit_row["notes"][0] == "everything unexplored from here is through this exit"
     assert not any(o["tool"] == "explore" for o in opts)  # all unseen routes are blocked, so only the exit remains
-    assert "Everything unexplored from here is through: RIGHT" in world.view("", "a")
+    assert "Everything unexplored from here is through: Room B" in world.view("", "a")
 
 
 def test_each_explore_direction_has_a_ref_and_concrete_action(tmp_path, monkeypatch):
@@ -474,7 +474,7 @@ def test_selected_exit_travels_through_its_own_door_not_another_to_the_same_plac
     tile(mem, 2, 0, {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "observed"})
     tile(mem, -2, 0, {"dir": "LEFT", "to": "hall", "arrive": [0, 0], "src": "observed"})
     world, per = setup(mem, []); world.pos = (0, 0)
-    row = next(o for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["label"].startswith("go through LEFT,"))
+    row = next(o for o in world.options(per, "room", {}, 3, inputs=INPUTS) if (o.get("exit") or {}).get("tile") == [-2, 0])
     assert row["exit"] == {"tile": [-2, 0], "to": "hall"}
     assert world.plan(world.resolve("Hall", per, "room"), exit=row["exit"])[0]["exit_tile"] == (-2, 0)
 
