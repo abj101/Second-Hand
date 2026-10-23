@@ -78,7 +78,6 @@ class Loop:
         for hud in self.world._hud.values(): hud["crop"] = None
         self.world.self_spot, self.world._self_contradictions, self.world._self_from_motion = None, 0, False
         self.world.pa, self.world.actor_tiles, self.world._travelled = None, frozenset(), None
-        self.world._cut_arrival = self.world._lone = None
         self.live_invalidation_reason = "live_resume_cleared_pending" if had_pending else "live_resume_invalidated_pixels"
     def _observation_fields(self, stamp=None):
         stamp = stamp or self.observation_stamp
