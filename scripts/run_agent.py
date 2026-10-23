@@ -13,7 +13,7 @@ from scripts.truth_pokered import read
 class CallCap(RuntimeError): pass
 MODEL = "gemma4:31b-cloud"
 MAX_HASHED_BYTES = 5 * 1024 * 1024
-TOTAL_CAP, M1_CAP = 7854, 7804  # persistent e3 ledger caps; raised only with user approval
+TOTAL_CAP, M1_CAP = 17854, 17804  # persistent e3 ledger caps; raised only with user approval
 def source_fingerprint(root: Path = Path(".")) -> dict:
     """Git HEAD and a sha256 per modified or untracked file; notes name what could not be recorded."""
     git = lambda *args: subprocess.run(["git", "-C", str(root), *args], capture_output=True, check=True).stdout.decode("utf-8", "replace")
