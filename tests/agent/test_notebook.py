@@ -210,7 +210,7 @@ def test_place_quest_targeted_while_in_place_closes_only_on_arrival(tmp_path):
 
 
 @pytest.mark.parametrize(("target", "name", "done_when"), [
-    ("thing:person", "Mira", "Mira speaks to you"),
+    ("thing:person", "Mira", "target: Mira; close this quest with done when it is achieved"),
     ("thing:exit", "doorway", "you go through doorway"),
     ("thing:building", "large house", "you enter large house"),
     ("place:hall", "Hall", "you enter Hall"),
@@ -227,10 +227,22 @@ def test_render_focus_labels_target_and_limits_cited_text(tmp_path, target, name
     rendered = nb.render_focus(lambda ref: name)
     because = rendered.split("Because:\n", 1)[1].split("\nRecent:", 1)[0].splitlines()
 
-    assert f"Goal: Quest q (done when: {done_when})" in rendered
+    expected = f"Goal: Quest q ({done_when})" if target == "thing:person" else f"Goal: Quest q (done when: {done_when})"
+    assert expected in rendered
     assert len(because) == 1 and because[0] == f'Mira, step 1: "{cited}"'
     assert "Uncited text" not in rendered
     assert "Recent note" in rendered
+
+
+def test_plain_thing_focus_stays_open_until_done(tmp_path):
+    nb = notebook(tmp_path, ref=lambda value: value)
+    key = nb.heard(0, None, "here", "Look at Mira.")
+    nb.apply_ops([{**add("q", target="thing:person"), "why": [key]}], 1)
+
+    rendered = nb.render_focus(lambda ref: "Mira")
+
+    assert "speaks to you" not in rendered
+    assert "(target: Mira; close this quest with done when it is achieved)" in rendered
 
 
 def test_render_focus_shows_newest_cited_text_whole_and_cuts_older(tmp_path):
@@ -339,8 +351,7 @@ def test_closed_thing_quest_shows_current_label_and_who_said(tmp_path):
     nb.heard(1, "MOM", "kitchen", "Go find the professor.", who="thing:a")
     assert nb.apply_ops([add("q", target="person")], 2)[0]["result"] == "ok"
     nb.heard(39, "MOM", "kitchen", "Ah, you came back.", who="thing:a")
-    nb.talked(39, "thing:a")  # legacy closure evidence still renders with the current label
-    assert nb.observe(39, None) == ["q"]
+    assert nb.apply_ops([{"op": "done", "key": "q", "reason": "talked to MOM, who said t1"}], 39)[0]["result"] == "ok"
     nb.heard(44, "MOM", "room", "PROF next door is looking for you.", who="thing:a")
 
     rendered = nb.render()
@@ -348,31 +359,6 @@ def test_closed_thing_quest_shows_current_label_and_who_said(tmp_path):
     assert '- q "Quest q": done at step 39 — talked to MOM, who said t' in rendered
     assert "PROF next door" in rendered
     assert "talked to person" not in rendered
-
-
-def test_talked_closes_targeted_thing_quest(tmp_path):
-    nb = notebook(tmp_path, ref=lambda value: value if str(value).startswith("thing:") else None,
-                  canon=lambda value: value.lower() if isinstance(value, str) else value)
-    nb.heard(1, "Guide", "Hall", "The door is open.", who="thing:guide")
-    assert nb.apply_ops([add("q", target="thing:GUIDE")], 2)[0]["result"] == "ok"
-
-    events = nb.talked(3, "thing:GUIDE")
-
-    assert [event["op"] for event in events] == ["observe"]
-    assert events[0]["key"] == "q"
-    assert nb.data["quests"][0]["status"] == "done"
-    assert nb.data["quests"][0]["reason"] == "talked"
-    assert nb.observe(3, None) == ["q"]
-
-
-def test_talked_does_not_close_for_reply_before_retarget(tmp_path):
-    nb = notebook(tmp_path, ref=lambda value: value if str(value).startswith("thing:") else None)
-    nb.heard(1, "Guide", "Hall", "The door is open.", who="thing:guide")
-    assert nb.apply_ops([add("q")], 2)[0]["result"] == "ok"
-    assert nb.apply_ops([{"op": "target", "key": "q", "target": "thing:guide"}], 3)[0]["result"] == "ok"
-
-    assert nb.talked(2, "thing:guide") == []
-    assert nb.data["quests"][0]["status"] == "open"
 
 
 def test_ambiguous_target_lists_each_candidate_ref(tmp_path):

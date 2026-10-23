@@ -1,0 +1,46 @@
+[
+  {
+    "run": "m1_r12_boot",
+    "checkpoint": 55,
+    "step": 56,
+    "situation": "guessed name",
+    "absent": [{"tool": ".*", "label_re": "^talk to PROF\\. OAK,"}],
+    "right": [{"label_re": "maybe PROF\\. OAK"}]
+  },
+  {
+    "run": "m1_r12_boot",
+    "checkpoint": 100,
+    "step": 101,
+    "situation": "stale actor",
+    "absent": [{"tool": ".*", "label_re": "not on screen, here$"}]
+  },
+  {
+    "run": "m1_r12_boot",
+    "checkpoint": 105,
+    "step": 107,
+    "situation": "stale actor",
+    "absent": [{"tool": ".*", "label_re": "not on screen, here$"}]
+  },
+  {
+    "run": "m1_r12_boot",
+    "checkpoint": 110,
+    "step": 111,
+    "situation": "explore facts",
+    "right": [{"tool": "explore", "label_re": "unseen cells"}]
+  },
+  {
+    "run": "m1_r12_boot",
+    "checkpoint": 175,
+    "step": 179,
+    "situation": "place name",
+    "text_absent": ["speaks to you"]
+  },
+  {
+    "run": "m1_r12_boot",
+    "checkpoint": 195,
+    "step": 196,
+    "situation": "legend",
+    "text_absent": ["speaks to you"],
+    "text_re": ["Things here:.*(ball|sphere|item)"]
+  }
+]
