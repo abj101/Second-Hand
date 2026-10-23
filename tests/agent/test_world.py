@@ -752,6 +752,7 @@ def test_text_tier_name_is_shown_as_a_guess_in_options_and_view(tmp_path):
     ident = next(iter(world.entity_ids.values())); mem.call(ident, "PROF", 2, tier="text")
 
     assert world.label(f"thing:{ident}") == "NPC, maybe PROF"
+    assert world.ref("PROF") == f"thing:{ident}"
     assert any("talk to NPC, maybe PROF" in row["label"] for row in world.options(per, "room", {}, 2, inputs=GridEnv().inputs()))
     assert "NPC, maybe PROF" in world.view("", "room")
 

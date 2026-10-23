@@ -72,8 +72,7 @@ def unexplored(mem, pid):
 def _direction(pos, target):
     dx, dy = target[0] - pos[0], target[1] - pos[1]
     if not dx and not dy: return None
-    axis = 0 if abs(dx) >= abs(dy) else 1
-    return ("RIGHT" if dx > 0 else "LEFT") if axis == 0 else ("DOWN" if dy > 0 else "UP")
+    return ("RIGHT" if dx > 0 else "LEFT") if abs(dx) >= abs(dy) else ("DOWN" if dy > 0 else "UP")
 
 def _open_edge(frame, t):
     """{side: [i, ...]}: the edge tiles (i-th along that side) that show something, not uniform void, so the place may continue past them.
@@ -200,16 +199,14 @@ class World:
         self.tracker.seed([(ids[i], e["at"], self._actor(ids[i], e)) for i, e in enumerate(per.get("entities", []))
                            if i in ids and self._actor(ids[i], e) and e.get("kind", "").casefold() != "player" and isinstance(e.get("at"), list) and len(e["at"]) == 2])
         if per.get("screen") != "world" or per.get("text") or any(e.get("kind") == "dialogue_box" for e in per.get("entities", [])): return
-        for ident in self.tracker.gone() - set(ids.values()):
-            self.tracker.tracks.pop(ident)
+        gone = self.tracker.gone() - set(ids.values())
+        for ident in gone: self.tracker.tracks.pop(ident)
+        if anchor and size and (rect := self._view_rect(anchor, size)):
+            x0, y0, x1, y1 = rect; present = set(ids.values()) | {ident for ident, track in self.tracker.tracks.items() if track["status"] == "live"}
+            gone.update(row["id"] for row in self.mem.rows("entities") if row.get("place") == self.current_place and row.get("state") != "merged" and row.get("status") != "gone" and row.get("tile") and x0 <= row["tile"][0] <= x1 and y0 <= row["tile"][1] <= y1 and row["id"] not in present and self._actor(row["id"], row))
+        for ident in gone:
             row = self.mem.get("entities", ident)
             if row and row.get("status") != "gone": self.mem.upsert("entities", {**row, "status": "gone"})
-        if anchor and size and (rect := self._view_rect(anchor, size)):
-            x0, y0, x1, y1 = rect; visible = set(ids.values())
-            tracked = {ident for ident, track in self.tracker.tracks.items() if track["status"] == "live"}
-            for row in self.mem.rows("entities"):
-                if row.get("place") == self.current_place and row.get("state") != "merged" and row.get("status") != "gone" and row.get("tile") and x0 <= row["tile"][0] <= x1 and y0 <= row["tile"][1] <= y1 and row["id"] not in visible | tracked and self._actor(row["id"], row):
-                    self.mem.upsert("entities", {**row, "status": "gone"})
     def _promote(self, ids):
         for ident in ids:
             row = self.mem.get("entities", ident)
@@ -753,8 +750,7 @@ class World:
 
     def _shown(self, row, base):
         called = row.get("called")
-        if not called: return base
-        return f"{base}, maybe {called}" if (row.get("called_src") or {}).get("tier") == "text" else called
+        return f"{base}, maybe {called}" if called and (row.get("called_src") or {}).get("tier") == "text" else called or base
 
     def place_label(self, place):
         rows = [p for p in self.mem.rows("places") if p.get("state") != "merged"]
@@ -865,7 +861,6 @@ class World:
             possible_to = f" → {self.place_label(x['dest'])}" if x["dest"] else ""
             return f"{x['head']}{possible_to}: possible exit, unverified (never crossed)"
         goal = str(goal_text or "").casefold()
-        base_name = _base
         promoted = [e["id"] for e in self.mem.rows("entities") if e.get("place") in live and e.get("name")
                     and _base(e["name"]) in goal]
         self._promote(promoted)
@@ -877,9 +872,8 @@ class World:
         seen_cells = set(seen.get("cells", []))
         edges = frontier(self.mem, place)
         unseen_cells = unexplored(self.mem, place)
-        unseen, past = len(unseen_cells), len(open_cells(self.mem, place))
         walked = sum(r.get("floor") is True for r in tiles)
-        lines = [f"Here: {label} ({self.pos[0]},{self.pos[1]})  map: {walked} walked, {len(seen_cells)} seen, {len(edges)} untried edges ({unseen} unseen cells)" + (f", {past} unseen cells past open screen edges" if past else "")]
+        lines = [f"Here: {label} ({self.pos[0]},{self.pos[1]})  map: {walked} walked, {len(seen_cells)} seen, {len(edges)} untried edges ({len(unseen_cells)} unseen cells)" + (f", {past} unseen cells past open screen edges" if (past := len(open_cells(self.mem, place))) else "")]
         by_direction = Counter(d for target in unseen_cells if (d := _direction(self.pos, target)))
         if directions := ", ".join(f"{d} {by_direction[d]}" for d in ("UP", "DOWN", "LEFT", "RIGHT") if by_direction[d]): lines[0] += f"; unseen by direction: {directions}"
 
@@ -897,10 +891,10 @@ class World:
         entities = [e for e in entities if not (_is_exit(e) and self._refuted(place, e.get("tile")) > 0)]
         grouped = {}
         for e in entities:
-            grouped.setdefault(base_name(e.get("name", e["id"])), []).append(e)
+            grouped.setdefault(_base(e.get("name", e["id"])), []).append(e)
         current_groups = {}
         for e in current_entities:
-            current_groups.setdefault(base_name(e.get("name", e["id"])), []).append(e)
+            current_groups.setdefault(_base(e.get("name", e["id"])), []).append(e)
         status_rank = {"seen": 3, "remembered": 2, "stale": 1}
         entities = []
         for base, group in sorted(grouped.items()):
@@ -936,9 +930,9 @@ class World:
             legend.append(legend_line)
             legend_refs[symbol] = f"thing:{(rec or {}).get('ident') or e['id']}"
             legend_lines[symbol] = legend_line
-        has_look_wall = False; plain_rows = []
+        has_look_wall = False
         for y in range(y0, y1 + 1):
-            row, plain_row = [], []
+            row = []
             for x in range(x0, x1 + 1):
                 tile = cells.get((x, y), {})
                 glyph = "@" if (x, y) == tuple(self.pos) else "E" if tile.get("exit") else None
@@ -951,9 +945,8 @@ class World:
                     look = self.mem.get("looks", f"{place}@{x},{y}"); store = getattr(self.mem, "looks", None); learned = store.says(look["look"]) if look and store else None
                     if tile.get("floor") is not True and learned == "wall": glyph = "x"; has_look_wall = True
                     else: glyph = "." if tile.get("floor") is True else "," if f"{x},{y}" in seen_cells else " "
-                plain_row.append(glyph)
-                row.append("@" if (x, y) == tuple(self.pos) else "E" if tile.get("exit") else marks.get((x, y), glyph))
-            plain_rows.append("".join(plain_row)); lines.append("".join(row))
+                row.append(glyph)
+            lines.append("".join(row))
         lines.append("Map: . walked, , seen, x looks like a wall, # blocked side, E exit already used, @ you; letters mark things and landmarks (kind exit = seen, not yet used)" if has_look_wall else "Map: . walked, , seen, # blocked side, E exit already used, @ you; letters mark things and landmarks (kind exit = seen, not yet used)")
         current_facts = []
         far = self.beyond(place)  # ponytail: no screen things here; view's live set is navigable places, so a through exit missing from the table prints nothing
@@ -1002,7 +995,7 @@ class World:
             groups = {}
             for e in self.mem.rows("entities"):
                 if e.get("place") == pid and tier(e) == "interest" and eligible(e):
-                    groups.setdefault(base_name(e.get("name", e["id"])), []).append(e)
+                    groups.setdefault(_base(e.get("name", e["id"])), []).append(e)
             rendered = []
             for base, group in sorted(groups.items()):
                 best = max(group, key=lambda e: (status_rank.get(e.get("status", "remembered"), 0), e.get("last", 0), e["id"]))
@@ -1024,13 +1017,12 @@ class World:
             if len("\n".join((*output, line))) <= VIEW_TOKENS * 4:
                 if 1 <= i <= MAP_H: grid_indexes[i - 1] = len(output)
                 output.append(line)
-        def add_detail_bundle(label, detail, limit=VIEW_TOKENS * 4):
-            if not detail or len("\n".join((*output, label, detail[0]))) > limit: return
+        def add_detail_bundle(label, detail):
+            if not detail or len("\n".join((*output, label, detail[0]))) > VIEW_TOKENS * 4: return
             output.extend((label, detail[0]))
             for line in detail[1:]:
-                if len("\n".join((*output, line))) <= limit: output.append(line)
-        here = [*legend, *current_detail]; here_label = f"Things here: {label}"
-        add_detail_bundle(here_label, here)
+                if len("\n".join((*output, line))) <= VIEW_TOKENS * 4: output.append(line)
+        add_detail_bundle(f"Things here: {label}", [*legend, *current_detail])
         for line in current_facts:
             if len("\n".join((*output, line))) <= VIEW_TOKENS * 4: output.append(line)
         included = set()
@@ -1041,8 +1033,7 @@ class World:
                 output.extend(place_headers[pid]); included.add(pid)
         for other in others:
             pid = other["id"]
-            detail = place_things[pid]
-            if pid in included: add_detail_bundle(f"Things: {self.place_label(pid)}", detail)
+            if pid in included: add_detail_bundle(f"Things: {self.place_label(pid)}", place_things[pid])
 
         flags = list(getattr(self, "view_flags", ()))
         if self._travelled and self._travelled.status != "done": flags.append(f"travel: {self._travelled.reason}")
@@ -1051,10 +1042,9 @@ class World:
             if hud["changed"] is not None and row and row.get("place") == place: flags.append(f"HUD {row['name']} changed at step {hud['changed']}")
         for line in (f"Flag: {flag}" for flag in dict.fromkeys(flags)):
             if len("\n".join((*output, line))) <= VIEW_TOKENS * 4: output.append(line)
-        shown = {symbol for symbol, line in legend_lines.items() if line in output}
-        for y, index in grid_indexes.items():
-            output[index] = "".join(c if c not in symbols or c in shown else plain_rows[y][x] for x, c in enumerate(output[index]))
         self.legend = {symbol: ref for symbol, ref in legend_refs.items() if legend_lines[symbol] in output}
+        for y, index in grid_indexes.items():
+            output[index] = "".join(symbol if c not in "@E" and (symbol := marks.get((x0 + x, y0 + y))) in self.legend else c for x, c in enumerate(output[index]))
         return "\n".join(output)
     def _tile(self, ident):
         tile = (self.entity_tiles.get(ident) or (self.mem.get("entities", ident) or {}).get("tile")) if ident else None

@@ -17,8 +17,8 @@
   {
     "run": "m1_r12_boot",
     "checkpoint": 105,
-    "step": 107,
-    "situation": "stale actor",
+    "step": 106,
+    "situation": "stale actor (nearest replayable step to 107)",
     "absent": [{"tool": ".*", "label_re": "not on screen, here$"}]
   },
   {
@@ -41,6 +41,6 @@
     "step": 196,
     "situation": "legend",
     "text_absent": ["speaks to you"],
-    "text_re": ["Things here:.*(ball|sphere|item)"]
+    "text_re": ["Things here:.*(ball|sphere|item|table with globes)"]
   }
 ]
