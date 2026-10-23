@@ -245,6 +245,23 @@ def test_plain_thing_focus_stays_open_until_done(tmp_path):
     assert "(target: Mira; close this quest with done when it is achieved)" in rendered
 
 
+def test_focus_target_shows_a_text_name_as_a_guess(tmp_path):
+    from agent.loop import Loop
+    from agent.memory import Memory
+    from tests.agent.fakes import GridEnv, StubModel
+    mem = Memory(tmp_path / "memory")
+    mem.upsert("places", {"id": "hall", "name": "Hall", "screen": "world", "state": "place"})
+    mem.upsert("entities", {"id": "person", "name": "NPC", "kind": "npc", "place": "hall"})
+    loop = Loop(GridEnv(), StubModel([]), mem, "grid")
+    key = loop.notebook.heard(1, None, "Hall", "The sign says PROF.")
+    loop.notebook.apply_ops([{**add("q", target="thing:person"), "why": [key]}], 2)
+    mem.call("person", "PROF", 3, tier="text")
+
+    rendered = loop.notebook.render_focus(loop.world.label)
+
+    assert "(target: NPC, maybe PROF; close this quest with done when it is achieved)" in rendered
+
+
 def test_render_focus_shows_newest_cited_text_whole_and_cuts_older(tmp_path):
     nb = notebook(tmp_path)
     nb.heard(1, "Mira", "Hall", "old " + "x" * 220)
