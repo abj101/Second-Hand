@@ -1306,6 +1306,21 @@ def test_view_exit_table_refuted_thing_and_run_start_place(tmp_path):
     assert len(view) <= VIEW_TOKENS * 4
 
 
+@pytest.mark.parametrize("src", ["inferred", "observed"])
+def test_travel_inferred_arrival_uses_view_but_observed_arrival_keeps_precedence(tmp_path, monkeypatch, src):
+    import numpy as np
+    from PIL import Image; from agent.skills import Ctx, SkillResult; from agent import world as world_module; from tests.agent.fakes import GridEnv, StubModel
+    mem = Memory(tmp_path); place(mem, "source", "Source"); place(mem, "expected", "Expected")
+    edge = {"dir": "RIGHT", "to": "expected", "arrive": [0, 0], "src": src}
+    mem.upsert("tiles", {"id": "source@1,0", "place": "source", "x": 1, "y": 0, "floor": True, "blocked": [], "pushed": [], "exit": edge, "step": 1})
+    frame = Image.fromarray(np.random.default_rng(7).integers(1, 4, (144, 160), dtype=np.uint8) * 80); mem.remember_view("expected", (2, 1), frame)
+    monkeypatch.setattr(world_module, "approach", lambda ctx, *_a, **_k: SkillResult("done", "scene cut", 1, 0, frame, frame, (0, 0), False, [("RIGHT", (0, 0))]))
+    world = World(mem, 16); world.current_place = "source"
+    result = world.travel(Ctx(GridEnv(), StubModel([]), 16), [{"place": "source", "dirs": ["RIGHT"], "push": "RIGHT", "expect": "expected", "exit_tile": (1, 0)}], 5)
+    assert result.status == "done" and world.current_place == "expected" and world.pos == ((2, 1) if src == "inferred" else (0, 0))
+    assert mem.get("tiles", "source@1,0")["exit"] == ({**edge, "arrive": [2, 1], "src": "observed"} if src == "inferred" else edge)
+
+
 def test_travel_leg_through_a_matching_exit_counts_the_departure(tmp_path, monkeypatch):
     from PIL import Image; from agent.skills import Ctx, SkillResult; from agent import world as world_module; from tests.agent.fakes import GridEnv, StubModel
 

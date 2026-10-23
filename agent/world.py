@@ -1354,7 +1354,10 @@ class World:
                     mark_exit(self.mem, place, tuple(leg["exit_tile"]), leg["push"], *arrival[:2], step); self._cross(place, tuple(leg["exit_tile"]), arrival[0], arrival[1], step)
                     self.pos, place = arrival[:2][1], arrival[0]; self._land(place)
                     return self._travel_result(results, "blocked", f"leg {n} {'arrival' if wrong or edge and edge.get('to') == leg['expect'] else 'exit'} mismatch", ctx)
-                arrive = arrival[1] if arrival else tuple(edge["arrive"])
+                if not arrival and edge.get("src") == "inferred":
+                    self.mem.match_place({"screen": "world"}, step, prev=place, cut=True, exit=(*leg["exit_tile"], edge.get("dir")))
+                    arrive = self._locate(leg["expect"], result.after)
+                else: arrive = arrival[1] if arrival else tuple(edge["arrive"])
                 self._cross(place, tuple(leg["exit_tile"]), leg["expect"], arrive, step)
                 self.pos, place = arrive, leg["expect"]
                 self._land(place)
