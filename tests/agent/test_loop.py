@@ -1132,7 +1132,7 @@ def test_zero_ok_stuck_plan_reply_increments_backoff(tmp_path, monkeypatch):
     row = loop.step()
 
     assert loop.stuck.u == 1
-    assert row["plan"]["ops"] == [{"op": "done", "key": "missing", "result": "error: key is not open"}]
+    assert row["plan"]["ops"] == [{"op": "done", "key": "missing", "result": "error: missing is not a quest yet; add it first"}]
 
 
 def test_plan_returns_operations_and_why(tmp_path):

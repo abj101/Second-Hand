@@ -34,15 +34,18 @@ CASES = [
     ("add-unresolved-target", [], {**add("q"), "target": "unknown"}, None),
     ("reopen-not-closed", [add("q")], {"op": "reopen", "key": "q", "reason": "Needed again"}, "key is not closed"),
     ("reopen-ok", closed_setup(), {"op": "reopen", "key": "q", "reason": "Needed again"}, None),
-    ("done-not-open", [], {"op": "done", "key": "q", "reason": "Finished"}, "key is not open"),
+    ("done-not-open", [], {"op": "done", "key": "q", "reason": "Finished"}, "q is not a quest yet; add it first"),
+    ("done-closed", closed_setup(), {"op": "done", "key": "q", "reason": "Finished"}, "q is closed (dropped at step 2); reopen it first"),
     ("done-ok", [add("q")], {"op": "done", "key": "q", "reason": "Found the archive"}, None),
     ("done-empty-reason", [add("q")], {"op": "done", "key": "q", "reason": " "}, "reason is empty"),
-    ("drop-not-open", [], {"op": "drop", "key": "q", "reason": "Finished"}, "key is not open"),
+    ("done-tkeys-why", [add("q")], {"op": "done", "key": "q", "why": ["t1"]}, "reason is empty (a sentence, not t-keys)"),
+    ("done-sentence-why", [add("q")], {"op": "done", "key": "q", "why": "The archive was found."}, None),
+    ("drop-not-open", [], {"op": "drop", "key": "q", "reason": "Finished"}, "q is not a quest yet; add it first"),
     ("drop-ok", [add("q")], {"op": "drop", "key": "q", "reason": "Changed course"}, None),
     ("drop-empty-reason", [add("q")], {"op": "drop", "key": "q", "reason": " "}, "reason is empty"),
-    ("top-not-open", [], {"op": "top", "key": "q"}, "key is not open"),
+    ("top-not-open", [], {"op": "top", "key": "q"}, "q is not a quest yet; add it first"),
     ("top-ok", [add("q"), add("next")], {"op": "top", "key": "q"}, None),
-    ("target-not-open", [], {"op": "target", "key": "q", "target": "place:room"}, "key is not open"),
+    ("target-not-open", [], {"op": "target", "key": "q", "target": "place:room"}, "q is not a quest yet; add it first"),
     ("target-missing", [add("q")], {"op": "target", "key": "q"}, "target is missing"),
     ("target-unresolved", [add("q")], {"op": "target", "key": "q", "target": "unknown"}, 'target "unknown" matches no known place or thing; no known places or things yet'),
     ("target-ok", [add("q")], {"op": "target", "key": "q", "target": "place:room"}, None),
@@ -83,6 +86,19 @@ def test_drop_then_add_at_open_cap_in_one_reply(tmp_path):
     assert [row["result"] for row in result] == ["ok", "ok"]
     assert nb.focus == "q1"
     assert next(q for q in nb.data["quests"] if q["key"] == "replacement")["status"] == "open"
+
+
+@pytest.mark.parametrize("op,status", [("done", "done"), ("drop", "dropped")])
+def test_done_and_drop_use_sentence_why_as_reason(tmp_path, op, status):
+    nb = notebook(tmp_path)
+    nb.heard(1, None, "Hall", "A clue.")
+    nb.apply_ops([add("q")], 2)
+
+    result = nb.apply_ops([{"op": op, "key": "q", "why": "Found another way forward."}], 3)
+
+    assert result[0]["result"] == "ok"
+    assert nb.data["quests"][0]["status"] == status
+    assert nb.data["quests"][0]["reason"] == "Found another way forward."
 
 
 def test_add_resolves_legend_target_from_current_world_view(tmp_path):
@@ -472,4 +488,30 @@ def test_name_op_names_a_place_and_resolves_its_guess(tmp_path):
     assert result[0]["result"] == "ok"
     assert loop.world.ref("LAB") == "place:hall"
     assert loop.world.label("place:hall") == "Hall, maybe LAB"
-    assert loop.notebook.apply_ops([{"op": "name", "key": "unknown", "text": "X", "why": [key]}], 3)[0]["result"] == 'error: "unknown" names no known thing or place'
+    assert loop.notebook.apply_ops([{"op": "name", "key": "unknown", "text": "X", "why": [key]}], 3)[0]["result"] == 'error: "unknown" names no known thing or place; closest: Hall, maybe LAB'
+
+
+def test_name_error_lists_closest_label(tmp_path):
+    nb = notebook(tmp_path, ref=lambda value: "place:lab" if value == "Oak's Lab" else None,
+                  refs=lambda: ["place:lab"], label=lambda _: "Oak's Lab")
+    key = nb.heard(1, None, "Room", "The laboratory is nearby.")
+
+    result = nb.apply_ops([{"op": "name", "key": "oak", "text": "Oak", "why": [key]}], 2)
+
+    assert result[0]["result"] == 'error: "oak" names no known thing or place; closest: Oak\'s Lab'
+
+
+def test_name_of_another_place_reports_its_label(tmp_path):
+    from agent.loop import Loop
+    from agent.memory import Memory
+    from tests.agent.fakes import GridEnv, StubModel
+    mem = Memory(tmp_path / "memory")
+    for ident, name in (("hall", "Hall"), ("lab", "Laboratory")):
+        mem.upsert("places", {"id": ident, "name": name, "screen": "world", "state": "place"})
+    loop = Loop(GridEnv(), StubModel([]), mem, "grid")
+    key = loop.notebook.heard(1, None, "Hall", "A sign says LAB.")
+    loop.notebook.observe(1, "place:hall")
+
+    result = loop.notebook.apply_ops([{"op": "name", "key": "place:lab", "text": "LAB", "why": [key]}], 2)
+
+    assert result[0]["result"] == "ok (named Laboratory, not where you are)"
