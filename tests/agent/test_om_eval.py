@@ -229,6 +229,23 @@ def test_points_checks_cover_right_wrong_section_notes_goal_and_plan():
     not_applicable = eval_act.points_checks({"plan_re": "BALL"}, options, "", None)
     assert not_applicable == [("plan_re", True, "BALL: NOT APPLICABLE")]
 
+def test_points_text_checks_match_focus_line_and_planner_view():
+    case = {"text_absent": ["speaks to you"], "text_re": [r"Things here:.*(ball|sphere|item)"]}
+    prompt = "Trigger: new text\nMap and memory: Things here: shop\nThing A ball\nText on screen now: none"
+
+    checks = eval_act.points_checks(case, [], "Goal: Choose an item\nBecause:", prompt)
+
+    assert checks == [
+        ("text_absent", True, "speaks to you: not found"),
+        ("text_re", True, r"Things here:.*(ball|sphere|item): matched"),
+    ]
+    assert not eval_act.points_checks(case, [], "Goal: speaks to you", prompt)[0][1]
+    missing_view = eval_act.points_checks(case, [], "", None)
+    assert missing_view == [
+        ("text_absent", False, "speaks to you: planner view not captured"),
+        ("text_re", False, r"Things here:.*(ball|sphere|item): planner view not captured"),
+    ]
+
 def test_points_stub_captures_target_plan_prompt_even_when_recording_is_exhausted():
     found = {}
     stub = eval_act.PointsStub([], {}, 5, found)

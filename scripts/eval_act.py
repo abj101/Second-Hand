@@ -859,6 +859,16 @@ def points_checks(case, options, goal="", plan_prompt=None):
     for pattern in _point_patterns(case.get("plan_re")):
         if plan_prompt is None: rows.append(("plan_re", True, f"{pattern}: NOT APPLICABLE"))
         else: rows.append(("plan_re", bool(re.search(pattern, plan_prompt, re.I)), f"{pattern}: {'matched' if re.search(pattern, plan_prompt, re.I) else 'not found'}"))
+    focus = next((line for line in goal.splitlines() if line.startswith("Goal:")), "")
+    has_view = bool(plan_prompt and "Map and memory: " in plan_prompt)
+    view = plan_prompt.split("Map and memory: ", 1)[1].split("\nText on screen now:", 1)[0] if has_view else ""
+    text = f"{focus}\n{view}"
+    for pattern in _point_patterns(case.get("text_absent")):
+        matched = re.search(pattern, text, re.I | re.S) is not None
+        rows.append(("text_absent", has_view and not matched, f"{pattern}: {'matched' if matched else 'not found' if has_view else 'planner view not captured'}"))
+    for pattern in _point_patterns(case.get("text_re")):
+        matched = re.search(pattern, text, re.I | re.S) is not None
+        rows.append(("text_re", has_view and matched, f"{pattern}: {'matched' if matched else 'not found' if has_view else 'planner view not captured'}"))
     return rows
 
 def _point_entries(value): return value if isinstance(value, list) else [value] if isinstance(value, dict) else []
