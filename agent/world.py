@@ -632,7 +632,7 @@ class World:
         if len(labelled) == 1: return f"place:{labelled[0]['id']}"
         if (match := re.search(r"\s+\[([^\[\]]+)\]$", text)) and self.canon_place(match[1]) in maps:
             return self.canon(f"place:{match[1]}")
-        named = [p for p in places if key in {n.casefold() for n in [place_name(p), *place_aliases(p)] if n}]
+        named = [p for p in places if key in {n.casefold() for n in [place_name(p), p.get("called"), *place_aliases(p)] if n}]
         if len(named) == 1: return f"place:{named[0]['id']}"
         things = self._named_things(text)
         if len(things) == 1: return f"thing:{things[0]['id']}"

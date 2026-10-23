@@ -113,11 +113,11 @@ class Notebook:
         elif op == "name":
             text, refs = op_data.get("text"), _refs(op_data.get("why"))
             resolved = self._resolve(key)
-            if resolved is None or not resolved.startswith("thing:"): return f'"{key}" names no known thing'
+            if resolved is None or not resolved.startswith(("thing:", "place:")): return f'"{key}" names no known thing or place'
             if not isinstance(text, str) or not text.strip() or len(text.strip()) > 40: return "text must be 1 to 40 characters"
             if not refs or any(not isinstance(r, str) or not self._known_key(r) for r in refs): return "why must cite game-text keys"
             event["name"] = {"thing": resolved, "text": text.strip(), "why": refs}
-            self.name(resolved.partition(":")[2], text.strip(), refs[0], step)
+            self.name(resolved, text.strip(), refs[0], step)
         if op in ("add", "done", "drop", "reopen", "top", "target", "name"):
             return None
         return "unknown op"

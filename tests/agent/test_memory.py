@@ -3,6 +3,15 @@ import json
 from agent.memory import Looks, TRANSIENT, Memory, conf, normalize_kind
 
 
+def test_call_can_store_a_place_name_with_text_provenance(tmp_path):
+    mem = Memory(tmp_path)
+    mem.upsert("places", {"id": "hall", "name": "Hall", "screen": "world", "state": "place"})
+
+    row = mem.call("hall", "LAB", 3, tier="text", store="places")
+
+    assert row["called"] == "LAB" and row["called_src"] == {"tier": "text", "step": 3, "key": None}
+
+
 def test_looks_load_deduplicates_and_reports_mixed_evidence(tmp_path):
     path = tmp_path / "looks.jsonl"
     row = {"id": "a|r|room@1,2|wall", "look": "a", "label": "wall", "run": "r", "place": "room", "cell": [1, 2], "step": 2}
