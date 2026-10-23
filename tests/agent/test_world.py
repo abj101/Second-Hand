@@ -765,9 +765,8 @@ def test_world_view_lists_all_place_exits_before_any_other_place_things(tmp_path
                               "exit": {"dir": "DOWN", "to": "here", "arrive": [0, 0]}, "step": 1})
         entity(mem, f"thing-{name}", f"Thing {name}", name.lower(), [1, 0])
         mem.upsert("entities", {**mem.get("entities", f"thing-{name}"), "tier": "interest"})
-    for i in range(60):
-        mem.upsert("entities", {"id": f"clutter-{i}", "name": f"Clutter {i}", "kind": "object",
-                                "place": "here", "tile": None, "seen": 1, "tier": "interest"})
+    entity(mem, "lamp", "Lamp", "here", [1, 0])
+    mem.upsert("entities", {**mem.get("entities", "lamp"), "tier": "interest"})
     world = World(mem, 16); world.current_place = "here"
 
     view = world.view("", "here")
@@ -775,8 +774,35 @@ def test_world_view_lists_all_place_exits_before_any_other_place_things(tmp_path
     headings = [view.index(f"Place: {name}") for name in ("North", "South", "West")]
     exit_rows = [line for line in view.splitlines() if line == "  Exit DOWN → Atrium: possible exit, unverified (never crossed)"]
     exits = [view.index(line) for line in exit_rows]
-    first_thing = min(i for i in (view.find("Thing "), view.find("Thing:"), view.find("Landmark ")) if i >= 0)
-    assert len(set(headings)) == 3 and len(exits) == 3 and max(headings + exits) < first_thing and len(view) <= 2000
+    first_other_things = view.find("Things: ")
+    assert len(set(headings)) == 3 and len(exits) == 3 and view.index("Things here: Atrium") < min(headings)
+    assert max(headings + exits) < first_other_things and len(view) <= 2000
+
+
+def test_world_view_keeps_drawn_letters_in_legend_when_crowded(tmp_path):
+    from agent.world import MAP_H, MAP_W, VIEW_TOKENS
+
+    mem, world = _legend_world(tmp_path)
+    for i in range(20):
+        pid = f"place-{i}"
+        place(mem, pid, f"Place {i}")
+        for n in range(8):
+            entity(mem, f"{pid}-thing-{n}", f"Object {n} at {pid}", pid, (n, 0))
+            mem.upsert("entities", {**mem.get("entities", f"{pid}-thing-{n}"), "tier": "interest"})
+    for i in range(50):
+        x, y = i % 10 - 5, i // 10 - 2
+        entity(mem, f"local-{i:02}", f"Local {i} " + "word " * 35, "room", (x, y))
+        mem.upsert("entities", {**mem.get("entities", f"local-{i:02}"), "tier": "interest"})
+        mem.upsert("tiles", {"id": f"room@{x},{y}", "place": "room", "x": x, "y": y, "floor": True, "blocked": [], "pushed": [], "step": 1})
+    view = world.view("", "room")
+    rows = view.splitlines()
+    grid = rows[1:1 + MAP_H]
+    legend = {line.split()[1] for line in rows if line.startswith(("Thing ", "Landmark ")) and len(line.split()) > 2}
+    drawn = {c for row in grid for c in row if c.isalnum() and c not in "@E"}
+
+    assert drawn <= legend and len(world.legend) < 50 and len(view) <= VIEW_TOKENS * 4
+    x0, y0 = world.pos[0] - MAP_W // 2, world.pos[1] - MAP_H // 2
+    assert grid[2 - y0][4 - x0] == "."  # the last entity's legend does not fit, so its floor tile stays plain
 
 
 def test_world_view_labels_other_place_detail_bundle(tmp_path):

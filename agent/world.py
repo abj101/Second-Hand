@@ -914,12 +914,12 @@ class World:
             legend.append(legend_line)
             legend_refs[symbol] = f"thing:{(rec or {}).get('ident') or e['id']}"
             legend_lines[symbol] = legend_line
-        has_look_wall = False
+        has_look_wall = False; plain_rows = []
         for y in range(y0, y1 + 1):
-            row = []
+            row, plain_row = [], []
             for x in range(x0, x1 + 1):
                 tile = cells.get((x, y), {})
-                glyph = "@" if (x, y) == tuple(self.pos) else "E" if tile.get("exit") else marks.get((x, y))
+                glyph = "@" if (x, y) == tuple(self.pos) else "E" if tile.get("exit") else None
                 if glyph is None:
                     for d, (dx, dy) in DIRS.items():
                         source = cells.get((x - dx, y - dy), {})
@@ -929,20 +929,22 @@ class World:
                     look = self.mem.get("looks", f"{place}@{x},{y}"); store = getattr(self.mem, "looks", None); learned = store.says(look["look"]) if look and store else None
                     if tile.get("floor") is not True and learned == "wall": glyph = "x"; has_look_wall = True
                     else: glyph = "." if tile.get("floor") is True else "," if f"{x},{y}" in seen_cells else " "
-                row.append(glyph)
-            lines.append("".join(row))
+                plain_row.append(glyph)
+                row.append("@" if (x, y) == tuple(self.pos) else "E" if tile.get("exit") else marks.get((x, y), glyph))
+            plain_rows.append("".join(plain_row)); lines.append("".join(row))
         lines.append("Map: . walked, , seen, x looks like a wall, # blocked side, E exit already used, @ you; letters mark things and landmarks (kind exit = seen, not yet used)" if has_look_wall else "Map: . walked, , seen, # blocked side, E exit already used, @ you; letters mark things and landmarks (kind exit = seen, not yet used)")
+        current_facts = []
         far = self.beyond(place)  # ponytail: no screen things here; view's live set is navigable places, so a through exit missing from the table prints nothing
         for e in exit_rows:  # beyond suffix on this place's exits only; other places' exits show status alone
-            lines.append(f"E at ({e['tile'][0]},{e['tile'][1]}) {exit_text(e, far['exits'].get(e['tile']))}")
+            current_facts.append(f"E at ({e['tile'][0]},{e['tile'][1]}) {exit_text(e, far['exits'].get(e['tile']))}")
         through = [e["head"] for e in exit_rows if e["tile"] == far["through"]] if far["dead_end"] else []
-        if through: lines.append(f"Everything unexplored from here is through: {through[0]}")
+        if through: current_facts.append(f"Everything unexplored from here is through: {through[0]}")
         here = {e["id"] for e in self.mem.rows("entities") if e.get("place") == place} | set(self.entity_ids.values())
         refuted = {}  # most recent first; a thing's first 'not working' note only
         for r in sorted((r for r in self.mem.rows("relations") if r.get("p") == "does_nothing" and r.get("state") == "refuted" and r.get("s") in here), key=lambda r: -r.get("step", 0)):
             note = [n for n in self._notes(r["s"]).split("; ") if n.startswith("not working")]
             if note: refuted.setdefault(r["s"], note[0])
-        if refuted: lines.append("Don't believe: " + "; ".join(f"{(self.mem.get('entities', s) or {}).get('name', s)} ({n})" for s, n in list(refuted.items())[:2]))
+        if refuted: current_facts.append("Don't believe: " + "; ".join(f"{(self.mem.get('entities', s) or {}).get('name', s)} ({n})" for s, n in list(refuted.items())[:2]))
         current_detail = []
         for base, group in sorted(current_groups.items()):
             if any(e["id"] in mapped for e in group): continue
@@ -993,9 +995,21 @@ class World:
                     rendered.append(f"  Thing: {best.get('called') or best.get('name', best['id'])} {fact}{self._notes(best['id'])}")
             place_things[pid] = [*rendered, f"  Edges: {len(other_edges)} untried ({other_unseen} into unseen)"]
 
-        # ponytail: place summaries fit before entity detail; raise VIEW_TOKENS only if real maps outgrow it.
+        # ponytail: the local legend resolves every drawn letter; raise the cap only if real maps outgrow it.
         output = []
-        for line in lines:
+        grid_indexes = {}
+        for i, line in enumerate(lines):
+            if len("\n".join((*output, line))) <= VIEW_TOKENS * 4:
+                if 1 <= i <= MAP_H: grid_indexes[i - 1] = len(output)
+                output.append(line)
+        def add_detail_bundle(label, detail, limit=VIEW_TOKENS * 4):
+            if not detail or len("\n".join((*output, label, detail[0]))) > limit: return
+            output.extend((label, detail[0]))
+            for line in detail[1:]:
+                if len("\n".join((*output, line))) <= limit: output.append(line)
+        here = [*legend, *current_detail]; here_label = f"Things here: {label}"
+        add_detail_bundle(here_label, here)
+        for line in current_facts:
             if len("\n".join((*output, line))) <= VIEW_TOKENS * 4: output.append(line)
         included = set()
         for other in others:
@@ -1003,15 +1017,10 @@ class World:
             candidate = "\n".join((*output, *place_headers[pid]))
             if len(candidate) <= VIEW_TOKENS * 4:
                 output.extend(place_headers[pid]); included.add(pid)
-        def add_detail_bundle(label, detail):
-            if not detail or len("\n".join((*output, label, detail[0]))) > VIEW_TOKENS * 4: return
-            output.extend((label, detail[0]))
-            for line in detail[1:]:
-                if len("\n".join((*output, line))) <= VIEW_TOKENS * 4: output.append(line)
-        add_detail_bundle(f"Things here: {label}", [*legend, *current_detail])
         for other in others:
             pid = other["id"]
-            if pid in included: add_detail_bundle(f"Things: {self.place_label(pid)}", place_things[pid])
+            detail = place_things[pid]
+            if pid in included: add_detail_bundle(f"Things: {self.place_label(pid)}", detail)
 
         flags = list(getattr(self, "view_flags", ()))
         if self._travelled and self._travelled.status != "done": flags.append(f"travel: {self._travelled.reason}")
@@ -1020,6 +1029,9 @@ class World:
             if hud["changed"] is not None and row and row.get("place") == place: flags.append(f"HUD {row['name']} changed at step {hud['changed']}")
         for line in (f"Flag: {flag}" for flag in dict.fromkeys(flags)):
             if len("\n".join((*output, line))) <= VIEW_TOKENS * 4: output.append(line)
+        shown = {symbol for symbol, line in legend_lines.items() if line in output}
+        for y, index in grid_indexes.items():
+            output[index] = "".join(c if c not in symbols or c in shown else plain_rows[y][x] for x, c in enumerate(output[index]))
         self.legend = {symbol: ref for symbol, ref in legend_refs.items() if legend_lines[symbol] in output}
         return "\n".join(output)
     def _tile(self, ident):
