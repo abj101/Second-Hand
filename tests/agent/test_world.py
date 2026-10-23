@@ -23,6 +23,30 @@ def entity(mem, id, name, place, tile, seen=2):
     mem.upsert("entities", {"id": id, "name": name, "kind": "object", "place": place, "tile": tile, "seen": seen})
 
 
+def test_held_push_refutes_exit_after_every_direction_was_tried(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room")
+    mem.upsert("tiles", {"id": "room@0,0", "place": "room", "x": 0, "y": 0, "floor": True,
+                         "blocked": ["DOWN"], "pushed": ["LEFT", "RIGHT"], "held": ["UP"], "exit": None, "step": 1})
+    entity(mem, "hatch", "exit: hatch", "room", [0, 0])
+    world = World(mem, 16)
+
+    assert world._refuted("room", (0, 0)) == 1
+    assert world._exits("room", {"room"})[0]["status"] == "refuted"
+
+
+def test_held_push_is_shown_as_tried_in_exit_options(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room")
+    mem.upsert("tiles", {"id": "room@0,0", "place": "room", "x": 0, "y": 0, "floor": True,
+                         "blocked": ["DOWN"], "pushed": ["LEFT"], "held": ["UP"], "exit": None, "step": 1})
+    entity(mem, "hatch", "exit: hatch", "room", [0, 0])
+    world = World(mem, 16); world.current_place, world.pos = "room", (0, 0)
+
+    row = next(o for o in world.options({"screen": "world", "entities": []}, "room", {}, 2)
+               if o.get("action", {}).get("push") == "UP")
+
+    assert row["state"] == "failed" and "pressed UP: someone stood there" in row["notes"]
+
+
 def test_fix_player_swaps_entity_near_locked_self_spot(tmp_path):
     world = World(Memory(tmp_path), 16); world.self_spot, world._self_from_motion = [.5, .5], True
     player = {"name": "Guide", "kind": "player", "at": [.75, .5]}

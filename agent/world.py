@@ -1138,18 +1138,18 @@ class World:
                     wall = x.get("placement"); here = (self.mem.get("tiles", f"{place}@{x['tile'][0]},{x['tile'][1]}") or {}) if x["tile"] else {}
                     untried = push_dirs(self.mem, place, x["tile"], wall) if x["tile"] else list(DIRS)
                     if not x["tile"] and wall: untried = list(dict.fromkeys([outward(self.mem, place, self.pos, wall), *untried]))
-                    tried = [d for d in dict.fromkeys(here.get("pushed", []) + here.get("blocked", [])) if d in DIRS]
+                    tried = [d for d in dict.fromkeys(here.get("pushed", []) + here.get("blocked", []) + here.get("held", [])) if d in DIRS]
                     label = f"go to {self.label(ref, place)}"; key = _yx(x["tile"], label)
                     on_tile = bool(x["tile"] and self.current_place != self.mem.unplaced and tuple(self.pos) == tuple(x["tile"]))
                     if x["tile"] and not on_tile:
                         action = {"thing": x["idx"], "verb": "approach", "onto": True} if x["idx"] is not None else {"go_to": ref, "onto": True}
                         row = option("approach", f"walk onto {self.label(ref, place)}{f' ({wall})' if wall else ''}{self._where(x['tile'])}", action, "approach", target, ref, x["ident"], note="exit, never crossed")
-                        row["notes"].extend(f"pressed {d}: {'blocked' if d in here.get('blocked', []) else 'moved, no exit'}" for d in tried)
+                        row["notes"].extend(f"pressed {d}: {'blocked' if d in here.get('blocked', []) else 'someone stood there' if d in here.get('held', []) else 'moved, no exit'}" for d in tried)
                         reach = self.mem.get("reach", f"{place}@{x['tile'][0]},{x['tile'][1]}")
                         row["state"] = "failed" if row["intent_key"] in fails or reach and reach.get("n", 0) > 0 else "new"
                         exits.append((key, row)); continue
                     for direction in [*untried, *tried] if untried else [None]:
-                        fact = "all four pushes tried" if direction is None else f"pressed {direction}: blocked" if direction in here.get("blocked", []) else f"pressed {direction}: moved, no exit" if direction in here.get("pushed", []) else "untried"
+                        fact = "all four pushes tried" if direction is None else f"pressed {direction}: blocked" if direction in here.get("blocked", []) else f"pressed {direction}: someone stood there" if direction in here.get("held", []) else f"pressed {direction}: moved, no exit" if direction in here.get("pushed", []) else "untried"
                         text = f"{label}{f' ({wall})' if wall else ''}{self._where(x['tile'])}, then press {direction}" if direction else f"{label}, all four pushes tried"
                         if direction and x["tile"]:
                             dx, dy = DIRS[direction]; neighbour = self.mem.get("tiles", f"{place}@{x['tile'][0]+dx},{x['tile'][1]+dy}") or {}

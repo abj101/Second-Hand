@@ -15,6 +15,8 @@ def test_push_dirs_prioritizes_wall_then_neighbour_exit_then_unknown_floor(tmp_p
     assert push_dirs(mem, "room", (0, 0), "left wall")[:3] == ["LEFT", "RIGHT", "DOWN"]
     tile(mem, "room", (0, 0), pushed=["RIGHT"], blocked=["DOWN"])
     assert set(push_dirs(mem, "room", (0, 0))) == {"UP", "LEFT"}
+    tile(mem, "room", (0, 0), held=["UP"])
+    assert "UP" not in push_dirs(mem, "room", (0, 0))
     tile(mem, "room", (0, 0), pushed=["RIGHT", "LEFT"], blocked=["DOWN", "UP"])
     assert push_dirs(mem, "room", (0, 0)) == []
 
@@ -49,7 +51,7 @@ def test_fold_walk_blocked_and_none(tmp_path):
     assert len((tmp_path / "blank" / "tiles.jsonl").read_text().splitlines()) == len(lines)
 
 
-def test_actor_zero_motion_does_not_record_a_wall(tmp_path):
+def test_actor_zero_motion_records_held_without_a_wall(tmp_path):
     from types import SimpleNamespace
 
     mem = Memory(tmp_path); mem.upsert("places", {"id": "hall", "screen": "world", "state": "place"})  # the loop always has the place row (match_place mints it)
@@ -60,11 +62,21 @@ def test_actor_zero_motion_does_not_record_a_wall(tmp_path):
     world.before(per, "hall", None, (160, 144), 1)
     world.prepare(SimpleNamespace(moves=[("RIGHT", (0, 0))]), "hall", False, 1)
     assert world.actor_tiles == frozenset({(1, 0)})
-    assert mem.rows("tiles") == []
+    source = mem.get("tiles", "hall@0,0")
+    assert source["held"] == ["RIGHT"] and source["blocked"] == []
+    assert mem.get("tiles", "hall@1,0") is None and mem.rows("looks") == []
 
     blank = Memory(tmp_path / "blank")
     fold(blank, "hall", (0, 0), [("RIGHT", (0, 0))], 16, 1)
     assert blank.get("tiles", "hall@0,0")["blocked"] == ["RIGHT"]
+
+
+def test_successful_move_clears_held_direction(tmp_path):
+    mem = Memory(tmp_path)
+    tile(mem, "hall", (0, 0), held=["RIGHT"])
+
+    assert fold(mem, "hall", (0, 0), [("RIGHT", (-16, 0))], 16, 2) == (1, 0)
+    assert mem.get("tiles", "hall@0,0")["held"] == []
 
 
 def test_route_detours_around_wall_and_allows_unknown_goal(tmp_path):
