@@ -1160,7 +1160,10 @@ class World:
                         exits.append((key, row))
                     continue
                 label = f"{'go through' if history.get('uses') else 'go to'} {self.label(ref, place)}{self._where(x['tile'])}"
-                row = option(tool, label, action, "approach", target, ref, x["ident"], {"tile": list(tiles[0]), "to": dest} if tiles else None, note)
+                door = {"tile": list(tiles[0]), "to": dest} if tiles else None
+                resolved = self.resolve(action["go_to"], per, place) if action.get("go_to") else None
+                row = option(tool, label, action, "approach", target, ref, x["ident"], door, note)
+                if action.get("go_to") and self.plan(resolved, exit=door) is None: row["notes"].append("no known route from here (remembered walls block every path)")
                 if beyond["dead_end"] and x["tile"] == beyond["through"]: row["notes"].insert(0, "everything unexplored from here is through this exit")
                 exits.append((_yx(x["tile"], label), row))
             plain_groups, listed = {}, set()

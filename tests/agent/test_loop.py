@@ -2413,3 +2413,25 @@ def test_an_option_whose_action_never_resolves_lands_in_fails_under_its_own_key(
     row = loop.step()
     assert row["choice"] is None and row["skill"]["inputs"] == 0 and row["verdict"] == "failed"
     assert loop.fails[picks[0]["intent_key"]]["why"] == "did nothing"  # the menu notes it, so the next prompt differs
+
+
+def test_unplannable_exit_pick_fails_without_waiting(tmp_path, monkeypatch):
+    loop, picks = _idle_loop(tmp_path, monkeypatch, lambda o: o["action"] if (o.get("action") or {}).get("go_to") == "place:hall" else None)
+    for pid, name in (("room", "Room"), ("hall", "Hall")):
+        loop.mem.upsert("places", {"id": pid, "name": name, "screen": "world", "state": "place"})
+    for x in range(-2, 3):
+        for y in range(-2, 3):
+            ident = f"room@{x},{y}"
+            loop.mem.upsert("tiles", {"id": ident, "place": "room", "x": x, "y": y, "floor": True, "blocked": [], "pushed": [], "exit": None})
+    for x, y in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        ident = f"room@{x},{y}"
+        loop.mem.upsert("tiles", {**loop.mem.get("tiles", ident), "floor": False})
+    loop.mem.upsert("tiles", {**loop.mem.get("tiles", "room@2,0"), "exit": {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "observed"}})
+    loop.mem.match_place = lambda *args, **kwargs: "room"
+    loop.world.current_place, loop.world.pos = "room", (0, 0)
+
+    first = loop.step()
+    assert first["choice"] and first["skill"]["status"] == "blocked" and first["skill"]["inputs"] == 0
+    assert first["skill"]["failure"]["stage"] == "route" and first["choice"]["intent"] in loop.fails
+    loop.step()
+    assert picks[1]["state"] == "failed"

@@ -49,6 +49,19 @@ def test_uncrossed_exit_direction_facts_come_from_tile_memory(tmp_path):
     assert all(o["notes"] == ["exit, never crossed"] for o in rows.values())
 
 
+def test_exit_row_stays_offered_when_memory_walls_block_every_route(tmp_path):
+    note = "no known route from here (remembered walls block every path)"
+    for blocked in (True, False):
+        mem = Memory(tmp_path / str(blocked)); room(mem); mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 2)
+        if blocked:
+            for x, y in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                row = mem.get("tiles", f"room@{x},{y}")
+                mem.upsert("tiles", {**row, "floor": False})
+        world, per = setup(mem, [])
+        row = next((o for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["action"] == {"go_to": "place:hall"}), None)
+        assert row is not None and ((note in row["notes"]) == blocked)
+
+
 def test_explicit_push_controls_screen_and_remembered_exit_routes(tmp_path):
     mem = Memory(tmp_path); room(mem)
     entity = {"name": "exit: doorway", "kind": "exit", "at": at(2, 0), "placement": "left wall"}
