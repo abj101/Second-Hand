@@ -1118,6 +1118,27 @@ def test_plan_ops_apply_and_plan_row_carries_results(tmp_path, monkeypatch):
     assert row["plan"]["why"] == "new lead" and "quests_changed" not in row["plan"]
 
 
+@pytest.mark.parametrize("followup", [False, True])
+def test_descriptive_name_success_keeps_planner_success_semantics(tmp_path, monkeypatch, followup):
+    from agent import loop as module
+    short_settle(monkeypatch); scripted_world(monkeypatch, acts=[chosen(None)])
+    loop = Loop(Busy(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    for ident in ("room", "other"):
+        loop.mem.upsert("places", {"id": ident, "name": "Room" if ident == "room" else "Annex", "screen": "world", "state": "place", "visits": 1})
+    loop.mem.match_place = lambda *args, **kwargs: "room"
+    loop.place = "room"; loop.stuck.seen_places.add("room"); loop.prev_frame = loop.env.screenshot()
+    loop.notebook.observe(0, "place:room"); loop.notebook.heard(0, None, "Room", "The other room has a sign.")
+    loop._plan_trigger = lambda per: "stuck: no_progress"
+    plans = iter(([SimpleNamespace(ops=[{"op": "done", "key": "missing", "reason": "finished"}], why="missing")] if followup else []) +
+                 [SimpleNamespace(ops=[{"op": "name", "key": "place:other", "text": "Sign", "why": ["t1"]}], why="name"), SimpleNamespace(ops=[], why="no quest")])
+    calls = []
+    def reply(*a, **k): calls.append(a[1]); return next(plans)
+    monkeypatch.setattr(module, "plan", reply)
+    row = loop.step()
+    assert len(calls) == (3 if followup else 1) and loop.stuck.u == 0
+    assert row["plan"]["ops"][-1]["result"].startswith("ok (named Annex")
+
+
 def test_zero_ok_stuck_plan_reply_increments_backoff(tmp_path, monkeypatch):
     from agent import loop as module
     short_settle(monkeypatch); scripted_world(monkeypatch, acts=[chosen(None)])
