@@ -59,3 +59,4 @@ def test_system_is_bounded_and_uses_generic_game_language():
     assert SCHEMA["required"] == ["ops", "why"]
     assert SCHEMA["properties"]["why"]["maxLength"] == 200
     assert SCHEMA["properties"]["ops"]["items"]["properties"]["target"] == {"type": "string"}
+    assert "top, target, done and drop take an open quest key" in REPLY.casefold()

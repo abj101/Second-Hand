@@ -126,6 +126,7 @@ class Loop:
             self._moved(prior, place, self.pending_via, self.step_no + 1, self.pending_key)
         self.place, self.pending_cut, self.pending_via, self.pending_key = place, False, None, None
         self.cut_carry = is_cut and per.get("screen") != "world"  # match_place keeps the place on a non-world screen: the cut waits for a world one
+        self.world.unsettled = self.cut_carry
         size = before.size
         proj = self.world.before(per, place, prior, size, self.step_no + 1, frame=before)[0]
         drift_fix = None

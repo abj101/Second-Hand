@@ -95,6 +95,7 @@ class World:
         self._observed_per = None
         self.novel = 0
         self.current_place = None
+        self.unsettled = False
         self._travelled = None
         self._last_miss_hash = {}
         self.self_spot, self._self_contradictions, self._self_from_motion = None, 0, False
@@ -767,7 +768,8 @@ class World:
         return self._shown(row, f"{name} [{place}]" if duplicates else name)
 
     def here(self, place):
-        if not place: return self.place_label(place)
+        unknown = ": the scene changed under the text; where you are is not known yet" if self.unsettled else ""
+        if not place: return self.place_label(place) + unknown
         place = self.canon(place if str(place).startswith("place:") else f"place:{place}")
         label = self.label(place)
         entered = []
@@ -777,7 +779,7 @@ class World:
             if ref in seen or f"thing:{thing['id']}" != ref: continue
             seen.add(ref)
             if place in self.leads_to(ref): entered.append(self.label(ref))
-        return f"{label}, entered through {', '.join(entered)}" if entered else label
+        return (f"{label}, entered through {', '.join(entered)}" if entered else label) + unknown
 
     def label(self, ref, place=None):  # place: where an exit ref's tile lies (exit refs carry no place); default the current place
         ref = self.canon(ref)

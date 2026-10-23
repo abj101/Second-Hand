@@ -15,7 +15,7 @@ REPLY = (
     'Reply JSON: {"ops":[{"op":"add|done|drop|reopen|top|target|name","key":"id",'
     '"text":"text","why":["t-key"],"target":"place-id or thing-id",'
     '"reason":"reason"}],"why":"why this plan"}. '
-    "Use only fields needed by each operation; include at most 8 operations."
+    "Use only fields needed by each operation; include at most 8 operations. Top, target, done and drop take an open quest key (add creates one); done and drop need a reason sentence; name's key is a map label."
 )
 SCHEMA = {
     "type": "object",

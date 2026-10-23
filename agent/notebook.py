@@ -47,14 +47,14 @@ class Notebook:
     def _known_key(self, key):
         return any(row.get("key") == key for row in self.data["text"] if isinstance(row, dict))
 
-    def _no_target(self, target):
+    def _no_target(self, target, name=False):
         ties = self.ties(target)
         if ties:  # the candidates are refs the planner can name; the closest-label list would hide them
             return f'target "{target}" is ambiguous: ' + ", ".join(f"{ref} ({place})" for ref, place in ties) + "; use one of these refs"
         labels = list(dict.fromkeys(l for r in self.refs() if (l := self.label(r)) and self.ref(l)))
         closest = difflib.get_close_matches(str(target), labels, n=3, cutoff=0)
         tail = f"closest: {', '.join(closest)}" if closest else "no known places or things yet"
-        return f'target "{target}" matches no known place or thing; {tail}'
+        return f'"{target}" names no known thing or place; {tail}' if name else f'target "{target}" matches no known place or thing; {tail}'
 
     def _resolve(self, target):
         resolved = self.ref(target) if target is not None else None
@@ -84,8 +84,11 @@ class Notebook:
             event["quest"] = value
         elif op in ("done", "drop"):
             reason = op_data.get("reason")
-            if not quest or quest.get("status") != "open": return "key is not open"
-            if not isinstance(reason, str) or not reason.strip(): return "reason is empty"
+            if not quest: return f"{key} is not a quest yet; add it first"
+            if quest.get("status") != "open": return f"{key} is closed ({quest['status']} at step {quest.get('closed')}); reopen it first"
+            why = op_data.get("why")
+            if not reason and isinstance(why, str) and why.strip(): reason = why
+            if not isinstance(reason, str) or not reason.strip(): return "reason is empty (a sentence, not t-keys)" if isinstance(why, list) else "reason is empty"
             quest.update(status="done" if op == "done" else "dropped", closed=step, reason=reason)
             event["quest"] = quest
         elif op == "reopen":
@@ -98,13 +101,15 @@ class Notebook:
             quest.update(status="open", closed=None, by=None, reason=reason, reopened=step)
             event["quest"] = quest
         elif op == "top":
-            if not quest or quest.get("status") != "open": return "key is not open"
+            if not quest: return f"{key} is not a quest yet; add it first"
+            if quest.get("status") != "open": return f"{key} is closed ({quest['status']} at step {quest.get('closed')}); reopen it first"
             quests.remove(quest)
             quests.insert(0, quest)
             event["quest"] = quest
         elif op == "target":
             target = op_data.get("target")
-            if not quest or quest.get("status") != "open": return "key is not open"
+            if not quest: return f"{key} is not a quest yet; add it first"
+            if quest.get("status") != "open": return f"{key} is closed ({quest['status']} at step {quest.get('closed')}); reopen it first"
             if target is None: return "target is missing"
             resolved = self._resolve(target)
             if resolved is None: return self._no_target(target)
@@ -113,11 +118,13 @@ class Notebook:
         elif op == "name":
             text, refs = op_data.get("text"), _refs(op_data.get("why"))
             resolved = self._resolve(key)
-            if resolved is None or not resolved.startswith(("thing:", "place:")): return f'"{key}" names no known thing or place'
+            if resolved is None or not resolved.startswith(("thing:", "place:")): return self._no_target(key, name=True)
             if not isinstance(text, str) or not text.strip() or len(text.strip()) > 40: return "text must be 1 to 40 characters"
             if not refs or any(not isinstance(r, str) or not self._known_key(r) for r in refs): return "why must cite game-text keys"
             event["name"] = {"thing": resolved, "text": text.strip(), "why": refs}
             self.name(resolved, text.strip(), refs[0], step)
+            if resolved.startswith("place:") and self.data.get("here") and self.canon(self.data["here"]) != resolved:
+                event["result"] = f"ok (named {self.label(resolved)}, not where you are)"
         if op in ("add", "done", "drop", "reopen", "top", "target", "name"):
             return None
         return "unknown op"
