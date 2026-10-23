@@ -885,7 +885,7 @@ def test_stage_b_override_reaches_invocation_guard(tmp_path, monkeypatch):
         def __init__(self): super().__init__([])
         def _post(self,payload): self.calls+=1
     class ManyRequests:
-        def __init__(self,env,model,mem,game): self.env,self.model,self.mem=env,model,mem; self.step_no=0
+        def __init__(self,env,model,mem,game,looks=None): self.env,self.model,self.mem=env,model,mem; self.step_no=0
         def step(self):
             for _ in range(181): self.model._post({})
             self.step_no+=1
@@ -955,7 +955,7 @@ def test_probe_stage_stops_at_thirty_invocations(tmp_path, monkeypatch):
         def __init__(self): super().__init__([])
         def _post(self, payload): self.calls += 1
     class ManyRequests:
-        def __init__(self, env, model, mem, game): self.env, self.model, self.mem = env, model, mem; self.step_no = 0
+        def __init__(self, env, model, mem, game, looks=None): self.env, self.model, self.mem = env, model, mem; self.step_no = 0
         def step(self):
             for _ in range(31): self.model._post({})
             self.step_no += 1
@@ -974,7 +974,7 @@ def test_probe_stage_stops_after_reaching_town(tmp_path, monkeypatch):
         def save(self, path): Path(path).write_text("state")
         def close(self): pass
     class OneStep:
-        def __init__(self, env, model, mem, game): self.env, self.mem, self.step_no = env, mem, 0
+        def __init__(self, env, model, mem, game, looks=None): self.env, self.mem, self.step_no = env, mem, 0
         def step(self): self.step_no += 1; return {"step": self.step_no, "place": "p", "task": "t", "choice": {}, "verdict": ""}
         def state(self): return {"step": self.step_no}
     steps = []

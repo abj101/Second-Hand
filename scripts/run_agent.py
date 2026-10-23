@@ -192,7 +192,7 @@ def _play(env, a, run, cp, state, boot, invocation_row, cancelled=None):
         _ledger(run, a.stage, stage_cap); invocation[0] += 1
         check_cancel()
         return post(payload)
-    model._post = guarded; loop = Loop(env, model, Memory(run / "memory"), a.game)
+    model._post = guarded; loop = Loop(env, model, Memory(run / "memory"), a.game, looks=Path("runs/looks") / f"{a.game}.jsonl")
     loop.invocation = invocation_row["invocation"]
     if cp:
         loop.restore(state)
