@@ -197,7 +197,7 @@ def test_duplicate_exit_records_pick_the_observed_door_and_the_failure_note_foll
 
     assert third["choice"]["intent"] == key and resumed.fails[key]["n"] == 3 and resumed.place == loop.place
     noted = next(o for o in resumed.world.options(env.perception(), resumed.place, resumed.fails, 9, inputs=list(env.inputs())) if o.get("intent_key") == key)
-    assert noted["label"].startswith("go through RIGHT,") and noted["state"] == "failed"
+    assert noted["label"].startswith("go through Hallway,") and noted["state"] == "failed"
     assert "exit mismatch 3×" in "; ".join(noted["notes"])
 
 
