@@ -187,6 +187,13 @@ def test_position_checkpoint_defaults_and_restores(tmp_path):
     assert resumed.pos == (4, -2)
     resumed.restore({}); assert resumed.pos == (0, 0)
 
+def test_checkpoint_keeps_excursion_and_unplaced(tmp_path):
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path/"memory"), "grid"); loop.mem.excursion, loop.mem.unplaced = "p_x", "p_y"
+    state = json.loads(json.dumps(loop.state()))
+    resumed = Loop(loop.env, loop.model, Memory(tmp_path/"memory"), "grid"); resumed.restore(state)
+    assert (resumed.mem.excursion, resumed.mem.unplaced) == ("p_x", "p_y")
+    resumed.restore({}); assert (resumed.mem.excursion, resumed.mem.unplaced) == (None, None)
+
 def test_marked_perception_uses_raw_hash_and_restores_mark_state(tmp_path, monkeypatch):
     from PIL import Image
     from agent import loop as module
