@@ -1379,12 +1379,15 @@ def test_open_screen_edges_count_unseen_cells_past_them_until_seen(tmp_path):
 def test_explore_dirs_routes_to_open_cells_and_extends_half_a_view(tmp_path):
     mem = Memory(tmp_path); place(mem, "room", "room")
     mem.upsert("seen", {"id": "room", "cells": [], "open": ["2,0", "0,-3"]})
+    mem.upsert("tiles", {"id": "room@1,0", "place": "room", "x": 1, "y": 0, "floor": True, "blocked": ["UP", "DOWN", "LEFT"], "pushed": [], "exit": None, "step": 1})
     world = World(mem, 16); world.current_place, world.pos, world.size = "room", (0, 0), (160, 144)
 
     routes = world.explore_dirs("room")
 
-    assert routes == {"UP": {"dirs": ["UP"] * 7, "to": (0, -3)},
-                      "RIGHT": {"dirs": ["RIGHT"] * 7, "to": (2, 0)}}
+    assert routes == {"UP": {"dirs": ["UP"] * 7, "steps": 3, "unseen": 1, "to": (0, -3)},
+                      "RIGHT": {"dirs": ["RIGHT"] * 7, "steps": 2, "unseen": 1, "to": (2, 0)}}
+    assert "(2 unseen cells)" in world.view("", "room").splitlines()[0]
+    assert "unseen by direction: UP 1, RIGHT 1" in world.view("", "room").splitlines()[0]
     assert World(mem, None).explore_dirs("room") == {}
 
 
@@ -1399,7 +1402,7 @@ def test_explore_dirs_routes_to_seen_boundary_and_extends(tmp_path):
 
     routes = world.explore_dirs("room")
 
-    assert routes == {"RIGHT": {"dirs": ["RIGHT"] * 8, "to": (3, 0)}}
+    assert routes == {"RIGHT": {"dirs": ["RIGHT"] * 8, "steps": 3, "unseen": 1, "to": (3, 0)}}
 
 
 def test_record_view_counts_only_new_seen_cells(tmp_path):

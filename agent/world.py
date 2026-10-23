@@ -65,6 +65,16 @@ def open_cells(mem, pid):  # cells just past a screen edge that showed something
     row = mem.get("seen", pid) or {}
     return set(row.get("open", [])) - set(row.get("cells", []))
 
+def unexplored(mem, pid):
+    return {tuple(map(int, cell.split(","))) for cell in open_cells(mem, pid)} | {
+        (tile[0] + DIRS[d][0], tile[1] + DIRS[d][1]) for tile, d in unseen_edges(mem, pid)}
+
+def _direction(pos, target):
+    dx, dy = target[0] - pos[0], target[1] - pos[1]
+    if not dx and not dy: return None
+    axis = 0 if abs(dx) >= abs(dy) else 1
+    return ("RIGHT" if dx > 0 else "LEFT") if axis == 0 else ("DOWN" if dy > 0 else "UP")
+
 def _open_edge(frame, t):
     """{side: [i, ...]}: the edge tiles (i-th along that side) that show something, not uniform void, so the place may continue past them.
     ponytail: <=2 grey levels in a tile = void (Game Boy black/white borders); a game with textured void needs a better test"""
@@ -551,16 +561,16 @@ class World:
         (unverified) exits and unexplored edges (untried edges into unseen cells), counted per place then summed. dead_end: place has no unexplored edge or unverified exit and
         exactly one verified exit leads to anything unexplored (through: that exit's tile). Pure: writes nothing, asks no model."""
         live = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged"}
-        def here(pid, exits): return sum(x["status"] == "unverified" for x in exits), (len(unseen_edges(self.mem, pid)) + len(open_cells(self.mem, pid)) if self.tile_px else 0)
+        def here(pid, exits): return sum(x["status"] == "unverified" for x in exits), (len(unexplored(self.mem, pid)) if self.tile_px else 0)
         own = self._exits(place, live, screen)
         own_unused, own_unexplored = here(place, own)
         exits = {}
         for x in own:
             if x["status"] != "verified" or not x["dest"] or x["dest"] == place or not x["tile"]: continue
-            unused = unexplored = 0; labels = []
+            unused = unexp = 0; labels = []
             for pid in self._paths(x["dest"], avoid={place}):
-                u, e = here(pid, self._exits(pid, live)); unused += u; unexplored += e; labels.append(self.place_label(pid))
-            exits[tuple(x["tile"])] = {"unused_exits": unused, "unexplored": unexplored, "places": labels}
+                u, e = here(pid, self._exits(pid, live)); unused += u; unexp += e; labels.append(self.place_label(pid))
+            exits[tuple(x["tile"])] = {"unused_exits": unused, "unexplored": unexp, "places": labels}
         beyond = [t for t, v in exits.items() if v["unused_exits"] + v["unexplored"] > 0]
         dead_end = not own_unused and not own_unexplored and len(beyond) == 1
         return {"exits": exits, "dead_end": dead_end, "through": beyond[0] if dead_end else None}
@@ -863,9 +873,12 @@ class World:
         seen = self.mem.get("seen", place) or {"cells": []}
         seen_cells = set(seen.get("cells", []))
         edges = frontier(self.mem, place)
-        unseen, past = len(unseen_edges(self.mem, place)), len(open_cells(self.mem, place))
+        unseen_cells = unexplored(self.mem, place)
+        unseen, past = len(unseen_cells), len(open_cells(self.mem, place))
         walked = sum(r.get("floor") is True for r in tiles)
-        lines = [f"Here: {label} ({self.pos[0]},{self.pos[1]})  map: {walked} walked, {len(seen_cells)} seen, {len(edges)} untried edges ({unseen} into unseen)" + (f", {past} unseen cells past open screen edges" if past else "")]
+        lines = [f"Here: {label} ({self.pos[0]},{self.pos[1]})  map: {walked} walked, {len(seen_cells)} seen, {len(edges)} untried edges ({unseen} unseen cells)" + (f", {past} unseen cells past open screen edges" if past else "")]
+        by_direction = Counter(d for target in unseen_cells if (d := _direction(self.pos, target)))
+        if directions := ", ".join(f"{d} {by_direction[d]}" for d in ("UP", "DOWN", "LEFT", "RIGHT") if by_direction[d]): lines[0] += f"; unseen by direction: {directions}"
 
         x0, y0 = self.pos[0] - MAP_W // 2, self.pos[1] - MAP_H // 2
         x1, y1 = x0 + MAP_W - 1, y0 + MAP_H - 1
@@ -982,7 +995,7 @@ class World:
             header.extend(f"  Exit {exit_text(e)}" for e in self._exits(pid, live))
             place_headers[pid] = header
             other_edges = frontier(self.mem, pid)
-            other_unseen = len(unseen_edges(self.mem, pid)) + len(open_cells(self.mem, pid))
+            other_unseen = len(unexplored(self.mem, pid))
             groups = {}
             for e in self.mem.rows("entities"):
                 if e.get("place") == pid and tier(e) == "interest" and eligible(e):
@@ -1212,7 +1225,7 @@ class World:
                 remembered.append((_yx(tile, r["name"]), row))
             remembered = [row for _, row in sorted(remembered, key=lambda t: t[0])]
             for direction, route in sorted(self.explore_dirs(place).items(), key=lambda item: _yx(item[1]["to"], item[0])):
-                label = f"explore {direction}, {len(route['dirs'])} steps to unseen ground"
+                label = f"explore {direction}, {route.get('steps', len(route['dirs']))} steps, {route.get('unseen', 0)} unseen cells that way"
                 ref = f"explore:{place}:{direction.casefold()}"
                 explores.append(option("explore", label, {"go_to": "unexplored", "dir": direction}, "approach", "unexplored", ref))
             for p in self.mem.rows("places"):
@@ -1238,18 +1251,15 @@ class World:
     def explore_dirs(self, place):
         if not self.tile_px: return {}
         span = [max(1, self.size[i] // self.tile_px // 2) for i in (0, 1)] if self.size else [4, 4]
-        candidates = {tuple(map(int, cell.split(","))) for cell in open_cells(self.mem, place)}
-        candidates.update((tile[0] + DIRS[d][0], tile[1] + DIRS[d][1]) for tile, d in unseen_edges(self.mem, place))
-        routes = {}
+        candidates, routes = unexplored(self.mem, place), {}
+        unseen = Counter(d for target in candidates if (d := _direction(self.pos, target)))
         for target in sorted(candidates):
-            dx, dy = target[0] - self.pos[0], target[1] - self.pos[1]
-            if not dx and not dy: continue
-            axis = 0 if abs(dx) >= abs(dy) else 1
-            direction = ("RIGHT" if dx > 0 else "LEFT") if axis == 0 else ("DOWN" if dy > 0 else "UP")
+            direction = _direction(self.pos, target)
+            if not direction: continue
             dirs = route(self.mem, place, self.pos, target, occupied=self.occupied(place))
             if dirs is not None and (direction not in routes or (len(dirs), target) < (len(routes[direction][0]), routes[direction][1])):
                 routes[direction] = (dirs, target)
-        return {d: {"dirs": dirs + [d] * span[0 if d in ("LEFT", "RIGHT") else 1], "to": target}
+        return {d: {"dirs": dirs + [d] * span[0 if d in ("LEFT", "RIGHT") else 1], "steps": len(dirs), "unseen": unseen[d], "to": target}
                 for d, (dirs, target) in routes.items()}
     def beside(self, place, pos, tile):  # nearest reachable free tile beside tile and the direction that faces it: (stand, facing, dirs)
         rows = {(r["x"], r["y"]): r for r in self.mem.rows("tiles") if r.get("place") == place}; occupied = self.occupied(place); near = []
