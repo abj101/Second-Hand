@@ -120,7 +120,13 @@ class Env(Protocol):
         # emulated frame while held, plus 8 frames after release, so callers can track scroll frame by frame
     def click(self, at: list[float]) -> None             # pointer envs only, else NotImplementedError
     def tick(self, frames: int = 1) -> None              # advance time (emulator: run frames; window: sleep frames/60 s)
+    def listen(self, fn: Callable[[Image | None, int], None]) -> None   # optional, r18 (approved 2026-10-24)
+        # fn(frame, seq) after EVERY emulated frame, in emulation order: press frames, every frame of tick(n), and
+        # (live) the frames emulated while the agent thinks. seq rises by 1 per frame. fn(None, seq) marks a
+        # discontinuity (load, restore, new generation). Live envs call fn on the emulator thread.
 ```
+
+- **r18 (approved 2026-10-24):** an env without `listen` is still valid; the tracker then feeds the odometer from `press` on_frame and `tick`, and frames emulated between calls are unknown motion (a gap), never zero.
 
 - `press` and `click` may raise (for example when the window lost focus, or the kill switch is on). The loop then writes a checkpoint and exits; it never retries input blindly.
 - **Pad input names** are `UP DOWN LEFT RIGHT A B START SELECT`.
@@ -168,6 +174,7 @@ def cut(a: Image, b: Image, blank_seen: bool = False) -> bool    # scene cut: bl
 ```
 
 - **Settling:** a frame is quiet if its hash equals a frame already seen in the last `quiet` frames. Animated tiles cycle through the same frames, while text printing and fades don't. The screen is settled after `quiet` consecutive quiet frames. **Never** settle on a near-uniform frame (≥ 95% one colour).
+- **r18 (approved 2026-10-24):** a `Settle` is evidence for the skill that waited (quiet, blank, arrival frame); the player's position never comes from a `Settle`. Position comes from the per-frame odometer (see [world](#world)), so a settle that stops at `max_frames` mid-walk loses no motion.
 - **Places before E3 memory exists:** callers keep a counter and start a new place id on every `cut()`. From E3 on, `Memory.match_place` uses the same `cut` as its trigger (see [memory](#memory)).
 
 ## skills
@@ -188,6 +195,9 @@ class SkillResult:
     moves: list[tuple[str, tuple[int, int] | None]] = field(default_factory=list)
         # E3R4: one entry per direction press, (direction, measured content shift in px or None if unsure);
         # when the skill ends in a scene cut, the last entry is the press that caused it
+        # r18 (approved 2026-10-24): moves are press evidence only (dir, shift, no_response, self_at, plus "at" = the
+        # odometer frame seq when the press started). World uses them for bumps, walls, cut direction and self-lock;
+        # the position comes from the odometer. Forced moves made from a Settle ("forced", "after_cut") are removed.
 
 @dataclass
 class Ctx:
@@ -255,7 +265,7 @@ A trace row, one per step. Every key is always present; use `null` when a value 
  "verdict": "hit", "calls": 2, "ms": 7400, "shortcut": null}
 ```
 
-E3R4 adds `"tile": [x, y]` (the player's place-frame tile after the step, or null) and `"drift_fix": [dx, dy]` or null. W0 (approved 2026-10-12) adds `"entities": [{"id", "name", "kind", "at"}]` (the before-perception entities) and `"scroll": [dx, dy]` (the skill's total content scroll) or null; W4 replays anchors from them. E3R5 (approved 2026-10-11) adds `"ranker": {"state": ..., "answer": ...}` (what the local ranker was asked and replied) on steps where it was asked, else null.
+E3R4 adds `"tile": [x, y]` (the player's place-frame tile after the step, or null) and `"drift_fix": [dx, dy]` or null. W0 (approved 2026-10-12) adds `"entities": [{"id", "name", "kind", "at"}]` (the before-perception entities) and `"scroll": [dx, dy]` (the skill's total content scroll) or null; W4 replays anchors from them. r18 (approved 2026-10-24) adds `"odometer": {"frames": int, "px": [dx, dy], "uncertain": int, "cuts": int, "gap": bool}` (what the odometer drained this step) or null. E3R5 (approved 2026-10-11) adds `"ranker": {"state": ..., "answer": ...}` (what the local ranker was asked and replied) on steps where it was asked, else null.
 
 - `effects` and `pred.effect` come from `EFFECTS = ("place_changes", "text_appears", "screen_changes", "entity_appears", "entity_disappears", "view_scrolled", "no_change")`.
 - `verdict` is one of `hit`, `partial`, `surprise`, `miss` or `unobservable`.
@@ -360,6 +370,7 @@ def describe(mem, place: str, pos: tuple[int, int]) -> str
 - **Exit filter:** a navigation candidate whose tile is within 1 of a known exit tile in this place leading to an already visited place is excluded, alongside the relation filter.
 - **2026-10-12 (approved, W0–P4):** `agent/world.py` becomes the only caller of these functions on the act path (W0). W2 adds `fold(..., actors: frozenset[tuple[int, int]] = frozenset())`: a confident `(0, 0)` press into an actor tile records nothing. P4 removes `describe` and the exit filter below together with the gated path.
 - **Not in E3R4:** landmark matching by tile; perception skipping on known views; fixed-camera games (pos changes only from scroll).
+- **r18 (approved 2026-10-24), odometer:** `pos` changes only from the World's odometer drain: camera scroll measured on every emulated frame, whoever caused it (the agent's press or the game), split into segments at blank frames, instant cuts and gaps. World turns the summed pixels into tile steps by rounding the running sum (never per frame or per press) and feeds them to `fold`, merged in frame order with press bumps (confident `(0, 0)` moves) at their "at" seq. Fixed-camera games stay out of scope: the odometer reports no camera motion there, and the self-sprite term is a later round.
 
 ## predict
 
@@ -536,6 +547,10 @@ class World:
         # folds the skill's moves (all but the cut move); returns {"cut_dir", "exit_key"}; call before matching the next place
     def after(self, skill: SkillResult, place: str, next_place: str, scene_cut: bool, step: int) -> dict
         # requires prepare() for the same step; known exit + arrival pos reset; returns {"known_exit", "scroll"}
+        # r18 (approved 2026-10-24): prepare folds the odometer's pre-cut segment into place; after folds the LAST
+        # post-cut segment from the arrival tile; middle segments of a multi-cut step are dropped and flagged in the
+        # trace. Motion drained at the start of a step (frames emulated while the agent thought) folds into the
+        # current place before perception. after() stops returning "scroll" (no reader).
     def mark_exit(self, place: str, direction: str, to: str, arrive: tuple[int, int], step: int) -> None   # from the prepared exit tile
     def observe_after(self, per: dict, frame, reused: bool, place: str, size: tuple[int, int], step: int) -> tuple[int, int] | None
         # drift re-anchor (returns drift_fix) and the after-perception observe
