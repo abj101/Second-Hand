@@ -549,8 +549,10 @@ class World:
         # requires prepare() for the same step; known exit + arrival pos reset; returns {"known_exit", "scroll"}
         # r18 (approved 2026-10-24): prepare folds the odometer's pre-cut segment into place; after folds the LAST
         # post-cut segment from the arrival tile; middle segments of a multi-cut step are dropped and flagged in the
-        # trace. Motion drained at the start of a step (frames emulated while the agent thought) folds into the
-        # current place before perception. after() stops returning "scroll" (no reader).
+        # trace. Amended 2026-10-24: a segment folds only when the screen it shows is world-type (perceived "world", or a
+        # dialogue/menu screen over a world place); others are drained, not folded, and counted in "dropped".
+        # Motion drained at the start of a step (frames emulated while the agent thought) folds into the
+        # current place after perception and before World.before (amended 2026-10-24). after() stops returning "scroll" (no reader).
     def mark_exit(self, place: str, direction: str, to: str, arrive: tuple[int, int], step: int) -> None   # from the prepared exit tile
     def observe_after(self, per: dict, frame, reused: bool, place: str, size: tuple[int, int], step: int) -> tuple[int, int] | None
         # drift re-anchor (returns drift_fix) and the after-perception observe

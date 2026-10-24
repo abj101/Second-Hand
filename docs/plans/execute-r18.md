@@ -47,9 +47,13 @@ The root cause is that position is attributed per settle and per skill, instead 
   - It merges those unit moves in seq order with the step's press bumps: skill moves with a confident `(0, 0)` shift or `no_response`, each carrying `"at"` = the odometer seq when that press started.
   - It calls the existing `space.fold` once on the merged list, so floors, walls, held, silent and firm behave as before.
   - The sub-tile remainder is kept in `World._odo_px` and carried across drains. It resets on a cut, a relocation, a place change and restore.
+  - **World-type rule (amended 2026-10-24):** a drained segment folds only if the screen it shows is world-type, otherwise it is drained, not folded, and counted in `dropped`.
+    - World-type means the perceived `screen` is `world`, or a dialogue or menu screen while the current place is a world place: a scripted walk under a dialogue box counts.
+    - The screen comes from the perception at the segment's start. A segment that starts at a cut takes the screen of the perception that follows it.
+    - Example: a battle intro that slides the whole lower half of the screen reads as a confident camera scroll (m1_r17_boot step 121: +8 tiles while RAM did not move). Generic, no game words: the screen categories come from perception.
   - Skill moves with a nonzero shift are never folded for position again. They stay for self-lock, travel route compare, and cut direction.
 - **Drain points** (each drains `through` the frame the code is about to use):
-  1. Start of `Loop.step`, before perception of the before-frame: fold into the current place.
+  1. Start of `Loop.step`, AFTER perception of the before-frame and before `World.before` (amended 2026-10-24; projection needs pos, perception does not): fold into the current place.
      - Any cut found in this drain is folded up to the cut and flagged `odometer.cuts`. The rest is dropped and the trace says so.
      - `# ponytail:` ceiling: a door crossed while the model thinks is re-identified by the existing view matching, not followed.
   2. `World.prepare`: drain through the after-frame.
@@ -155,6 +159,14 @@ Run order: wave 0, then O1, then O2 and O3 in parallel worktrees, then G18a (gat
   - Use `wait_settled` between steps, as `.tmp/r18/ref/replay_r18.py` proved works: copy its approach, do not import from the scratch dir.
   - It reads RAM (map, x, y) per frame through `PyBoyEnv.ram`, which is allowed in scripts only.
   - It compares, per step and per segment, the odometer tile delta (with `tile_px=16` passed as an argument, never hard-coded in agent/) against the RAM delta within the same map. A segment that starts at a map change is compared from the first frame with the new map's warp coordinates.
+  - **Amended 2026-10-24: crossing step.** The comparison stays strictly within one map; RAM coordinates are never subtracted across maps.
+    - When a segment ends in a cut, the same-map RAM delta may contain exactly one extra unit step whose RAM change happens after the segment's last measured-motion frame. That step is the walk into the exit, hidden by the fade.
+    - That unit is scored as the crossing, not as position. The segment agrees if odometer == RAM − that unit, and the unit's direction equals the step's cut direction (the odometer's last unit-move direction).
+    - The JSON lists each crossing unit, and the gate fails on any other residual.
+    - This matches the contract that the move causing a cut is not folded into the departure place.
+  - **Amended 2026-10-24: world-type segments only.** Score only the segments World would fold (§2.2 world-type rule), using the trace's perceived `screen` for the step.
+    - Report excluded segments separately, with their raw odometer motion.
+    - m1_r17_boot step 121 (a battle screen, odometer +8 x, RAM 0) is the known example.
   - It writes `.tmp/r18/g/<run>_odometer.json` and prints the agreement.
   - It never writes inside `runs/`.
 - **Acceptance (T18-O3):**
