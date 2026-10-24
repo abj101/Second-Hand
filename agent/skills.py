@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw
 from agent.env import Env
 from agent.locate import refine
 from agent.model import Ollama
-from agent.observer import _blank, _residual, changed, cut, for_model, scroll, snap, wait_settled
+from agent.observer import _blank, _residual, changed, cut, for_model, scroll, wait_settled
 INTERACT_MIN_CHANGED_TILE_FRACTION = 0.25  # ponytail: quarter-tile minimum change, calibrated on m1_building_live_150 S146-149 vs S123/S126; raise if sprite noise exceeds it
 @dataclass
 class SkillResult:
@@ -58,13 +58,14 @@ def _step(ctx, direction, before):
     if move == (0, 0):
         reacted = False
         if ctx.self_spot is not None and ctx.tile_px:
-            t = ctx.tile_px; x, y = (round(v * n - t / 2) for v, n in zip(snap(ctx.self_spot, before.size, t), before.size))
+            t = ctx.tile_px; x, y = (round(v * n) for v, n in zip(ctx.self_spot, before.size)); r, outer = round(.75 * t), round(1.5 * t)
+            # ponytail: sprites larger than 1.5 tiles touch the ring and lose walls; measure sprite extent from motion if needed.
             mask = np.logical_or.reduce([np.any(np.asarray(f) != np.asarray(before), axis=2) for f in [*frames, end.frame]])
-            # ponytail: one-tile ring; widen the neighborhood if nearby effects escape it.
-            ring = np.zeros_like(mask); ring[max(0, y-t):y+2*t, max(0, x-t):x+2*t] = True; ring[max(0, y):y+t, max(0, x):x+t] = False
+            # ponytail: ring ends 1.5 tiles from the motion centroid; widen it if nearby effects escape it.
+            ring = np.zeros_like(mask); ring[max(0, y-outer):y+outer+1, max(0, x-outer):x+outer+1] = True; ring[max(0, y-r):y+r+1, max(0, x-r):x+r+1] = False
             for x0, y0, x1, y1 in ctx.actor_boxes() if callable(ctx.actor_boxes) else (): ring[max(0, y0):max(0, y1), max(0, x0):max(0, x1)] = False
             # ponytail: a missed wall costs one re-bump; widen the ring rule if NPC-adjacent misses matter.
-            reacted = mask[max(0, y):y+t, max(0, x):x+t].any() and not (mask & ring).any()
+            reacted = mask[max(0, y-r):y+r+1, max(0, x-r):x+r+1].any() and not (mask & ring).any()
         if not reacted:
             end.no_response = True; ctx._last_residual_box, ctx._last_residual_box_coverage = None, 0
             return end, None, end.blank_seen, None

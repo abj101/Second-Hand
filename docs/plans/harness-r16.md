@@ -88,13 +88,15 @@ One lane, in order: W1 → W2 → W3 → W3x → N1. All of these touch `skills.
 ### W1: a wall needs the player to have tried
 - **Change** (`_step`), for a press whose total scroll is (0,0) and whose frames are not all identical:
   - OR the per-frame pixel differences against `before` over every in-press frame and the end frame into one mask;
-  - `tile` = the `tile_px` square at `ctx.self_spot` (snapped as `snap` does);
-  - `ring` = the 3×3-tile square around it, minus `tile`, minus `ctx.actor_boxes()`;
-  - **bump** when the mask has a pixel in `tile` and none in `ring`;
+  - `self` = the square ±0.75·`tile_px` around `ctx.self_spot`, **not snapped**. `self_spot` is measured from the player's own motion, so it already carries the sprite's offset from the tile grid (in Pokémon Red the sprite draws 4 px above it, and snapping rejected 156/156 real walls);
+  - `ring` = the square ±1.5·`tile_px` around `self_spot`, minus `self`, minus `ctx.actor_boxes()`;
+  - every size is in `tile_px` units and the centre is a screen fraction, so the rule doesn't depend on screen or tile size. Ceiling (`ponytail:` note): a sprite larger than 1.5 tiles touches the ring, so its bumps read as "no response". That loses walls but never invents one; the upgrade is to measure the sprite's extent from motion;
+  - **bump** when the mask has a pixel in `self` and none in `ring`;
   - otherwise set `end.no_response = True` and return `move=None`, exactly as H1's identical-frames branch does.
 - `self_spot` unknown (`None`): no response. That never happened on a world step in r13–r15.
 - Keep `ponytail:` notes for the ring's size and the conservative miss: "a missed wall costs one re-bump; widen the ring rule if NPC-adjacent misses matter."
-- **Tests** (`tests/agent/test_skills.py`, synthetic frames):
+- **Validated** (`.tmp/r16/g/validate_box.py`, the same geometry at tile 16): real walls kept 148/156, false walls kept 0/25. A centroid-only variant kept 4 false walls and was rejected.
+- **Tests** (`tests/agent/test_skills.py`, synthetic frames; each case also run at 2× and 3× scale with `tile_px` scaled, and must give the same answer):
   - player-tile-only change → bump;
   - change only far away (box arrow) → no response;
   - change in the tile above the player ("!" bubble) → no response;

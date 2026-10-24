@@ -563,16 +563,18 @@ def test_no_response_is_not_an_animated_bump(tmp_path, monkeypatch, animated):
     assert (mem.get("tiles", "room@0,0") or {}).get("blocked", []) == []
 
 
-@pytest.mark.parametrize("pixels,actors,bump", [([(72, 65)], (), True), ([(145, 130)], (), False), ([(72, 49)], (), False), ([(72, 65), (88, 65)], ((80, 64, 96, 80),), True)])
-def test_wall_needs_player_tile_reaction(monkeypatch, pixels, actors, bump):
+@pytest.mark.parametrize("scale", [1, 2, 3])
+@pytest.mark.parametrize("pixels,actors,bump", [([(72, 65)], (), True), ([(145, 130)], (), False), ([(72, 49)], (), False), ([(72, 65), (88, 65)], ((80, 64, 96, 80),), True), ([(66, 60), (78, 75)], (), True), ([(72, 65), (72, 49)], (), False)])
+def test_wall_needs_player_tile_reaction(monkeypatch, pixels, actors, bump, scale):
     from PIL import Image
     from agent import skills
     from agent.observer import Settle
     before = Image.new("RGB", (160, 144), "white"); animated = before.copy()
     for pixel in pixels: animated.putpixel(pixel, (0, 0, 0))
+    before, animated = (f.resize((160 * scale, 144 * scale), Image.Resampling.NEAREST) for f in (before, animated))
     class Env:
         def press(self, direction, frames, on_frame): on_frame(animated)
-    c = Ctx(Env(), StubModel([]), tile_px=16, self_spot=(.45, .451), actor_boxes=lambda: actors)
+    c = Ctx(Env(), StubModel([]), tile_px=16 * scale, self_spot=(.45, .451), actor_boxes=lambda: [tuple(v * scale for v in box) for box in actors])
     monkeypatch.setattr(skills, "scroll", lambda *a, **kw: (0, 0))
     monkeypatch.setattr(skills, "_settled", lambda *_: Settle(before, True, 0, False))
     end, move, _, _ = skills._step(c, "RIGHT", before)
