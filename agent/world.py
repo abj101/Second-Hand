@@ -95,7 +95,7 @@ class World:
     def __init__(self, mem, tile_px):
         self.mem, self.tile_px = mem, tile_px
         self.tracker = Tracker(tile_px or 16)  # pixel tracks keep one id per moving thing; Loop wraps the env so it sees every frame
-        self.odometer = self.tracker.odometer; self.odometer.tile_px = tile_px; self._odo_px = (0, 0); self._odo_segments = []; self._odo_stats = None
+        self.odometer = self.tracker.odometer; self.odometer.tile_px = tile_px; self._odo_px = (0, 0); self._odo_stats = None
         self._odo_screen = None
         self.pos, self.drift, self.drift_ref = (0, 0), None, None
         self.entity_tiles, self.entity_ids, self.actor_tiles = {}, {}, frozenset()
@@ -340,7 +340,7 @@ class World:
                 row = {**row, "misses": misses, "status": status}
             if row.get("status") != self.mem.get("entities", ident).get("status") or row.get("misses") != self.mem.get("entities", ident).get("misses"):
                 self.mem.upsert("entities", row)
-    def odometer_begin(self): self._odo_segments = []; self._odo_stats = {"frames": 0, "px": [0, 0], "uncertain": 0, "cuts": 0, "gap": False, "dropped": 0, "drained": False}
+    def odometer_begin(self): self._odo_stats = {"frames": 0, "px": [0, 0], "uncertain": 0, "cuts": 0, "gap": False, "dropped": 0, "drained": False}
     def odometer_trace(self): return {k: v for k, v in (self._odo_stats or {}).items() if k != "drained"} if self._odo_stats and self._odo_stats["drained"] else None
     def _odometer_drain(self, through, place, step, bumps=(), next_per=None, next_place=None):
         segments = self.odometer.take(through=through)
@@ -501,7 +501,7 @@ class World:
     def failed_push(self, skill, place, start, direction, step):
         moves = skill.moves
         if direction not in DIRS or not moves or not self.tile_px or place == self.mem.unplaced: return
-        tile = self._travel_push_from if skill is self._travelled and self._travel_push_from is not None else fold(self.mem, place, tuple(start), moves[:-1], self.tile_px, step, actors=self.actor_tiles)  # a travelled skill is already folded: use the tile it pressed from
+        tile = self._travel_push_from if skill is self._travelled and self._travel_push_from is not None else moves[-1].get("_tile", tuple(start)) if isinstance(moves[-1], dict) else tuple(start)  # the odometer records the tile where the final press began
         shift = moves[-1].get("shift") if isinstance(moves[-1], dict) else moves[-1][1]
         if shift not in ((0, 0), 0): push_failed(self.mem, place, tile, direction, step)
     def after(self, skill, place, next_place, scene_cut, step):  # call after prepare() for the same step
