@@ -35,7 +35,7 @@ The root cause is that position is attributed per settle and per skill, instead 
   - It holds pixels only, and knows nothing about tiles except the optional `tile_px` used for the retry.
   - A lock guards the state, because the live writer and the agent reader are on different threads.
   - `odometer.seq` is the last frame seq seen.
-  - `odometer.take(through=None) -> list[dict]` drains every closed segment plus the open one up to `through`. Each segment is `{"moves": [(seq, dx, dy, held)], "cut": None|"blank"|"jump", "gap": bool, "arrival": Image|None, "frames": int, "uncertain": int}`.
+  - `odometer.take(through=None) -> list[dict]` drains every closed segment plus the open one up to `through`. Each segment is `{"start": seq, "end": seq, "moves": [(seq, dx, dy, held)], "cut": None|"blank"|"jump", "gap": bool, "arrival": Image|None, "frames": int, "uncertain": int}` (`start`/`end` = first and last frame seq covered, inclusive; amended 2026-10-24).
   - `odometer.reset()` drops everything. `Loop.invalidate_live_observation` and restore call it.
 - **Cost:** it runs on the emulator thread, so the mean must be at most 3 ms per frame on 160x144. Identical frames cost almost nothing. Keep int16 arrays; do not copy frames except the arrival.
 
