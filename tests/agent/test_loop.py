@@ -2238,6 +2238,21 @@ def test_flagged_menu_choice_picked_by_number_reads_menu_once_and_selects(tmp_pa
     assert row["skill"]["status"] == "done" and row["skill"]["calls"] == 1
 
 
+@pytest.mark.parametrize("identified", [True, False])
+def test_dialogue_keeps_successful_select_answer_before_more_dialogue(tmp_path, identified):
+    question = "Give a nickname?"; note = "(you chose NO)"
+    per = {"screen": "dialogue", "text": [question], "entities": [{"name": "NO", "kind": "menu_item", "at": [.3, .4], "selectable": True}]}
+    after = {"screen": "dialogue", "text": ["All right."], "entities": []}
+    env = Keys(); model = Roles([reply(per), pick_reply(1), reply({"items": ["NO" if identified else "YES"], "cursor": 0, "layout": "vertical"}), reply(after)])
+    loop = Loop(env, model, Memory(tmp_path / "memory"), "grid")
+    row = loop.step()
+    assert row["skill"]["status"] == ("done" if identified else "failed") and env.keys == (["A"] if identified else [])
+    loop._learn([], after["text"], loop.step_no + 1, loop.place, "world")
+    saved = " ".join(t["text"] for t in loop.notebook.data["text"])
+    assert (note in saved) == identified
+    if identified: assert saved.index(question) < saved.index(note) < saved.index("All right.")
+
+
 def test_selected_non_world_item_records_new_screen_reply(tmp_path, monkeypatch):
     from agent import loop as module
     env = Keys(); menu = {"screen": "battle", "text": ["SCORE 01 READY"], "entities": [

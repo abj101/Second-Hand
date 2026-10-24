@@ -270,6 +270,7 @@ class Loop:
         try:
             skill = SkillResult("blocked", refused, 0, 0, before, before, (0, 0), False, failure={"stage": "route", "reason": refused, "direction": None}) if refused else self.world.travel(skillctx, travel_legs, self.step_no + 1, self.trace) if travel_legs is not None and choice else wait_until(skillctx) if not affs or choice is None else press_seq(skillctx, affs[choice["i"]]["target"].split()) if affs[choice["i"]].get("verb") == "buttons" else run_affordance(skillctx, affs[choice["i"]], per, text=choice["text"], exit=False, **({"onto": True} if onto else {}), **({"route": act_route} if act_route else {}))
         except BaseException: self.pending_cut, self.pending_via, self.pending_key = cut(before, self.env.screenshot()), affs[choice["i"]].get("target") if choice else None, intent; self.cached = self.cached_hash = None; raise
+        if choice and skill.status == "done" and self.conversation["lines"] and affs[choice["i"]].get("verb") == "select": self.conversation["lines"].append(f"(you chose {affs[choice['i']]['target']})")
         if choice and skill.status == "done" and affs[choice["i"]].get("verb") in ("approach", "interact") and choice["i"] < len(targets) and targets[choice["i"]]:
             self.world._promote([targets[choice["i"]]])
         self.tile_px = skillctx.tile_px; self.world.tile_px = self.tile_px
