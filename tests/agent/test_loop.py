@@ -2441,6 +2441,18 @@ def test_dialogue_ends_when_its_screen_kind_changes(tmp_path):
     assert ["OAK"] == [t["speaker"] for t in loop.notebook.data["text"]] and "Welcome to the world" in loop.notebook.data["text"][0]["text"]  # a citable t-line
 
 
+def test_dialogue_records_where_it_started(tmp_path):
+    loop = _loop(tmp_path); loop.world.pos = (5, -6)
+    loop._learn(["MOM: Right."], [], 5, "room", "dialogue")
+    loop.world.pos = (9, 8)
+
+    loop._learn([], [], 6, "room", "world")
+
+    row = loop.notebook.data["text"][0]
+    assert row["at"] == [5, -6]
+    assert "(5,-6)" in loop.notebook._text_line(row)
+
+
 def _idle_loop(tmp_path, monkeypatch, action):
     from agent import loop as module
     per = {"screen": "world", "text": [], "entities": [{"kind": "player", "name": "player", "at": [.5, .5]}, {"kind": "object", "name": "Lamp", "at": [.7, .5]}]}

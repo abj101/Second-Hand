@@ -447,10 +447,10 @@ class Loop:
             self.conversation.pop("who", None)  # back in the world with no dialogue: nothing was said by the thing last touched
             if fresh:
                 self.text_for_trigger = " / ".join(fresh)
-                for text in fresh: self.notebook.heard(step, None, self.world.place_label(place) if place else "?", text)
+                for text in fresh: self.notebook.heard(step, None, self.world.place_label(place) if place else "?", text, at=list(self.world.pos))
                 self._event("T1", f"new game text: {self.text_for_trigger[:200]}", step)
             return bool(fresh)
-        if not self.conversation["lines"]: self.conversation.update(place=place, screen=screen)
+        if not self.conversation["lines"]: self.conversation.update(place=place, screen=screen, at=list(self.world.pos))
         lines = self.conversation["lines"]
         for text in fresh:
             line = " ".join(str(text).replace("▼", "").replace("▶", "").split())
@@ -478,7 +478,7 @@ class Loop:
         if len(speakers) == 1 and kind == "thing" and self.world._actor(ident, {}): self.mem.call(ident, next(iter(speakers)), step)
         if matches and matches[0].start() == 0: joined = joined[matches[0].end():].lstrip()
         self.text_for_trigger = joined
-        for speaker, text in segments: self.notebook.heard(step, speaker, self.world.place_label(place) if place else "?", text, who=who)
+        for speaker, text in segments: self.notebook.heard(step, speaker, self.world.place_label(place) if place else "?", text, who=who, at=self.conversation.get("at"))
         self._event("T1", f"new game text: {joined[:200]}", step)
         self.conversation = {"place": None, "lines": []}
     def _screen_route(self, place, t, push, avoid=(), *, beside=False):  # to an on-screen entity at tile t; an actor holds its tile, so stop beside it, facing it; avoid: tiles a route blocker held
