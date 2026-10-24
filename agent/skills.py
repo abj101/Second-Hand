@@ -34,8 +34,9 @@ class Ctx:
     settles: list = field(default_factory=list)  # every settle's flag, shared by reference through replace(ctx)
     actor_boxes: object = None
     self_spot: tuple[float, float] | None = None
+    ambient: object = None
 def _settled(ctx, **kw):
-    settle = wait_settled(ctx.env, **kw); ctx.settles.append(settle.settled); return settle
+    settle = wait_settled(ctx.env, **kw); ctx.ambient = settle.ambient; ctx.settles.append(settle.settled); return settle
 def _tracked(fn):  # a skill's settled flag: False if any settle inside it (its own, nested skills', travel legs') timed out
     @wraps(fn)
     def run(ctx, *args, **kwargs):
@@ -47,6 +48,7 @@ def _result(status, reason, inputs, calls, before, after, total=(0, 0), blank=Fa
     return SkillResult(status, reason, inputs, calls, before, after, tuple(total), blank, moves, self_at or next((m.get("self_at") for m in reversed(moves) if isinstance(m, dict) and m.get("self_at") is not None), None), failure, arrival_frame=arrival_frame)
 def _crossing(exit_target): return {"stage": "crossing", "reason": "exit not crossed"} if exit_target is not None else None
 def _step(ctx, direction, before):
+    amb = ctx.ambient
     frames = []
     ctx.env.press(direction, ctx.move_frames, on_frame=frames.append)
     end = _settled(ctx)
@@ -55,7 +57,7 @@ def _step(ctx, direction, before):
         return end, None, end.blank_seen, None
     shifts = [scroll(a, b) for a, b in zip([before, *frames], frames)]
     move = scroll(before, end.frame, max_shift=max(4, ctx.tile_px or 16)) if any(s is None for s in shifts) else tuple(sum(s[i] for s in shifts) for i in (0, 1))
-    if move == (0, 0):
+    if move == (0, 0) and not (end.blank_seen or any(_blank(f) for f in frames) or cut(before, end.frame)):
         reacted = False
         if ctx.self_spot is not None and ctx.tile_px:
             t = ctx.tile_px; x, y = (round(v * n) for v, n in zip(ctx.self_spot, before.size)); r, outer = round(.75 * t), round(1.5 * t)
@@ -65,7 +67,8 @@ def _step(ctx, direction, before):
             ring = np.zeros_like(mask); ring[max(0, y-outer):y+outer+1, max(0, x-outer):x+outer+1] = True; ring[max(0, y-r):y+r+1, max(0, x-r):x+r+1] = False
             for x0, y0, x1, y1 in ctx.actor_boxes() if callable(ctx.actor_boxes) else (): ring[max(0, y0):max(0, y1), max(0, x0):max(0, x1)] = False
             # ponytail: a missed wall costs one re-bump; widen the ring rule if NPC-adjacent misses matter.
-            reacted = mask[max(0, y-r):y+r+1, max(0, x-r):x+r+1].any() and not (mask & ring).any()
+            # ponytail: ambient = pixels that changed during the settle before the press with no camera shift; an animation slower than the settle's quiet window is missed and that bump reads as no response.
+            reacted = mask[max(0, y-r):y+r+1, max(0, x-r):x+r+1].any() and not ((mask & ring & ~amb) if amb is not None else (mask & ring)).any()
         if not reacted:
             end.no_response = True; ctx._last_residual_box, ctx._last_residual_box_coverage = None, 0
             return end, None, end.blank_seen, None

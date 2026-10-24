@@ -1,5 +1,5 @@
 import pytest
-from PIL import ImageDraw
+from PIL import Image, ImageDraw
 
 from agent.model import Reply
 from agent.skills import Ctx, approach, interact, press_seq, run_affordance, select
@@ -285,7 +285,7 @@ def test_interact_ignores_actor_motion_between_a_press_frames(monkeypatch):
     before = Image.new("RGB", (16, 16)); before.paste((255, 0, 0), (4, 4, 8, 8))
     after = before.copy(); after.paste((0, 0, 0), (4, 4, 8, 8)); after.paste((255, 0, 0), (8, 8, 12, 12))
     frames = iter((before, before, after))
-    monkeypatch.setattr(skills, "wait_settled", lambda _env, **_kw: SimpleNamespace(frame=next(frames), settled=True, blank_seen=False))
+    monkeypatch.setattr(skills, "wait_settled", lambda _env, **_kw: SimpleNamespace(frame=next(frames), settled=True, blank_seen=False, ambient=None))
     boxes = iter((((4, 4, 8, 8),), ((8, 8, 12, 12),)))
     c = ctx(RecordingEnv(), tile_px=None); c.actor_boxes = lambda: next(boxes)
     monkeypatch.setattr(skills, "_step", lambda _ctx, _direction, old: (SimpleNamespace(frame=old, blank_seen=False), (0, 0), False, None))
@@ -303,7 +303,7 @@ def test_interact_keeps_dialogue_text_change_after_actor_mask(monkeypatch):
     before = Image.new("RGB", (16, 16)); after = before.copy()
     after.paste((255, 255, 255), (1, 10, 15, 15))
     frames = iter((before, before, after))
-    monkeypatch.setattr(skills, "wait_settled", lambda _env, **_kw: SimpleNamespace(frame=next(frames), settled=True, blank_seen=False))
+    monkeypatch.setattr(skills, "wait_settled", lambda _env, **_kw: SimpleNamespace(frame=next(frames), settled=True, blank_seen=False, ambient=None))
     boxes = iter((((4, 4, 8, 8),), ((8, 8, 12, 12),)))
     c = ctx(RecordingEnv(), tile_px=None); c.actor_boxes = lambda: next(boxes)
     monkeypatch.setattr(skills, "_step", lambda _ctx, _direction, old: (SimpleNamespace(frame=old, blank_seen=False), (0, 0), False, None))
@@ -321,7 +321,7 @@ def test_interact_does_not_count_face_step_as_a_press_effect(monkeypatch):
     initial = Image.new("RGB", (16, 16)); faced = initial.copy()
     faced.paste((255, 255, 0), (7, 7, 9, 9))
     frames = iter((initial, initial, faced))
-    monkeypatch.setattr(skills, "wait_settled", lambda _env, **_kw: SimpleNamespace(frame=next(frames), settled=True, blank_seen=False))
+    monkeypatch.setattr(skills, "wait_settled", lambda _env, **_kw: SimpleNamespace(frame=next(frames), settled=True, blank_seen=False, ambient=None))
     c = ctx(RecordingEnv(), tile_px=None)
     monkeypatch.setattr(skills, "_step", lambda _ctx, _direction, _old: (SimpleNamespace(frame=faced, blank_seen=False), (0, 0), False, None))
 
@@ -338,7 +338,7 @@ def test_interact_requires_quarter_tile_of_unmasked_pixels(monkeypatch):
     before = Image.new("RGB", (32, 32)); after = before.copy()
     after.paste((255, 0, 0), (28, 0, 32, 3))
     frames = iter((before, before, after))
-    monkeypatch.setattr(skills, "wait_settled", lambda _env, **_kw: SimpleNamespace(frame=next(frames), settled=True, blank_seen=False))
+    monkeypatch.setattr(skills, "wait_settled", lambda _env, **_kw: SimpleNamespace(frame=next(frames), settled=True, blank_seen=False, ambient=None))
     boxes = ((-20, -20, 28, 28), (16, 16, 40, 40))
     c = ctx(RecordingEnv(), tile_px=8); c.actor_boxes = lambda: boxes
     monkeypatch.setattr(skills, "_step", lambda _ctx, _direction, old: (SimpleNamespace(frame=old, blank_seen=False), (0, 0), False, None))
@@ -356,7 +356,7 @@ def test_interact_uses_included_pixel_count_for_overlapping_clipped_masks(monkey
     before = Image.new("RGB", (40, 40)); after = before.copy()
     after.paste((255, 0, 0), (24, 0, 40, 16))
     frames = iter((before, before, after))
-    monkeypatch.setattr(skills, "wait_settled", lambda _env, **_kw: SimpleNamespace(frame=next(frames), settled=True, blank_seen=False))
+    monkeypatch.setattr(skills, "wait_settled", lambda _env, **_kw: SimpleNamespace(frame=next(frames), settled=True, blank_seen=False, ambient=None))
     boxes = ((-20, -20, 24, 24), (16, 16, 50, 50))
     c = ctx(RecordingEnv(), tile_px=16); c.actor_boxes = lambda: boxes
     monkeypatch.setattr(skills, "_step", lambda _ctx, _direction, old: (SimpleNamespace(frame=old, blank_seen=False), (0, 0), False, None))
@@ -569,8 +569,8 @@ def test_wall_needs_player_tile_reaction(monkeypatch, pixels, actors, bump, scal
     from PIL import Image
     from agent import skills
     from agent.observer import Settle
-    before = Image.new("RGB", (160, 144), "white"); animated = before.copy()
-    for pixel in pixels: animated.putpixel(pixel, (0, 0, 0))
+    before = Image.linear_gradient("L").resize((160, 144)).convert("RGB"); animated = before.copy()
+    for pixel in pixels: animated.putpixel(pixel, (255, 0, 0))
     before, animated = (f.resize((160 * scale, 144 * scale), Image.Resampling.NEAREST) for f in (before, animated))
     class Env:
         def press(self, direction, frames, on_frame): on_frame(animated)
@@ -612,3 +612,33 @@ def test_travel_does_not_reroute_no_response(tmp_path, monkeypatch):
     world = World(Memory(tmp_path), 16); world.current_place = "room"; world.pa = [.5, .5]
     result = world.travel(ctx(env), [{"place": "room", "dirs": ["RIGHT"] * 3, "target": {"tile": [3, 0]}}], 1)
     assert keys == ["RIGHT"] and result.status == "blocked" and result.failure["reason"] == "no response"
+
+
+def test_step_does_not_call_a_scene_cut_no_response(monkeypatch):
+    from types import SimpleNamespace
+    import agent.skills as skills
+    env = RecordingEnv(); before = env.screenshot(); blank = Image.new("RGB", before.size); after = Image.eval(before, lambda value: 255 - value)
+    env.press = lambda key, frames=8, on_frame=None: on_frame(blank)
+    monkeypatch.setattr(skills, "_settled", lambda ctx: SimpleNamespace(frame=after, blank_seen=False))
+    monkeypatch.setattr(skills, "scroll", lambda *args, **kwargs: (0, 0))
+    monkeypatch.setattr(skills, "cut", lambda *args, **kwargs: False)
+    end, _, _, _ = skills._step(ctx(env), "RIGHT", before)
+    assert not getattr(end, "no_response", False)
+
+
+def test_step_ignores_only_ambient_reaction_ring_changes(monkeypatch):
+    import numpy as np
+    import agent.skills as skills
+    from agent.observer import Settle
+    before = Image.linear_gradient("L").resize((160, 144)).convert("RGB"); changed = before.copy()
+    changed.putpixel((72, 65), (255, 0, 0)); changed.putpixel((90, 65), (255, 0, 0))
+    class Env:
+        def press(self, direction, frames, on_frame): on_frame(changed)
+    monkeypatch.setattr(skills, "scroll", lambda *a, **kw: (0, 0))
+    monkeypatch.setattr(skills, "wait_settled", lambda *_a, **_kw: Settle(before, True, 0, False))
+    for ring_is_ambient in (True, False):
+        ambient = np.zeros((144, 160), dtype=bool)
+        if ring_is_ambient: ambient[65, 90] = True
+        c = Ctx(Env(), StubModel([]), tile_px=16, self_spot=(.45, .451), ambient=ambient)
+        end, move, _, _ = skills._step(c, "RIGHT", before)
+        assert move == ((0, 0) if ring_is_ambient else None) and bool(getattr(end, "no_response", False)) == (not ring_is_ambient)
