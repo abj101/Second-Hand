@@ -60,6 +60,11 @@ The root cause is that position is attributed per settle and per skill, instead 
      - Segment 0 (pre-cut) folds into `place`.
      - `cut_dir` is the direction of the last direction press if the step had one. Otherwise it is the direction of the last unit move in segment 0.
      - The exit tile is pos at the end of segment 0.
+     - **Amended 2026-10-24: exit tile convention.** When the camera shows the step onto a warp tile, that step is real motion in the place being left. Segment 0 includes it, so the exit tile is the warp tile itself, and `cut_dir` is that step's direction.
+       - When nothing scrolls (a push against an edge or mat), the exit tile is the tile the player stood on, as before.
+       - The old settle path dropped the last press ("all but the cut move"), so exits recorded before r18 may sit one tile short. Twin grouping within one tile already merges such records.
+       - `travel` must treat entering the exit tile as the crossing: a scene cut during the route leg onto the exit tile is a successful crossing, not a failed leg.
+       - O2 adds a test for this: a route leg whose last step lands on the exit tile and cuts counts one crossing, and pos ends at the destination arrival.
   3. `World.after`, on a cut:
      - `_locate(next_place, arrival of the LAST segment)` runs first, then that segment folds from the arrival tile.
      - Middle segments are dropped and counted in the trace.
@@ -159,11 +164,15 @@ Run order: wave 0, then O1, then O2 and O3 in parallel worktrees, then G18a (gat
   - Use `wait_settled` between steps, as `.tmp/r18/ref/replay_r18.py` proved works: copy its approach, do not import from the scratch dir.
   - It reads RAM (map, x, y) per frame through `PyBoyEnv.ram`, which is allowed in scripts only.
   - It compares, per step and per segment, the odometer tile delta (with `tile_px=16` passed as an argument, never hard-coded in agent/) against the RAM delta within the same map. A segment that starts at a map change is compared from the first frame with the new map's warp coordinates.
-  - **Amended 2026-10-24: crossing step.** The comparison stays strictly within one map; RAM coordinates are never subtracted across maps.
-    - When a segment ends in a cut, the same-map RAM delta may contain exactly one extra unit step whose RAM change happens after the segment's last measured-motion frame. That step is the walk into the exit, hidden by the fade.
-    - That unit is scored as the crossing, not as position. The segment agrees if odometer == RAM − that unit, and the unit's direction equals the step's cut direction (the odometer's last unit-move direction).
-    - The JSON lists each crossing unit, and the gate fails on any other residual.
-    - This matches the contract that the move causing a cut is not folded into the departure place.
+  - **Amended 2026-10-24 (replaces the earlier "crossing step" rule, which was wrong): map-flip endpoint.**
+    - In this game's RAM, the map byte flips on the same frame as the coordinates of the final step onto the warp tile, and those coordinates are SOURCE-map coordinates. The destination's arrival coordinates are written later, after the blank.
+    - Evidence, 36/36 cuts in both runs (`.tmp/r18/diag/haiku/results36.json`): in each case, odometer departure delta == (flip-frame xy − segment-start xy).
+      - The two cuts whose coordinates differ show the later arrival write: m1_r17_boot step 69, (12,11) then (5,11) at seq 1149; m1_rcr_phase_e step 149, (2,7) then (5,5) at seq 9370.
+      - The other 34 are stairs at the same (x,y) on both floors.
+    - **Rule:**
+      - A departure segment's truth endpoint is the (x,y) on the first map-flip frame, read as source-map coordinates. It is accepted only when it is the last same-map (x,y) or exactly one unit step from it; otherwise the case is a disagreement.
+      - A post-cut segment's truth start is the first coordinate write after the flip (the arrival), or the flip (x,y) when none happens before the first non-blank post-cut frame.
+    - This is a RAM-reading rule for the gate script only; agent/ is unchanged by it.
   - **Amended 2026-10-24: world-type segments only.** Score only the segments World would fold (§2.2 world-type rule), using the trace's perceived `screen` for the step.
     - Report excluded segments separately, with their raw odometer motion.
     - m1_r17_boot step 121 (a battle screen, odometer +8 x, RAM 0) is the known example.
