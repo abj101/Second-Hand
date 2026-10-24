@@ -267,15 +267,22 @@ def test_route_ignores_non_static_or_inactive_entities(tmp_path, entity):
 
 
 def test_failed_push_is_recorded_on_departure_and_next_plan_tries_another_direction(tmp_path):
-    from types import SimpleNamespace
+    from agent.skills import Ctx, press
     from agent.space import push_failed
+    from tests.agent.fakes import GridEnv, StubModel
     mem = Memory(tmp_path); mem.upsert("places", {"id": "room", "screen": "world", "state": "place"})
     tile(mem, "room", (0, 0)); tile(mem, "room", (-1, 0))
-    world = World(mem, 16); world.current_place, world.pos = "room", (-1, 0)
+    env = GridEnv(); world = World(mem, 16); world.tracker.wrap(env); env.tick()
+    frame = env.screenshot(); mem.remember_view("room", (-1, 0), frame); per = env.perception()
+    world.before(per, "room", "source", frame.size, 1, frame)
     target = {"kind": "exit", "place": "room", "tile": (0, 0), "exit": {"placement": "left wall"}}
     assert world.plan(target)[-1]["push"] == "LEFT"
-    skill = SimpleNamespace(failure={"stage": "crossing", "push": "LEFT"}, moves=[{"dir": "RIGHT", "shift": (-16, 0)}, {"dir": "LEFT", "shift": (16, 0)}])
-    world.failed_push(skill, "room", (-1, 0), "LEFT", 2)
+    ctx = Ctx(env, StubModel([]), 16, odometer=world.odometer)
+    right = press(ctx, "RIGHT"); world.prepare(right, "room", False, 2)
+    start = world.pos
+    skill = press(ctx, "LEFT"); world.prepare(skill, "room", False, 3)
+    skill.failure = {"stage": "crossing", "push": "LEFT"}
+    world.failed_push(skill, "room", start, "LEFT", 3)
     assert mem.get("tiles", "room@0,0")["pushed"] == ["LEFT"] and mem.get("tiles", "room@-1,0")["pushed"] == []
     assert world.plan(target)[-1]["push"] != "LEFT"
     before = (tmp_path / "tiles.jsonl").read_text()
