@@ -467,15 +467,17 @@ class Loop:
         lines = self.conversation["lines"]
         if not lines: return
         joined = " ".join(lines)
-        match = re.match(r"^([A-Z][A-Za-z.' -]{0,19}):\s*", joined)
-        speaker = match.group(1) if match and sum(c.isalpha() for c in match.group(1)) >= 2 else None
-        if speaker: joined = joined[match.end():]
+        matches = [m for m in re.finditer(r"(?<!\S)([A-Z][A-Za-z.' -]{0,19}):\s", joined) if sum(c.isalpha() for c in m.group(1)) >= 2]
+        segments = ([(None, joined[:matches[0].start()].strip())] if matches and joined[:matches[0].start()].strip() else [])
+        segments += [(m.group(1), joined[m.end():matches[i+1].start() if i+1 < len(matches) else len(joined)].strip()) for i, m in enumerate(matches)] if matches else [(None, joined)]
+        speakers = {speaker for speaker, _ in segments if speaker}
         place = self.conversation["place"]
         who = self.conversation.get("who")
         kind, _, ident = (who or "").partition(":")
-        if speaker and kind == "thing" and self.world._actor(ident, {}): self.mem.call(ident, speaker, step)
+        if len(speakers) == 1 and kind == "thing" and self.world._actor(ident, {}): self.mem.call(ident, next(iter(speakers)), step)
+        if matches and matches[0].start() == 0: joined = joined[matches[0].end():].lstrip()
         self.text_for_trigger = joined
-        self.notebook.heard(step, speaker, self.world.place_label(place) if place else "?", joined, who=self.conversation.get("who"))
+        for speaker, text in segments: self.notebook.heard(step, speaker, self.world.place_label(place) if place else "?", text, who=who)
         self._event("T1", f"new game text: {joined[:200]}", step)
         self.conversation = {"place": None, "lines": []}
     def _screen_route(self, place, t, push, avoid=(), *, beside=False):  # to an on-screen entity at tile t; an actor holds its tile, so stop beside it, facing it; avoid: tiles a route blocker held
