@@ -320,3 +320,32 @@ def test_wall_confirmed_only_by_rebump_after_it_was_written(tmp_path):
     fold(mem, "room", (0, 0), [("RIGHT", (0, 0)), ("DOWN", (0, 0))], 16, 2)
     row = mem.get("tiles", "room@0,0")
     assert row["firm"] == ["DOWN"] and "RIGHT" in row["blocked"]
+
+
+def test_one_no_response_records_silent_direction_without_wall(tmp_path):
+    mem = Memory(tmp_path)
+    fold(mem, "room", (0, 0), [{"dir": "LEFT", "shift": None, "no_response": True}], 16, 1)
+    row = Memory(tmp_path).get("tiles", "room@0,0")
+    assert row["blocked"] == [] and row["silent"] == {"LEFT": 1}
+
+
+def test_no_response_on_a_later_step_records_unconfirmed_wall(tmp_path):
+    mem = Memory(tmp_path); moves = [{"dir": "LEFT", "shift": None, "no_response": True}]
+    fold(mem, "room", (0, 0), moves, 16, 1); fold(mem, "room", (0, 0), moves, 16, 2)
+    row = Memory(tmp_path).get("tiles", "room@0,0")
+    assert row["blocked"] == ["LEFT"] and "LEFT" not in row.get("firm", [])
+
+
+def test_two_no_responses_in_one_step_do_not_record_wall(tmp_path):
+    mem = Memory(tmp_path); moves = [{"dir": "LEFT", "shift": None, "no_response": True}]
+    fold(mem, "room", (0, 0), moves * 2, 16, 1)
+    row = Memory(tmp_path).get("tiles", "room@0,0")
+    assert row["blocked"] == [] and row["silent"] == {"LEFT": 1}
+
+
+def test_successful_move_clears_silent_and_wall_evidence(tmp_path):
+    mem = Memory(tmp_path); moves = [{"dir": "LEFT", "shift": None, "no_response": True}]
+    fold(mem, "room", (0, 0), moves, 16, 1); fold(mem, "room", (0, 0), moves, 16, 2)
+    assert fold(mem, "room", (0, 0), [("LEFT", (16, 0))], 16, 3) == (-1, 0)
+    row = Memory(tmp_path).get("tiles", "room@0,0")
+    assert row["blocked"] == [] and row["walled"] == {} and row["silent"] == {}

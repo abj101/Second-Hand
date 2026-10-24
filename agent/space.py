@@ -11,8 +11,13 @@ def fold(mem, place, pos, moves, tile_px, step, actors: frozenset[tuple[int, int
     for move in moves:
         if move is None: continue
         direction, shift = (move.get("dir"), move.get("shift")) if isinstance(move, dict) else move
+        # ponytail: two separate steps of no response at one tile/direction = wall; a scripted freeze spanning two steps on a world screen makes an unconfirmed wall that W3 re-tests.
+        if isinstance(move, dict) and move.get("no_response") and direction in DIRS:  # a press that changed nothing at the player
+            row = _get(mem, place, here) or _new(place, here, step); old = {**row, "silent": dict(row.get("silent", {}))}
+            if step <= row.get("silent", {}).get(direction, step): row.setdefault("silent", {})[direction] = step; _save(mem, row, old); continue
+            shift = (0, 0)  # silent on an earlier step too: a bump (unconfirmed until re-bumped, W3)
         if direction not in DIRS or shift is None: continue
-        row = _get(mem, place, here) or _new(place, here, step); before = dict(row, blocked=list(row["blocked"]), pushed=list(row["pushed"]), **({"held": list(row["held"])} if "held" in row else {}), **({"firm": list(row["firm"])} if "firm" in row else {}), **({"walled": dict(row["walled"])} if "walled" in row else {}))
+        row = _get(mem, place, here) or _new(place, here, step); before = dict(row, blocked=list(row["blocked"]), pushed=list(row["pushed"]), **({"held": list(row["held"])} if "held" in row else {}), **({"firm": list(row["firm"])} if "firm" in row else {}), **({"walled": dict(row["walled"])} if "walled" in row else {}), **({"silent": dict(row["silent"])} if "silent" in row else {}))
         if (shift == (0, 0) or shift == 0) and (here[0] + DIRS[direction][0], here[1] + DIRS[direction][1]) in actors:
             if direction not in row.get("held", []): row.setdefault("held", []).append(direction); row["step"] = step
             _save(mem, row, before); continue
@@ -25,6 +30,7 @@ def fold(mem, place, pos, moves, tile_px, step, actors: frozenset[tuple[int, int
             _save(mem, row, before); continue
         if direction in row["blocked"]: row["blocked"].remove(direction)
         row.get("walled", {}).pop(direction, None)
+        row.get("silent", {}).pop(direction, None)
         if direction in row.get("firm", []): row["firm"].remove(direction)
         if direction in row.get("held", []): row["held"].remove(direction)
         sx, sy = DIRS[direction]; shift = (shift, 0) if isinstance(shift, int) and sx else (0, shift) if isinstance(shift, int) else shift
