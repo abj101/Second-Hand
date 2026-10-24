@@ -1,5 +1,5 @@
 import pytest
-from PIL import ImageDraw
+from PIL import Image, ImageDraw
 
 from agent.model import Reply
 from agent.skills import Ctx, approach, interact, press_seq, run_affordance, select
@@ -569,8 +569,8 @@ def test_wall_needs_player_tile_reaction(monkeypatch, pixels, actors, bump, scal
     from PIL import Image
     from agent import skills
     from agent.observer import Settle
-    before = Image.new("RGB", (160, 144), "white"); animated = before.copy()
-    for pixel in pixels: animated.putpixel(pixel, (0, 0, 0))
+    before = Image.linear_gradient("L").resize((160, 144)).convert("RGB"); animated = before.copy()
+    for pixel in pixels: animated.putpixel(pixel, (255, 0, 0))
     before, animated = (f.resize((160 * scale, 144 * scale), Image.Resampling.NEAREST) for f in (before, animated))
     class Env:
         def press(self, direction, frames, on_frame): on_frame(animated)
@@ -612,3 +612,15 @@ def test_travel_does_not_reroute_no_response(tmp_path, monkeypatch):
     world = World(Memory(tmp_path), 16); world.current_place = "room"; world.pa = [.5, .5]
     result = world.travel(ctx(env), [{"place": "room", "dirs": ["RIGHT"] * 3, "target": {"tile": [3, 0]}}], 1)
     assert keys == ["RIGHT"] and result.status == "blocked" and result.failure["reason"] == "no response"
+
+
+def test_step_does_not_call_a_scene_cut_no_response(monkeypatch):
+    from types import SimpleNamespace
+    import agent.skills as skills
+    env = RecordingEnv(); before = env.screenshot(); blank = Image.new("RGB", before.size); after = Image.eval(before, lambda value: 255 - value)
+    env.press = lambda key, frames=8, on_frame=None: on_frame(blank)
+    monkeypatch.setattr(skills, "_settled", lambda ctx: SimpleNamespace(frame=after, blank_seen=False))
+    monkeypatch.setattr(skills, "scroll", lambda *args, **kwargs: (0, 0))
+    monkeypatch.setattr(skills, "cut", lambda *args, **kwargs: False)
+    end, _, _, _ = skills._step(ctx(env), "RIGHT", before)
+    assert not getattr(end, "no_response", False)

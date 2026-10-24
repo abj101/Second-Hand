@@ -55,7 +55,7 @@ def _step(ctx, direction, before):
         return end, None, end.blank_seen, None
     shifts = [scroll(a, b) for a, b in zip([before, *frames], frames)]
     move = scroll(before, end.frame, max_shift=max(4, ctx.tile_px or 16)) if any(s is None for s in shifts) else tuple(sum(s[i] for s in shifts) for i in (0, 1))
-    if move == (0, 0):
+    if move == (0, 0) and not (end.blank_seen or any(_blank(f) for f in frames) or cut(before, end.frame)):
         reacted = False
         if ctx.self_spot is not None and ctx.tile_px:
             t = ctx.tile_px; x, y = (round(v * n) for v, n in zip(ctx.self_spot, before.size)); r, outer = round(.75 * t), round(1.5 * t)

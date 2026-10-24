@@ -1337,7 +1337,7 @@ class World:
                 # the skill checks every press for a cut; first vs last frame of a long walk is a scroll, not a cut (m1_decide2 replay step 42)
                 is_cut = result.reason == "scene cut" or result.blank_seen; self._travel_cut |= is_cut; self.pos = fold(self.mem, place, self.pos, result.moves[:-1], self.tile_px, step, actors=self.actor_tiles); self._travel_push_from = self.pos  # the tile the last press was made from
                 if not is_cut and result.moves: self.pos = fold(self.mem, place, self.pos, result.moves[-1:], self.tile_px, step, actors=self.actor_tiles)
-                if result.reason == "no response": return self._travel_result(results, "blocked", f"leg {n} no response", ctx)
+                if result.reason == "no response" and not is_cut: return self._travel_result(results, "blocked", f"leg {n} no response", ctx)
                 target = current.get("target") or {}; target_tile = target.get("tile"); directions = [m.get("dir") if isinstance(m, dict) else m[0] for m in result.moves]
                 screen_facing = not current.get("push") and not current.get("cross") and target.get("kind") == "screen" and target_tile and current["dirs"] and directions == current["dirs"] and tuple(self.pos[i] + DIRS[current["dirs"][-1]][i] for i in (0, 1)) == tuple(target_tile)
                 if result.reason != "route blocked" or is_cut or not result.failure or result.failure.get("stage") != "route" or self._facing_target(current, result) or screen_facing: break
