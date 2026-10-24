@@ -48,6 +48,7 @@ The lanes are disjoint. A owns `skills.py`, `observer.py` and `world.py` `travel
   - `test_observer.py`: a settle over frames where one 4×4 patch alternates yields `ambient` true only on that patch, and a scrolled frame adds nothing.
   - `test_skills.py`: a bump whose ring change lies inside `ctx.ambient` is a bump; the same change outside `ambient` is "no response".
 - **Approved fixture clarification (2026-10-24):** add `ambient=None` to the fake settle objects in `test_interact_ignores_actor_motion_between_a_press_frames`, `test_interact_keeps_dialogue_text_change_after_actor_mask`, `test_interact_does_not_count_face_step_as_a_press_effect`, `test_interact_requires_quarter_tile_of_unmasked_pixels`, and `test_interact_uses_included_pixel_count_for_overlapping_clipped_masks`. Preserve their assertions and the specified production code (`ctx.ambient = settle.ambient`). These fakes must model the new `Settle` field; this approval does not permit other existing-test changes.
+- **Additional approved fixture (2026-10-24):** the same `ambient=None` mock-field addition is approved in `tests/agent/test_type_text.py::test_approach_keeps_sidestepping_past_a_two_tile_obstacle`, preserving its assertions and production code. This extends lane A's test-file scope to this fixture only.
 
 ### B2 (lane B)
 - `agent/world.py` `unexplored(mem, pid)` (about line 68): also return `edge` cells, where
