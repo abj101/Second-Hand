@@ -507,7 +507,7 @@ class World:
             if world_screen and self.tile_px and not stored and frame is not None:
                 hit = self.mem.seen_view(frame, "world", place, self.tile_px)
                 if hit:
-                    other, tile = hit; off = tuple(tile[i] - self.pos[i] for i in (0, 1)); prior = getattr(self, "_closure", None)
+                    other, tile = hit[:2]; off = tuple(tile[i] - self.pos[i] for i in (0, 1)); prior = getattr(self, "_closure", None)
                     if prior and prior[:2] == (other, off) and prior[2] != self.pos:
                         row, known = self.mem.get("places", place) or {}, self.mem.get("places", other) or {}
                         if row.get("first", step) >= known.get("first", step):
@@ -779,7 +779,8 @@ class World:
             if ref in seen or f"thing:{thing['id']}" != ref: continue
             seen.add(ref)
             if place in self.leads_to(ref): entered.append(self.label(ref))
-        return (f"{label}, entered through {', '.join(entered)}" if entered else label) + unknown
+        hint = (self.mem.get("places", place.split(":", 1)[1]) or {}).get("looks_like")
+        return (f"{label}, entered through {', '.join(entered)}" if entered else label) + (f", partly looks like {self.place_label(hint[0])} ({hint[1]})" if hint else "") + unknown
 
     def label(self, ref, place=None):  # place: where an exit ref's tile lies (exit refs carry no place); default the current place
         ref = self.canon(ref)

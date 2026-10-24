@@ -23,6 +23,25 @@ def test_merge_carries_departure_and_arrival_crossing_counts(tmp_path):
     assert any("crossed 5×" in " ".join(row.get("notes", [])) for row in world.options({"screen": "world", "entities": []}, "dst", {}, 5))
 
 
+@pytest.mark.parametrize("score", [.6, .49])
+def test_minted_place_reports_partial_view_without_merging(tmp_path, monkeypatch, score):
+    from agent import memory
+    from PIL import Image
+    mem = Memory(tmp_path); place(mem, "known", "Hall"); frame = Image.new("RGB", (16, 16), "white")
+    mem.remember_view("known", (0, 0), frame)
+    monkeypatch.setattr(memory, "_view_score", lambda *_: score)
+    minted = mem.match_place({"screen": "world"}, 2, prev=None, cut=True, frame=frame, tile_px=16)
+    world = World(mem, 16); world.current_place = minted
+    assert minted != "known" and mem.arrival == (minted, (0, 0), "new")
+    if score >= .5:
+        assert mem.get("places", minted)["looks_like"] == ["known", .6, 2]
+        assert ", partly looks like Hall (0.6)" in world.here(minted)
+        world.merge(minted, "known", 3, (0, 0))
+        assert "partly looks like" not in world.here(world.current_place)
+    else:
+        assert "looks_like" not in mem.get("places", minted) and "partly looks like" not in world.here(minted)
+
+
 def test_only_navigable_places_resolve_as_targets(tmp_path):
     mem = Memory(tmp_path); place(mem, "room", "Hall")
     mem.upsert("places", {"id": "p_place_1", "screen": "title", "state": "candidate", "first": 1})
