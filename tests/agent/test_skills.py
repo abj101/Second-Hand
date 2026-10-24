@@ -476,26 +476,35 @@ def test_settled_flag_ands_every_settle_inside_a_skill_sequence(monkeypatch):
 
 
 def test_travel_settled_ands_its_legs_and_folds_each_move_once(tmp_path, monkeypatch):
+    from agent import world as world_module
     from agent.memory import Memory
     from agent.skills import Ctx
     from agent.world import World
     short_settle(monkeypatch)
 
+    folded, real_fold = [], world_module.fold
+    monkeypatch.setattr(world_module, "fold", lambda mem, place, pos, moves, *a, **k: (folded.append(list(moves)), real_fold(mem, place, pos, moves, *a, **k))[1])
     def travel(name, plan):
         mem = Memory(tmp_path / name)
         mem.upsert("places", {"id": "room", "name": "room", "screen": "world", "state": "place", "first": 1, "last": 1, "edges": [], "visits": 1})
         env, world = Busy(plan), World(mem, 16)
         world.current_place, world.pa = "room", [.5, .5]
+        world.tracker.wrap(env)
         legs = [{"place": "room", "dirs": ["RIGHT"], "push": None}, {"place": "room", "dirs": ["RIGHT"], "push": None}]
-        return world.travel(Ctx(env, StubModel([]), 16), legs, 1), world, env
+        first = len(folded); result = world.travel(Ctx(env, StubModel([]), 16, odometer=world.odometer), legs, 1); return result, world, env, folded[first:]
 
-    still, still_world, _ = travel("still", [0, 0])
-    first_late, first_world, _ = travel("first_late", [20, 0])
-    second_late, second_world, _ = travel("second_late", [0, 20])
+    still, still_world, _, still_folded = travel("still", [0, 0])
+    first_late, first_world, _, first_folded = travel("first_late", [20, 0])
+    second_late, second_world, _, second_folded = travel("second_late", [0, 20])
     assert still.settled is True and first_late.settled is False and second_late.settled is False
     assert still.inputs == first_late.inputs == second_late.inputs == 2
     assert still.reason == first_late.reason == second_late.reason
     assert still_world.pos == first_world.pos == second_world.pos and len(still.moves) == len(second_late.moves) == 2
+    units = lambda batches: [m["dir"] for batch in batches for m in batch if isinstance(m, dict) and m.get("shift") not in ((0, 0), 0, None)]
+    def expected(world):
+        dx, dy = (round(-v / 16) for v in world.odometer_trace()["px"])
+        return ["RIGHT" if dx > 0 else "LEFT"] * abs(dx) + ["DOWN" if dy > 0 else "UP"] * abs(dy)
+    assert units(still_folded) == expected(still_world) and units(first_folded) == expected(first_world) and units(second_folded) == expected(second_world)
 
 
 def test_travel_across_a_scene_cut_counts_its_crossing_once_and_reports_unsettled(tmp_path, monkeypatch):
@@ -528,23 +537,40 @@ def test_non_direction_press_folds_forced_motion(tmp_path, monkeypatch):
     from agent.observer import Settle
     from agent.skills import press
     from agent.memory import Memory
-    from agent.space import fold
-    env = GridEnv(); frame = env.screenshot()
-    settles = iter([Settle(frame, True, 0, False), Settle(frame, True, 3, False, scroll=(-48, 0), last_dir="RIGHT")])
+    from agent.world import World
+    import numpy as np
+    env = GridEnv(); mem = Memory(tmp_path); mem.upsert("places", {"id": "room", "name": "room", "screen": "world", "state": "place", "first": 1, "last": 1, "edges": [], "visits": 1})
+    world = World(mem, 16); world._odo_screen = {"screen": "world"}; rng = np.random.default_rng(5); pixels = rng.integers(0, 256, (144, 700, 3), dtype=np.uint8)
+    frame = lambda x: Image.fromarray(pixels[:, x:x + 160]); odo = world.odometer; odo(frame(100), 0)
+    def forced(key, frames):
+        odo.held = key
+        for seq, x in enumerate((116, 132, 148), 1): odo(frame(x), seq)
+        odo.held = None
+    monkeypatch.setattr(env, "press", forced)
+    settles = iter([Settle(frame(100), True, 0, False), Settle(frame(148), True, 3, False, {"frame_seq": 3})])
     monkeypatch.setattr("agent.skills._settled", lambda *_: next(settles))
-    result = press(ctx(env), "A")
-    assert result.moves == [{"dir": "RIGHT", "shift": (-48, 0), "forced": True}]
-    assert fold(Memory(tmp_path), "room", (0, 0), result.moves, 16, 1) == (3, 0)
+    skillctx = ctx(env); skillctx.odometer = odo
+    result = press(skillctx, "A"); world.prepare(result, "room", False, 1)
+    assert result.moves == [] and world._prepared_forced and world.pos == (3, 0)
 
 
-def test_press_sequence_keeps_following_moves_after_cut(monkeypatch):
+def test_press_sequence_keeps_following_moves_after_cut(tmp_path, monkeypatch):
     from agent.skills import SkillResult
     from agent import skills
-    env = GridEnv(); frame = env.screenshot()
-    results = iter([SkillResult("done", "", 1, 0, frame, frame, (0, 0), True, [{"dir": "DOWN", "shift": (0, -16), "forced": True}], arrival_frame=frame), SkillResult("done", "", 1, 0, frame, frame, (0, 0), False, [{"dir": "UP", "shift": (0, 16)}])])
+    from agent.memory import Memory
+    from agent.world import World
+    import numpy as np
+    env = GridEnv(); mem = Memory(tmp_path); mem.upsert("places", {"id": "source", "name": "source", "screen": "world", "state": "place", "first": 1, "last": 1, "edges": [], "visits": 1}); mem.upsert("places", {"id": "dest", "name": "dest", "screen": "world", "state": "place", "first": 1, "last": 1, "edges": [], "visits": 1})
+    world = World(mem, 16); world._odo_screen = {"screen": "world"}; rng = np.random.default_rng(9); pixels = rng.integers(0, 256, (700, 700, 3), dtype=np.uint8)
+    frame = lambda x, y: Image.fromarray(pixels[y:y + 144, x:x + 160]); odo = world.odometer; odo(frame(100, 100), 0)
+    odo.held = "A"; odo(frame(116, 100), 1); odo.held = None; odo(Image.new("RGB", (160, 144), "white"), 2); odo(frame(200, 200), 3); odo.held = "UP"; odo(frame(200, 184), 4); odo.held = None
+    frame_after = frame(200, 184); frame_after.info["frame_seq"] = 4
+    results = iter([SkillResult("done", "", 1, 0, frame(100, 100), frame(116, 100), (0, 0), True, [{"dir": "DOWN", "shift": (0, -16), "at": 0}], arrival_frame=frame(200, 200)), SkillResult("done", "", 1, 0, frame(200, 200), frame_after, (0, 0), False, [{"dir": "UP", "shift": (0, 16), "at": 3}])])
     monkeypatch.setattr(skills, "press", lambda *_: next(results))
-    result = press_seq(ctx(env), ["A", "UP"])
+    skillctx = ctx(env); skillctx.odometer = odo
+    result = press_seq(skillctx, ["A", "UP"]); world.prepare(result, "source", True, 1); monkeypatch.setattr(world, "_locate", lambda *_: (4, 7)); world._odo_screen = {"screen": "world"}; world.after(result, "source", "dest", True, 1)
     assert not result.moves[0].get("after_cut") and result.moves[1]["after_cut"]
+    assert world.pos == (4, 6)
 
 
 @pytest.mark.parametrize("animated", [False, True])
