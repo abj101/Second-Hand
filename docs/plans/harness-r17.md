@@ -49,16 +49,16 @@ The lanes are disjoint. A owns `skills.py`, `observer.py` and `world.py` `travel
 
 ### B2 (lane B)
 - `agent/world.py` `unexplored(mem, pid)` (about line 68): also return `edge` cells, where
-  - `seen` = that place's seen cells;
+  - `seen` = that place's seen cells; candidates are only seen cells that are also in that place's seen-row `open` list (cells once seen past a drawn, non-void screen edge, i.e. real ground). **Amended 2026-10-24:** using every seen cell put explore rows toward the black void around every indoor room (Oak's lab went from 0 to 4 explore directions on LV16 memory) and broke the dead-end note;
   - `known` = every tiles-row cell of the place, plus every cell a `blocked` direction of a tiles row points into;
-  - `edge = {c in seen, not in known, with at least one 4-neighbour not in seen}`.
+  - `edge = {c in seen ∩ open, not in known, with at least one 4-neighbour not in seen}`.
 - Return `<existing set> | edge`. `explore_dirs` and everything downstream stay unchanged.
 - `# ponytail:` note: "edge cells may be walls; each costs at most one bump before `known` excludes it."
 - Explore label (about line 1242): change `unseen cells that way` to `unexplored cells that way`.
 - **Pre-approved assertion changes:**
   - `tests/agent/test_options.py:412` label string;
   - `scripts/points.json:61` regex (`unseen` becomes `unexplored`).
-- **Test** (`test_world.py`): a place whose seen block extends 3 rows past its walked tiles yields an "UP" explore target in that block. A cell next to a blocked side is not a target.
+- **Test** (`test_world.py`): a place whose seen block (also listed in `open`) extends 3 rows past its walked tiles yields an "UP" explore target in that block. The same block without `open` yields none. A cell next to a blocked side is not a target. `test_untried_edge_into_a_seen_cell_is_not_unexplored_so_the_dead_end_fires` must pass **unchanged**.
 
 ### B3 (lane B)
 - **`agent/loop.py`:**
@@ -75,7 +75,7 @@ The lanes are disjoint. A owns `skills.py`, `observer.py` and `world.py` `travel
 - **T17-W1:** re-run `.tmp/r16/g/validate2.py` (real `_step`) on r13, r14 and r15. Pass: false walls kept 0/25, real walls kept ≥ 148/156.
 - **T17-R2:** copy `.tmp/r16/g/lv16_end.py` to `.tmp/r17/g/water.py` and change it to call the real `_step` with `Ctx(env, None, 16, 16, self_spot=(0.45, 0.4513888888888889))`, after one `_settled(ctx)`, from r16 `checkpoint/000245`. Press LEFT twice at RAM (8,14). Pass: both presses return `move == (0, 0)` and `no_response` False.
 - **T17-R1:** the unit test above, plus: replay r16 `checkpoint/000060` with presses 61–64 from `presses.jsonl`, then each key of step 65 through the real `_step`. Pass: no press that changes the RAM map is `no_response`.
-- **T17-B2:** on a copy of `runs/m1_r16_boot/memory`, run `World(mem,16)` with `size=(160,144)`, `current_place="p_place_4"`, `pos=(8,-4)`, then `explore_dirs("p_place_4")`. Pass: it has "UP", with target y ≤ -9. The prototype gave `UP: 8 steps, 10 cells, to (5,-9)`.
+- **T17-B2:** on a copy of `runs/m1_r16_boot/memory`, run `World(mem,16)` with `size=(160,144)`, `current_place="p_place_4"`, `pos=(8,-4)`, then `explore_dirs("p_place_4")`. Pass: it has "UP", with target y ≤ -9 (prototype: `UP: 8 steps, 3 cells, to (5,-9)`). Also on that copy, `current_place="p_place_6"`, `pos=(0,-2)`: no more than 2 explore directions (prototype: LEFT and RIGHT, 1 cell each).
 
 ## LV17 (orchestrator, once, after T17 passes)
 - Make sure the viewer is up: `curl -s http://127.0.0.1:8765/state`. If not, start `python scripts/watch_run.py --no-browser` in the background.
