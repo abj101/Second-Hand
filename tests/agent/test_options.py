@@ -667,3 +667,19 @@ def test_free_row_reports_and_clears_consecutive_no_response(tmp_path):
     assert "your last 2 presses changed nothing on screen" in free()["notes"]
     world.prepare(SimpleNamespace(moves=[{"dir": "UP", "shift": (0, -16)}]), "room", False, 3)
     assert not any("changed nothing" in note for note in free()["notes"])
+
+
+def test_enclosed_tile_offers_failed_retests_that_can_clear_a_wall(tmp_path):
+    from agent.skills import Ctx, press_seq
+    from agent.space import DIRS
+    mem = Memory(tmp_path); room(mem); world, per = setup(mem, [])
+    retests = lambda: [r for r in world.options(per, "room", {}, 4, inputs=INPUTS) if "remembered wall from step" in r["label"]]
+    assert retests() == []
+    tile = mem.get("tiles", "room@0,0"); mem.upsert("tiles", {**tile, "blocked": list(DIRS), "step": 3})
+    rows = retests(); assert len(rows) == 4
+    assert all(r["state"] == "failed" and r["tool"] == "buttons" and r["label"] == f"press {r['action']['buttons'][0]} here: remembered wall from step 3" for r in rows)
+    mem.unplaced = "room"; assert retests() == []; mem.unplaced = None
+    picked = next(r for r in rows if r["action"] == {"buttons": ["RIGHT"]})
+    skill = press_seq(Ctx(GridEnv(), None, tile_px=16), picked["action"]["buttons"])
+    world.prepare(skill, "room", False, 4)
+    assert world.pos == (1, 0) and "RIGHT" not in mem.get("tiles", "room@0,0")["blocked"]
