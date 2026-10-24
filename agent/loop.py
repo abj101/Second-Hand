@@ -73,6 +73,7 @@ class Loop:
         self.repair_pending = False; self.parse_failed = False; self.empty_streak = self.repair_used = 0
         self.reperception_used = False; self.unsettled = 0; self.observation_stamp = self.observation_age_ms = None
         self.world.tracker.clear(); self.world._observed_per = self.world._prepared = None
+        self.world.odometer.reset(); self.world._odo_px = (0, 0); self.world._prepared_segments = []
         self.world.tracker.phase = None; self.world.tracker.ignore = []
         self.world.drift = self.world.drift_ref = None
         for hud in self.world._hud.values(): hud["crop"] = None
@@ -108,6 +109,7 @@ class Loop:
         return per, key, False, []
     def step(self):
         start, calls, self._seq0 = time.perf_counter(), self.model.calls, getattr(self.model, "seq", None)
+        self.world.odometer_begin()
         before_set = wait_settled(self.env); before = before_set.frame; prior = self.place
         self.observation_stamp = dict(before_set.frame_stamp) if before_set.frame_stamp else None
         self.observation_age_ms = None
@@ -117,7 +119,9 @@ class Loop:
         per, frame_hash, reused, _ = self._see(before, prior, screen_was_world=before_mark); marked = self.seen_marked
         player_fix = self.world.fix_player(per, before.size); self.empty_streak = self.empty_streak + 1 if self.parse_failed else 0; self.repair_used = self.repair_used if self.parse_failed else False
         modal = self.prev and {self.prev.get("screen"), per.get("screen")} <= {"world", "dialogue", "menu"} and self.prev.get("screen") != per.get("screen") and "world" in (self.prev.get("screen"), per.get("screen")) and not (self.pending_cut or self.cut_carry or before_set.blank_seen)
-        place = self.mem.match_place(per, self.step_no + 1, prev=prior, cut=(is_cut := bool((self.pending_cut or self.cut_carry or prior and self.prev_frame is not None and cut(self.prev_frame, before, before_set.blank_seen)) and not modal)), via=self.pending_via, frame=before, tile_px=self.tile_px)
+        before_seq = (before_set.frame_stamp or {}).get("frame_seq", self.world.odometer.seq)
+        odo_cuts = self.world.odometer_start(before_seq, prior or self.world.current_place or self.mem.unplaced, self.step_no + 1, per)
+        place = self.mem.match_place(per, self.step_no + 1, prev=prior, cut=(is_cut := bool((self.pending_cut or self.cut_carry or odo_cuts or prior and self.prev_frame is not None and cut(self.prev_frame, before, before_set.blank_seen)) and not modal)), via=self.pending_via, frame=before, tile_px=self.tile_px)
         unseen_crossing = None
         if prior and place != prior:
             crossings = {r["id"] for r in self.mem.rows("crossings")}
@@ -132,19 +136,28 @@ class Loop:
         drift_fix = None
         probe = None
         if per.get("screen") == "world" and not modal and not self.world._self_from_motion and self.tile_px:
-            probe_ctx = Ctx(self.env, self.model, self.tile_px, self.move_frames, self_spot=self.world.self_spot); probe_ctx.step = self.step_no + 1
+            probe_ctx = Ctx(self.env, self.model, self.tile_px, self.move_frames, self_spot=self.world.self_spot, odometer=self.world.odometer); probe_ctx.step = self.step_no + 1
             probe = self.world.probe(probe_ctx)
             if probe["presses"]:
                 probe_set = wait_settled(self.env); probe_frame = probe_set.frame
                 self.observation_stamp = dict(probe_set.frame_stamp) if probe_set.frame_stamp else None
                 self.observation_age_ms = None
+                probe_spatial = {"exit_key": None}
+                probe["scene_cut"] |= probe_set.blank_seen
+                if "skill" in probe:
+                    probe_through = (probe_set.frame_stamp or {}).get("frame_seq", self.world.odometer.seq)
+                    self.world._odo_through = probe_through
+                    probe_spatial = self.world.prepare(probe["skill"], place, probe["scene_cut"], self.step_no + 1, through=probe_through)
+                    probe["scene_cut"] |= self.world._prepared_scene_cut
                 probe_per, probe_hash, probe_reused, _ = self._see(probe_frame, place, force=True, screen_was_world=per.get("screen") == "world" and not probe["scene_cut"]); marked = self.seen_marked
                 probe_fix = self.world.fix_player(probe_per, probe_frame.size); player_fix = player_fix or probe_fix
                 if probe["scene_cut"]:
-                    probe_place = self.mem.match_place(probe_per, self.step_no + 1, prev=place, cut=True, frame=probe_frame, tile_px=self.tile_px)
+                    probe_place = self.mem.match_place(probe_per, self.step_no + 1, prev=place, cut=True, exit=probe_spatial["exit_key"], frame=probe_frame, tile_px=self.tile_px)
+                    self.world._odo_screen = probe_per
                     self.world.after(probe["skill"], place, probe_place, True, self.step_no + 1)
                     if probe_place != place: self._moved(place, probe_place, "a step taken to locate yourself", self.step_no + 1)
                     place = self.place = probe_place
+                elif "skill" in probe: self.world._prepared_segments = []
                 per, frame_hash, reused = probe_per, probe_hash, probe_reused
                 before, size = probe_frame, probe_frame.size
                 proj = self.world.before(per, place, place, size, self.step_no + 1)[0]
@@ -258,7 +271,7 @@ class Loop:
                           min(w, int(t["x"] + r)), min(h, int(t["y"] + r)))
                          for t in tracker.tracks.values() if t["status"] == "live" and t["actor"] and
                          (px is None or max(abs(t["x"] - px), abs(t["y"] - py)) > r))
-        skillctx = Ctx(self.env, self.model, self.tile_px, self.move_frames, actor_boxes=actor_boxes, self_spot=self.world.self_spot); pressed_from = tuple(self.world.pos)
+        skillctx = Ctx(self.env, self.model, self.tile_px, self.move_frames, actor_boxes=actor_boxes, self_spot=self.world.self_spot, odometer=self.world.odometer); pressed_from = tuple(self.world.pos)
         if choice and travel_legs is None and act_route is not None and affs[choice["i"]].get("verb") == "approach":
             t = target_tile
             if t is None:
@@ -273,10 +286,10 @@ class Loop:
         if choice and skill.status == "done" and self.conversation["lines"] and affs[choice["i"]].get("verb") == "select": self.conversation["lines"].append(f"(you chose {affs[choice['i']]['target']})")
         if choice and skill.status == "done" and affs[choice["i"]].get("verb") in ("approach", "interact") and choice["i"] < len(targets) and targets[choice["i"]]:
             self.world._promote([targets[choice["i"]]])
-        self.tile_px = skillctx.tile_px; self.world.tile_px = self.tile_px
+        self.tile_px = skillctx.tile_px; self.world.tile_px = self.world.odometer.tile_px = self.tile_px
         scene_cut = self.world._travel_cut if travel_legs is not None else skill.blank_seen or skill.reason == "scene cut" or (cut(skill.before, skill.after) and (self.env.pointer or not choice or affs[choice["i"]].get("verb") not in ("approach", "interact") or skill.scroll == (0, 0)))
-        spatial = self.world.prepare(skill, place, scene_cut, self.step_no + 1); exit_key, cut_dir = spatial["exit_key"], spatial["cut_dir"]
         self.pending_cut, self.pending_via, self.pending_key = scene_cut, affs[choice["i"]].get("target") if choice else None, intent
+        exit_key, cut_dir = None, None
         row_choice = {"i": choice["i"], **affs[choice["i"]], "id": targets[choice["i"]], "called": True, "text": choice["text"], "why": choice["why"], "intent": intent} if choice else None
         # the action's state, JSON-safe: values used by the outcome tail below
         s = {"action_step": self.step_no + 1, "before_settled": before_set.settled, "before_waited": before_set.waited, "frame": f"frames/{self.step_no + 1:06d}.png", "place": place, "per": per, "reused": reused, "frame_hash": frame_hash, "marked": marked, "observation_stamp": self.observation_stamp,
@@ -290,6 +303,13 @@ class Loop:
              "world": {"cut_dir": cut_dir, "pos": list(self.world.pos), "travelled": skill is self.world._travelled, "travel_open": self.world._travel_open, "current_place": self.world.current_place}}
         try: after_set = wait_settled(self.env)
         except BaseException: self.cached = self.cached_hash = None; raise
+        self.world._odo_through = (after_set.frame_stamp or {}).get("frame_seq", self.world.odometer.seq)
+        scene_cut |= after_set.blank_seen
+        spatial = self.world.prepare(skill, place, scene_cut, self.step_no + 1, through=self.world._odo_through)
+        scene_cut |= self.world._prepared_scene_cut; exit_key, cut_dir = spatial["exit_key"], spatial["cut_dir"]
+        self.pending_cut, self.pending_via, self.pending_key = scene_cut, affs[choice["i"]].get("target") if choice else None, intent
+        s.update(scene_cut=scene_cut, exit_key=list(exit_key) if exit_key else None, cut_dir=cut_dir,
+                 world={"cut_dir": cut_dir, "pos": list(self.world.pos), "travelled": skill is self.world._travelled, "travel_open": self.world._travel_open, "current_place": self.world.current_place})
         return self._settle(s, skill, after_set, start, calls)
     def _settle(self, s, skill, after_set, start, calls):
         """Evidence and the row for an action, using its latest after-frame."""
@@ -304,6 +324,7 @@ class Loop:
         scene_cut &= not modal
         if not scene_cut and (getattr(skill, "failure", None) or {}).get("stage") == "crossing": self.world.failed_push(skill, place, s["pressed_from"], s.get("push"), self.step_no + 1)
         next_place = self.world.current_place if s["travel"] and not self.world._travel_open else place if modal else self.mem.match_place(after_per, self.step_no + 1, prev=place, cut=scene_cut or self.cut_carry, via=(aff.get("target") if aff else None), exit=exit_key, via_id=tid, frame=after, tile_px=self.tile_px)
+        self.world._odo_screen = after_per
         spatial = self.world.after(skill, place, next_place, scene_cut, self.step_no + 1)
         reach_step, reach_pos = s["action_step"], tuple(self.world.pos)
         for reach in self.mem.rows("reach"):
@@ -314,7 +335,7 @@ class Loop:
         if next_place != place: self._moved(place, next_place, aff.get("target") if aff else None, self.step_no + 1, intent)
         if skill.scroll != (0, 0) and next_place == place and self.mem.get("places", place).get("state") == "candidate" and self.mem.get("places", place).get("screen") == "world":
             source = self.mem.get("places", place); source["state"] = "place"; self.mem.upsert("places", source)
-        world_exit = bool(scene_cut and next_place != place and cut_dir and after_per.get("screen") == "world" and (per.get("screen") == "world" or per.get("screen") == "dialogue" and self.mem.get("places", next_place).get("screen") == "world" and any(isinstance(m, dict) and m.get("forced") and m.get("shift") not in (None, (0, 0), 0) for m in skill.moves)))
+        world_exit = bool(scene_cut and next_place != place and cut_dir and after_per.get("screen") == "world" and (per.get("screen") == "world" or per.get("screen") == "dialogue" and self.mem.get("places", next_place).get("screen") == "world" and self.world._prepared_forced))
         outcome = effects(per, after_per, skill, place, next_place, place_after_candidate=not world_exit and self.mem.get("places", next_place).get("state") == "candidate", scene_cut=scene_cut and next_place != place)
         route =(getattr(skill, "failure", None) or {}).get("stage") in ("route", "interaction")  # never reached the thing (a route stopped short, a choice refused before any press): no evidence about it
         said_step, repeated = None, False
@@ -349,7 +370,7 @@ class Loop:
             "choice": choice, "pred": None, "used": [], "skill": {"status": skill.status, "reason": skill.reason, "inputs": skill.inputs, "calls": skill.calls, "failure": getattr(skill, "failure", None), "settled": getattr(skill, "settled", None), **({"bumps": skill.bumps} if getattr(skill, "bumps", 0) else {})},
             "outcome": outcome, "verdict": "unobservable", "calls": self.model.calls-calls, "ms": int((time.perf_counter()-start)*1000), "shortcut": None,
             "ranker": None, "perception_reused": s["reused"], "frame_hash": s["frame_hash"], "marked": s["marked"],
-            "scene_cut": scene_cut, "next_place": next_place, "verified_edge": verified_edge, "view_ids": [], "tile": self.world.pos if self.tile_px else None, "drift_fix": None, "player_fix": player_fix, "entities": self.world.entities, "scroll": spatial["scroll"], **({"exit": list(exit_key)} if scene_cut and not modal and next_place != place and exit_key else {}),
+            "scene_cut": scene_cut, "next_place": next_place, "verified_edge": verified_edge, "view_ids": [], "tile": self.world.pos if self.tile_px else None, "drift_fix": None, "player_fix": player_fix, "entities": self.world.entities, "scroll": list(skill.scroll) if skill.scroll is not None else None, "odometer": self.world.odometer_trace(), **({"exit": list(exit_key)} if scene_cut and not modal and next_place != place and exit_key else {}),
             "act": s["act"], "option": s["option"], "plan": s["plan"], "probe": s["probe"],
             "observation_status": "settled" if after_set.settled and s.get("before_settled", True) else "timed_out", "execution": skill.status, "action_step": None, **self._provenance(),
             "settle_frames": {"before": s["before_waited"], "after": after_set.waited},
@@ -425,7 +446,7 @@ class Loop:
         row = {"step": step, "t": time.time(), "place": place, "screen": None, "task": None, "frame": frame, "after": None, "options": None,
             "choice": None, "pred": None, "used": [], "skill": None, "outcome": None, "verdict": "unobservable", "calls": self.model.calls - calls, "ms": int((time.perf_counter() - start) * 1000),
             "shortcut": None, "ranker": None, "perception_reused": False, "frame_hash": None, "marked": False, "scene_cut": False, "next_place": place, "verified_edge": False,
-            "view_ids": [], "tile": self.world.pos if self.tile_px else None, "drift_fix": None, "player_fix": False, "entities": self.world.entities, "scroll": None,
+            "view_ids": [], "tile": self.world.pos if self.tile_px else None, "drift_fix": None, "player_fix": False, "entities": self.world.entities, "scroll": None, "odometer": self.world.odometer_trace(),
             "act": None, "option": None, "plan": None, "probe": None, "observation_status": "pending", "execution": None, "action_step": None, **self._provenance(),
             **self._observation_fields(), **({"live_invalidation_reason": self.live_invalidation_reason} if self.live_invalidation_reason else {}), **fields}
         self.live_invalidation_reason = None
@@ -588,7 +609,8 @@ class Loop:
         self.step_no, self.place = int(state.get("step", 0)), state.get("place")
         self.observation_stamp = state.get("observation_stamp")
         self.tile_px, self.move_frames = state.get("tile_px"), int(state.get("move_frames", 16))
-        self.world.tile_px = self.tile_px; self.world.restore(state)
+        self.world.tile_px = self.world.odometer.tile_px = self.tile_px; self.world.restore(state)
+        self.world.odometer.reset(); self.world._odo_px = (0, 0); self.world._prepared_segments = []
         self.stuck.restore(state.get("stuck", {})); self.prev = state.get("perception"); self.prev_frame = self.env.screenshot()
         self.prev_frame_mark_eligible = state.get("frame_mark_eligible")
         digest = hashlib.sha256(self.prev_frame.tobytes()).hexdigest()

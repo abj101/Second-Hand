@@ -10,6 +10,18 @@ from tests.agent.fakes import GridEnv
 def place(mem, id, name, first=1):
     mem.upsert("places", {"id": id, "name": name, "screen": "world", "state": "place", "first": first, "last": first, "edges": [], "visits": 1})  # memory always sets visits
 
+def camera(seed=1):
+    import numpy as np
+    from PIL import Image
+    pixels = np.random.default_rng(seed).integers(0, 256, (700, 700, 3), dtype=np.uint8)
+    return lambda x, y: Image.fromarray(pixels[y:y + 144, x:x + 160])
+
+def feed(odometer, frame, seq, x, y, dx, dy):
+    count = max(abs(dx), abs(dy)) // 4
+    for i in range(1, count + 1):
+        seq += 1; odometer(frame(x + dx * i // count, y + dy * i // count), seq)
+    return seq, x + dx, y + dy
+
 
 def test_merge_carries_departure_and_arrival_crossing_counts(tmp_path):
     mem = Memory(tmp_path); world = World(mem, 16)
@@ -679,6 +691,7 @@ def test_seen_cells_union_the_full_view_rectangles(tmp_path):
 
     mem = Memory(tmp_path); place(mem, "room", "room"); world = World(mem, 16)
     env = GridEnv()
+    world.tracker.wrap(env); env.tick()
     player = {"name": "Player", "kind": "player", "at": [.5, .5]}
     world.before({"screen": "world", "entities": [player], "text": []}, "room", None, (160, 144), 1)
     world.observe_after({"screen": "world", "entities": [player]}, env.screenshot(), False, "room", (160, 144), 1)
@@ -694,6 +707,7 @@ def test_seen_cells_union_the_full_view_rectangles(tmp_path):
 
 def test_tiers_keep_landmarks_promote_interest_blockers_and_cap_is_not_deletion(tmp_path):
     from types import SimpleNamespace
+    from tests.agent.fakes import GridEnv
 
     mem = Memory(tmp_path); place(mem, "room", "room")
     mem.upsert("tiles", {"id": "room@-2,0", "place": "room", "x": -2, "y": 0, "floor": True, "blocked": [], "pushed": [], "exit": None})
@@ -703,7 +717,7 @@ def test_tiers_keep_landmarks_promote_interest_blockers_and_cap_is_not_deletion(
                 {"name": "exit: path south", "kind": "affordance", "at": [.3, .5]},
                 {"name": "Chest", "kind": "object", "at": [.55, .6]},
                 {"name": "Sign", "kind": "object", "at": [.45, .6]}]
-    world = World(mem, 16)
+    env = GridEnv(); env.walls.add((10, 8)); world = World(mem, 16)
     _, _, ids = world.before({"screen": "world", "entities": entities, "text": ["Sign"]}, "room", None, (160, 144), 1)
     oak, guide, exit_id, chest, sign = (ids[i] for i in (1, 2, 3, 4, 5))
     assert mem.get("entities", oak)["tier"] == "landmark"
@@ -712,7 +726,11 @@ def test_tiers_keep_landmarks_promote_interest_blockers_and_cap_is_not_deletion(
     mem.upsert("tiles", {"id": "room@-3,0", "place": "room", "x": -3, "y": 0, "floor": True, "blocked": ["RIGHT"], "pushed": [], "exit": None})
     world._tiers({"entities": [entities[3]], "text": []}, "room", {0: exit_id})
     assert mem.get("entities", exit_id)["tier"] == "landmark"
-    world.prepare(SimpleNamespace(moves=[("RIGHT", -16), ("RIGHT", (0, 0))]), "room", False, 2)
+    world.tracker.wrap(env); env.tick(); at = world.odometer.seq; env.press("RIGHT")
+    assert world.odometer.pixels_since(at, world.odometer.seq) == (-16, 0)
+    bump_at = world.odometer.seq; env.press("RIGHT")
+    assert world.odometer.pixels_since(bump_at, world.odometer.seq) == (0, 0)
+    world.prepare(SimpleNamespace(moves=[{"dir": "RIGHT", "shift": (-16, 0), "at": at}, {"dir": "RIGHT", "shift": (0, 0), "at": bump_at}]), "room", False, 2)
     assert mem.get("entities", oak)["tier"] == "interest"
     for i in range(10):
         mem.upsert("entities", {"id": f"landmark{i}", "name": f"Landmark {i}", "kind": "object", "place": "room", "tier": "landmark", "seen": i})
@@ -1141,13 +1159,15 @@ def _per(env, extra=()):
 
 def _drive(world, env, steps, start=1, extra=lambda step: ()):
     """RIGHT/LEFT alternately (the door is never reached), fed to World as the loop feeds it."""
+    if world.odometer.seq is None: world.tracker.wrap(env); env.tick()
     for step in range(start, start + steps):
         before = env.screenshot()
         world.before(_per(env, extra(step)), "room", "room", SIZE, step)
-        key, x0 = ("RIGHT" if env.player[0] <= 8 else "LEFT"), env.player[0]
+        key, x0, seq = ("RIGHT" if env.player[0] <= 8 else "LEFT"), env.player[0], world.odometer.seq
         env.press(key)
         moved = env.player[0] - x0
         scroll = (-16 * moved, 0)
+        assert world.odometer.pixels_since(seq, world.odometer.seq) == scroll
         skill = SimpleNamespace(scroll=scroll, moves=[(key, scroll if moved else (0, 0))], status="done", reason="", inputs=1, calls=0)
         world.prepare(skill, "room", False, step); world.after(skill, "room", "room", False, step)
         world.observe_after(_per(env, extra(step)), env.screenshot(), False, "room", SIZE, step, before=before, skill=skill)
@@ -1382,7 +1402,8 @@ ROUTE_DIRS = [("RIGHT", 1, 0), ("LEFT", -1, 0), ("UP", 0, -1), ("DOWN", 0, 1)]
 def _route_world(mem, env):  # player starts at (8, 8); callers route it towards a blocker two tiles away
     from agent.skills import Ctx; from tests.agent.fakes import StubModel
     world = World(mem, 16); world.current_place = "room"; world.pa = [.5, .5]; world.pos = (8, 8)
-    return world, Ctx(env, StubModel([]), 16, self_spot=(.5, .5))
+    world.tracker.wrap(env)
+    return world, Ctx(env, StubModel([]), 16, self_spot=(.5, .5), odometer=world.odometer)
 
 
 @pytest.mark.parametrize("guarded", [True, False])
@@ -1436,11 +1457,14 @@ def test_every_travelled_move_is_folded_exactly_once(tmp_path, monkeypatch):
     from tests.agent.fakes import GridEnv; from agent import world as world_module
 
     folded, real = [], world_module.fold
-    monkeypatch.setattr(world_module, "fold", lambda mem, place, pos, moves, *a, **k: (folded.append(len(moves)), real(mem, place, pos, moves, *a, **k))[1])
+    monkeypatch.setattr(world_module, "fold", lambda mem, place, pos, moves, *a, **k: (folded.append(list(moves)), real(mem, place, pos, moves, *a, **k))[1])
     (world, ctx), legs = _walled_leg(Memory(tmp_path), GridEnv())
     result = world.travel(ctx, legs, 1)
 
-    assert result.bumps >= 1 and len(result.moves) > 2 and sum(folded) == len(result.moves)
+    units = [m for batch in folded for m in batch if isinstance(m, dict) and m.get("shift") not in ((0, 0), 0, None)]
+    expected = [m for m in result.moves if isinstance(m, dict) and m.get("shift") not in ((0, 0), 0, None)]
+    assert result.bumps >= 1 and len(result.moves) > 2 and world.pos == (10, 8)
+    assert [m["dir"] for m in units] == [m["dir"] for m in expected]
 
 
 def test_wall_bumped_mid_route_is_recorded_and_the_next_attempt_goes_around_it(tmp_path):
@@ -1465,12 +1489,24 @@ def test_three_bumps_end_the_travel_blocked_with_bumps_three(tmp_path, monkeypat
 
 
 def test_crossing_failure_from_the_exit_tile_marks_that_tile_pushed(tmp_path, monkeypatch):
-    from PIL import Image; from agent.skills import SkillResult; from agent import world as world_module; from tests.agent.fakes import GridEnv
+    from agent.skills import SkillResult; from agent import world as world_module; from tests.agent.fakes import GridEnv
 
-    frame, mem = Image.new("RGB", (8, 8), "red"), Memory(tmp_path); place(mem, "room", "room")
-    moves = [("RIGHT", (-16, 0)), ("RIGHT", (-16, 0))]
-    monkeypatch.setattr(world_module, "approach", lambda *_a, **_k: SkillResult("blocked", "exit not crossed", 2, 0, frame, frame, (0, 0), False, moves, failure={"stage": "crossing", "reason": "exit not crossed", "direction": "RIGHT"}))
-    world, ctx = _route_world(mem, GridEnv())
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    env = GridEnv(); original_frame = env._frame
+    def no_warp_frame():
+        door, env.door = env.door, (-5, -5)
+        try: original_frame()
+        finally: env.door = door
+    env._frame = no_warp_frame
+    def approach(ctx, *_a, **_k):
+        ctx.env.tick(); start = ctx.odometer.seq; before = ctx.env.screenshot(); moves = []
+        for _ in range(2):
+            at = ctx.odometer.seq; ctx.env.press("RIGHT"); moves.append({"dir": "RIGHT", "shift": (-16, 0), "at": at})
+        after = ctx.env.screenshot()
+        assert ctx.odometer.pixels_since(start, ctx.odometer.seq) == (-32, 0)
+        return SkillResult("blocked", "exit not crossed", 2, 0, before, after, (0, 0), False, moves, failure={"stage": "crossing", "reason": "exit not crossed", "direction": "RIGHT"})
+    monkeypatch.setattr(world_module, "approach", approach)
+    world, ctx = _route_world(mem, env)
     result = world.travel(ctx, [{"place": "room", "dirs": ["RIGHT", "RIGHT"], "push": "RIGHT"}], 1)
     world.failed_push(result, "room", (8, 8), "RIGHT", 2)
 
@@ -1479,15 +1515,29 @@ def test_crossing_failure_from_the_exit_tile_marks_that_tile_pushed(tmp_path, mo
 
 
 def test_scene_cut_mid_route_ends_the_leg_as_before(tmp_path, monkeypatch):
-    from PIL import Image; from agent.skills import SkillResult; from agent import world as world_module; from tests.agent.fakes import GridEnv
+    from agent.skills import SkillResult; from agent import world as world_module; from tests.agent.fakes import GridEnv
 
-    frame, mem = Image.new("RGB", (8, 8), "red"), Memory(tmp_path); place(mem, "room", "room")
-    moves = [("RIGHT", (-16, 0)), ("RIGHT", (-16, 0))]
-    monkeypatch.setattr(world_module, "approach", lambda *_a, **_k: SkillResult("done", "scene cut", 2, 0, frame, frame, (0, 0), False, moves))
-    world, ctx = _route_world(mem, GridEnv())
+    mem = Memory(tmp_path); place(mem, "room", "room"); place(mem, "hall", "hall")
+    mem.upsert("tiles", {"id": "room@10,8", "place": "room", "x": 10, "y": 8, "floor": True, "blocked": [], "pushed": [], "exit": {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "observed"}})
+    env = GridEnv(); original_frame = env._frame
+    def no_warp_frame():
+        door, env.door = env.door, (-5, -5)
+        try: original_frame()
+        finally: env.door = door
+    env._frame = no_warp_frame
+    def approach(ctx, *_a, **_k):
+        ctx.env.tick(); start = ctx.odometer.seq; before = ctx.env.screenshot(); moves = []
+        for _ in range(2):
+            at = ctx.odometer.seq; ctx.env.press("RIGHT"); moves.append({"dir": "RIGHT", "shift": (-16, 0), "at": at})
+        after = ctx.env.screenshot()
+        assert ctx.odometer.pixels_since(start, ctx.odometer.seq) == (-32, 0)
+        env._transition = 1; ctx.env.tick(3); after = ctx.env.screenshot()
+        return SkillResult("done", "scene cut", 2, 0, before, after, (0, 0), False, moves)
+    monkeypatch.setattr(world_module, "approach", approach)
+    world, ctx = _route_world(mem, env)
     result = world.travel(ctx, [{"place": "room", "dirs": ["RIGHT", "RIGHT"], "push": None}], 1)
 
-    assert result.status == "done" and result.reason.endswith("scene cut") and world._travel_open and world.pos == (9, 8)
+    assert result.status == "done" and result.reason.endswith("scene cut") and world._travel_open and world.pos == (10, 8)
 
 
 @pytest.mark.parametrize("actor", [True, False])
@@ -1855,18 +1905,195 @@ def test_unconfident_thing_label_shows_its_candidates(tmp_path):
 
 @pytest.mark.parametrize("final_view", [False, True])
 def test_forced_cut_folds_destination_once(tmp_path, monkeypatch, final_view):
+    from agent import world as world_module
     mem = Memory(tmp_path); place(mem, "source", "Source"); place(mem, "dest", "Dest")
     world = World(mem, 16)
-    frame = GridEnv().screenshot()
-    skill = SimpleNamespace(moves=[{"dir": "DOWN", "shift": (0, -160), "forced": True}, {"dir": "RIGHT", "shift": (-16, 0), "forced": True}, {"dir": "UP", "shift": (0, 80), "forced": True, "after_cut": True}], after=frame, arrival_frame=frame, scroll=(0, 0))
+    source, dest = camera(), camera(2); odo = world.odometer; world._odo_screen = {"screen": "world"}
+    seq, x, y = 0, 100, 100; odo(source(x, y), seq); seq, x, y = feed(odo, source, seq, x, y, 16, 160)
+    from PIL import Image
+    seq += 1; odo(Image.new("RGB", (160, 144), "white"), seq); seq += 1; odo(dest(200, 280), seq)
+    seq, x, y = feed(odo, dest, seq, 200, 280, 0, -80)
+    frame = dest(x, y)
+    skill = SimpleNamespace(moves=[{"dir": "RIGHT", "shift": (-16, 0), "at": 0}], after=frame, arrival_frame=frame, scroll=(0, 0))
     spatial = world.prepare(skill, "source", True, 2)
     assert spatial == {"cut_dir": "RIGHT", "exit_key": (1, 10, "RIGHT")}
     mem.arrival = ("dest", (4, 2) if final_view else (4, 7), "view" if final_view else "observed")
-    monkeypatch.setattr(mem, "seen_view", lambda *args, **kwargs: None)
+    folded, real_fold = [], world_module.fold
+    monkeypatch.setattr(world_module, "fold", lambda mem, place, pos, moves, *a, **k: (folded.extend(moves), real_fold(mem, place, pos, moves, *a, **k))[1])
     world.after(skill, "source", "dest", True, 2)
-    assert world.pos == (4, 2)
+    assert world.pos == (4, 2) and spatial["exit_key"] == (1, 10, "RIGHT")
+    assert [m["dir"] for m in folded if isinstance(m, dict) and m.get("shift") == (0, 16)] == ["UP"] * 5
     world.mark_exit("source", spatial["cut_dir"], "dest", world.pos, 2)
     assert mem.get("tiles", "source@1,10")["exit"]["arrive"] == [4, 7]
-    mem.arrival = ("dest", (4, 7), "observed")
-    world.pos = (0, 0); world.prepare(skill, "source", True, 3); world.after(skill, "source", "dest", True, 3)
-    assert world.pos == (4, 2)
+    folded_n, pos = len(folded), world.pos
+    assert world.odometer_start(seq, "dest", 3, {"screen": "world"}) is False and world.pos == pos == (4, 2) and len(folded) == folded_n
+
+
+def _odo_world(tmp_path, pid="room"):
+    mem = Memory(tmp_path); place(mem, pid, pid); world = World(mem, 16); world.current_place = pid; world._odo_screen = {"screen": "world"}
+    return mem, world
+
+
+def test_pixels_since_is_bounded_non_consuming_and_take_exposes_bounds(tmp_path):
+    _, world = _odo_world(tmp_path); odo = world.odometer; frame = camera(); odo(frame(100, 100), 0)
+    seq, x, y = feed(odo, frame, 0, 100, 100, 16, 0)
+    assert odo.pixels_since(0, seq - 2) == (-8, 0)
+    assert odo.pixels_since(0, seq) == (-16, 0)
+    seg = odo.take(through=seq)[0]
+    assert (seg["start"], seg["end"]) == (0, seq) and sum(m[1] for m in seg["moves"]) == -16
+
+
+def test_world_rounds_the_running_pixel_sum_at_tie_and_emits_unit_moves(tmp_path, monkeypatch):
+    from agent import world as world_module
+    _, world = _odo_world(tmp_path); frame = camera(); world.odometer(frame(100, 100), 0)
+    emitted, fold = [], world_module.fold
+    monkeypatch.setattr(world_module, "fold", lambda mem, place, pos, moves, *a, **k: (emitted.extend(moves), fold(mem, place, pos, moves, *a, **k))[1])
+    seq, x, y = feed(world.odometer, frame, 0, 100, 100, 24, 0)
+    for segment in world._odometer_drain(seq, "room", 1): world._odometer_fold(segment, "room", 1)
+    assert world.pos == (2, 0) and [m["shift"] for m in emitted] == [(-16, 0)] * 2
+
+
+def test_bump_at_seq_follows_camera_motion_from_that_frame(tmp_path):
+    _, world = _odo_world(tmp_path); frame = camera(); world.odometer(frame(100, 100), 0)
+    seq, x, y = feed(world.odometer, frame, 0, 100, 100, 16, 0)
+    bump = {"dir": "DOWN", "shift": (0, 0), "at": seq}
+    segment = world._odometer_drain(seq, "room", 1, [bump])[0]
+    world._odometer_fold(segment, "room", 1)
+    assert world.pos == (1, 0) and bump["_tile"] == (1, 0)
+
+
+def test_subtile_remainder_crosses_drains_once(tmp_path):
+    _, world = _odo_world(tmp_path); frame = camera(); world.odometer(frame(100, 100), 0)
+    seq, x, y = feed(world.odometer, frame, 0, 100, 100, 8, 0)
+    for segment in world._odometer_drain(seq, "room", 1): world._odometer_fold(segment, "room", 1)
+    assert world.pos == (0, 0) and world._odo_px == (-8, 0)
+    seq, x, y = feed(world.odometer, frame, seq, x, y, 8, 0)
+    for segment in world._odometer_drain(seq, "room", 2): world._odometer_fold(segment, "room", 2)
+    assert world.pos == (1, 0)
+
+
+def test_start_drain_folds_think_time_motion_before_world_projection(tmp_path):
+    _, world = _odo_world(tmp_path); world.odometer_begin(); frame = camera(); world.odometer(frame(100, 100), 0)
+    seq, _, _ = feed(world.odometer, frame, 0, 100, 100, 16, 0)
+    assert world.odometer_start(seq, "room", 3, {"screen": "world"}) is False
+    assert world.pos == (1, 0) and world.odometer_trace()["px"] == [-16, 0]
+
+
+def test_multi_cut_folds_first_and_last_segments_and_counts_middle(tmp_path, monkeypatch):
+    mem, world = _odo_world(tmp_path); place(mem, "dest", "Dest"); source, dest = camera(), camera(3); odo = world.odometer
+    seq, x, y = 0, 100, 100; odo(source(x, y), seq); seq, x, y = feed(odo, source, seq, x, y, 16, 0)
+    from PIL import Image
+    seq += 1; odo(Image.new("RGB", (160, 144), "white"), seq); seq += 1; odo(dest(200, 200), seq)
+    seq, x, y = feed(odo, dest, seq, 200, 200, 16, 0)
+    seq += 1; odo(Image.new("RGB", (160, 144), "white"), seq); seq += 1; odo(source(300, 300), seq)
+    seq, x, y = feed(odo, source, seq, 300, 300, 0, -16)
+    skill = SimpleNamespace(moves=[], after=SimpleNamespace(info={"frame_seq": seq}), arrival_frame=source(x, y), scroll=(0, 0))
+    world.prepare(skill, "room", True, 4); monkeypatch.setattr(world, "_locate", lambda place, frame: (4, 7)); world._odo_screen = {"screen": "world"}
+    world.after(skill, "room", "dest", True, 4)
+    assert world.pos == (4, 6) and world.odometer_trace()["dropped"] == 1
+
+
+def test_battle_style_full_band_motion_is_dropped_but_world_dialogue_folds(tmp_path):
+    mem, world = _odo_world(tmp_path); frame = camera(); world.odometer(frame(100, 100), 0)
+    seq, x, y = feed(world.odometer, frame, 0, 100, 100, 32, 0)
+    world._odo_screen = {"screen": "battle"}
+    for segment in world._odometer_drain(seq, "room", 1): world._odometer_fold(segment, "room", 1)
+    assert world.pos == (0, 0) and world.odometer_trace()["dropped"] == 1
+    world.odometer_begin(); world._odo_screen = {"screen": "dialogue"}
+    seq, x, y = feed(world.odometer, frame, seq, x, y, 16, 0)
+    for segment in world._odometer_drain(seq, "room", 2): world._odometer_fold(segment, "room", 2)
+    assert world.pos == (1, 0)
+
+
+def test_gap_after_restore_does_not_move_position(tmp_path):
+    _, world = _odo_world(tmp_path); world.pos = (3, 4); world.restore({"pos": [3, 4]})
+    world.odometer(None, 1)
+    for segment in world._odometer_drain(1, "room", 1): world._odometer_fold(segment, "room", 1)
+    assert world.pos == (3, 4) and world.odometer_trace()["gap"]
+
+
+def test_travel_plans_next_leg_from_the_drained_tile(tmp_path, monkeypatch):
+    from agent import world as world_module
+    from agent.skills import Ctx, SkillResult
+    from tests.agent.fakes import GridEnv
+    mem, world = _odo_world(tmp_path); env = GridEnv(); world.tracker.wrap(env); world.pa = [.5, .5]; ctx = Ctx(env, SimpleNamespace(calls=0), 16, odometer=world.odometer)
+    frame = camera(); seq = 0; x = y = 100; world.odometer(frame(x, y), seq); seen = []
+    def step(ctx, target, player, *, exit_target=None, route=None):
+        nonlocal seq, x, y
+        seen.append(world.pos); direction = route["dirs"][0]; dx, dy = (16, 0) if direction == "RIGHT" else (0, -16)
+        seq, x, y = feed(world.odometer, frame, seq, x, y, dx, dy)
+        image = frame(x, y); image.info["frame_seq"] = seq
+        return SkillResult("done", "", 1, 0, image, image, (-dx, -dy), False, [{"dir": direction, "shift": (-dx, -dy), "at": seq - 4}])
+    monkeypatch.setattr(world_module, "approach", step)
+    result = world.travel(ctx, [{"place": "room", "dirs": ["RIGHT"], "push": None}, {"place": "room", "dirs": ["UP"], "push": None}], 1)
+    assert result.status == "done" and seen == [(0, 0), (1, 0)] and world.pos == (1, -1)
+
+
+def test_three_tile_agent_route_uses_odometer_once(tmp_path, monkeypatch):
+    from agent import world as world_module
+    mem = Memory(tmp_path); place(mem, "room", "room"); env = GridEnv(); env.door, env.npc = (-5, -5), (-6, -6)
+    world, ctx = _route_world(mem, env); folded, real = [], world_module.fold
+    monkeypatch.setattr(world_module, "fold", lambda mem, place, pos, moves, *a, **k: (folded.extend(moves), real(mem, place, pos, moves, *a, **k))[1])
+    result = world.travel(ctx, [{"place": "room", "dirs": ["RIGHT"] * 3, "push": None}], 1)
+    units = [move for move in folded if isinstance(move, dict) and move.get("shift") not in ((0, 0), 0, None)]
+    assert result.status == "done" and result.inputs == 3 and world.pos == (11, 8)
+    assert [move["dir"] for move in units] == ["RIGHT"] * 3
+
+
+def test_route_cut_on_exit_tile_counts_crossing_and_lands_at_arrival(tmp_path, monkeypatch):
+    from agent import world as world_module
+    from agent.skills import Ctx, SkillResult
+    from tests.agent.fakes import GridEnv
+    mem, world = _odo_world(tmp_path, "source"); place(mem, "dest", "Dest")
+    mem.upsert("tiles", {"id": "source@1,0", "place": "source", "x": 1, "y": 0, "floor": True, "blocked": [], "pushed": [], "exit": {"dir": "RIGHT", "to": "dest", "arrive": [4, 7], "src": "observed"}, "step": 1})
+    env = GridEnv(); world.tracker.wrap(env); world.pa = [.5, .5]; ctx = Ctx(env, SimpleNamespace(calls=0), 16, odometer=world.odometer)
+    source, dest = camera(), camera(4); seq = 0; x = y = 100; world.odometer(source(x, y), seq)
+    def cut_step(ctx, target, player, *, exit_target=None, route=None):
+        nonlocal seq, x, y
+        seq, x, y = feed(world.odometer, source, seq, x, y, 16, 0)
+        from PIL import Image
+        seq += 1; world.odometer(Image.new("RGB", (160, 144), "white"), seq); seq += 1; world.odometer(dest(200, 200), seq)
+        image = dest(200, 200); image.info["frame_seq"] = seq
+        return SkillResult("done", "scene cut", 1, 0, image, image, (-16, 0), True, [{"dir": "RIGHT", "shift": (-16, 0), "at": 0}], arrival_frame=image)
+    monkeypatch.setattr(world_module, "approach", cut_step)
+    result = world.travel(ctx, [{"place": "source", "dirs": ["RIGHT"], "push": None, "expect": "dest", "exit_tile": (1, 0)}], 2)
+    assert result.status == "done" and world.pos == (4, 7), (result.status, result.reason, world.pos, world._travel_push, world._travel_segments)
+    assert mem.get("crossings", "source@1,0>dest")["n"] == 1
+
+
+def test_r17_walk_keeps_motion_after_600_frame_settle_cap(tmp_path):
+    from PIL import Image
+    from agent.loop import Loop
+    from agent.observer import wait_settled
+    from tests.agent.fakes import StubModel
+
+    class Walk(GridEnv):
+        def __init__(self, source, dest): super().__init__(); self.source, self.dest, self.mode, self.x, self.i = source, dest, "still", 100, 0
+        def screenshot(self):
+            if self.mode == "post" and self.i == 1: return Image.new("RGB", (160, 144), "white")
+            image = self.source if self.mode in ("still", "pre") else self.dest
+            return image.crop((self.x, 0, self.x + 160, 144))
+        def _frame(self):
+            if self.mode == "pre": self.x += 1
+            elif self.mode == "post":
+                if self.i == 0: self.i = 1
+                elif self.i == 1: self.i, self.x = 2, 100
+                else: self.x += 1
+            elif self.mode == "late": self.x += 1
+
+    mem = Memory(tmp_path); place(mem, "source", "Source"); place(mem, "dest", "Dest")
+    rng = __import__("numpy").random.default_rng(44)
+    source = Image.fromarray(rng.integers(0, 256, (144, 900, 3), dtype="uint8")); dest = Image.fromarray(rng.integers(0, 256, (144, 900, 3), dtype="uint8"))
+    env, model = Walk(source, dest), StubModel([]); loop = Loop(env, model, mem, "grid"); world = loop.world
+    world.current_place, world.pos, world._odo_screen = "source", (0, 0), {"screen": "world"}; world._locate = lambda *_: (0, 0)
+    odo = world.odometer; odo.tile_px = world.tile_px = 16; odo(env.screenshot(), 0)
+    env.mode = "pre"; odo.held = "A"; env.tick(16); odo.held = None; env.mode = "still"
+    before = env.screenshot(); before.info["frame_seq"] = env._frame_seq
+    skill = SimpleNamespace(moves=[{"dir": "RIGHT", "shift": (-16, 0), "at": 0}], after=SimpleNamespace(info={"frame_seq": env._frame_seq}), before=before, arrival_frame=None, scroll=(0, 0), blank_seen=True)
+    world.prepare(skill, "source", True, 1); env.mode, env.i = "post", 0
+    settled = wait_settled(env, max_frames=600, quiet=2)
+    assert settled.waited == 600 and not settled.settled
+    world._odo_screen = {"screen": "world"}; world._odo_through = odo.seq; world.after(skill, "source", "dest", True, 1)
+    assert world.pos == (37, 0)
+    env.mode = "late"; env.tick(26); world.odometer_begin(); world.odometer_start(odo.seq, "dest", 2, {"screen": "world"})
+    assert world.pos == (39, 0) and model.calls == loop.model.calls == 0

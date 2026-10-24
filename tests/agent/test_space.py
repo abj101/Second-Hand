@@ -288,7 +288,8 @@ def test_failed_push_is_recorded_on_departure_and_next_plan_tries_another_direct
 def test_blocked_push_keeps_only_blocked_evidence(tmp_path):
     from types import SimpleNamespace
     from agent.space import push_dirs
-    mem = Memory(tmp_path); world = World(mem, 16)
+    mem = Memory(tmp_path); mem.upsert("places", {"id": "room", "screen": "world", "state": "place"}); world = World(mem, 16)
+    world.before({"screen": "world", "entities": []}, "room", None, (160, 144), 1)
     skill = SimpleNamespace(failure={"stage": "crossing", "push": "LEFT"}, moves=[{"dir": "LEFT", "shift": (0, 0)}])
     world.prepare(skill, "room", False, 1); world.failed_push(skill, "room", (0, 0), "LEFT", 1)
     assert mem.get("tiles", "room@0,0")["blocked"] == ["LEFT"] and mem.get("tiles", "room@0,0")["pushed"] == []

@@ -54,6 +54,7 @@ class Odometer:
                 closed = segment["_end"] is not None and segment["_end"] <= limit
                 if not n and not closed: keep.append(segment); continue
                 part = {key: segment[key] for key in ("moves", "cut", "gap", "arrival", "frames", "uncertain")}
+                part["start"], part["end"] = (seqs[0], seqs[n - 1]) if n else (None, None)
                 part["moves"] = [move for move in segment["moves"] if move[0] <= limit]
                 part["frames"], part["uncertain"] = n, sum(seq <= limit for seq in segment["_uncertain"])
                 if n < len(seqs) or not closed: part["cut"], part["gap"] = None, False
@@ -64,6 +65,10 @@ class Odometer:
             self._open = keep[-1] if keep and keep[-1]["_end"] is None else self._new()
             self._segments = keep[:-1] if self._open is not None and keep and keep[-1] is self._open else keep
             return out
+    def pixels_since(self, seq, through=None):
+        with self.lock:
+            limit = self.seq if through is None else through
+            return tuple(sum(move[i] for segment in self._segments + [self._open] for move in segment["moves"] if seq < move[0] <= limit) for i in (1, 2))
     def reset(self):
         with self.lock: self._previous = None; self._segments, self._open, self._blank_wait = [], self._new(), False
 

@@ -33,8 +33,13 @@ def test_uncrossed_screen_route_records_the_callers_push(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "act", lambda *a, **k: SimpleNamespace(place="", ops=[], action={"thing": 1, "verb": "approach"}, why="test", text=None))
     def use(ctx, aff, per, **kwargs):
         assert kwargs["route"]["push"] == "LEFT"
-        frame = env.screenshot()
-        return SkillResult("blocked", "exit not crossed", 2, 0, frame, frame, (0, 0), False, [{"dir": "RIGHT", "shift": (-16, 0)}, {"dir": "LEFT", "shift": (16, 0)}], failure={"stage": "crossing", "reason": "exit not crossed"})
+        ctx.env.tick(); start = ctx.odometer.seq; before = env.screenshot(); at = ctx.odometer.seq; ctx.env.press("RIGHT")
+        assert ctx.odometer.pixels_since(at, ctx.odometer.seq) == (-16, 0)
+        back = ctx.odometer.seq; ctx.env.press("LEFT"); after = env.screenshot()
+        assert ctx.odometer.pixels_since(back, ctx.odometer.seq) == (16, 0)
+        return SkillResult("blocked", "exit not crossed", 2, 0, before, after, (0, 0), False,
+                           [{"dir": "RIGHT", "shift": (-16, 0), "at": at}, {"dir": "LEFT", "shift": (16, 0), "at": back}],
+                           failure={"stage": "crossing", "reason": "exit not crossed"})
     approach_stub(monkeypatch, use)
     loop = Loop(env, model, Memory(tmp_path / "memory"), "grid"); loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     row = loop.step()
@@ -124,9 +129,18 @@ def test_first_departure_crossing_is_verified_for_known_or_new_destination(tmp_p
 
     monkeypatch.setattr(loop_module, "cut", lambda *args, **kwargs: True)
     monkeypatch.setattr(loop_module, "effects", lambda *args, **kwargs: {"effects": ["place_changes"], "basis": {"place_changes": "pixel"}, "to": "destination"})
-    monkeypatch.setattr(loop_module, "run_affordance", lambda ctx, *args, **kwargs: SimpleNamespace(
-        status="done", reason="scene cut", inputs=1, calls=0, before=ctx.env.screenshot(), after=ctx.env.screenshot(),
-        scroll=(0, 0), blank_seen=True, moves=[{"dir": "RIGHT", "shift": (16, 0)}]))
+    perceived = 0; perceive = loop_module.perceive
+    def after_perception(model, image, ctx):
+        nonlocal perceived
+        perceived += 1
+        return perceive(model, image, ctx) if perceived == 1 else (perception(), reply(perception()))
+    monkeypatch.setattr(loop_module, "perceive", after_perception)
+    def run_affordance(ctx, *args, **kwargs):
+        ctx.env.tick(); at = ctx.odometer.seq; before = ctx.env.screenshot(); ctx.env.press("RIGHT"); after = ctx.env.screenshot()
+        assert ctx.odometer.pixels_since(at, ctx.odometer.seq) == (-16, 0)
+        return SimpleNamespace(status="done", reason="scene cut", inputs=1, calls=0, before=before, after=after,
+                               scroll=(0, 0), blank_seen=True, moves=[{"dir": "RIGHT", "shift": (16, 0), "at": at}])
+    monkeypatch.setattr(loop_module, "run_affordance", run_affordance)
     replies = [reply(perception()), act_reply(0, "place_changes")]
     model = StubModel(replies); mem = Memory(tmp_path / "memory")
     mem.upsert("places", {"id": "source", "name": "Source"})
@@ -144,6 +158,48 @@ def test_first_departure_crossing_is_verified_for_known_or_new_destination(tmp_p
 
     assert row["verified_edge"]
     assert model.calls == 2
+
+
+@pytest.mark.parametrize("blank", [True, False])
+def test_late_settle_cut_folds_source_continuation_before_matching(tmp_path, monkeypatch, blank):
+    from agent import loop as module
+    from agent.skills import SkillResult
+
+    class DelayedWarp(GridEnv):
+        def __init__(self, blank): super().__init__(); self.blank_cut = blank
+        def _frame(self):
+            if self.scene == 0 and self.player == self.door and not self._moving and not self._transition:
+                if self.blank_cut: self._transition = 1
+                else: self.scene, self.player = 1, (2, 8)
+                return
+            if self.scene == 0:
+                door, self.door = self.door, (-5, -5)
+                try: super()._frame()
+                finally: self.door = door
+            else: super()._frame()
+    env = DelayedWarp(blank); model = StubModel([]); source = {"screen": "world", "text": [], "entities": [
+        {"name": "player", "kind": "player", "at": [.5, .5]}, {"name": "exit: door", "kind": "exit", "at": [.7, .5]}]}
+    dest = {"screen": "world", "text": [], "entities": [{"name": "player", "kind": "player", "at": [.5, .5]}]}
+    monkeypatch.setattr(module, "perceive", lambda _m, _i, _c: (dest if env.scene else source, reply({})))
+    monkeypatch.setattr(module, "act", lambda *a, **k: SimpleNamespace(place="", ops=[], action={"thing": 1, "verb": "approach"}, why="late cut", text=None))
+    loop = Loop(env, model, Memory(tmp_path / "memory"), "grid"); loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    loop.mem.upsert("places", {"id": "source", "name": "Source", "screen": "world", "state": "place"})
+    loop.mem.upsert("places", {"id": "dest", "name": "Dest", "screen": "world", "state": "place"})
+    loop.mem.arrival = ("dest", (4, 7), "observed")
+    monkeypatch.setattr(loop.mem, "match_place", lambda per, _step, prev=None, cut=False, **_kw: "dest" if cut else "source")
+    def walk(ctx, *_a, **_kw):
+        before = ctx.env.screenshot(); at = ctx.odometer.seq; ctx.env.press("RIGHT"); after = ctx.env.screenshot()
+        assert ctx.odometer.pixels_since(at, ctx.odometer.seq) == (-16, 0)
+        ctx.env._direction, ctx.env._moving = "RIGHT", True  # the final settle advances one more source tile before the warp cut
+        return SkillResult("done", "", 1, 0, before, after, (-16, 0), False, [{"dir": "RIGHT", "shift": (-16, 0), "at": at}])
+    monkeypatch.setattr(module, "run_affordance", walk)
+
+    row = loop.step()
+
+    assert row["scene_cut"] and row["next_place"] == "dest" and row["exit"] == [2, 0, "RIGHT"]
+    assert row["odometer"]["px"] == [-32, 0] and row["odometer"]["cuts"] == 1
+    assert loop.world.pos == (4, 7) and loop.mem.get("crossings", "source@2,0>dest")["n"] == 1
+    assert model.calls == 0
 
 def test_twenty_steps_have_contract_keys_and_reuse(tmp_path):
     from collections import deque
@@ -536,7 +592,12 @@ def test_directional_world_exit_into_new_place_is_place_changes(tmp_path, monkey
     loop = Loop(env, model, Memory(tmp_path/"memory"), "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     def transition(ctx, aff, per, text=None, exit=False, route=None):
+        if moves:
+            direction = moves[-1][0]; loop.world.odometer.held = "A"; env._direction = direction; env._moving = True
+            for _ in range(8): env.tick()
+            env._direction = ""; loop.world.odometer.held = None
         before = env.screenshot(); env.scene = 1; after = env.screenshot()
+        env.tick()
         return SimpleNamespace(status="done", reason="scene cut", inputs=1, calls=0, moves=moves,
                                before=before, after=after, scroll=(0, 0), blank_seen=False)
     approach_stub(monkeypatch, transition)
@@ -2513,8 +2574,12 @@ def test_dialogue_forced_cut_records_only_navigable_crossing(tmp_path, monkeypat
     model = StubModel([reply(before), reply(dest)])
     monkeypatch.setattr(module, "act", lambda *a, **k: SimpleNamespace(place="", ops=[], action={"verb": "advance"}, expect="screen_changes", why="test", text=None))
     def transition(ctx, *args, **kwargs):
+        at = loop.world.odometer.seq; loop.world.odometer.held = "A"; env._direction = "UP"; env._moving = True
+        for _ in range(8): env.tick()
+        env._direction = ""; loop.world.odometer.held = None
         frame = env.screenshot(); env.scene = 1
-        return SimpleNamespace(status="done", reason="scene cut", inputs=1, calls=0, before=frame, after=env.screenshot(), scroll=(0, 0), blank_seen=True, moves=[{"dir": "DOWN", "shift": (0, -16), "forced": True, "last_dir": "UP"}])
+        env.tick()
+        return SimpleNamespace(status="done", reason="scene cut", inputs=1, calls=0, before=frame, after=env.screenshot(), scroll=(0, 0), blank_seen=True, moves=[{"dir": "UP", "shift": (0, 16), "at": at}])
     approach_stub(monkeypatch, transition)
     mem = Memory(tmp_path / "memory"); loop = Loop(env, model, mem, "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True

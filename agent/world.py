@@ -95,9 +95,11 @@ class World:
     def __init__(self, mem, tile_px):
         self.mem, self.tile_px = mem, tile_px
         self.tracker = Tracker(tile_px or 16)  # pixel tracks keep one id per moving thing; Loop wraps the env so it sees every frame
+        self.odometer = self.tracker.odometer; self.odometer.tile_px = tile_px; self._odo_px = (0, 0); self._odo_segments = []; self._odo_stats = None
+        self._odo_screen = None
         self.pos, self.drift, self.drift_ref = (0, 0), None, None
         self.entity_tiles, self.entity_ids, self.actor_tiles = {}, {}, frozenset()
-        self.entities, self.pa, self._prepared = [], None, None
+        self.entities, self.pa, self._prepared = [], None, None; self._prepared_segments, self._prepared_forced, self._prepared_scene_cut = [], False, False
         self.legend = {}
         self._observed_per = None
         self.novel = 0
@@ -167,9 +169,11 @@ class World:
         return image, True
     def before(self, per, place, prior, size, step, frame=None):
         self.current_place, self.size = place, size
+        self._odo_screen = per
         if per.get("screen") == "world": self.name(place, per.get("place"), step)
         if prior and place != prior:
             self.pos, self.drift, self.drift_ref = self._locate(place, frame), None, None
+            self._odo_px = (0, 0)
             self._observed_per = None; self.tracker.clear()
         player = next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         pa = self.self_spot if self._self_from_motion else self._anchor(per, size) if player else None
@@ -336,28 +340,136 @@ class World:
                 row = {**row, "misses": misses, "status": status}
             if row.get("status") != self.mem.get("entities", ident).get("status") or row.get("misses") != self.mem.get("entities", ident).get("misses"):
                 self.mem.upsert("entities", row)
-    def prepare(self, skill, place, scene_cut, step):
-        for move in getattr(skill, "moves", []):
-            if isinstance(move, dict) and move.get("no_response"): self.no_response += 1
-            elif move is not None and (move.get("shift") if isinstance(move, dict) else move[1]) is not None: self.no_response = 0
-        # ponytail: forced motion inside a travel leg is not followed.
+    def odometer_begin(self): self._odo_segments = []; self._odo_stats = {"frames": 0, "px": [0, 0], "uncertain": 0, "cuts": 0, "gap": False, "dropped": 0, "drained": False}
+    def odometer_trace(self): return {k: v for k, v in (self._odo_stats or {}).items() if k != "drained"} if self._odo_stats and self._odo_stats["drained"] else None
+    def _odometer_drain(self, through, place, step, bumps=(), next_per=None, next_place=None):
+        segments = self.odometer.take(through=through)
+        if self._odo_stats is None: self.odometer_begin()
+        stats = self._odo_stats; stats["drained"] |= any(not seg.get("_synthetic") for seg in segments)
+        screen, screen_place, cut = self._odo_screen or next_per, place, False
+        for segment in segments:
+            if cut: screen, screen_place = next_per or screen, next_place or place
+            segment["_screen"], segment["_place"] = screen, screen_place
+            stats["frames"] += segment["frames"]; stats["uncertain"] += segment["uncertain"]
+            stats["cuts"] += segment["cut"] is not None; stats["gap"] |= segment["gap"]
+            stats["px"] = [stats["px"][i] + sum(move[i + 1] for move in segment["moves"]) for i in (0, 1)]
+            cut |= segment.get("cut") is not None or segment.get("gap", False)
+        for move in bumps:
+            raw = move
+            if isinstance(move, (tuple, list)) and len(move) == 2: move = {"dir": move[0], "shift": move[1]}
+            if not isinstance(move, dict): continue
+            at = move.get("at") if move.get("at") is not None else through if through is not None else self.odometer.seq
+            if isinstance(raw, dict): raw.setdefault("at", at)
+            move = raw if isinstance(raw, dict) else dict(move, at=at)
+            i = next((i for i, seg in enumerate(segments) if seg["end"] is not None and at is not None and at <= seg["end"]), len(segments) - 1)
+            bump = move.get("shift") in ((0, 0), 0) or move.get("no_response") and move.get("shift") is None
+            if not bump:
+                if at is not None and i >= 0: segments[i].setdefault("_presses", []).append(move)
+                continue
+            if i < 0:
+                segments.append({"start": None, "end": None, "moves": [], "cut": None, "gap": False, "arrival": None, "frames": 0, "uncertain": 0, "_synthetic": True, "_screen": self._odo_screen, "_place": place})
+                i = 0
+            segments[i].setdefault("_bumps", []).append(move)
+        return segments
+    def odometer_start(self, through, place, step, next_per=None, next_place=None):
+        segments = self._odometer_drain(through, place, step, next_per=next_per, next_place=next_place)
+        stop = next((i for i, seg in enumerate(segments) if seg.get("cut") or seg.get("gap")), len(segments))
+        for segment in segments[:stop]: self._odometer_fold(segment, place, step)
+        if stop < len(segments):
+            if segments[stop].get("cut"): self._odometer_fold(segments[stop], place, step)
+            self._odo_stats["dropped"] += len(segments) - stop - 1 if segments[stop].get("cut") else len(segments) - stop
+        return any(segment.get("cut") for segment in segments)
+    def _odometer_fold(self, segment, place, step):
+        screen, place = segment.get("_screen"), segment.get("_place", place)
+        screen_name = screen.get("screen") if isinstance(screen, dict) else None
+        world_type = screen_name == "world" or screen_name in ("dialogue", "menu") and (self.mem.get("places", place) or {}).get("screen") == "world"
+        if not world_type or segment.get("gap"):
+            if self._odo_stats is not None: self._odo_stats["dropped"] += 1
+            if segment.get("cut") or segment.get("gap"): self._odo_px = (0, 0)
+            return None
+        if not self.tile_px or place == self.mem.unplaced:
+            if self._odo_stats is not None: self._odo_stats["dropped"] += 1
+            if segment.get("cut") or segment.get("gap"): self._odo_px = (0, 0)
+            return None
+        moves, px = [], list(self._odo_px); tile_delta, prev_delta, origin, last_dir = [0, 0], [0, 0], self.pos, None
+        events = [(m.get("at"), 1, m) for m in segment.get("_bumps", [])]
+        events.extend((m.get("at"), 1, m) for m in segment.get("_presses", []))
+        events.extend((seq, 0, (dx, dy, held)) for seq, dx, dy, held in segment["moves"])
+        for _seq, kind, move in sorted(events, key=lambda e: (e[0], e[1])):
+            if kind == 1:
+                move["_tile"] = (origin[0] + tile_delta[0], origin[1] + tile_delta[1])
+                if move.get("shift") in ((0, 0), 0) and move.get("dir") in DIRS:
+                    at = (origin[0] + tile_delta[0], origin[1] + tile_delta[1]); target = (at[0] + DIRS[move["dir"]][0], at[1] + DIRS[move["dir"]][1])
+                    self._promote(i for i, tile in self.entity_tiles.items() if tile == target)
+                    moves.append(move)
+                continue
+            dx, dy, _held = move; px[0] += dx; px[1] += dy
+            after = [round(-v / self.tile_px) for v in px]
+            for axis, unit in enumerate(after[i] - prev_delta[i] for i in (0, 1)):
+                if not unit: continue
+                direction = ("RIGHT" if unit > 0 else "LEFT") if axis == 0 else ("DOWN" if unit > 0 else "UP")
+                shift = [-self.tile_px if unit > 0 else self.tile_px, 0] if axis == 0 else [0, -self.tile_px if unit > 0 else self.tile_px]
+                moves.extend({"dir": direction, "shift": tuple(shift)} for _ in range(abs(unit))); tile_delta[axis] += unit; last_dir = direction
+            prev_delta = after
+        if not segment.get("gap") and moves: self.pos = fold(self.mem, place, self.pos, moves, self.tile_px, step, actors=self.actor_tiles)
+        self._odo_px = (0, 0) if segment.get("cut") or segment.get("gap") else tuple(px[i] + self.tile_px * prev_delta[i] for i in (0, 1))
+        return last_dir
+    @staticmethod
+    def _join_odometer_segments(segments):
+        joined = []
+        for segment in segments:
+            if joined and joined[-1].get("cut") is None and not joined[-1].get("gap") and joined[-1].get("end") is not None and segment.get("start") == joined[-1]["end"] + 1:
+                prior = joined[-1]; prior["moves"].extend(segment["moves"]); prior["frames"] += segment["frames"]; prior["uncertain"] += segment["uncertain"]
+                prior["end"], prior["cut"], prior["gap"] = segment["end"], segment["cut"], segment["gap"]
+                if prior.get("arrival") is None: prior["arrival"] = segment.get("arrival")
+            else: joined.append(dict(segment, moves=list(segment["moves"])))
+        return joined
+    def prepare(self, skill, place, scene_cut, step, through=None):
+        repeated = bool(self._prepared and self._prepared[0] is skill and self._prepared[1:3] == (place, step))
+        if not repeated:
+            for move in getattr(skill, "moves", []):
+                if isinstance(move, dict) and move.get("no_response"): self.no_response += 1
+                elif move is not None and (move.get("shift") if isinstance(move, dict) else move[1]) is not None: self.no_response = 0
+        after = getattr(skill, "after", None); after_frame = getattr(after, "frame", after)
+        after_seq = (getattr(after, "frame_stamp", None) or {}).get("frame_seq") or getattr(after_frame, "info", {}).get("frame_seq")
+        def late_cut_at(segments):
+            for i, segment in enumerate(segments):
+                if not segment.get("cut"): continue
+                following = segments[i + 1] if i + 1 < len(segments) else None
+                if after_seq is not None:
+                    if following and following.get("start") is not None and following["start"] > after_seq: return i
+                    if not following and segment.get("cut") == "blank" and segment.get("end") is not None and segment["end"] > after_seq: return i
+                elif following and (arrival := following.get("arrival")) is not None and after_frame is not None and arrival.size == after_frame.size and arrival.tobytes() != after_frame.tobytes(): return i
+            return None
         if skill is self._travelled:  # travel already folded pos up to the exit tile; an open cut still crosses from there
-            moves = skill.moves; cut_dir = (moves[-1].get("dir") if isinstance(moves[-1], dict) else moves[-1][0]) if self._travel_open and moves else None
+            moves = skill.moves; prior = getattr(self, "_travel_segments", []); self._travel_segments = []
+            late = self._odometer_drain(through, place, step) if through is not None else []
+            cut_at = late_cut_at(late)
+            if cut_at is None and scene_cut and not self._travel_cut: cut_at = next((i for i, segment in enumerate(late) if segment.get("cut")), None)
+            last_unit = None
+            if not self._travel_open:
+                for segment in late[:cut_at + 1 if cut_at is not None else len(late)]:
+                    last_unit = self._odometer_fold(segment, place, step) or last_unit
+                if cut_at is not None or scene_cut and not self._travel_cut: self._travel_open = self._travel_cut = True
+                self._prepared_segments = late if cut_at is not None else []
+            else: self._prepared_segments = [*prior, *late]
+            press_dir = (moves[-1].get("dir") if isinstance(moves[-1], dict) else moves[-1][0]) if moves else None
+            cut_dir = press_dir if self._travel_open and press_dir else last_unit
+            self._prepared_forced = bool((self._prepared_segments or prior) and any(move[3] not in DIRS for move in (self._prepared_segments or prior)[0]["moves"]))
+            self._prepared_scene_cut = scene_cut or self._travel_cut or cut_at is not None
             self._prepared = (skill, place, step, cut_dir, self.pos); return {"cut_dir": cut_dir, "exit_key": (*self.pos, cut_dir) if cut_dir and self.tile_px else None}
-        moves = [m for m in getattr(skill, "moves", []) if not isinstance(m, dict) or not m.get("after_cut")]; move_rows = moves[:-1] if scene_cut and moves and not (isinstance(moves[-1], dict) and moves[-1].get("forced")) else moves
-        at = self.pos
-        for move in move_rows:
-            direction, shift = (move.get("dir"), move.get("shift")) if isinstance(move, dict) else move
-            if direction not in DIRS: continue
-            if shift in ((0, 0), 0):
-                target = at[0] + DIRS[direction][0], at[1] + DIRS[direction][1]
-                self._promote(i for i, tile in self.entity_tiles.items() if tile == target)
-            elif self.tile_px and isinstance(shift, (tuple, int)):
-                dx, dy = ((round(-shift / self.tile_px), 0) if direction in ("LEFT", "RIGHT") else (0, round(-shift / self.tile_px))) if isinstance(shift, int) else (round(-v / self.tile_px) for v in shift)
-                n = max(abs(dx), abs(dy))
-                if n: at = (at[0] + ((dx > 0) - (dx < 0)) * n, at[1] + ((dy > 0) - (dy < 0)) * n)
-        if self.tile_px and place != self.mem.unplaced: self.pos = fold(self.mem, place, self.pos, move_rows, self.tile_px, step, actors=self.actor_tiles)
-        cut_dir = (moves[-1].get("last_dir") or moves[-1].get("dir") if isinstance(moves[-1], dict) else moves[-1][0]) if scene_cut and moves else None
+        through = through if through is not None else getattr(getattr(skill, "after", None), "info", {}).get("frame_seq", self.odometer.seq)
+        prior = self._prepared_segments if repeated else []
+        prior_cut = bool(repeated and self._prepared_scene_cut)
+        moves = getattr(skill, "moves", []); segments = self._odometer_drain(through, place, step, () if repeated else moves)
+        self._prepared_segments = [*prior, *segments]
+        self._prepared_scene_cut = scene_cut or (self._prepared_scene_cut if repeated else False) or late_cut_at(self._prepared_segments) is not None
+        first = segments[0] if segments else None; last_unit = self._odometer_fold(first, place, step) if first and not prior_cut else None
+        evidence = prior[0] if prior else first
+        self._prepared_forced = bool(evidence and any(move[3] not in DIRS for move in evidence["moves"]))
+        for move in moves:
+            if isinstance(move, dict) and move.get("dir") in DIRS: last_press = move.get("dir")
+        cut_dir = (locals().get("last_press") or last_unit or (self._prepared[3] if repeated else None)) if self._prepared_scene_cut else None
         self._prepared = (skill, place, step, cut_dir, self.pos)
         return {"cut_dir": cut_dir, "exit_key": (*self.pos, cut_dir) if cut_dir and self.tile_px else None}
 
@@ -375,6 +487,7 @@ class World:
             skill = press(ctx, direction)
             scene_cut = skill.blank_seen or cut(skill.before, skill.after)
             self.prepare(skill, place, scene_cut, step)
+            scene_cut = self._prepared_scene_cut
             result.update(presses=result["presses"] + skill.inputs, skill=skill, scene_cut=scene_cut)
             if not scene_cut: self.after(skill, place, place, False, step)
             move = skill.moves[-1] if skill.moves else {}
@@ -392,24 +505,34 @@ class World:
         shift = moves[-1].get("shift") if isinstance(moves[-1], dict) else moves[-1][1]
         if shift not in ((0, 0), 0): push_failed(self.mem, place, tile, direction, step)
     def after(self, skill, place, next_place, scene_cut, step):  # call after prepare() for the same step
+        through = getattr(self, "_odo_through", self.odometer.seq); self._odo_through = None
         if skill is self._travelled and not self._travel_open:
             self.current_place = next_place
-            return {"known_exit": None, "scroll": list(skill.scroll) if skill.scroll is not None else None}
+            for segment in self._odometer_drain(through, next_place, step): self._odometer_fold(segment, next_place, step)
+            return {"known_exit": None}
         cut_dir = self._prepared[3]
         known_exit = exit_to(self.mem, place, self.pos, cut_dir) if scene_cut and cut_dir else None
+        segments = self._join_odometer_segments([*getattr(self, "_prepared_segments", []), *self._odometer_drain(through, place, step)])
+        self._prepared_segments = []
+        after_cut = False
+        for segment in segments:
+            if after_cut: segment["_screen"], segment["_place"] = self._odo_screen, next_place
+            after_cut |= segment.get("cut") is not None or segment.get("gap", False)
         if scene_cut and next_place != place:
-            final_view = (self._seen_at(next_place) or (None, None))[1] == "view"
-            arrival = getattr(skill, "arrival_frame", None)
-            self.pos = self._locate(next_place, getattr(skill, "after", None) if final_view or arrival is None else arrival)
-            tail = [m for m in skill.moves if isinstance(m, dict) and m.get("after_cut")]
-            delta = tuple(sum(round(-m["shift"][i] / self.tile_px) for m in tail) for i in (0, 1)) if self.tile_px else (0, 0)
-            if tail: self._prepared = (*self._prepared[:5], tuple(self.pos[i] - delta[i] for i in (0, 1)) if final_view else self.pos)
-            if not final_view and self.tile_px and next_place != self.mem.unplaced: self.pos = fold(self.mem, next_place, self.pos, tail, self.tile_px, step)
-            if cut_dir: self._cross(place, self._prepared[4], next_place, self.pos, step)  # a crossing takes a press in a direction
+            last = segments[-1] if len(segments) > 1 else None
+            self._odo_stats["dropped"] += max(0, len(segments) - 2)
+            arrival = last.get("arrival") if last else None
+            view = self._seen_at(next_place); located = self._locate(next_place, arrival or getattr(skill, "after", None))
+            delta = tuple(round(-sum(move[i + 1] for move in last["moves"]) / self.tile_px) for i in (0, 1)) if view and view[1] == "view" and last and self.tile_px else (0, 0)
+            arrival_pos = tuple(located[i] - delta[i] for i in (0, 1)); self.pos = arrival_pos; self._prepared = (*self._prepared, arrival_pos)
+            self._odo_px = (0, 0)
+            if len(segments) > 1: self._odometer_fold(last, next_place, step)
+            if cut_dir: self._cross(place, self._prepared[4], next_place, arrival_pos, step)  # a crossing takes a press in a direction
             self.drift = self.drift_ref = None
             self.entity_tiles = self.entity_ids = {}
-        return {"known_exit": known_exit,
-                "scroll": list(skill.scroll) if skill.scroll is not None else None}
+        else:
+            for segment in segments[1:]: self._odometer_fold(segment, place, step)
+        return {"known_exit": known_exit}
     def _cross(self, src, tile, dst, arrive, step):
         """Count a crossing on its departure tile only."""
         if tile: self._count(src, tuple(tile), dst, step)
@@ -482,7 +605,7 @@ class World:
             else:
                 self._self_contradictions = 0
         if place == self.mem.unplaced and frame is not None and self.tile_px and (hit := self.mem.seen_view(frame, None, None, self.tile_px, only=place)):
-            self.pos, self.mem.unplaced = tuple(hit[1]), None  # a stored view says where you are: positions count again
+            self.pos, self.mem.unplaced = tuple(hit[1]), None; self._odo_px = (0, 0)  # a stored view says where you are: positions count again
         player = next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         aa = self.self_spot if self._self_from_motion else self._anchor(per, size) if player else None
         tiles = self._tiles(per, aa, size, place)
@@ -507,7 +630,7 @@ class World:
                 at = self.mem.seen_view(frame, None, None, self.tile_px, only=place) if drift and drift == self.drift and frame is not None else None
                 if at and tuple(at[1]) != (self.pos[0] + dx, self.pos[1] + dy): self.drift = self.drift_ref = None  # stored views say where we are: entity drift was noise
                 elif drift and drift == self.drift:
-                    self.pos = (self.pos[0] + dx, self.pos[1] + dy); drift_fix = (dx, dy)
+                    self.pos = (self.pos[0] + dx, self.pos[1] + dy); self._odo_px = (0, 0); drift_fix = (dx, dy)
                     tiles = {i: (p[0] + dx, p[1] + dy) for i, p in tiles.items()}
                     for ident, tile in current.items():
                         row = self.mem.get("entities", ident)
@@ -559,6 +682,7 @@ class World:
 
     def restore(self, state):
         self.pos, self.drift = tuple(state.get("pos", (0, 0))), tuple(state["drift"]) if state.get("drift") else None
+        self._odo_px, self._prepared_segments = (0, 0), []
         self.drift_ref, self.entity_tiles = state.get("drift_ref"), state.get("entity_tiles", {})
         self.entity_ids = {int(i): v for i, v in state.get("entity_ids", {}).items()}
         self.legend = dict(state.get("legend") or {})
@@ -1330,7 +1454,8 @@ class World:
         else: legs.append({"place": p, "dirs": dirs + ([facing] if facing else []), "push": None, "expect": None, "target": target})
         return legs
     def travel(self, ctx, legs, step, trace=None):
-        results, inputs, place, bumps = [], 0, self.current_place, 0; self._travel_cut = self._travel_open = False; self._travel_push = self._travel_push_from = None; self._travel_bumps = 0; self._travel_screen_leg = len(legs) == 1 and (legs[0].get("target") or {}).get("kind") == "screen"  # open: a cut travel could not place; the loop re-identifies
+        results, inputs, place, bumps = [], 0, self.current_place, 0; self._travel_cut = self._travel_open = False; self._travel_push = self._travel_push_from = None; self._travel_bumps = 0; self._travel_segments = []; self._travel_screen_leg = len(legs) == 1 and (legs[0].get("target") or {}).get("kind") == "screen"  # open: a cut travel could not place; the loop re-identifies
+        if self._odo_screen is None: self._odo_screen = {"screen": (self.mem.get("places", place) or {}).get("screen")}
         for n, leg in enumerate(legs, 1):
             if inputs >= TRAVEL_MAX_INPUTS: break
             if leg["place"] != place: return self._travel_result(results, "blocked", f"leg {n} unexpected place", ctx)
@@ -1342,8 +1467,11 @@ class World:
                 self._travel_push = current.get("push") or (current["dirs"][-1] if current.get("expect") and current["dirs"] else None)
                 results.append(result); inputs += result.inputs
                 # the skill checks every press for a cut; first vs last frame of a long walk is a scroll, not a cut (m1_decide2 replay step 42)
-                is_cut = result.reason == "scene cut" or result.blank_seen; self._travel_cut |= is_cut; self.pos = fold(self.mem, place, self.pos, result.moves[:-1], self.tile_px, step, actors=self.actor_tiles); self._travel_push_from = self.pos  # the tile the last press was made from
-                if not is_cut and result.moves: self.pos = fold(self.mem, place, self.pos, result.moves[-1:], self.tile_px, step, actors=self.actor_tiles)
+                through = getattr(result.after, "info", {}).get("frame_seq", self.odometer.seq)
+                self._travel_segments = self._odometer_drain(through, place, step, result.moves)
+                is_cut = result.reason == "scene cut" or result.blank_seen or any(segment.get("cut") for segment in self._travel_segments); self._travel_cut |= is_cut
+                for segment in self._travel_segments[:1] if is_cut else self._travel_segments: self._odometer_fold(segment, place, step)
+                self._travel_push_from = tuple(result.moves[-1].get("_tile", self.pos)) if result.moves and isinstance(result.moves[-1], dict) else self.pos
                 if result.reason == "no response" and not is_cut: return self._travel_result(results, "blocked", f"leg {n} no response", ctx)
                 target = current.get("target") or {}; target_tile = target.get("tile"); directions = [m.get("dir") if isinstance(m, dict) else m[0] for m in result.moves]
                 screen_facing = not current.get("push") and not current.get("cross") and target.get("kind") == "screen" and target_tile and current["dirs"] and directions == current["dirs"] and tuple(self.pos[i] + DIRS[current["dirs"][-1]][i] for i in (0, 1)) == tuple(target_tile)
@@ -1363,7 +1491,9 @@ class World:
             if leg.get("expect"):
                 if not is_cut and result.failure and result.failure.get("stage") == "route": return self._travel_result(results, "blocked", f"leg {n} route blocked", ctx)  # the route never reached the exit: not an exit mismatch
                 arrival = self._arrival(result.after, trace) if trace else None
-                edge = exit_to(self.mem, place, tuple(leg["exit_tile"]), leg["push"])
+                cut_dir = leg.get("push") or next((m.get("dir") if isinstance(m, dict) else m[0] for m in reversed(result.moves) if m), None)
+                for segment in self._travel_segments[1:]: segment["_place"], segment["_screen"] = leg["expect"], {"screen": (self.mem.get("places", leg["expect"]) or {}).get("screen")}
+                edge = exit_to(self.mem, place, tuple(leg["exit_tile"]), cut_dir)
                 if not is_cut:
                     key = _cross_key(place, tuple(leg["exit_tile"]), leg["expect"]); row = self.mem.get("crossings", key) or {"id": key, "n": 0}
                     self.mem.upsert("crossings", {**row, "miss": row.get("miss", 0) + 1}); push_failed(self.mem, place, tuple(leg["exit_tile"]), self._travel_push, step)
@@ -1373,8 +1503,10 @@ class World:
                 mismatch = wrong or not edge or edge.get("to") != leg["expect"] or arrival and tuple(edge["arrive"]) != arrival[1]
                 if mismatch:
                     if not arrival: self._travel_open = True; return self._travel_result(results, "blocked", f"leg {n} exit mismatch", ctx)
-                    mark_exit(self.mem, place, tuple(leg["exit_tile"]), leg["push"], *arrival[:2], step); self._cross(place, tuple(leg["exit_tile"]), arrival[0], arrival[1], step)
+                    mark_exit(self.mem, place, tuple(leg["exit_tile"]), cut_dir, *arrival[:2], step); self._cross(place, tuple(leg["exit_tile"]), arrival[0], arrival[1], step)
                     self.pos, place = arrival[:2][1], arrival[0]; self._land(place)
+                    if len(self._travel_segments) > 1: self._odometer_fold(self._travel_segments[-1], place, step); self._odo_stats["dropped"] += max(0, len(self._travel_segments) - 2)
+                    self._travel_segments = []
                     return self._travel_result(results, "blocked", f"leg {n} {'arrival' if wrong or edge and edge.get('to') == leg['expect'] else 'exit'} mismatch", ctx)
                 if not arrival and edge.get("src") == "inferred":
                     self.mem.match_place({"screen": "world"}, step, prev=place, cut=True, exit=(*leg["exit_tile"], edge.get("dir")))
@@ -1383,6 +1515,8 @@ class World:
                 self._cross(place, tuple(leg["exit_tile"]), leg["expect"], arrive, step)
                 self.pos, place = arrive, leg["expect"]
                 self._land(place)
+                if len(self._travel_segments) > 1: self._odometer_fold(self._travel_segments[-1], place, step); self._odo_stats["dropped"] += max(0, len(self._travel_segments) - 2)
+                self._travel_segments = []
             elif result.status != "done" and not (result.reason == "route blocked" and (self._facing_target(current, result) or screen_facing)):
                 return self._travel_result(results, result.status, f"leg {n} {result.reason or result.status}", ctx)
             if is_cut and not leg.get("expect"): self._travel_open = True; return self._travel_result(results, "done", f"leg {n} scene cut", ctx)  # a real cut, not a failure; the loop re-identifies the place
@@ -1394,7 +1528,7 @@ class World:
         digest = hashlib.sha256(image.tobytes()).hexdigest(); live = {p["id"] for p in self.mem.rows("places") if p.get("state") != "merged"}; rows = map(json.loads, trace.path.open(encoding="utf8"))
         matches = {(row["place"], tuple(prior["tile"]), row.get("screen")) for prior, row in pairwise(rows) if row.get("frame_hash") == digest and prior.get("place") in live and row.get("place") in live and prior.get("next_place") == row["place"] and prior.get("tile")}; return next(iter(matches)) if len(matches) == 1 else None
     def _land(self, place):
-        self.current_place, self.drift, self.drift_ref = place, None, None; self.entity_tiles, self.entity_ids, self.actor_tiles = {}, {}, frozenset()
+        self.current_place, self.drift, self.drift_ref = place, None, None; self._odo_px = (0, 0); self.entity_tiles, self.entity_ids, self.actor_tiles = {}, {}, frozenset()
     def _facing_target(self, leg, result):
         target = leg.get("target"); dx, dy = DIRS[leg["dirs"][-1]] if leg["dirs"] else (0, 0)
         if not target or target.get("kind") != "memory" or [m.get("dir") if isinstance(m, dict) else m[0] for m in result.moves] != leg["dirs"]: return False
@@ -1459,5 +1593,5 @@ class World:
             if (s, o) != (r.get("s"), r.get("o")): self.mem.upsert("relations", {**r, "s": s, "o": o})
         p = self.mem.get("places", src)
         self.mem.upsert("places", {**p, "state": "merged", "into": dst, "offset": [dx, dy]})
-        if self.current_place == src: self.pos = (self.pos[0] + dx, self.pos[1] + dy); self.current_place = dst
+        if self.current_place == src: self.pos = (self.pos[0] + dx, self.pos[1] + dy); self._odo_px = (0, 0); self.current_place = dst
         return True
