@@ -90,6 +90,15 @@ def test_unverified_exit_three_tiles_away_stays_a_separate_possible_exit(tmp_pat
     assert any(l.startswith("go through Hall,") for l in labels) and any(l.startswith("walk onto stairs,") for l in labels)
 
 
+def test_unverified_exit_walk_onto_is_failed_only_once_a_push_on_its_tile_failed(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, [{"name": "exit: doorway", "kind": "exit", "at": at(2, 0)}])
+    walk = lambda: next(o for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["label"].startswith("walk onto doorway"))
+    assert walk()["state"] == "new"
+    mem.upsert("tiles", {**mem.get("tiles", "room@2,0"), "blocked": ["UP"]})
+    assert walk()["state"] == "failed"
+
+
 def test_two_verified_exits_with_different_destinations_next_to_each_other_stay_two(tmp_path):
     mem = Memory(tmp_path); room(mem)
     mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)

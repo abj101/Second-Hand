@@ -21,7 +21,7 @@ def test_uncrossed_exit_rows_offer_each_push_and_keep_tried_facts(tmp_path):
     push_failed(mem, "room", (2, 0), "LEFT", 3)
     row = mem.get("tiles", "room@2,0"); mem.upsert("tiles", {**row, "blocked": ["RIGHT"]})
     rows = [o for o in world.options(per, "room", {}, 4, inputs=INPUTS) if o["ref"] == "exit:2,0"]
-    assert len(rows) == 1 and rows[0]["state"] == "new" and rows[0]["action"] == {"thing": 1, "verb": "approach", "onto": True}
+    assert len(rows) == 1 and rows[0]["state"] == "failed" and rows[0]["action"] == {"thing": 1, "verb": "approach", "onto": True}
     assert rows[0]["notes"] == ["exit, never crossed", "pressed LEFT: moved, no exit", "pressed RIGHT: blocked"]
     failed = world.options(per, "room", {rows[0]["intent_key"]: {"n": 1, "why": "route blocked", "step": 4}}, 5, inputs=INPUTS)
     walk = [o for o in failed if o["ref"] == "exit:2,0"]
