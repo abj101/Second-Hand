@@ -1242,10 +1242,6 @@ class World:
                 label = f"explore {direction}, {route.get('steps', len(route['dirs']))} steps, {route.get('unseen', 0)} unseen cells that way"
                 ref = f"explore:{place}:{direction.casefold()}"
                 explores.append(option("explore", label, {"go_to": "unexplored", "dir": direction}, "approach", "unexplored", ref))
-            tile = self.mem.get("tiles", f"{place}@{self.pos[0]},{self.pos[1]}") or {}
-            if place != self.mem.unplaced and set(DIRS) <= set(tile.get("blocked", [])):
-                for direction in DIRS:
-                    explores.append({**option("buttons", f"press {direction} here: remembered wall from step {tile['step']}", {"buttons": [direction]}), "state": "failed"})
             for p in self.mem.rows("places"):
                 pid = p["id"]
                 if pid == place or pid not in live or p.get("screen") != "world": continue
