@@ -112,7 +112,11 @@ class GridEnv:
             self._moving = dest not in self.walls and not (self.scene == 0 and dest == self.npc)
         for _ in range(max(0, frames) + 8):
             self._frame()
-            if on_frame: on_frame(self.screenshot())
+            if on_frame:
+                image = self.screenshot()
+                if key in self._steps and not self._moving and dest != self.player and _ < 4:
+                    ImageDraw.Draw(image).rectangle((79, self._top - 1, 80, self._top), fill=(245, 140, 120))
+                on_frame(image)
         if self.wander: self._wander_step()
         self._direction = ""
     def click(self, at: list[float]) -> None: raise NotImplementedError("GridEnv has no pointer input")

@@ -657,3 +657,13 @@ def test_live_menu_charges_every_request_and_refuses_beyond_the_cap():
     model.ask("s", "u", role="act"); model.ask("s", "u retry", role="act")  # a retry is a request too
     with pytest.raises(CallCap): model.ask("s", "u", role="act")
     assert model.requests == 2 and len(charged) == 2
+
+
+def test_free_row_reports_and_clears_consecutive_no_response(tmp_path):
+    mem = Memory(tmp_path); room(mem); world, per = setup(mem, [])
+    skill = SimpleNamespace(moves=[{"dir": "UP", "shift": None, "no_response": True}] * 2)
+    world.prepare(skill, "room", False, 2)
+    free = lambda: next(r for r in world.options(per, "room", {}, 3, inputs=INPUTS) if r["action"] is None)
+    assert "your last 2 presses changed nothing on screen" in free()["notes"]
+    world.prepare(SimpleNamespace(moves=[{"dir": "UP", "shift": (0, -16)}]), "room", False, 3)
+    assert not any("changed nothing" in note for note in free()["notes"])

@@ -545,3 +545,19 @@ def test_press_sequence_keeps_following_moves_after_cut(monkeypatch):
     monkeypatch.setattr(skills, "press", lambda *_: next(results))
     result = press_seq(ctx(env), ["A", "UP"])
     assert not result.moves[0].get("after_cut") and result.moves[1]["after_cut"]
+
+
+@pytest.mark.parametrize("animated", [False, True])
+def test_no_response_is_not_an_animated_bump(tmp_path, monkeypatch, animated):
+    from agent import skills
+    from agent.memory import Memory
+    from agent.space import fold
+    class Bump(GridEnv):
+        def press(self, key, frames=8, on_frame=None):
+            if animated and on_frame:
+                frame = self.screenshot(); frame.putpixel((0, 0), (255, 0, 0)); on_frame(frame)
+    env = Bump(); monkeypatch.setattr(skills, "scroll", lambda *a, **k: (0, 0))
+    result = skills.press(ctx(env), "RIGHT"); move = result.moves[0]
+    assert move["shift"] == ((0, 0) if animated else None) and bool(move.get("no_response")) == (not animated)
+    mem = Memory(tmp_path); assert fold(mem, "room", (0, 0), result.moves, 16, 1) == (0, 0)
+    assert (mem.get("tiles", "room@0,0") or {}).get("blocked", []) == (["RIGHT"] if animated else [])

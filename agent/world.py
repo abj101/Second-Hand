@@ -95,7 +95,7 @@ class World:
         self._observed_per = None
         self.novel = 0
         self.current_place = None
-        self.unsettled = False
+        self.unsettled, self.no_response = False, 0
         self._travelled = None
         self._last_miss_hash = {}
         self.self_spot, self._self_contradictions, self._self_from_motion = None, 0, False
@@ -330,6 +330,9 @@ class World:
             if row.get("status") != self.mem.get("entities", ident).get("status") or row.get("misses") != self.mem.get("entities", ident).get("misses"):
                 self.mem.upsert("entities", row)
     def prepare(self, skill, place, scene_cut, step):
+        for move in getattr(skill, "moves", []):
+            if isinstance(move, dict) and move.get("no_response"): self.no_response += 1
+            elif move is not None and (move.get("shift") if isinstance(move, dict) else move[1]) is not None: self.no_response = 0
         # ponytail: forced motion inside a travel leg is not followed.
         if skill is self._travelled:  # travel already folded pos up to the exit tile; an open cut still crosses from there
             moves = skill.moves; cut_dir = (moves[-1].get("dir") if isinstance(moves[-1], dict) else moves[-1][0]) if self._travel_open and moves else None
@@ -1109,6 +1112,7 @@ class World:
             blocked = ", ".join(d for d in DIRS if d in tile.get("blocked", [])) or "none"
             failed = ", ".join(f"{f['act'][len('buttons '):]} x{f['n']}" for _, _, f in hits[:4])
             row["notes"] = [f"blocked directions: {blocked}"] + ([f"failed here: {failed}"] if failed else [])
+            if self.no_response: row["notes"].append(f"your last {self.no_response} presses changed nothing on screen")
             row["state"] = "new"
             return row
         free_label = "free buttons" + (f": {', '.join(inputs)}" if inputs else "")

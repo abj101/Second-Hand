@@ -47,7 +47,11 @@ def _crossing(exit_target): return {"stage": "crossing", "reason": "exit not cro
 def _step(ctx, direction, before):
     frames = []
     ctx.env.press(direction, ctx.move_frames, on_frame=frames.append)
-    end = _settled(ctx); shifts = [scroll(a, b) for a, b in zip([before, *frames], frames)]
+    end = _settled(ctx)
+    if all(f.tobytes() == before.tobytes() for f in [*frames, end.frame]):
+        end.no_response = True; ctx._last_residual_box, ctx._last_residual_box_coverage = None, 0
+        return end, None, end.blank_seen, None
+    shifts = [scroll(a, b) for a, b in zip([before, *frames], frames)]
     if any(s is None for s in shifts):
         move = scroll(before, end.frame, max_shift=max(4, ctx.tile_px or 16))
         ctx._last_residual_box, ctx._last_residual_box_coverage = None, 0
@@ -88,7 +92,7 @@ def approach(ctx: Ctx, target_at: list[float], player_at: list[float] | None, *,
     total, blocked, inputs, last_dir, pushed, axis_dirs, moves = [0, 0], set(), 0, None, False, {}, []
     result = lambda *args, **kw: _result(*args, moves=moves, **kw)
     def step(direction, old):
-        end, move, saw_blank, self_at = _step(ctx, direction, old); moves.append({"dir": direction, "shift": move, "self_at": self_at}); return end, move, saw_blank
+        end, move, saw_blank, self_at = _step(ctx, direction, old); moves.append({"dir": direction, "shift": move, "self_at": self_at, **({"no_response": True} if getattr(end, "no_response", False) else {})}); return end, move, saw_blank
     if route is not None:
         dirs = route.get("dirs", [])[:max(0, ctx.max_inputs)]
         for direction in dirs:
@@ -224,7 +228,7 @@ def press(ctx: Ctx, key: str) -> SkillResult:
     if key is None or ctx.max_inputs < 1: return _result("blocked", "unsupported input" if key is None else "input limit", 0, 0, start.frame, start.frame, blank=start.blank_seen)
     end, move, blank, self_at = _step(ctx, key, start.frame) if key in ("UP", "DOWN", "LEFT", "RIGHT") else (None, None, False, None)
     if end is None: ctx.env.press(key, ctx.move_frames); end = _settled(ctx)
-    return _result("done", "", 1, 0, start.frame, end.frame, blank=start.blank_seen or end.blank_seen or blank, moves=[{"dir": key, "shift": move, "self_at": self_at}] if key in ("UP", "DOWN", "LEFT", "RIGHT") else _forced(end), self_at=self_at, arrival_frame=end.arrival_frame)
+    return _result("done", "", 1, 0, start.frame, end.frame, blank=start.blank_seen or end.blank_seen or blank, moves=[{"dir": key, "shift": move, "self_at": self_at, **({"no_response": True} if getattr(end, "no_response", False) else {})}] if key in ("UP", "DOWN", "LEFT", "RIGHT") else _forced(end), self_at=self_at, arrival_frame=end.arrival_frame)
 @_tracked
 def press_seq(ctx: Ctx, keys: list[str]) -> SkillResult:
     if not keys: frame = ctx.env.screenshot(); return _result("failed", "no keys", 0, 0, frame, frame)
