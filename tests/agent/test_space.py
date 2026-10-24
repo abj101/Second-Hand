@@ -312,3 +312,11 @@ def test_once_bumped_walls_allow_fallback_and_later_bumps_become_firm(tmp_path, 
     fold(mem, "room", (0, 0), [("DOWN", (0, -16))], 16, 3)
     row = Memory(tmp_path).get("tiles", "room@0,0")
     assert "DOWN" not in row["blocked"] and row["firm"] == []
+
+
+def test_wall_confirmed_only_by_rebump_after_it_was_written(tmp_path):
+    mem = Memory(tmp_path)
+    fold(mem, "room", (0, 0), [("DOWN", (0, 0))], 16, 1)
+    fold(mem, "room", (0, 0), [("RIGHT", (0, 0)), ("DOWN", (0, 0))], 16, 2)
+    row = mem.get("tiles", "room@0,0")
+    assert row["firm"] == ["DOWN"] and "RIGHT" in row["blocked"]

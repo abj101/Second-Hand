@@ -12,18 +12,19 @@ def fold(mem, place, pos, moves, tile_px, step, actors: frozenset[tuple[int, int
         if move is None: continue
         direction, shift = (move.get("dir"), move.get("shift")) if isinstance(move, dict) else move
         if direction not in DIRS or shift is None: continue
-        row = _get(mem, place, here) or _new(place, here, step); before = dict(row, blocked=list(row["blocked"]), pushed=list(row["pushed"]), **({"held": list(row["held"])} if "held" in row else {}), **({"firm": list(row["firm"])} if "firm" in row else {}))
+        row = _get(mem, place, here) or _new(place, here, step); before = dict(row, blocked=list(row["blocked"]), pushed=list(row["pushed"]), **({"held": list(row["held"])} if "held" in row else {}), **({"firm": list(row["firm"])} if "firm" in row else {}), **({"walled": dict(row["walled"])} if "walled" in row else {}))
         if (shift == (0, 0) or shift == 0) and (here[0] + DIRS[direction][0], here[1] + DIRS[direction][1]) in actors:
             if direction not in row.get("held", []): row.setdefault("held", []).append(direction); row["step"] = step
             _save(mem, row, before); continue
         if row["floor"] is not True: row["floor"] = True; row["step"] = step
         mem.learn_look(place, here, "floor", step)
         if shift == (0, 0) or shift == 0:
-            if direction in row["blocked"] and step > row["step"] and direction not in row.get("firm", []): row.setdefault("firm", []).append(direction)
-            if direction not in row["blocked"]: row["blocked"].append(direction); row["step"] = step
+            if direction in row["blocked"] and step > row.get("walled", {}).get(direction, row["step"]) and direction not in row.get("firm", []): row.setdefault("firm", []).append(direction)
+            if direction not in row["blocked"]: row["blocked"].append(direction); row["step"] = step; row.setdefault("walled", {})[direction] = step
             dx, dy = DIRS[direction]; mem.learn_look(place, (here[0] + dx, here[1] + dy), "wall", step)
             _save(mem, row, before); continue
         if direction in row["blocked"]: row["blocked"].remove(direction)
+        row.get("walled", {}).pop(direction, None)
         if direction in row.get("firm", []): row["firm"].remove(direction)
         if direction in row.get("held", []): row["held"].remove(direction)
         sx, sy = DIRS[direction]; shift = (shift, 0) if isinstance(shift, int) and sx else (0, shift) if isinstance(shift, int) else shift
