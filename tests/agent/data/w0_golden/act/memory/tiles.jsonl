@@ -1,5 +1,6 @@
 {"blocked":[],"exit":null,"floor":true,"id":"p_place@0,0","place":"p_place","pushed":[],"step":1,"x":0,"y":0}
 {"blocked":[],"exit":null,"floor":true,"id":"p_place@1,0","place":"p_place","pushed":[],"step":1,"x":1,"y":0}
-{"blocked":[],"exit":{"arrive":[0,0],"dir":"RIGHT","src":"observed","to":"p_place_2"},"floor":true,"id":"p_place@1,0","place":"p_place","pushed":[],"step":1,"x":1,"y":0}
-{"blocked":[],"exit":{"arrive":[1,0],"dir":"LEFT","src":"inferred","to":"p_place"},"floor":true,"id":"p_place_2@0,0","place":"p_place_2","pushed":[],"step":1,"x":0,"y":0}
+{"blocked":[],"exit":null,"floor":true,"id":"p_place@2,0","place":"p_place","pushed":[],"step":1,"x":2,"y":0}
+{"blocked":[],"exit":{"arrive":[0,0],"dir":"RIGHT","src":"observed","to":"p_place_2"},"floor":true,"id":"p_place@2,0","place":"p_place","pushed":[],"step":1,"x":2,"y":0}
+{"blocked":[],"exit":{"arrive":[2,0],"dir":"LEFT","src":"inferred","to":"p_place"},"floor":true,"id":"p_place_2@0,0","place":"p_place_2","pushed":[],"step":1,"x":0,"y":0}
 {"blocked":[],"exit":null,"floor":true,"id":"p_place_2@1,0","place":"p_place_2","pushed":[],"step":2,"x":1,"y":0}
