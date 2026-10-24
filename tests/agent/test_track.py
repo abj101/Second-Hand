@@ -220,3 +220,110 @@ def test_live_snapshot_and_wait_consume_exact_returned_sequences_during_race():
     waited = env.wait_frame(snapshot, timeout=1)
     assert waited.frame_seq == 3 and seen == [1, 2, 3]
     assert tracker.live_seq == 3
+
+
+def test_odometer_sums_camera_scroll_at_1_2_and_4_pixels_per_frame():
+    from agent.track import Odometer
+    for step in (1, 2, 4):
+        odo = Odometer(); odo(frame(0), 0)
+        for seq in range(1, 9): odo(frame(seq * step), seq)
+        moves = odo.take()[0]["moves"]
+        assert sum(move[1] for move in moves) == -8 * step and all(move[2] == 0 for move in moves)
+
+
+def test_odometer_ignores_static_hud_and_sliding_dialogue_band():
+    from PIL import ImageDraw
+    from agent.track import Odometer
+    base = frame(0); hud = base.copy(); ImageDraw.Draw(hud).rectangle((0, 0, W, 15), fill="white")
+    box = hud.copy(); ImageDraw.Draw(box).rectangle((0, 110, W, 143), fill="black")
+    text = box.copy(); ImageDraw.Draw(text).text((8, 116), "A short message", fill="white")
+    odo = Odometer(); odo(base, 0); odo(hud, 1); odo(box, 2); odo(text, 3)
+    seg = odo.take()[0]
+    assert seg["moves"] == [] and seg["cut"] is None and seg["uncertain"] == 3
+
+
+def test_odometer_splits_fade_and_keeps_destination_arrival():
+    from PIL import Image
+    from agent.track import Odometer
+    odo = Odometer(); odo(frame(0), 0)
+    for seq in range(1, 4): odo(frame(seq), seq)
+    odo(Image.new("RGB", (W, H), "black"), 4)
+    odo(frame(100), 5)
+    for seq in range(6, 9): odo(frame(100 + seq - 5), seq)
+    first, second = odo.take()
+    assert first["cut"] == "blank" and sum(move[1] for move in first["moves"]) == -3
+    assert second["arrival"].tobytes() == frame(100).tobytes() and sum(move[1] for move in second["moves"]) == -3
+
+
+def test_odometer_marks_instant_cut_without_blank():
+    from PIL import Image
+    from agent.track import Odometer
+    odo = Odometer(); odo(frame(0), 0); destination = Image.fromarray(blocks(H, W, 8)); odo(destination, 1)
+    first, second = odo.take()
+    assert first["cut"] == "jump" and second["arrival"].tobytes() == destination.tobytes()
+
+
+def test_odometer_counts_ambiguous_text_frame_without_motion():
+    from PIL import ImageDraw
+    from agent.track import Odometer
+    base = frame(0); text = base.copy(); ImageDraw.Draw(text).rectangle((0, 120, W, 143), fill="white")
+    odo = Odometer(); odo(base, 0); odo(text, 1); seg = odo.take()[0]
+    assert not seg["moves"] and seg["uncertain"] == 1 and seg["cut"] is None
+
+
+def test_odometer_discontinuity_closes_a_gap_segment():
+    from agent.track import Odometer
+    odo = Odometer(); odo(frame(0), 0); odo(None, 1); seg = odo.take()[0]
+    assert seg["gap"] and seg["frames"] == 1
+
+
+def test_odometer_take_through_leaves_later_frames_for_next_drain():
+    from agent.track import Odometer
+    odo = Odometer(); odo(frame(0), 0)
+    for seq in range(1, 4): odo(frame(seq), seq)
+    first = odo.take(through=2); second = odo.take()
+    assert [m[0] for s in first for m in s["moves"]] == [1, 2]
+    assert [m[0] for s in second for m in s["moves"]] == [3]
+
+
+def test_odometer_concurrent_take_does_not_lose_10000_frames():
+    from threading import Event, Thread
+    from agent.track import Odometer
+    odo, done, counts, sums = Odometer(), Event(), [], []
+    image = frame(0)
+    def write():
+        for seq in range(10000): odo(image, seq)
+        done.set()
+    def read():
+        while not done.is_set():
+            batches = odo.take(); counts.extend(s["frames"] for s in batches); sums.extend(m[1] for s in batches for m in s["moves"])
+        batches = odo.take(); counts.extend(s["frames"] for s in batches); sums.extend(m[1] for s in batches for m in s["moves"])
+    writer = Thread(target=write); reader = Thread(target=read); writer.start(); reader.start(); writer.join(); reader.join()
+    assert sum(counts) == 10000 and sum(sums) == 0
+
+
+def test_odometer_waits_through_repeated_blank_frames():
+    from PIL import Image
+    from agent.track import Odometer
+    black = Image.new("RGB", (W, H), "black"); odo = Odometer(); odo(frame(0), 0)
+    odo(black, 1); odo(black, 2); odo(frame(50), 3)
+    segments = odo.take()
+    assert len([s for s in segments if s["cut"] == "blank"]) == 1
+    assert segments[-1]["arrival"].tobytes() == frame(50).tobytes()
+
+
+def test_odometer_held_label_is_set_while_tracked_press_runs():
+    from agent.track import Tracker
+    class ListeningEnv:
+        def __init__(self): self.listeners = []; self.frame = frame(0)
+        def listen(self, fn): self.listeners.append(fn)
+        def screenshot(self): return self.frame
+        def tick(self, frames=1): pass
+        def press(self, key, frames=8, on_frame=None):
+            for seq in range(1, 4):
+                self.frame = frame(seq)
+                for fn in self.listeners: fn(self.frame, seq)
+                if on_frame: on_frame(self.frame)
+    tracker = Tracker(); env = tracker.wrap(ListeningEnv()); env.press("RIGHT", 3)
+    assert any(move[3] == "RIGHT" for seg in tracker.odometer.take() for move in seg["moves"])
+    assert tracker.odometer.held is None

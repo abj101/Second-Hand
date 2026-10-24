@@ -1,18 +1,78 @@
 """Object tracks: pixels keep one id per thing between perceptions (0 requests). The vision model names things; this follows them.
 Every emulated frame goes through Tracker.update (wrap() hooks an env). A static track moves with the camera only; an actor track also
 centres on the pixels that changed beyond the camera shift near it (its own motion); lost = still and its patch is gone."""
+from threading import RLock
 from types import SimpleNamespace
 
 import numpy as np
-from agent.observer import changed, scroll
+from agent.observer import _blank, changed, frame_shift, scroll
 
 LOST_SCORE, GONE_FRAMES, BLOB = 30.0, 24, 6  # mean abs diff above which a still patch is no longer there; frames lost before "gone"; changed pixels that count as motion
+
+class Odometer:
+    def __init__(self, tile_px=None):
+        self.tile_px, self.lock, self.seq, self.held = tile_px, RLock(), None, None
+        self._previous = None
+        self._segments, self._open, self._blank_wait = [], self._new(), False
+    @staticmethod
+    def _new(): return {"moves": [], "cut": None, "gap": False, "arrival": None, "frames": 0, "uncertain": 0, "_seqs": [], "_uncertain": [], "_end": None}
+    def _close(self, cut=None, gap=False, seq=None):
+        self._open["cut"], self._open["gap"], self._open["_end"] = cut, gap, seq
+        self._segments.append(self._open); self._open = self._new()
+        self._previous = None
+    def __call__(self, frame, seq):
+        with self.lock: previous, blank_wait = self._previous, self._blank_wait
+        if frame is not None:
+            arr = np.asarray(frame).astype(np.int16)
+            if previous is not None and np.array_equal(previous, arr):
+                with self.lock: self.seq = seq; self._open["frames"] += 1; self._open["_seqs"].append(seq)
+                return
+            blank = _blank(frame)
+            shift = None if blank or previous is None else frame_shift(previous, arr, 4, self.tile_px)
+        with self.lock:
+            self.seq = seq
+            if frame is None: self._close(gap=True, seq=seq); return
+            if blank_wait and blank: return
+            self._open["frames"] += 1; self._open["_seqs"].append(seq)
+            if blank:
+                self._close("blank", seq=seq); self._blank_wait = True; return
+            if self._blank_wait: self._blank_wait = False
+            if previous is None or self._previous is None: self._open["arrival"] = frame.copy()
+            elif shift == "cut":
+                self._open["frames"] -= 1; self._open["_seqs"].pop()
+                self._close("jump", seq=seq - 1)
+                self._open["frames"], self._open["_seqs"], self._open["arrival"] = 1, [seq], frame.copy()
+            elif shift is None: self._open["uncertain"] += 1; self._open["_uncertain"].append(seq)
+            elif any(shift): self._open["moves"].append((seq, *shift, self.held))
+            self._previous = arr
+    def take(self, through=None):
+        with self.lock:
+            limit = self.seq if through is None else through
+            out, keep = [], []
+            for segment in self._segments + [self._open]:
+                seqs = segment["_seqs"]; n = sum(seq <= limit for seq in seqs)
+                closed = segment["_end"] is not None and segment["_end"] <= limit
+                if not n and not closed: keep.append(segment); continue
+                part = {key: segment[key] for key in ("moves", "cut", "gap", "arrival", "frames", "uncertain")}
+                part["moves"] = [move for move in segment["moves"] if move[0] <= limit]
+                part["frames"], part["uncertain"] = n, sum(seq <= limit for seq in segment["_uncertain"])
+                if n < len(seqs) or not closed: part["cut"], part["gap"] = None, False
+                out.append(part)
+                if not closed:
+                    rest = self._new(); rest.update({"moves": [move for move in segment["moves"] if move[0] > limit], "_seqs": [seq for seq in seqs if seq > limit], "_uncertain": [seq for seq in segment["_uncertain"] if seq > limit], "frames": len(seqs) - n, "uncertain": sum(seq > limit for seq in segment["_uncertain"]), "cut": segment["cut"], "gap": segment["gap"], "arrival": None if n else segment["arrival"], "_end": segment["_end"]})
+                    keep.append(rest)
+            self._open = keep[-1] if keep and keep[-1]["_end"] is None else self._new()
+            self._segments = keep[:-1] if self._open is not None and keep and keep[-1] is self._open else keep
+            return out
+    def reset(self):
+        with self.lock: self._previous = None; self._segments, self._open, self._blank_wait = [], self._new(), False
 
 class Tracker:
     def __init__(self, tile_px: int = 16):
         self.tile_px, self.tracks, self.frame, self.arr, self.ignore = tile_px, {}, None, None, []  # ignore: boxes (x0, y0, x1, y1) of screen-fixed motion, set by World
         self.phase = None  # (px, py): pixel phase of sprite centres, set by World from the player's motion-locked spot; None = unknown
         self.live_generation = self.live_seq = self.live_cursor = None
+        self.odometer = Odometer(tile_px)
     def clear(self): self.tracks = {}; self.frame = self.arr = None
     def _snap(self, x, y):
         # ponytail: assumes sprites at rest sit on the player's tile grid (true for grid games like Pokemon); a free-moving game needs a pixel search instead.
@@ -99,6 +159,16 @@ class Tracker:
     def wrap(self, env):
         """Feed every emulated frame to update(): press via on_frame, tick via a screenshot. Composes with later press wrappers."""
         press, tick = env.press, env.tick
+        listen = getattr(env, "listen", None); listening = callable(listen)
+        if listening: listen(self.odometer)
+        fallback_seq = 0; fallback_started = False
+        def gap():
+            nonlocal fallback_started
+            if not listening and fallback_seq and not fallback_started: self.odometer(None, fallback_seq)
+            fallback_started = True
+        def odo(frame):
+            nonlocal fallback_seq, fallback_started
+            if not listening: fallback_seq += 1; fallback_started = False; self.odometer(frame, fallback_seq)
         snapshot, wait_frame, frames_after = (getattr(env, name, None) for name in ("snapshot", "wait_frame", "frames_after"))
         live = all(callable(method) for method in (snapshot, wait_frame, frames_after))
         if live:
@@ -112,14 +182,23 @@ class Tracker:
                 return item
             env.snapshot, env.wait_frame = tracked_snapshot, tracked_wait_frame
         def tracked_press(key, frames=8, on_frame=None):
+            gap()
+            with self.odometer.lock: self.odometer.held = key
             def both(image):
+                odo(image)
                 if live: self._consume_live(image)
                 else: self.update(image)
                 on_frame and on_frame(image)
-            return press(key, frames, on_frame=both)
+            try: return press(key, frames, on_frame=both)
+            finally:
+                with self.odometer.lock: self.odometer.held = None
         def tracked_tick(frames=1):
-            tick(frames)
+            gap()
+            if listening: tick(frames)
+            else:
+                for _ in range(frames):
+                    tick(1); image = env.screenshot(); odo(image); self.update(image)
             if live: self._catch_up(frames_after)
-            else: self.update(env.screenshot())
+            elif listening: self.update(env.screenshot())
         env.press, env.tick = tracked_press, tracked_tick
         return env
