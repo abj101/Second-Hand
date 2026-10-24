@@ -1389,6 +1389,22 @@ def test_conversation_without_speaker_keeps_a_text_name_as_a_guess(tmp_path):
     assert loop.mem.get("entities", "person")["called_src"]["tier"] == "text"
 
 
+@pytest.mark.parametrize("who", [None, "thing:person"])
+def test_joined_conversation_splits_speakers_without_confirming_a_name(tmp_path, who):
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.mem.upsert("entities", {"id": "person", "name": "person", "kind": "npc", "place": "room"})
+    loop.mem.call("person", "PROF", 1, tier="text")
+    text = "Gramps! I'm fed up with waiting! OAK: BLUE? Let me think... Oh, that's right, I told you to come! Just wait! Here, RED ! There are 3 POKéMON here! Haha! They are inside the POKé BALLs. When I was young, I was a serious POKéMON trainer! In my old age, I have only 3 left, but you can have one! Choose! BLUE: Hey! Gramps! What about me? OAK: Be patient! BLUE, you can have one too!"
+    loop.conversation = {"place": None, "lines": [text], "who": who}
+    loop._flush_conversation(2)
+    rows = loop.notebook.data["text"]
+    assert [row["speaker"] for row in rows] == [None, "OAK", "BLUE", "OAK"]
+    assert [row["who"] for row in rows] == [who] * 4 and all(row["step"] == 2 for row in rows)
+    assert rows[0]["text"] == "Gramps! I'm fed up with waiting!" and rows[2]["text"] == "Hey! Gramps! What about me?"
+    assert loop.text_for_trigger == text
+    assert loop.mem.get("entities", "person")["called_src"]["tier"] == "text"
+
+
 
 
 

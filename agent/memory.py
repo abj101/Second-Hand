@@ -85,7 +85,7 @@ def place_aliases(row: dict | None) -> list[str]:
 
 # ponytail: calibrated on Red's house 1F/2F (same floor >=.958 within 4 tiles, other floor <=.789);
 # pixel-identical interiors in different towns (Poke Centers) will match: add a graph-consistency check then.
-VIEW_MATCH, VIEW_REACH = .9, 4
+VIEW_MATCH, VIEW_REACH = .9, 6
 
 
 def _thumb(frame) -> np.ndarray:
@@ -218,7 +218,7 @@ class Memory:
             return prev  # the run-start place is never promoted: the first map is minted below, so pre-map screens stay out of it
         exclude = None if back else prev
         if cut and frame is not None and (hit := self.seen_view(frame, screen, exclude, tile_px)):
-            self.arrival_exit = None; self.arrival = (*hit, "view")  # place, tile, source
+            self.arrival_exit = None; self.arrival = (*hit[:2], "view")  # place, tile, source
             row = self.get("places", hit[0])
             return self.upsert("places", {**row, "visits": row.get("visits", 0) + 1, "last": step})["id"]
         if cut and prev and exit:  # the exact exit, else every known exit within one tile (position drifts) if they agree on where they lead
@@ -236,6 +236,8 @@ class Memory:
                                "state": "candidate", "visits": 1,
                                "blocked": [],
                                "first": step, "last": step})
+        if cut and frame is not None and (hit := self.seen_view(frame, screen, prev, tile_px, at_least=.5)):
+            self.upsert("places", {**self.get("places", pid), "looks_like": [hit[0], round(hit[2], 2), step]})
         self.arrival_exit = None; self.arrival = (pid, (0, 0), "new")  # a new place's frame starts where you stand
         return pid
 
@@ -247,10 +249,10 @@ class Memory:
         self.upsert("views", {"id": vid, "place": place, "pos": list(pos), "shape": list(q.shape),
                               "q": base64.b64encode(q.tobytes()).decode()})
 
-    def seen_view(self, frame, screen: str, exclude: str | None, tile_px: int | None, only: str | None = None):
-        """(place, tile) of the known view this frame matches, allowing whole-tile camera scroll; `only` = look up where you are in that place."""
+    def seen_view(self, frame, screen: str, exclude: str | None, tile_px: int | None, only: str | None = None, at_least: float = VIEW_MATCH):
+        """(place, tile, score) of the known view this frame matches, allowing whole-tile camera scroll; `only` = look up where you are in that place."""
         q, best, step = _thumb(frame), None, (tile_px or 0) // 2
-        reach = range(-VIEW_REACH, VIEW_REACH + 1) if step else (0,)
+        reach = sorted(range(-VIEW_REACH, VIEW_REACH + 1), key=abs) if step else (0,)
         for v in self.rows("views"):
             place, (ox, oy), row = self._home(v["place"])
             # views are only stored on world screens, so no screen-type check: a place first seen under a dialogue box keeps type "dialogue" (m1_gp5: bedroom re-minted on return)
@@ -259,9 +261,9 @@ class Memory:
             for dy in reach:
                 for dx in reach:
                     score = _view_score(stored, q, dx * step, dy * step)
-                    if score >= VIEW_MATCH and (best is None or score > best[0]):
+                    if score >= at_least and (best is None or score > best[0]):
                         best = (score, place, (v["pos"][0] + ox + dx, v["pos"][1] + oy + dy))
-        return best[1:] if best else None
+        return (*best[1:], best[0]) if best else None
 
     def _home(self, place: str):
         """Live place a (possibly merged) place now lives in, its tile offset there, and that place's row."""
