@@ -2105,7 +2105,9 @@ def test_repeated_destination_goes_around_a_known_blocker_when_a_detour_exists(t
 
 def test_repeated_destination_without_a_detour_is_a_zero_input_failure_and_options_are_untouched(tmp_path, monkeypatch):
     loop, model, seen = crate_scene(monkeypatch, tmp_path)
+    monkeypatch.setattr("agent.world.route", lambda *a, **kw: None)  # this fixture has no travel detour; fallback re-tests are covered in test_space
     enclose(loop, "p_place"); loop.step()  # walled in from the start: the fallback route goes through the seen crate and stops there
+    tile = loop.mem.get("tiles", "p_place@0,0"); loop.mem.upsert("tiles", {**tile, "firm": list(tile["blocked"])})  # this fixture's blocker is confirmed; unconfirmed walls are re-tested
     row = loop.step(); again = loop.step()
     assert len(seen["routes"]) == 1  # no skill ran after the first: nothing was pressed
     assert {k: row["skill"][k] for k in ("status", "reason", "inputs", "calls")} == {"status": "blocked", "reason": "no route avoids blocker", "inputs": 0, "calls": 0}

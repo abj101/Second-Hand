@@ -12,17 +12,19 @@ def fold(mem, place, pos, moves, tile_px, step, actors: frozenset[tuple[int, int
         if move is None: continue
         direction, shift = (move.get("dir"), move.get("shift")) if isinstance(move, dict) else move
         if direction not in DIRS or shift is None: continue
-        row = _get(mem, place, here) or _new(place, here, step); before = dict(row, blocked=list(row["blocked"]), pushed=list(row["pushed"]), **({"held": list(row["held"])} if "held" in row else {}))
+        row = _get(mem, place, here) or _new(place, here, step); before = dict(row, blocked=list(row["blocked"]), pushed=list(row["pushed"]), **({"held": list(row["held"])} if "held" in row else {}), **({"firm": list(row["firm"])} if "firm" in row else {}))
         if (shift == (0, 0) or shift == 0) and (here[0] + DIRS[direction][0], here[1] + DIRS[direction][1]) in actors:
             if direction not in row.get("held", []): row.setdefault("held", []).append(direction); row["step"] = step
             _save(mem, row, before); continue
         if row["floor"] is not True: row["floor"] = True; row["step"] = step
         mem.learn_look(place, here, "floor", step)
         if shift == (0, 0) or shift == 0:
+            if direction in row["blocked"] and step > row["step"] and direction not in row.get("firm", []): row.setdefault("firm", []).append(direction)
             if direction not in row["blocked"]: row["blocked"].append(direction); row["step"] = step
             dx, dy = DIRS[direction]; mem.learn_look(place, (here[0] + dx, here[1] + dy), "wall", step)
             _save(mem, row, before); continue
         if direction in row["blocked"]: row["blocked"].remove(direction)
+        if direction in row.get("firm", []): row["firm"].remove(direction)
         if direction in row.get("held", []): row["held"].remove(direction)
         sx, sy = DIRS[direction]; shift = (shift, 0) if isinstance(shift, int) and sx else (0, shift) if isinstance(shift, int) else shift
         dx, dy = (round(-v / tile_px) for v in shift); count = max(abs(dx), abs(dy)); sx = (dx > 0) - (dx < 0); sy = (dy > 0) - (dy < 0)
@@ -63,7 +65,7 @@ def route(mem, place, start, goal, strict=True, *, occupied=frozenset()):  # str
             nxt = (at[0] + dx, at[1] + dy)
             cell = _get(mem, place, nxt)
             edge = row.get("exit") or {}
-            if direction in row.get("blocked", []) or (strict or edge.get("src") != "inferred") and direction == edge.get("dir") or nxt in seen or nxt in occupied or nxt in static and nxt != goal or cell and cell.get("floor") is False and nxt != goal or not (bounds[0] <= nxt[0] <= bounds[1] and bounds[2] <= nxt[1] <= bounds[3]): continue
+            if direction in row.get("blocked", []) and (strict or direction in row.get("firm", [])) or (strict or edge.get("src") != "inferred") and direction == edge.get("dir") or nxt in seen or nxt in occupied or nxt in static and nxt != goal or cell and cell.get("floor") is False and nxt != goal or not (bounds[0] <= nxt[0] <= bounds[1] and bounds[2] <= nxt[1] <= bounds[3]): continue
             seen.add(nxt); queue.append((nxt, path + [direction]))
     return route(mem, place, start, goal, False, occupied=occupied) if strict else None
 def outward(mem, place, tile, placement=None):

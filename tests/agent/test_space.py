@@ -47,7 +47,7 @@ def test_fold_walk_blocked_and_none(tmp_path):
     assert blank.rows("tiles") == []
     fold(blank, "hall", (0, 0), [("RIGHT", (0, 0))], 16, 2)
     lines = (tmp_path / "blank" / "tiles.jsonl").read_text().splitlines()
-    fold(blank, "hall", (0, 0), [("RIGHT", (0, 0))], 16, 3)
+    fold(blank, "hall", (0, 0), [("RIGHT", (0, 0))], 16, 2)
     assert len((tmp_path / "blank" / "tiles.jsonl").read_text().splitlines()) == len(lines)
 
 
@@ -89,6 +89,7 @@ def test_route_detours_around_wall_and_allows_unknown_goal(tmp_path):
     tile(mem, "hall", (1, 0), floor=False)
     assert route(mem, "hall", (0, 0), (2, 0))[0] != "RIGHT"
     mem.get("tiles", "hall@0,0")["blocked"] = ["RIGHT", "UP", "DOWN", "LEFT"]
+    mem.get("tiles", "hall@0,0")["firm"] = list(DIRS)
     assert route(mem, "hall", (0, 0), (2, 0)) is None
 
 
@@ -292,3 +293,22 @@ def test_blocked_push_keeps_only_blocked_evidence(tmp_path):
     world.prepare(skill, "room", False, 1); world.failed_push(skill, "room", (0, 0), "LEFT", 1)
     assert mem.get("tiles", "room@0,0")["blocked"] == ["LEFT"] and mem.get("tiles", "room@0,0")["pushed"] == []
     assert "LEFT" not in push_dirs(mem, "room", (0, 0))
+
+
+def test_once_bumped_walls_allow_fallback_and_later_bumps_become_firm(tmp_path, monkeypatch):
+    from agent import space
+    mem = Memory(tmp_path)
+    fold(mem, "room", (0, 0), [(d, (0, 0)) for d in DIRS], 16, 1)
+    original = space.route; fallbacks = []
+    def fallback(*args, **kw):
+        fallbacks.append(args[4]); return original(*args, **kw)
+    monkeypatch.setattr(space, "route", fallback)
+    assert original(mem, "room", (0, 0), (0, 2)) == ["DOWN", "DOWN"] and fallbacks == [False]
+    fold(mem, "room", (0, 0), [("DOWN", (0, 0))], 16, 1)
+    assert mem.get("tiles", "room@0,0").get("firm", []) == []
+    fold(mem, "room", (0, 0), [("DOWN", (0, 0))], 16, 2)
+    assert Memory(tmp_path).get("tiles", "room@0,0")["firm"] == ["DOWN"]
+    assert original(mem, "room", (0, 0), (0, 2), False)[0] != "DOWN"
+    fold(mem, "room", (0, 0), [("DOWN", (0, -16))], 16, 3)
+    row = Memory(tmp_path).get("tiles", "room@0,0")
+    assert "DOWN" not in row["blocked"] and row["firm"] == []
