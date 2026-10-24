@@ -1379,7 +1379,7 @@ ROUTE_DIRS = [("RIGHT", 1, 0), ("LEFT", -1, 0), ("UP", 0, -1), ("DOWN", 0, 1)]
 def _route_world(mem, env):  # player starts at (8, 8); callers route it towards a blocker two tiles away
     from agent.skills import Ctx; from tests.agent.fakes import StubModel
     world = World(mem, 16); world.current_place = "room"; world.pa = [.5, .5]; world.pos = (8, 8)
-    return world, Ctx(env, StubModel([]), 16)
+    return world, Ctx(env, StubModel([]), 16, self_spot=(.5, .5))
 
 
 @pytest.mark.parametrize("guarded", [True, False])

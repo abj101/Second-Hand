@@ -12,7 +12,7 @@ def point(env, at):
 
 
 def ctx(env, tile_px=16, max_inputs=30, replies=None):
-    return Ctx(env, StubModel(replies or []), tile_px=tile_px, max_inputs=max_inputs)
+    return Ctx(env, StubModel(replies or []), tile_px=tile_px, max_inputs=max_inputs, self_spot=(.5, .5))
 
 
 class RecordingEnv(GridEnv):
@@ -229,7 +229,7 @@ def test_blocked_exit_route_push_is_one_recorded_press():
 
 def test_interact_and_directional_press_preserve_move_records():
     env = GridEnv()
-    result = interact(ctx(env, tile_px=None), point(env, env.npc), [.5, .5])
+    result = interact(ctx(env), point(env, env.npc), [.5, .5], route={"dirs": ["LEFT"]})
     assert result.moves and all(move["dir"] in {"UP", "DOWN", "LEFT", "RIGHT"} and set(move) == {"dir", "shift", "self_at"} for move in result.moves)
     env = GridEnv(); env.player = (9, 8)
     result = run_affordance(ctx(env), {"verb": "press", "target": "RIGHT"}, {"entities": []})
@@ -273,7 +273,7 @@ def test_approach_at_player_is_blocked_without_pressing():
 
 def test_interact_opens_text_box():
     env = GridEnv()
-    result = interact(ctx(env, tile_px=None), point(env, env.npc), [.5, .5])
+    result = interact(ctx(env), point(env, env.npc), [.5, .5], route={"dirs": ["LEFT"]})
     assert result.status == "done" and env.text_box
 
 
@@ -558,6 +558,22 @@ def test_no_response_is_not_an_animated_bump(tmp_path, monkeypatch, animated):
                 frame = self.screenshot(); frame.putpixel((0, 0), (255, 0, 0)); on_frame(frame)
     env = Bump(); monkeypatch.setattr(skills, "scroll", lambda *a, **k: (0, 0))
     result = skills.press(ctx(env), "RIGHT"); move = result.moves[0]
-    assert move["shift"] == ((0, 0) if animated else None) and bool(move.get("no_response")) == (not animated)
+    assert move["shift"] is None and move.get("no_response") is True
     mem = Memory(tmp_path); assert fold(mem, "room", (0, 0), result.moves, 16, 1) == (0, 0)
-    assert (mem.get("tiles", "room@0,0") or {}).get("blocked", []) == (["RIGHT"] if animated else [])
+    assert (mem.get("tiles", "room@0,0") or {}).get("blocked", []) == []
+
+
+@pytest.mark.parametrize("pixels,actors,bump", [([(72, 65)], (), True), ([(145, 130)], (), False), ([(72, 49)], (), False), ([(72, 65), (88, 65)], ((80, 64, 96, 80),), True)])
+def test_wall_needs_player_tile_reaction(monkeypatch, pixels, actors, bump):
+    from PIL import Image
+    from agent import skills
+    from agent.observer import Settle
+    before = Image.new("RGB", (160, 144), "white"); animated = before.copy()
+    for pixel in pixels: animated.putpixel(pixel, (0, 0, 0))
+    class Env:
+        def press(self, direction, frames, on_frame): on_frame(animated)
+    c = Ctx(Env(), StubModel([]), tile_px=16, self_spot=(.45, .451), actor_boxes=lambda: actors)
+    monkeypatch.setattr(skills, "scroll", lambda *a, **kw: (0, 0))
+    monkeypatch.setattr(skills, "_settled", lambda *_: Settle(before, True, 0, False))
+    end, move, _, _ = skills._step(c, "RIGHT", before)
+    assert move == ((0, 0) if bump else None) and bool(getattr(end, "no_response", False)) == (not bump)

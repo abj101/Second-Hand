@@ -115,7 +115,8 @@ class GridEnv:
             if on_frame:
                 image = self.screenshot()
                 if key in self._steps and not self._moving and dest != self.player and _ < 4:
-                    ImageDraw.Draw(image).rectangle((79, self._top - 1, 80, self._top), fill=(245, 140, 120))
+                    x = 78 if self._top == 72 else 88
+                    ImageDraw.Draw(image).rectangle((x, 72, x + 1, 73), fill=(245, 140, 120))
                 on_frame(image)
         if self.wander: self._wander_step()
         self._direction = ""

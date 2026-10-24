@@ -132,7 +132,7 @@ class Loop:
         drift_fix = None
         probe = None
         if per.get("screen") == "world" and not modal and not self.world._self_from_motion and self.tile_px:
-            probe_ctx = Ctx(self.env, self.model, self.tile_px, self.move_frames); probe_ctx.step = self.step_no + 1
+            probe_ctx = Ctx(self.env, self.model, self.tile_px, self.move_frames, self_spot=self.world.self_spot); probe_ctx.step = self.step_no + 1
             probe = self.world.probe(probe_ctx)
             if probe["presses"]:
                 probe_set = wait_settled(self.env); probe_frame = probe_set.frame
@@ -258,7 +258,7 @@ class Loop:
                           min(w, int(t["x"] + r)), min(h, int(t["y"] + r)))
                          for t in tracker.tracks.values() if t["status"] == "live" and t["actor"] and
                          (px is None or max(abs(t["x"] - px), abs(t["y"] - py)) > r))
-        skillctx = Ctx(self.env, self.model, self.tile_px, self.move_frames, actor_boxes=actor_boxes); pressed_from = tuple(self.world.pos)
+        skillctx = Ctx(self.env, self.model, self.tile_px, self.move_frames, actor_boxes=actor_boxes, self_spot=self.world.self_spot); pressed_from = tuple(self.world.pos)
         if choice and travel_legs is None and act_route is not None and affs[choice["i"]].get("verb") == "approach":
             t = target_tile
             if t is None:

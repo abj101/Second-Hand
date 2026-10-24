@@ -2,11 +2,12 @@
 from dataclasses import dataclass, field, replace; from typing import Literal
 from functools import wraps
 import re
+import numpy as np
 from PIL import Image, ImageDraw
 from agent.env import Env
 from agent.locate import refine
 from agent.model import Ollama
-from agent.observer import _blank, _residual, changed, cut, for_model, scroll, wait_settled
+from agent.observer import _blank, _residual, changed, cut, for_model, scroll, snap, wait_settled
 INTERACT_MIN_CHANGED_TILE_FRACTION = 0.25  # ponytail: quarter-tile minimum change, calibrated on m1_building_live_150 S146-149 vs S123/S126; raise if sprite noise exceeds it
 @dataclass
 class SkillResult:
@@ -32,6 +33,7 @@ class Ctx:
     max_inputs: int = 30
     settles: list = field(default_factory=list)  # every settle's flag, shared by reference through replace(ctx)
     actor_boxes: object = None
+    self_spot: tuple[float, float] | None = None
 def _settled(ctx, **kw):
     settle = wait_settled(ctx.env, **kw); ctx.settles.append(settle.settled); return settle
 def _tracked(fn):  # a skill's settled flag: False if any settle inside it (its own, nested skills', travel legs') timed out
@@ -52,11 +54,23 @@ def _step(ctx, direction, before):
         end.no_response = True; ctx._last_residual_box, ctx._last_residual_box_coverage = None, 0
         return end, None, end.blank_seen, None
     shifts = [scroll(a, b) for a, b in zip([before, *frames], frames)]
+    move = scroll(before, end.frame, max_shift=max(4, ctx.tile_px or 16)) if any(s is None for s in shifts) else tuple(sum(s[i] for s in shifts) for i in (0, 1))
+    if move == (0, 0):
+        reacted = False
+        if ctx.self_spot is not None and ctx.tile_px:
+            t = ctx.tile_px; x, y = (round(v * n - t / 2) for v, n in zip(snap(ctx.self_spot, before.size, t), before.size))
+            mask = np.logical_or.reduce([np.any(np.asarray(f) != np.asarray(before), axis=2) for f in [*frames, end.frame]])
+            # ponytail: one-tile ring; widen the neighborhood if nearby effects escape it.
+            ring = np.zeros_like(mask); ring[max(0, y-t):y+2*t, max(0, x-t):x+2*t] = True; ring[max(0, y):y+t, max(0, x):x+t] = False
+            for x0, y0, x1, y1 in ctx.actor_boxes() if callable(ctx.actor_boxes) else (): ring[max(0, y0):max(0, y1), max(0, x0):max(0, x1)] = False
+            # ponytail: a missed wall costs one re-bump; widen the ring rule if NPC-adjacent misses matter.
+            reacted = mask[max(0, y):y+t, max(0, x):x+t].any() and not (mask & ring).any()
+        if not reacted:
+            end.no_response = True; ctx._last_residual_box, ctx._last_residual_box_coverage = None, 0
+            return end, None, end.blank_seen, None
     if any(s is None for s in shifts):
-        move = scroll(before, end.frame, max_shift=max(4, ctx.tile_px or 16))
         ctx._last_residual_box, ctx._last_residual_box_coverage = None, 0
         return end, move, end.blank_seen or any(_blank(f) for f in frames), None
-    move = tuple(sum(s[i] for s in shifts) for i in (0, 1))
     cumulative, at = [(0, 0)], [0, 0]
     for shift in shifts:
         at[:] = [at[i] + shift[i] for i in (0, 1)]; cumulative.append(tuple(at))
