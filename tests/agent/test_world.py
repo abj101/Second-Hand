@@ -1577,6 +1577,24 @@ def test_explore_dirs_routes_to_seen_boundary_and_extends(tmp_path):
     assert routes == {"RIGHT": {"dirs": ["RIGHT"] * 8, "steps": 3, "unseen": 1, "to": (3, 0)}}
 
 
+def test_explore_dirs_targets_the_unvisited_edge_of_seen_cells(tmp_path):
+    from agent.world import unexplored
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    seen = {f"{x},{y}" for x in range(-1, 3) for y in range(-4, 2)} | {f"0,{y}" for y in range(-6, -4)}
+    mem.upsert("seen", {"id": "room", "cells": sorted(seen), "open": ["0,-6", "1,-4"]})
+    for y in range(-3, 1):
+        mem.upsert("tiles", {"id": f"room@0,{y}", "place": "room", "x": 0, "y": y,
+                             "floor": True, "blocked": [], "pushed": [], "exit": None, "step": 1})
+    mem.upsert("tiles", {"id": "room@1,-3", "place": "room", "x": 1, "y": -3,
+                         "floor": True, "blocked": ["UP"], "pushed": [], "exit": None, "step": 1})
+    world = World(mem, 16); world.current_place, world.pos, world.size = "room", (0, 0), (160, 144)
+
+    assert (1, -4) not in unexplored(mem, "room")
+    assert world.explore_dirs("room")["UP"]["to"] == (0, -6)
+    mem.upsert("seen", {"id": "room", "cells": sorted(seen), "open": []})
+    assert "UP" not in world.explore_dirs("room")
+
+
 def test_record_view_counts_only_new_seen_cells(tmp_path):
     from PIL import Image
 

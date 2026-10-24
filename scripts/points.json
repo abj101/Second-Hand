@@ -58,7 +58,7 @@
     "right": [
       {
         "tool": "explore",
-        "label_re": "^explore RIGHT, \\d+ steps, \\d+ unseen cells that way$"
+        "label_re": "^explore RIGHT, \\d+ steps, \\d+ unexplored cells that way$"
       }
     ],
     "wrong": []

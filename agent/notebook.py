@@ -155,10 +155,11 @@ class Notebook:
         self._save(events + [{"step": step, "op": "last", "value": self.data["last"]}])
         return rows
 
-    def heard(self, step: int, speaker: str | None, where: str, text: str, who=None) -> str:
+    def heard(self, step: int, speaker: str | None, where: str, text: str, who=None, at=None) -> str:
         key = f"t{len(self.data['text']) + 1}"
         value = {"key": key, "step": step, "speaker": speaker, "where": where, "text": text,
                  "who": self.canon(who) if who else None}
+        if at is not None: value["at"] = at
         self.data["text"].append(value)
         events = [{"step": step, "op": "text", "value": value}]
         self._save(events)
@@ -248,7 +249,8 @@ class Notebook:
 
     @staticmethod
     def _text_line(row, limit=None):
-        value = f"{row['key']} {row.get('speaker') or 'text'} at {row.get('where', '?')}: \"{row.get('text', '')}\""
+        at = row.get("at"); where = f"at {row.get('where', '?')}" + (f" ({at[0]},{at[1]})" if at is not None else "")
+        value = f"{row['key']} {row.get('speaker') or 'text'} {where}: \"{row.get('text', '')}\""
         return value if limit is None else value[:limit]
 
     def render(self) -> str:

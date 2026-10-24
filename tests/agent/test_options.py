@@ -409,7 +409,7 @@ def test_each_explore_direction_has_a_ref_and_concrete_action(tmp_path, monkeypa
     world.explore_dirs = lambda place: {"UP": {"dirs": ["UP", "UP"], "unseen": 3, "to": [0, -2]}, "RIGHT": {"dirs": ["RIGHT"], "unseen": 1, "to": [2, 0]}}
     per = {"screen": "world", "text": [], "entities": [player()]}
     rows = [o for o in world.options(per, "a", {}, 3, inputs=INPUTS) if o["tool"] == "explore"]
-    assert [o["label"] for o in rows] == ["explore UP, 2 steps, 3 unseen cells that way", "explore RIGHT, 1 steps, 1 unseen cells that way"]
+    assert [o["label"] for o in rows] == ["explore UP, 2 steps, 3 unexplored cells that way", "explore RIGHT, 1 steps, 1 unexplored cells that way"]
     assert [o["ref"] for o in rows] == ["explore:a:up", "explore:a:right"]
     assert [o["action"] for o in rows] == [{"go_to": "unexplored", "dir": "UP"}, {"go_to": "unexplored", "dir": "RIGHT"}]
 

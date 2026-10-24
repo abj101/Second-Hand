@@ -66,8 +66,15 @@ def open_cells(mem, pid):  # cells just past a screen edge that showed something
     return set(row.get("open", [])) - set(row.get("cells", []))
 
 def unexplored(mem, pid):
+    row = mem.get("seen", pid) or {}
+    seen, cells = set(row.get("cells", [])), set(row.get("open", [])) & set(row.get("cells", []))
+    seen_cells = {tuple(map(int, cell.split(","))) for cell in cells}
+    tiles = [r for r in mem.rows("tiles") if r.get("place") == pid]
+    known = {(r["x"], r["y"]) for r in tiles} | {
+        (r["x"] + DIRS[d][0], r["y"] + DIRS[d][1]) for r in tiles for d in r.get("blocked", []) if d in DIRS}
+    edge = {c for c in seen_cells if c not in known and any(f"{c[0]+dx},{c[1]+dy}" not in seen for dx, dy in DIRS.values())}  # ponytail: edge cells may be walls; each costs at most one bump before `known` excludes it.
     return {tuple(map(int, cell.split(","))) for cell in open_cells(mem, pid)} | {
-        (tile[0] + DIRS[d][0], tile[1] + DIRS[d][1]) for tile, d in unseen_edges(mem, pid)}
+        (tile[0] + DIRS[d][0], tile[1] + DIRS[d][1]) for tile, d in unseen_edges(mem, pid)} | edge
 
 def _direction(pos, target):
     dx, dy = target[0] - pos[0], target[1] - pos[1]
@@ -1239,7 +1246,7 @@ class World:
                 remembered.append((_yx(tile, r["name"]), row))
             remembered = [row for _, row in sorted(remembered, key=lambda t: t[0])]
             for direction, route in sorted(self.explore_dirs(place).items(), key=lambda item: _yx(item[1]["to"], item[0])):
-                label = f"explore {direction}, {route.get('steps', len(route['dirs']))} steps, {route.get('unseen', 0)} unseen cells that way"
+                label = f"explore {direction}, {route.get('steps', len(route['dirs']))} steps, {route.get('unseen', 0)} unexplored cells that way"
                 ref = f"explore:{place}:{direction.casefold()}"
                 explores.append(option("explore", label, {"go_to": "unexplored", "dir": direction}, "approach", "unexplored", ref))
             for p in self.mem.rows("places"):
