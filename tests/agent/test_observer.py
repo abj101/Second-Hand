@@ -215,3 +215,20 @@ def test_cut_when_the_scene_changes_under_an_unchanged_dialogue_box():
     b = Image.fromarray(np.vstack([rng.integers(0, 255, (88, 160, 3), dtype=np.uint8), box]))
     assert scroll(a, b) == (0, 0) and changed(a, b) > .5 and cut(a, b)  # m1_h1h4_live S90->S91: another map behind the professor's dialogue
     assert not cut(a, a)
+
+
+def test_settle_segments_static_band_motion_at_blank(monkeypatch):
+    from agent import observer
+    image = np.random.default_rng(9).integers(0, 255, (96, 96, 3), dtype=np.uint8)
+    frames = []
+    for dx in (0, -16, -32, -48):
+        a = np.roll(image, dx, axis=1); a[-24:] = 0; frames.append(Image.fromarray(a))
+    blank = Image.new("RGB", (96, 96))
+    frames += [blank, frames[0], frames[1], frames[1]]
+    shifts = iter([(-16, 0)] * 4)
+    monkeypatch.setattr(observer, "scroll", lambda a, b: next(shifts))
+    result = wait_settled(StubEnv(frames, loop_from=7), quiet=2)
+    assert result.scroll == (-48, 0) and result.last_dir == "RIGHT"
+    assert result.after_scroll == (-16, 0) and result.arrival_frame.tobytes() == frames[0].tobytes()
+    still = wait_settled(StubEnv([frames[0]]), quiet=1)
+    assert still.scroll == still.after_scroll == (0, 0)

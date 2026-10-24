@@ -22,6 +22,7 @@ class SkillResult:
     self_at: tuple[float, float] | None = None
     failure: dict | None = None  # why a blocked skill stopped: {"stage": "route"|"crossing", "reason", "direction"?}
     settled: bool | None = None  # False when any settle in the skill timed out unsettled; None = unknown (legacy)
+    arrival_frame: Image.Image | None = None
 @dataclass
 class Ctx:
     env: Env
@@ -39,9 +40,9 @@ def _tracked(fn):  # a skill's settled flag: False if any settle inside it (its 
         mark = len(ctx.settles); result = fn(ctx, *args, **kwargs)
         return replace(result, settled=all(ctx.settles[mark:]))
     return run
-def _result(status, reason, inputs, calls, before, after, total=(0, 0), blank=False, moves=None, self_at=None, failure=None):
+def _result(status, reason, inputs, calls, before, after, total=(0, 0), blank=False, moves=None, self_at=None, failure=None, arrival_frame=None):
     moves = moves or []
-    return SkillResult(status, reason, inputs, calls, before, after, tuple(total), blank, moves, self_at or next((m.get("self_at") for m in reversed(moves) if isinstance(m, dict) and m.get("self_at") is not None), None), failure)
+    return SkillResult(status, reason, inputs, calls, before, after, tuple(total), blank, moves, self_at or next((m.get("self_at") for m in reversed(moves) if isinstance(m, dict) and m.get("self_at") is not None), None), failure, arrival_frame=arrival_frame)
 def _crossing(exit_target): return {"stage": "crossing", "reason": "exit not crossed"} if exit_target is not None else None
 def _step(ctx, direction, before):
     frames = []
@@ -207,6 +208,15 @@ def select(ctx: Ctx, item: str) -> SkillResult:
     for key in keys: ctx.env.press(key, ctx.move_frames)
     ctx.env.press("A", ctx.move_frames); end = _settled(ctx)
     return _result("done", "", n, 1, start.frame, end.frame, blank=start.blank_seen or end.blank_seen)
+def _forced(end):
+    def axes(shift, last=None, **extra):
+        moves = [{"dir": ("RIGHT" if sx < 0 else "LEFT") if sx else ("DOWN" if sy < 0 else "UP"), "shift": (sx, sy), "forced": True, **extra}
+                 for sx, sy in ((shift[0], 0), (0, shift[1])) if sx or sy]
+        return sorted(moves, key=lambda m: last is not None and (m["dir"] in ("UP", "DOWN")) == (last in ("UP", "DOWN")))
+    source = axes(end.scroll, end.last_dir)
+    if source and end.blank_seen: source[-1]["last_dir"] = end.last_dir
+    return source + axes(end.after_scroll, after_cut=True)
+
 @_tracked
 def press(ctx: Ctx, key: str) -> SkillResult:
     start = _settled(ctx); keys = ctx.env.inputs(); words = set(re.findall(r"[a-z0-9]+", key.casefold())); matches = [k for k in keys if k.casefold() in words]
@@ -214,7 +224,7 @@ def press(ctx: Ctx, key: str) -> SkillResult:
     if key is None or ctx.max_inputs < 1: return _result("blocked", "unsupported input" if key is None else "input limit", 0, 0, start.frame, start.frame, blank=start.blank_seen)
     end, move, blank, self_at = _step(ctx, key, start.frame) if key in ("UP", "DOWN", "LEFT", "RIGHT") else (None, None, False, None)
     if end is None: ctx.env.press(key, ctx.move_frames); end = _settled(ctx)
-    return _result("done", "", 1, 0, start.frame, end.frame, blank=start.blank_seen or end.blank_seen or blank, moves=[{"dir": key, "shift": move, "self_at": self_at}] if key in ("UP", "DOWN", "LEFT", "RIGHT") else [], self_at=self_at)
+    return _result("done", "", 1, 0, start.frame, end.frame, blank=start.blank_seen or end.blank_seen or blank, moves=[{"dir": key, "shift": move, "self_at": self_at}] if key in ("UP", "DOWN", "LEFT", "RIGHT") else _forced(end), self_at=self_at, arrival_frame=end.arrival_frame)
 @_tracked
 def press_seq(ctx: Ctx, keys: list[str]) -> SkillResult:
     if not keys: frame = ctx.env.screenshot(); return _result("failed", "no keys", 0, 0, frame, frame)
@@ -223,14 +233,16 @@ def press_seq(ctx: Ctx, keys: list[str]) -> SkillResult:
         results.append(press(ctx, key))
         if results[-1].status != "done": break
     first, last = results[0], results[-1]
-    moves = [m for r in results for m in r.moves]
-    return _result(last.status, last.reason, sum(r.inputs for r in results), sum(r.calls for r in results), first.before, last.after, blank=any(r.blank_seen for r in results), moves=moves)
+    moves, crossed = [], False
+    for r in results:
+        moves.extend({**m, "after_cut": True} if crossed and isinstance(m, dict) else m for m in r.moves); crossed |= r.blank_seen
+    return _result(last.status, last.reason, sum(r.inputs for r in results), sum(r.calls for r in results), first.before, last.after, blank=any(r.blank_seen for r in results), moves=moves, arrival_frame=next((r.arrival_frame for r in results if r.arrival_frame is not None), None))
 def advance(ctx: Ctx) -> SkillResult: return press(ctx, "A")
 def cancel(ctx: Ctx) -> SkillResult: return press(ctx, "B")
 @_tracked
 def wait_until(ctx: Ctx, max_frames: int = 240) -> SkillResult:
     start = _settled(ctx); end = _settled(ctx, max_frames=max_frames)
-    return _result("done" if end.settled else "failed", "" if end.settled else "not settled", 0, 0, start.frame, end.frame, blank=start.blank_seen or end.blank_seen)
+    return _result("done" if end.settled else "failed", "" if end.settled else "not settled", 0, 0, start.frame, end.frame, blank=start.blank_seen or end.blank_seen, moves=_forced(end), arrival_frame=end.arrival_frame)
 @_tracked
 def type_text(ctx: Ctx, text: str) -> SkillResult:
     limit = min(60, max(0, ctx.max_inputs)); start = _settled(ctx); frame = start.frame; inputs = calls = 0; reason = ""; blank = start.blank_seen

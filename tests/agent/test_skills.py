@@ -522,3 +522,26 @@ def test_travel_across_a_scene_cut_counts_its_crossing_once_and_reports_unsettle
     assert still.reason == late.reason and still.inputs == late.inputs == 2
     assert still_world.current_place == late_world.current_place == 'expected' and still_world.pos == late_world.pos
     assert crossings(still_mem) == crossings(late_mem) and crossings(late_mem) and all(n == 1 for _, n in crossings(late_mem))
+
+
+def test_non_direction_press_folds_forced_motion(tmp_path, monkeypatch):
+    from agent.observer import Settle
+    from agent.skills import press
+    from agent.memory import Memory
+    from agent.space import fold
+    env = GridEnv(); frame = env.screenshot()
+    settles = iter([Settle(frame, True, 0, False), Settle(frame, True, 3, False, scroll=(-48, 0), last_dir="RIGHT")])
+    monkeypatch.setattr("agent.skills._settled", lambda *_: next(settles))
+    result = press(ctx(env), "A")
+    assert result.moves == [{"dir": "RIGHT", "shift": (-48, 0), "forced": True}]
+    assert fold(Memory(tmp_path), "room", (0, 0), result.moves, 16, 1) == (3, 0)
+
+
+def test_press_sequence_keeps_following_moves_after_cut(monkeypatch):
+    from agent.skills import SkillResult
+    from agent import skills
+    env = GridEnv(); frame = env.screenshot()
+    results = iter([SkillResult("done", "", 1, 0, frame, frame, (0, 0), True, [{"dir": "DOWN", "shift": (0, -16), "forced": True}], arrival_frame=frame), SkillResult("done", "", 1, 0, frame, frame, (0, 0), False, [{"dir": "UP", "shift": (0, 16)}])])
+    monkeypatch.setattr(skills, "press", lambda *_: next(results))
+    result = press_seq(ctx(env), ["A", "UP"])
+    assert not result.moves[0].get("after_cut") and result.moves[1]["after_cut"]
