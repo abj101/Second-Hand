@@ -30,25 +30,38 @@ The lanes are disjoint. A owns `skills.py`, `observer.py` and `world.py` `travel
 - **Test** (`tests/agent/test_skills.py`): a synthetic press whose in-press frames include one blank frame and whose end frame differs completely from `before` returns `no_response` False.
 - **Approved fixture clarification (2026-10-24):** keep the R1 guard exactly as specified. In `test_wall_needs_player_tile_reaction`, replace the all-white `before` frame with `Image.linear_gradient("L").resize((160, 144)).convert("RGB")`, and use `(255, 0, 0)` instead of `(0, 0, 0)` for marked pixels. Keep the parametrize table, scale handling, `self_spot`, actor boxes and final assertion unchanged. The same background swap is approved for another existing all-white fixture only if it fails for the same uniform-fade classification reason; any other failure still requires a stop.
 
-### R2 (lane A)
-- **`agent/observer.py`:**
-  - `Settle` gains a last field, `ambient: object = None`.
-  - In `wait_settled`, keep a bool mask `amb` (frame height × width, starts `None`).
-  - In `motion(prev, frame, is_blank)`, when `prev` and `frame` differ, `not is_blank` and `not crossed`, compute `diff = np.any(np.asarray(prev) != np.asarray(frame), axis=2)`.
-    - If the changed rows span less than half the height (the existing early-return branch), OR `diff` into `amb` before returning.
-    - When a non-zero camera `shift` is found, do **not** add it.
-  - Pass `amb` into `Settle(..., ambient=amb)` through the `result` lambda.
-- **`agent/skills.py`:**
-  - `Ctx` gains `ambient: object = None`.
-  - `_settled` sets `ctx.ambient = settle.ambient` before returning.
-  - In `_step`, read `amb = ctx.ambient` as the **first line**, before pressing. This is the mask from the settle that produced `before`; never use the end settle's mask.
-  - In the W1 test, `(mask & ring).any()` becomes `(mask & ring & ~amb).any()` when `amb is not None`.
-- `# ponytail:` note: "ambient = pixels that changed during the settle before the press with no camera shift; an animation slower than the settle's quiet window is missed and that bump reads as no response."
-- **Tests:**
-  - `test_observer.py`: a settle over frames where one 4×4 patch alternates yields `ambient` true only on that patch, and a scrolled frame adds nothing.
-  - `test_skills.py`: a bump whose ring change lies inside `ctx.ambient` is a bump; the same change outside `ambient` is "no response".
-- **Approved fixture clarification (2026-10-24):** add `ambient=None` to the fake settle objects in `test_interact_ignores_actor_motion_between_a_press_frames`, `test_interact_keeps_dialogue_text_change_after_actor_mask`, `test_interact_does_not_count_face_step_as_a_press_effect`, `test_interact_requires_quarter_tile_of_unmasked_pixels`, and `test_interact_uses_included_pixel_count_for_overlapping_clipped_masks`. Preserve their assertions and the specified production code (`ctx.ambient = settle.ambient`). These fakes must model the new `Settle` field; this approval does not permit other existing-test changes.
-- **Additional approved fixture (2026-10-24):** the same `ambient=None` mock-field addition is approved in `tests/agent/test_type_text.py::test_approach_keeps_sidestepping_past_a_two_tile_obstacle`, preserving its assertions and production code. This extends lane A's test-file scope to this fixture only.
+### R2 (lane A) — REPLACED 2026-10-24 (amendment 2)
+The ambient-mask R2 (`10749bf`) is **reverted**: `git revert --no-edit 10749bf` on `feat/lean-agent`.
+Measured on r13–r15 replays plus r16's water, with 0 asks. A wall kept on a press where truth shows a text box is a false wall:
+
+| rule | real walls kept | false walls kept | r16 water (1st / 2nd LEFT) |
+|---|---|---|---|
+| W1 + R1 only (no ambient) | 148/156 | 0/25 | no response / no response |
+| R2 as specced (`10749bf`) | 148/156 | 5/25 | no response / — |
+| ambient = pixels changed ≥ 2× in the settle | 148/156 | 2/25 | no response / bump |
+| self tile only, no ring | 152/156 | 7/25 | bump / bump |
+
+**Cause:** Pokémon Red animates water and flowers about every 21 frames, but the settle before a press ends after 24 quiet frames, so it rarely sees a full cycle. Any pixel rule either misses the animation or lets "!" bubbles and text events through. So W1 stays exactly as it is, and the loop is broken by **re-checking on a later step**.
+
+**New R2: a press with no response from the same tile, in the same direction, on a later step is recorded as a wall.** W3 treats it as unconfirmed, so it can be re-tested.
+- `agent/space.py` `fold`, at the top of the loop body, right after `direction, shift = ...` and **before** `if direction not in DIRS or shift is None: continue`, add:
+  ```python
+  if isinstance(move, dict) and move.get("no_response") and direction in DIRS:  # a press that changed nothing at the player
+      row = _get(mem, place, here) or _new(place, here, step); old = {**row, "silent": dict(row.get("silent", {}))}
+      if step <= row.get("silent", {}).get(direction, step): row.setdefault("silent", {})[direction] = step; _save(mem, row, old); continue
+      shift = (0, 0)  # silent on an earlier step too: a bump (unconfirmed until re-bumped, W3)
+  ```
+  Execution then falls through to the existing actor/`held` and bump logic unchanged, so an actor tile still gives `held`.
+- Add `**({"silent": dict(row["silent"])} if "silent" in row else {})` to the existing `before = dict(row, ...)` copy.
+- On a successful move in that direction, also `row.get("silent", {}).pop(direction, None)`, next to the `walled` pop.
+- `# ponytail:` note: "two separate steps of no response at one tile/direction = wall; a scripted freeze spanning two steps on a world screen makes an unconfirmed wall that W3 re-tests."
+- **Why it is safe:** W2 stops a walk at its first no-response press, so a step marks at most one direction silent. The r13–r15 false clusters each sat inside one step's dialogue freeze.
+- **Tests (`test_space.py`):**
+  - one no-response move at step 1 leaves `blocked` empty and `silent == {"LEFT": 1}`;
+  - the same at step 2 gives `blocked == ["LEFT"]`, not in `firm`;
+  - two in the same step leave it unblocked;
+  - a later successful LEFT move clears `blocked`, `walled` and `silent`.
+- **Lane A also reverts R2's test edits** (the revert does this). Keep R1's fixture changes.
 
 ### B2 (lane B)
 - `agent/world.py` `unexplored(mem, pid)` (about line 68): also return `edge` cells, where
@@ -75,8 +88,8 @@ The lanes are disjoint. A owns `skills.py`, `observer.py` and `world.py` `travel
 
 ## T17 gates (orchestrator, merged HEAD, 0 asks, outputs in `.tmp/r17/g/`)
 - **Suite:** `pytest -n auto -q` passes. The golden act trace must not change; never set W0_REGEN.
-- **T17-W1:** re-run `.tmp/r16/g/validate2.py` (real `_step`) on r13, r14 and r15. Pass: false walls kept 0/25, real walls kept ≥ 148/156.
-- **T17-R2:** copy `.tmp/r16/g/lv16_end.py` to `.tmp/r17/g/water.py` and change it to call the real `_step` with `Ctx(env, None, 16, 16, self_spot=(0.45, 0.4513888888888889))`, after one `_settled(ctx)`, from r16 `checkpoint/000245`. Press LEFT twice at RAM (8,14). Pass: both presses return `move == (0, 0)` and `no_response` False.
+- **T17-W1:** re-run `.tmp/r17/g/validate2.py` (real `_step`) on r13, r14 and r15 after the R2 revert. Pass: false walls kept 0/25, real walls kept ≥ 148/156. Never run two validators at once: they share a staging directory.
+- **T17-R2 (amended):** on r16 `checkpoint/000245` (RAM pos (8,14)), use a fresh `Ctx(env, None, 16, 16, self_spot=(0.45, 0.4513888888888889))` per simulated step. Call the real `_step(ctx, "LEFT", before)` and then `agent.space.fold(mem, "p_place_4", (3, 8), end_moves, 16, step)` on a temp `Memory`, where `end_moves = [{"dir": "LEFT", "shift": move, **({"no_response": True} if no_response else {})}]`, for steps 245 and then 246. Pass: after step 246, `mem.get("tiles", "p_place_4@3,8")["blocked"]` contains LEFT. Either press may be a bump or a no-response.
 - **T17-R1:** the unit test above, plus: replay r16 `checkpoint/000060` with presses 61–64 from `presses.jsonl`, then each key of step 65 through the real `_step`. Pass: no press that changes the RAM map is `no_response`.
 - **T17-B2:** on a copy of `runs/m1_r16_boot/memory`, run `World(mem,16)` with `size=(160,144)`, `current_place="p_place_4"`, `pos=(8,-4)`, then `explore_dirs("p_place_4")`. Pass: it has "UP", with target y ≤ -9 (prototype: `UP: 8 steps, 3 cells, to (5,-9)`). Also on that copy, `current_place="p_place_6"`, `pos=(0,-2)`: no more than 2 explore directions (prototype: LEFT and RIGHT, 1 cell each).
 
