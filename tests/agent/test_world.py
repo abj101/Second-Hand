@@ -614,7 +614,10 @@ def test_loop_travel_fetch_leg_traverses_three_rooms_and_faces_remembered_target
                 self._moving = dest not in self.walls and not (self.room == 2 and dest == self.npc)
             for _ in range(frames+8):
                 self._frame()
-                if on_frame: on_frame(self.screenshot())
+                if on_frame:
+                    image = self.screenshot()
+                    if key in self._steps and not self._moving and dest != self.player and _ < 4: image.putpixel((78, 72), (245, 140, 120))
+                    on_frame(image)
             self._direction = ""
         def screenshot(self):
             image = super().screenshot()

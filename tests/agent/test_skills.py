@@ -577,3 +577,36 @@ def test_wall_needs_player_tile_reaction(monkeypatch, pixels, actors, bump):
     monkeypatch.setattr(skills, "_settled", lambda *_: Settle(before, True, 0, False))
     end, move, _, _ = skills._step(c, "RIGHT", before)
     assert move == ((0, 0) if bump else None) and bool(getattr(end, "no_response", False)) == (not bump)
+
+
+@pytest.mark.parametrize("routed", [True, False])
+def test_walk_stops_at_first_no_response(tmp_path, monkeypatch, routed):
+    from types import SimpleNamespace
+    from agent import skills
+    from agent.memory import Memory
+    from agent.space import fold
+    env = RecordingEnv(); frame = env.screenshot(); keys = []
+    def step(c, direction, before):
+        keys.append(direction); frozen = len(keys) == 2
+        return SimpleNamespace(frame=frame, blank_seen=False, no_response=frozen), None if frozen else (-16, 0), False, None
+    monkeypatch.setattr(skills, "_step", step)
+    result = approach(ctx(env), [.9, .5], [.5, .5], route={"dirs": ["RIGHT"] * 4} if routed else None)
+    assert keys == ["RIGHT"] * 2 and result.inputs == 2 and result.status == "blocked" and result.reason == "no response"
+    assert result.failure == {"stage": "route", "reason": "no response", "direction": "RIGHT"}
+    mem = Memory(tmp_path); assert fold(mem, "room", (0, 0), result.moves, 16, 1) == (1, 0)
+    assert all(not row["blocked"] for row in mem.rows("tiles"))
+
+
+def test_travel_does_not_reroute_no_response(tmp_path, monkeypatch):
+    from agent.memory import Memory
+    from agent.world import World
+    from agent import skills
+    from types import SimpleNamespace
+    env = RecordingEnv(); frame = env.screenshot(); keys = []
+    def step(c, direction, before):
+        keys.append(direction); return SimpleNamespace(frame=frame, blank_seen=False, no_response=True), None, False, None
+    monkeypatch.setattr(skills, "_step", step)
+    monkeypatch.setattr("agent.world.route", lambda *a, **kw: pytest.fail("no-response travel rerouted"))
+    world = World(Memory(tmp_path), 16); world.current_place = "room"; world.pa = [.5, .5]
+    result = world.travel(ctx(env), [{"place": "room", "dirs": ["RIGHT"] * 3, "target": {"tile": [3, 0]}}], 1)
+    assert keys == ["RIGHT"] and result.status == "blocked" and result.failure["reason"] == "no response"

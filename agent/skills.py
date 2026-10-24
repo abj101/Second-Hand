@@ -111,6 +111,7 @@ def approach(ctx: Ctx, target_at: list[float], player_at: list[float] | None, *,
         dirs = route.get("dirs", [])[:max(0, ctx.max_inputs)]
         for direction in dirs:
             end, move, saw_blank = step(direction, before); inputs += 1
+            if getattr(end, "no_response", False): return result("blocked", "no response", inputs, calls, initial, end.frame, total, blank or saw_blank, failure={"stage": "route", "reason": "no response", "direction": direction})
             if cut(before, end.frame, saw_blank): return result("done", "scene cut", inputs, calls, initial, end.frame, total, blank or saw_blank)
             if move == (0, 0): return result("blocked", "route blocked", inputs, calls, initial, end.frame, total, blank or saw_blank, failure={"stage": "route", "reason": "route blocked", "direction": direction})
             if move is not None: total[:] = [total[i] + move[i] for i in (0, 1)]
@@ -121,6 +122,7 @@ def approach(ctx: Ctx, target_at: list[float], player_at: list[float] | None, *,
                 old = before
                 end, move, saw_blank = step(last_dir, old)
                 inputs += 1
+                if getattr(end, "no_response", False): return result("blocked", "no response", inputs, calls, initial, end.frame, total, blank or saw_blank, failure={"stage": "route", "reason": "no response", "direction": last_dir})
                 if move is None and not saw_blank: return result("blocked" if exit_target is not None else "failed", "exit not crossed" if exit_target is not None else "scroll unsure", inputs, calls, initial, end.frame, total, blank or saw_blank, failure=_crossing(exit_target))
                 if move is not None: total[:] = [total[i] + move[i] for i in (0, 1)]
                 blank |= saw_blank
@@ -139,6 +141,7 @@ def approach(ctx: Ctx, target_at: list[float], player_at: list[float] | None, *,
         direction = axis_dirs.get(axis, ("RIGHT" if axis == 0 else "DOWN")) if abs(delta[axis]) < .5 else (("RIGHT" if delta[0] > 0 else "LEFT") if axis == 0 else ("DOWN" if delta[1] > 0 else "UP"))
         if blocked: direction = axis_dirs.get(axis, direction)
         old = before; end, move, saw_blank = step(direction, old); inputs += 1
+        if getattr(end, "no_response", False): return result("blocked", "no response", inputs, calls, initial, end.frame, total, blank or saw_blank, failure={"stage": "route", "reason": "no response", "direction": direction})
         if cut(old, end.frame, saw_blank): return result("done", "scene cut", inputs, calls, initial, end.frame, total, blank or saw_blank)
         if move is None: return result("blocked" if exit_target is not None else "failed", "exit not crossed" if exit_target is not None else "scroll unsure", inputs, calls, initial, end.frame, total, blank or saw_blank, failure=_crossing(exit_target))
         if sizes := [abs(v) for v in move if v]: ctx.tile_px = min(sizes + ([ctx.tile_px] if ctx.tile_px else []))
@@ -156,6 +159,7 @@ def approach(ctx: Ctx, target_at: list[float], player_at: list[float] | None, *,
         before, last_dir = end.frame, direction
     if route is not None and exit_target is not None and inputs < ctx.max_inputs and route.get("push"):
         old = before; end, move, saw_blank = step(route["push"], old); inputs += 1
+        if getattr(end, "no_response", False): return result("blocked", "no response", inputs, calls, initial, end.frame, total, blank or saw_blank, failure={"stage": "route", "reason": "no response", "direction": route["push"]})
         if cut(old, end.frame, saw_blank): return result("done", "scene cut", inputs, calls, initial, end.frame, total, blank or saw_blank)
         if move is not None: total[:] = [total[j] + move[j] for j in (0, 1)]
         blank |= saw_blank; before = end.frame
