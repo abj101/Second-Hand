@@ -95,7 +95,7 @@ class World:
         self._observed_per = None
         self.novel = 0
         self.current_place = None
-        self.unsettled = False
+        self.unsettled, self.no_response = False, 0
         self._travelled = None
         self._last_miss_hash = {}
         self.self_spot, self._self_contradictions, self._self_from_motion = None, 0, False
@@ -330,10 +330,14 @@ class World:
             if row.get("status") != self.mem.get("entities", ident).get("status") or row.get("misses") != self.mem.get("entities", ident).get("misses"):
                 self.mem.upsert("entities", row)
     def prepare(self, skill, place, scene_cut, step):
+        for move in getattr(skill, "moves", []):
+            if isinstance(move, dict) and move.get("no_response"): self.no_response += 1
+            elif move is not None and (move.get("shift") if isinstance(move, dict) else move[1]) is not None: self.no_response = 0
+        # ponytail: forced motion inside a travel leg is not followed.
         if skill is self._travelled:  # travel already folded pos up to the exit tile; an open cut still crosses from there
             moves = skill.moves; cut_dir = (moves[-1].get("dir") if isinstance(moves[-1], dict) else moves[-1][0]) if self._travel_open and moves else None
             self._prepared = (skill, place, step, cut_dir, self.pos); return {"cut_dir": cut_dir, "exit_key": (*self.pos, cut_dir) if cut_dir and self.tile_px else None}
-        moves = getattr(skill, "moves", []); move_rows = moves[:-1] if scene_cut and moves else moves
+        moves = [m for m in getattr(skill, "moves", []) if not isinstance(m, dict) or not m.get("after_cut")]; move_rows = moves[:-1] if scene_cut and moves and not (isinstance(moves[-1], dict) and moves[-1].get("forced")) else moves
         at = self.pos
         for move in move_rows:
             direction, shift = (move.get("dir"), move.get("shift")) if isinstance(move, dict) else move
@@ -346,7 +350,7 @@ class World:
                 n = max(abs(dx), abs(dy))
                 if n: at = (at[0] + ((dx > 0) - (dx < 0)) * n, at[1] + ((dy > 0) - (dy < 0)) * n)
         if self.tile_px and place != self.mem.unplaced: self.pos = fold(self.mem, place, self.pos, move_rows, self.tile_px, step, actors=self.actor_tiles)
-        cut_dir = (moves[-1].get("dir") if isinstance(moves[-1], dict) else moves[-1][0]) if scene_cut and moves else None
+        cut_dir = (moves[-1].get("last_dir") or moves[-1].get("dir") if isinstance(moves[-1], dict) else moves[-1][0]) if scene_cut and moves else None
         self._prepared = (skill, place, step, cut_dir, self.pos)
         return {"cut_dir": cut_dir, "exit_key": (*self.pos, cut_dir) if cut_dir and self.tile_px else None}
 
@@ -387,7 +391,13 @@ class World:
         cut_dir = self._prepared[3]
         known_exit = exit_to(self.mem, place, self.pos, cut_dir) if scene_cut and cut_dir else None
         if scene_cut and next_place != place:
-            self.pos = self._locate(next_place, getattr(skill, "after", None))
+            final_view = (self._seen_at(next_place) or (None, None))[1] == "view"
+            arrival = getattr(skill, "arrival_frame", None)
+            self.pos = self._locate(next_place, getattr(skill, "after", None) if final_view or arrival is None else arrival)
+            tail = [m for m in skill.moves if isinstance(m, dict) and m.get("after_cut")]
+            delta = tuple(sum(round(-m["shift"][i] / self.tile_px) for m in tail) for i in (0, 1)) if self.tile_px else (0, 0)
+            if tail: self._prepared = (*self._prepared[:5], tuple(self.pos[i] - delta[i] for i in (0, 1)) if final_view else self.pos)
+            if not final_view and self.tile_px and next_place != self.mem.unplaced: self.pos = fold(self.mem, next_place, self.pos, tail, self.tile_px, step)
             if cut_dir: self._cross(place, self._prepared[4], next_place, self.pos, step)  # a crossing takes a press in a direction
             self.drift = self.drift_ref = None
             self.entity_tiles = self.entity_ids = {}
@@ -422,7 +432,7 @@ class World:
         self.mem.unplaced = None if tile is not None else place
         return tile if tile is not None else self.pos
     def mark_exit(self, place, direction, to, arrive, step):
-        mark_exit(self.mem, place, self._prepared[4], direction, to, arrive, step)
+        mark_exit(self.mem, place, self._prepared[4], direction, to, self._prepared[5] if len(self._prepared) > 5 else arrive, step)
     def _box(self, image, centre):
         t = self.tile_px; w, h = image.size
         x0, y0 = (min(max(round(centre[i] - t / 2), 0), max(n - t, 0)) for i, n in ((0, w), (1, h)))
@@ -1102,6 +1112,7 @@ class World:
             blocked = ", ".join(d for d in DIRS if d in tile.get("blocked", [])) or "none"
             failed = ", ".join(f"{f['act'][len('buttons '):]} x{f['n']}" for _, _, f in hits[:4])
             row["notes"] = [f"blocked directions: {blocked}"] + ([f"failed here: {failed}"] if failed else [])
+            if self.no_response: row["notes"].append(f"your last {self.no_response} presses changed nothing on screen")
             row["state"] = "new"
             return row
         free_label = "free buttons" + (f": {', '.join(inputs)}" if inputs else "")
@@ -1230,6 +1241,10 @@ class World:
                 label = f"explore {direction}, {route.get('steps', len(route['dirs']))} steps, {route.get('unseen', 0)} unseen cells that way"
                 ref = f"explore:{place}:{direction.casefold()}"
                 explores.append(option("explore", label, {"go_to": "unexplored", "dir": direction}, "approach", "unexplored", ref))
+            tile = self.mem.get("tiles", f"{place}@{self.pos[0]},{self.pos[1]}") or {}
+            if place != self.mem.unplaced and set(DIRS) <= set(tile.get("blocked", [])):
+                for direction in DIRS:
+                    explores.append({**option("buttons", f"press {direction} here: remembered wall from step {tile['step']}", {"buttons": [direction]}), "state": "failed"})
             for p in self.mem.rows("places"):
                 pid = p["id"]
                 if pid == place or pid not in live or p.get("screen") != "world": continue

@@ -2458,3 +2458,21 @@ def test_unplannable_exit_pick_fails_without_waiting(tmp_path, monkeypatch):
     assert first["skill"]["failure"]["stage"] == "route" and first["choice"]["intent"] in loop.fails
     loop.step()
     assert picks[1]["state"] == "failed"
+
+
+@pytest.mark.parametrize("destination_screen", ["world", "menu"])
+def test_dialogue_forced_cut_records_only_navigable_crossing(tmp_path, monkeypatch, destination_screen):
+    from agent import loop as module
+    env = GridEnv(); before = perception(); before["screen"] = "dialogue"
+    dest = perception(); dest["screen"] = destination_screen
+    model = StubModel([reply(before), reply(dest)])
+    monkeypatch.setattr(module, "act", lambda *a, **k: SimpleNamespace(place="", ops=[], action={"verb": "advance"}, expect="screen_changes", why="test", text=None))
+    def transition(ctx, *args, **kwargs):
+        frame = env.screenshot(); env.scene = 1
+        return SimpleNamespace(status="done", reason="scene cut", inputs=1, calls=0, before=frame, after=env.screenshot(), scroll=(0, 0), blank_seen=True, moves=[{"dir": "DOWN", "shift": (0, -16), "forced": True, "last_dir": "UP"}])
+    approach_stub(monkeypatch, transition)
+    mem = Memory(tmp_path / "memory"); loop = Loop(env, model, mem, "grid")
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    row = loop.step()
+    assert bool(mem.rows("crossings")) == (destination_screen == "world")
+    if destination_screen == "world": assert any(r.get("place") == row["place"] and (r.get("exit") or {}).get("dir") == "UP" for r in mem.rows("tiles"))

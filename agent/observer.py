@@ -14,6 +14,10 @@ class Settle:
     waited: int
     blank_seen: bool
     frame_stamp: dict | None = None
+    scroll: tuple[int, int] = (0, 0)
+    last_dir: str | None = None
+    after_scroll: tuple[int, int] = (0, 0)
+    arrival_frame: Image.Image | None = None
 
 def _blank(img: Image.Image) -> bool:
     a = np.asarray(img).astype(np.uint32)  # one int per pixel: a flat sort, not a row-wise one (~10 ms -> <1 ms per frame)
@@ -69,6 +73,22 @@ def _residual(frames: list[Image.Image], shifts: list[tuple[int, int]]):
 
 
 def wait_settled(env, *, quiet: int = 24, max_frames: int = 600, memory: int = 256) -> Settle:
+    total, tail, last_dir, crossed, arrival, previous = [0, 0], [0, 0], None, False, None, None
+    def motion(prev, frame, is_blank):
+        nonlocal last_dir, crossed, arrival, previous
+        # ponytail: one cut per settle; later blanks remain in the destination segment.
+        if is_blank: crossed, previous = True, None; return
+        if crossed:
+            if arrival is None: arrival = frame
+            prev, previous = previous, frame
+        if prev is None or prev.tobytes() == frame.tobytes(): return
+        top, bottom = _moving_rows(prev, frame)
+        if bottom - top < frame.height / 2: return
+        shift = scroll(prev.crop((0, top, prev.width, bottom)), frame.crop((0, top, frame.width, bottom)))
+        if shift and any(shift):
+            acc = tail if crossed else total; acc[:] = [acc[i] + shift[i] for i in (0, 1)]
+            if not crossed: last_dir = ("RIGHT" if shift[0] < 0 else "LEFT") if shift[0] else ("DOWN" if shift[1] < 0 else "UP")
+    result = lambda frame, settled, waited, blank, stamp=None: Settle(frame, settled, waited, blank, stamp, tuple(total), last_dir, tuple(tail), arrival)
     quiet = max(1, quiet)
     snapshot = getattr(env, "snapshot", None)
     wait_frame = getattr(env, "wait_frame", None)
@@ -101,15 +121,15 @@ def wait_settled(env, *, quiet: int = 24, max_frames: int = 600, memory: int = 2
             frame = current.image
             is_blank = _blank(frame)
             blank_seen = blank_seen or is_blank
-            if not is_blank:
-                last, last_snapshot = frame, current
+            motion(last, frame, is_blank)
+            if not is_blank: last, last_snapshot = frame, current
             key = hashlib.sha256(frame.tobytes()).digest()
             is_quiet = key in hashes and not is_blank
             consecutive = consecutive + 1 if is_quiet else 0
             hashes.append(key)
             if consecutive >= quiet:
-                return Settle(frame, True, waited, blank_seen, _frame_stamp(current))
-        return Settle(last if last is not None else frame, False, waited, blank_seen, _frame_stamp(last_snapshot or current))
+                return result(frame, True, waited, blank_seen, _frame_stamp(current))
+        return result(last if last is not None else frame, False, waited, blank_seen, _frame_stamp(last_snapshot or current))
     frame = env.screenshot()
     last = frame if not _blank(frame) else None
     blank_seen = last is None
@@ -120,19 +140,25 @@ def wait_settled(env, *, quiet: int = 24, max_frames: int = 600, memory: int = 2
         frame = env.screenshot()
         is_blank = _blank(frame)
         blank_seen = blank_seen or is_blank
-        if not is_blank:
-            last = frame
+        motion(last, frame, is_blank)
+        if not is_blank: last = frame
         key = hashlib.sha256(frame.tobytes()).digest()
         is_quiet = key in hashes and not is_blank
         consecutive = consecutive + 1 if is_quiet else 0
         hashes.append(key)
         if consecutive >= quiet:
-            return Settle(frame, True, waited, blank_seen)
-    return Settle(last if last is not None else frame, False, waited, blank_seen)
+            return result(frame, True, waited, blank_seen)
+    return result(last if last is not None else frame, False, waited, blank_seen)
 
 
 def _frame_stamp(snapshot) -> dict:
     return {key: getattr(snapshot, key) for key in ("generation", "frame_seq", "captured_monotonic")}
+
+def _moving_rows(a, b):
+    same = np.all(np.asarray(a) == np.asarray(b), axis=tuple(range(1, np.asarray(a).ndim)))
+    rows = np.flatnonzero(~same)
+    return (int(rows[0]), int(rows[-1]) + 1) if len(rows) else (0, 0)
+
 
 def scroll(a: Image.Image, b: Image.Image, max_shift: int = 4) -> tuple[int, int] | None:
     a, b = np.asarray(a), np.asarray(b)

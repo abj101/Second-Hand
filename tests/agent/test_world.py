@@ -1799,3 +1799,22 @@ def test_unconfident_thing_label_shows_its_candidates(tmp_path):
     assert world.label("thing:t") == "ball"
     mem.upsert("entities", {"id": "t", "name": "ball", "kind": "object", "place": "room", "tile": [1, 1], "called": "OAK", "recent_names": ["ball", "sphere"]})
     assert world.label("thing:t") == "OAK"
+
+
+@pytest.mark.parametrize("final_view", [False, True])
+def test_forced_cut_folds_destination_once(tmp_path, monkeypatch, final_view):
+    mem = Memory(tmp_path); place(mem, "source", "Source"); place(mem, "dest", "Dest")
+    world = World(mem, 16)
+    frame = GridEnv().screenshot()
+    skill = SimpleNamespace(moves=[{"dir": "DOWN", "shift": (0, -160), "forced": True}, {"dir": "RIGHT", "shift": (-16, 0), "forced": True}, {"dir": "UP", "shift": (0, 80), "forced": True, "after_cut": True}], after=frame, arrival_frame=frame, scroll=(0, 0))
+    spatial = world.prepare(skill, "source", True, 2)
+    assert spatial == {"cut_dir": "RIGHT", "exit_key": (1, 10, "RIGHT")}
+    mem.arrival = ("dest", (4, 2) if final_view else (4, 7), "view" if final_view else "observed")
+    monkeypatch.setattr(mem, "seen_view", lambda *args, **kwargs: None)
+    world.after(skill, "source", "dest", True, 2)
+    assert world.pos == (4, 2)
+    world.mark_exit("source", spatial["cut_dir"], "dest", world.pos, 2)
+    assert mem.get("tiles", "source@1,10")["exit"]["arrive"] == [4, 7]
+    mem.arrival = ("dest", (4, 7), "observed")
+    world.pos = (0, 0); world.prepare(skill, "source", True, 3); world.after(skill, "source", "dest", True, 3)
+    assert world.pos == (4, 2)

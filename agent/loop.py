@@ -313,7 +313,7 @@ class Loop:
         if next_place != place: self._moved(place, next_place, aff.get("target") if aff else None, self.step_no + 1, intent)
         if skill.scroll != (0, 0) and next_place == place and self.mem.get("places", place).get("state") == "candidate" and self.mem.get("places", place).get("screen") == "world":
             source = self.mem.get("places", place); source["state"] = "place"; self.mem.upsert("places", source)
-        world_exit = bool(scene_cut and next_place != place and cut_dir and per.get("screen") == after_per.get("screen") == "world")
+        world_exit = bool(scene_cut and next_place != place and cut_dir and after_per.get("screen") == "world" and (per.get("screen") == "world" or per.get("screen") == "dialogue" and self.mem.get("places", next_place).get("screen") == "world" and any(isinstance(m, dict) and m.get("forced") and m.get("shift") not in (None, (0, 0), 0) for m in skill.moves)))
         outcome = effects(per, after_per, skill, place, next_place, place_after_candidate=not world_exit and self.mem.get("places", next_place).get("state") == "candidate", scene_cut=scene_cut and next_place != place)
         route =(getattr(skill, "failure", None) or {}).get("stage") in ("route", "interaction")  # never reached the thing (a route stopped short, a choice refused before any press): no evidence about it
         said_step, repeated = None, False
