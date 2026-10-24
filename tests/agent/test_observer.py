@@ -232,3 +232,15 @@ def test_settle_segments_static_band_motion_at_blank(monkeypatch):
     assert result.after_scroll == (-16, 0) and result.arrival_frame.tobytes() == frames[0].tobytes()
     still = wait_settled(StubEnv([frames[0]]), quiet=1)
     assert still.scroll == still.after_scroll == (0, 0)
+
+
+def test_settle_tracks_ambient_patch_but_not_scroll(monkeypatch):
+    from agent import observer
+    image = texture(); animated = image.copy()
+    for y in range(20, 24):
+        for x in range(30, 34): animated.putpixel((x, y), (255, 0, 0))
+    scrolled = shifted(image, 0, 1)
+    monkeypatch.setattr(observer, "scroll", lambda *_: (1, 0))
+    result = wait_settled(StubEnv([image, animated, image, scrolled, scrolled, scrolled]), quiet=2, max_frames=10)
+    expected = np.zeros(np.asarray(image).shape[:2], dtype=bool); expected[20:24, 30:34] = True
+    assert np.array_equal(result.ambient, expected)

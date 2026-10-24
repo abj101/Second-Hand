@@ -18,6 +18,7 @@ class Settle:
     last_dir: str | None = None
     after_scroll: tuple[int, int] = (0, 0)
     arrival_frame: Image.Image | None = None
+    ambient: object = None
 
 def _blank(img: Image.Image) -> bool:
     a = np.asarray(img).astype(np.uint32)  # one int per pixel: a flat sort, not a row-wise one (~10 ms -> <1 ms per frame)
@@ -74,21 +75,27 @@ def _residual(frames: list[Image.Image], shifts: list[tuple[int, int]]):
 
 def wait_settled(env, *, quiet: int = 24, max_frames: int = 600, memory: int = 256) -> Settle:
     total, tail, last_dir, crossed, arrival, previous = [0, 0], [0, 0], None, False, None, None
+    amb = None
     def motion(prev, frame, is_blank):
-        nonlocal last_dir, crossed, arrival, previous
+        nonlocal last_dir, crossed, arrival, previous, amb
         # ponytail: one cut per settle; later blanks remain in the destination segment.
         if is_blank: crossed, previous = True, None; return
         if crossed:
             if arrival is None: arrival = frame
             prev, previous = previous, frame
         if prev is None or prev.tobytes() == frame.tobytes(): return
+        diff = np.any(np.asarray(prev) != np.asarray(frame), axis=2) if not is_blank and not crossed else None
         top, bottom = _moving_rows(prev, frame)
-        if bottom - top < frame.height / 2: return
+        if bottom - top < frame.height / 2:
+            if diff is not None:
+                if amb is None: amb = np.zeros_like(diff)
+                amb |= diff
+            return
         shift = scroll(prev.crop((0, top, prev.width, bottom)), frame.crop((0, top, frame.width, bottom)))
         if shift and any(shift):
             acc = tail if crossed else total; acc[:] = [acc[i] + shift[i] for i in (0, 1)]
             if not crossed: last_dir = ("RIGHT" if shift[0] < 0 else "LEFT") if shift[0] else ("DOWN" if shift[1] < 0 else "UP")
-    result = lambda frame, settled, waited, blank, stamp=None: Settle(frame, settled, waited, blank, stamp, tuple(total), last_dir, tuple(tail), arrival)
+    result = lambda frame, settled, waited, blank, stamp=None: Settle(frame, settled, waited, blank, stamp, tuple(total), last_dir, tuple(tail), arrival, ambient=amb)
     quiet = max(1, quiet)
     snapshot = getattr(env, "snapshot", None)
     wait_frame = getattr(env, "wait_frame", None)
