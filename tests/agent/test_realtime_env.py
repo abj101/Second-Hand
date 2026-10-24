@@ -300,3 +300,12 @@ def test_live_pyboy_real_rom_uses_main_thread_and_stops_cleanly(monkeypatch):
 def _wait_generation(env, initial, result):
     try: env.wait_frame(initial, timeout=5)
     except BaseException as exc: result.append(exc)
+
+
+def test_pyboy_tick_emits_every_listener_frame(fake_live):
+    host, _ = fake_live
+    env = env_module.PyBoyEnv("fake.gb"); seen = []
+    env.listen(lambda image, seq: seen.append((image.size, seq)))
+    env.tick(5)
+    assert [seq for _, seq in seen] == [1, 2, 3, 4, 5]
+    env.close()

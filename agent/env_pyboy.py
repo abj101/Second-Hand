@@ -80,6 +80,7 @@ class PyBoyEnv:
         self.name = name
         self.pyboy = PyBoy(rom or find_rom(), window="null")
         self.pyboy.set_emulation_speed(0)
+        self._frame_seq, self._listeners = 0, []
         if state:
             self.load(state)
 
@@ -87,6 +88,7 @@ class PyBoyEnv:
         return self.pyboy.screen.image.convert("RGB")
     def inputs(self) -> tuple[str, ...]:
         return _INPUTS
+    def listen(self, fn): self._listeners.append(fn)
     def press(self, key: str, frames: int = 8, on_frame: Callable[[Image.Image], None] | None = None) -> None:
         button = key.lower()
         if key not in _INPUTS:
@@ -101,16 +103,17 @@ class PyBoyEnv:
             self._tick(on_frame)
 
     def _tick(self, on_frame=None) -> None:
-        self.pyboy.tick(1)
-        if on_frame or self.frame_sink:
+        self.pyboy.tick(1); self._frame_seq += 1
+        if on_frame or self.frame_sink or self._listeners:
             image = self.screenshot()
+            for listener in self._listeners: listener(image, self._frame_seq)
             if on_frame: on_frame(image)
             if self.frame_sink: self.frame_sink(image)
 
     def click(self, at: list[float]) -> None:
         raise NotImplementedError("PyBoy has no pointer input")
     def tick(self, frames: int = 1) -> None:
-        if not self.frame_sink: return self.pyboy.tick(frames)
+        if not self.frame_sink and not self._listeners: return self.pyboy.tick(frames)
         for _ in range(frames): self._tick()
     def save(self, path: str) -> None:
         with open(path, "wb") as file:
@@ -119,6 +122,7 @@ class PyBoyEnv:
     def load(self, path: str) -> None:
         with open(path, "rb") as file:
             self.pyboy.load_state(file)
+        for listener in self._listeners: listener(None, self._frame_seq)
     def ram(self, addr: int) -> int:
         return self.pyboy.memory[addr]
     def close(self) -> None:
@@ -141,6 +145,7 @@ class _LivePyBoyEnv:
         self.name = host.name
 
     def inputs(self) -> tuple[str, ...]: return _INPUTS
+    def listen(self, fn): self._host.listen(fn)
     def click(self, at: list[float]) -> None: raise NotImplementedError("PyBoy has no pointer input")
 
     def snapshot(self) -> FrameSnapshot:
@@ -252,6 +257,7 @@ class LivePyBoyHost:
             self._failure: BaseException | None = None
             self._active: tuple[_Command, str, int, list[FrameSnapshot], int] | None = None
             self._held: set[str] = set()
+            self._listeners: list[Callable[[Image.Image | None, int], None]] = []
             self.env = _LivePyBoyEnv(self)
             self._event_filter = _install_live_event_filter()
         except BaseException:
@@ -302,6 +308,9 @@ class LivePyBoyHost:
         self._stop.set()
         with self._condition: self._condition.notify_all()
 
+    def listen(self, fn) -> None:
+        self._raise_if_unavailable(); self._listeners.append(fn)
+
     def _capture_image(self) -> Image.Image:
         return self._pyboy.screen.image.convert("RGB").copy()
 
@@ -311,6 +320,7 @@ class LivePyBoyHost:
         image = self._capture_image()
         image.info.update(generation=self._generation, frame_seq=self._frame_seq, captured_monotonic=now)
         frame = FrameSnapshot(self._generation, self._frame_seq, now, image)
+        for listener in self._listeners: listener(image, self._frame_seq)
         with self._condition:
             self._latest = frame
             if self._active is None: self._history.append(frame)
@@ -356,6 +366,7 @@ class LivePyBoyHost:
                     loaded = FrameSnapshot(self._generation, 0, now, image)
                     with self._condition:
                         self._latest = loaded; self._history.clear(); self._condition.notify_all()
+                    for listener in self._listeners: listener(None, 0)
                     self._complete(cmd, None)
                 else: raise ValueError(f"unknown live command: {cmd.kind}")
             except BaseException as exc:

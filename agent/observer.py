@@ -25,8 +25,18 @@ def _blank(img: Image.Image) -> bool:
     return bool(np.unique(v.ravel(), return_counts=True)[1].max() >= 0.99 * a.shape[0] * a.shape[1])  # fades are uniform; the NEW GAME menu is 95% white and must still settle
 
 
+def frame_shift(prev, frame, max_shift=4, tile_px=None):
+    a, b = np.asarray(prev), np.asarray(frame)
+    if np.array_equal(a, b): return None
+    top, bottom = _moving_rows(a, b)
+    if bottom - top < a.shape[0] / 2: return None
+    a, b = a[top:bottom], b[top:bottom]
+    shift = scroll(a, b) if max_shift == 4 else scroll(a, b, max_shift)
+    if shift is None and tile_px is not None: shift = scroll(a, b, max(4, tile_px))
+    return shift if shift is not None else "cut" if changed(prev, frame) > .5 else None
+
 def changed(a: Image.Image, b: Image.Image, thresh: int = 16, mask=()) -> float:
-    a, b = np.asarray(a).astype(np.int16), np.asarray(b).astype(np.int16)
+    a, b = np.asarray(a).astype(np.int16, copy=False), np.asarray(b).astype(np.int16, copy=False)
     pixels = np.max(np.abs(a - b), axis=-1) > thresh
     if not mask: return float(np.mean(pixels))
     included = np.ones(pixels.shape, dtype=bool)
@@ -81,11 +91,9 @@ def wait_settled(env, *, quiet: int = 24, max_frames: int = 600, memory: int = 2
         if crossed:
             if arrival is None: arrival = frame
             prev, previous = previous, frame
-        if prev is None or prev.tobytes() == frame.tobytes(): return
-        top, bottom = _moving_rows(prev, frame)
-        if bottom - top < frame.height / 2: return
-        shift = scroll(prev.crop((0, top, prev.width, bottom)), frame.crop((0, top, frame.width, bottom)))
-        if shift and any(shift):
+        if prev is None: return
+        shift = frame_shift(prev, frame, 4)
+        if isinstance(shift, tuple) and any(shift):
             acc = tail if crossed else total; acc[:] = [acc[i] + shift[i] for i in (0, 1)]
             if not crossed: last_dir = ("RIGHT" if shift[0] < 0 else "LEFT") if shift[0] else ("DOWN" if shift[1] < 0 else "UP")
     result = lambda frame, settled, waited, blank, stamp=None: Settle(frame, settled, waited, blank, stamp, tuple(total), last_dir, tuple(tail), arrival)
@@ -161,7 +169,7 @@ def _moving_rows(a, b):
 
 
 def scroll(a: Image.Image, b: Image.Image, max_shift: int = 4) -> tuple[int, int] | None:
-    a, b = np.asarray(a), np.asarray(b)
+    a, b = np.asarray(a).astype(np.int16, copy=False), np.asarray(b).astype(np.int16, copy=False)
     h, w = a.shape[:2]
     scores = []
     for dy in range(-max_shift, max_shift + 1):
@@ -169,7 +177,7 @@ def scroll(a: Image.Image, b: Image.Image, max_shift: int = 4) -> tuple[int, int
             sx, sy = w - abs(dx), h - abs(dy)
             aa = a[max(-dy, 0):max(-dy, 0) + sy, max(-dx, 0):max(-dx, 0) + sx]
             bb = b[max(dy, 0):max(dy, 0) + sy, max(dx, 0):max(dx, 0) + sx]
-            scores.append((float(np.mean(np.abs(aa.astype(np.int16) - bb.astype(np.int16)))), dx, dy))
+            scores.append((float(np.mean(np.abs(aa - bb))), dx, dy))
     scores.sort()
     # ponytail: 1.0 MAE unit is the ambiguity margin; raise if noisy captures need stricter matching.
     if len(scores) < 2 or scores[1][0] - scores[0][0] < 1.0:

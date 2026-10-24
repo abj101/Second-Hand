@@ -24,6 +24,11 @@ class GridEnv:
         self._facing = None  # last pressed direction; drawn as a marker only when hud/wander/animated
         # ponytail: gated geometry puts tile rows at y = 64 + 16k (centres 72 + 16k) so they sit on observer.snap's grid; default geometry stays unchanged for goldens.
         self._top = 64 if (hud or wander or animated) else 72
+        self._listeners, self._frame_seq = [], 0
+    def listen(self, fn) -> None: self._listeners.append(fn)
+    def _notify(self, image):
+        self._frame_seq += 1
+        for listener in self._listeners: listener(image, self._frame_seq)
     def inputs(self) -> tuple[str, ...]: return self.inputs_available
     def set_hud_value(self, n: int) -> None: self.hud_value = n
     def _wander_step(self) -> None:
@@ -117,13 +122,17 @@ class GridEnv:
                 if key in self._steps and not self._moving and dest != self.player and _ < 4:
                     x = 78 if self._top == 72 else 88
                     ImageDraw.Draw(image).rectangle((x, 72, x + 1, 73), fill=(245, 140, 120))
-                on_frame(image)
+                self._notify(image)
+                on_frame and on_frame(image)
+            else: self._notify(self.screenshot())
         if self.wander: self._wander_step()
         self._direction = ""
     def click(self, at: list[float]) -> None: raise NotImplementedError("GridEnv has no pointer input")
 
     def tick(self, frames: int = 1) -> None:
-        for _ in range(frames): self._frame()
+        for _ in range(frames):
+            self._frame()
+            if self._listeners: self._notify(self.screenshot())
 
 class StubModel:
     def __init__(self, replies: list[Any]) -> None: self._replies, self.calls = deque(replies), 0
