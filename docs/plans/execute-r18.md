@@ -117,7 +117,8 @@ Run order: wave 0, then O1, then O2 and O3 in parallel worktrees, then G18a (gat
   11. **perf:** the mean cost per frame on recorded 160x144 frames is reported (the gate is T18-O1). Not an assertion on timing in CI.
 - **Acceptance:**
   - `pytest -n auto -q` is green with the same count + new tests;
-  - `.tmp/r18/g/t18_o1_perf.py` reports a mean of at most 3 ms per frame on `runs/m1_r17_boot/frames/*.png` pairs.
+  - `.tmp/r18/g/t18_o1_perf.py` reports a mean of at most 3 ms per frame on CONSECUTIVE emulated frames: `.tmp/r18/ref/frames/lag1_*.png` (1570 frames of the step-69 replay: walk, fade, warp, walk). It also prints p95 and max (report-only).
+  - Amended 2026-10-24 by the user. The first gate fed `runs/*/frames/*.png`, which are per-STEP snapshots, not consecutive frames. Almost every pair there is a different screen, so every frame took the `tile_px` retry. That made the gate measure a case the odometer never sees.
 - **Risks:**
   - Thread lock contention: hold the lock only to append and drain.
   - Do not call listeners while holding the host's condition lock (deadlock).
@@ -180,7 +181,7 @@ Run order: wave 0, then O1, then O2 and O3 in parallel worktrees, then G18a (gat
 ## 4. Gates
 | Gate | Pass | Command |
 |---|---|---|
-| T18-O1 | O1 tests green; mean ≤ 3 ms/frame | `pytest -n auto -q`; `python .tmp/r18/g/t18_o1_perf.py` |
+| T18-O1 | O1 tests green; mean ≤ 3 ms/frame on `.tmp/r18/ref/frames` (consecutive frames) | `pytest -n auto -q`; `python .tmp/r18/g/t18_o1_perf.py` |
 | T18-O2 | O2 tests green; scripted cut walk pos exact | `python .tmp/r18/g/t18_o2.py` |
 | T18-O3 | step 69 = (+1,+10) then (0,-8); ≥ 99% step agreement on 2 runs | `python scripts/check_odometer.py --run runs/m1_r17_boot` and the second run |
 | G18a/G18b | merged HEAD: full suite green, T18-O1..O3 re-run | orchestrator |
