@@ -554,6 +554,10 @@ World Memory, approved 2026-10-12. Design: [world-memory.md](world-memory.md); p
 
 ```python
 class World:
+    # r20: a cut before a door leg's last press is not that door (travel stops open, the loop re-identifies) (Ha).
+    # Trace odometer stats carry per-segment logs (He). An edge's arrive is the settled standing tile;
+    # inferred ways back are marked settled:false until crossed; landing on a settled arrive absorbs post-cut motion.
+    # Legacy inferred provenance retains its unsettled meaning when the settled flag is absent.
     def __init__(self, mem: Memory, tile_px: int | None) -> None
     # W0 (as built 2026-10-12)
     def before(self, per: dict, place: str, prior: str | None, size: tuple[int, int], step: int) -> tuple[Callable, dict[int, tuple[int, int]], dict[int, str]]
