@@ -209,7 +209,7 @@ class Ctx:
 
 def approach(ctx, target_at: list[float], player_at: list[float] | None) -> SkillResult
 def interact(ctx, target_at: list[float], player_at: list[float] | None) -> SkillResult
-def select(ctx, item: str) -> SkillResult
+def select(ctx, item: str, perception: dict | None = None, menu: dict | None = None) -> SkillResult
 def advance(ctx) -> SkillResult
 def cancel(ctx) -> SkillResult
 def press(ctx, key: str) -> SkillResult
@@ -227,7 +227,9 @@ def run_affordance(ctx, aff: Affordance, perception: Perception, text: str | Non
 - On a pointer env, `approach` and `interact` click (after `refine`), and `player_at` is ignored.
 - On a pad env, `approach` returns `blocked` if `player_at` is None. A move whose scroll is `None` is re-measured, never treated as blocked. A confident `(0, 0)` scroll is blocked.
 - When the delta is 0 and no cut happened, `approach` presses once more in the last direction, because door mats and edge warps trigger on a push.
-- `select` uses one model call (read the items and cursor), then the presses, then A. The step's own post-perception verifies it.
+- `select` reads the items and cursor with one model call, unless the screen's stored menu (layout, items, cursor
+  signatures) matches the current menu region exactly once; then it uses no call (r21, approved 2026-10-25). Grids always read.
+  Then the presses, then A. The step's own post-perception verifies it.
 - A skill never loops past `ctx.max_inputs`. It returns `failed` or `blocked` with a reason instead.
 
 ## brief
@@ -558,6 +560,10 @@ class World:
     # Trace odometer stats carry per-segment logs (He). An edge's arrive is the settled standing tile;
     # inferred ways back are marked settled:false until crossed; landing on a settled arrive absorbs post-cut motion.
     # Legacy inferred provenance retains its unsettled meaning when the settled flag is absent.
+    # r21 (approved 2026-10-25): the last bump of a segment that ends in a cut is that crossing's press, never a wall (P5).
+    # An actor omitted by perception counts misses like a static thing; gone at MISS_TO_STALE misses or on pixel-track
+    # loss; a remembered live actor's tile is held (no wall) (P6). An unverified exit is refuted when travel stopped short
+    # of it twice, or known floor lies beyond it outward (P7). While unsettled, nothing is written to place memory (P8).
     def __init__(self, mem: Memory, tile_px: int | None) -> None
     # W0 (as built 2026-10-12)
     def before(self, per: dict, place: str, prior: str | None, size: tuple[int, int], step: int) -> tuple[Callable, dict[int, tuple[int, int]], dict[int, str]]
