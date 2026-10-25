@@ -1,47 +1,51 @@
 # Handoff notes
-Last written: 2026-10-25. r19 code merged and G19 passed; LV19 ended at its authorized call cap.
+Last written:2026-10-25. R20 implemented, G20 passed, single LV20 completed. Never pushed.
+
 ## Source and implementation
-- Branch feat/lean-agent; validated/live code HEAD 4c8ed14 (base a01c9b5).
-- Wave-0 plan/approved notebook contract: 2c03e15.
-- O1 9a28248, merge dcb3bef: known-place rows worked with visits/last/beyond notes.
-- N1 cf73fe8, merge 4c8ed14: own-idea quests, unexplored target, event floor correction.
-- Own quests store why [], basis <=200, source own; names retain strict citations.
-- Unexplored closes only on entry to a place first seen >= opened/retargeted.
-- Only all-T2/T4 queues keep the floor. User approved the additional T1 test update in chat.
-- Tests added four functions; detailed before/after assertions: .tmp/r19/N1/report.md.
-## Diagnosis and gates
-- D1 valid Loop replay stopped at step151: 558 RGB bytes differ from recorded after-frame.
-- H1/H2 unconfirmed; T1 skipped; no P5/P6 or world contract amendment.
-- H3 copied r18f replay65-90:26/26 RAM agreement. First row delta frame856 clears868.
-- G3 proposal: compare stable destination writes/door anchors before changing map stitching; no code.
-- Baseline904 passed,1 skipped. G19 merged908 passed,1 skipped.
-- T-O1:902 passed,3 skipped; T-N1:906 passed,3 skipped (worktrees omit ROM/runs links).
-- T18F/G/H/I PASS with unchanged PASS/FAIL counts. O2 exact output unchanged.
-- O3 complete JSON unchanged: boot85/85, phase109/109 agree. All9 golden files unchanged.
-## LV19 execution and outcome
-- Copied source m1_r18g_odo to previously absent m1_r19_odo; checkpoint150, invocation4.
-- Command: scripts/run_agent.py --run runs/m1_r19_odo --resume --from-step 150 --steps 60 --max-calls 120
-- Exactly one invocation. Completed151-192 (42 steps); attempt193 hit call_cap, exit3.
-- Ledger10509 ->10629, delta120; ceiling10630. No rerun, extension or manual early stop.
-- Requests: perceiver54, act44, plan6, skill16; four cached rows and one zero-request cap row.
-- Lab exit156 (LV18g152); nine party-present world steps through exit, five post-dialogue.
-- North crossing159: UP choice, RAM map0 ->12; wild battle160. LV18g never crossed north.
-- No new place minted: visual memory reuses p_place_4 and p_place_3 on map12.
-- No T2 events (honesty0/0, zero false novelty); q11 frontier remains open.
-- Plan5 rows/6 requests (LV18g8/10); add errors0 (was2); one name citation error remains.
-- Four own-idea quests; no Goal:(none) world prompts (LV18g actual153,154,156,157).
-- Untargeted house-route attempt175 chose bedroom; visual p_place_3, but RAM stayed map12.
-- No RAM-confirmed house/lab re-entry after156; no crossing-step exit wall recorded.
-- Walls18:15 RAM-scored nonsprite terrain,0 NPC/prop overlaps,3 unscored intermediate edges.
-- Unchosen presses0; all42 rows locked, world15/15 (100%); probe null; odo gap0.
-- Odo35287 frames,3566 uncertain,24 cuts. Dropped96 =90 battle +6 world-tagged middle travel.
-- World-type drop target0 missed at175 (7-cut travel into battle); real motion/fade unverified.
-- Each of5 (place,map) visits has one offset. Pallet[5,6] is an already-known origin.
-## Integrity, artifacts and open issues
-- All1469 source-run files, five user files and nine golden files unchanged by hash.
-- All r19 worktrees removed normally; no force, no push. Only runner updated the ledger.
-- Report .tmp/r19/report.md; raw metrics metrics.json, analysis.json, spatial-audit.json.
-- D1 evidence .tmp/r19/D/diagnosis.md; reproduction replay_loop.py and paired frame/hash evidence.
-- Gates .tmp/r19/g/; preflight.json, integrity.json, live.log and exit.txt preserve provenance.
-- Frontier identity failure and inappropriate battle unexplored targets remain observations, no added validator.
-- Fake top-wall door, shop label, persistent Pallet origin and conditional travel fixes remain open by scope.
+- Branch feat/lean-agent; base341264d; live/code HEAD1fb1ecf.
+- Wave0 docs/approved notebook contract24e9a74.
+- N3 b62f3ba, merge05209e7:optional act replan flag; T1 needs a flag; text always retained; T5 unchanged.
+- Tile first step persists; legacy missing first means old. Unexplored also closes half a screen beyond every old tile.
+- A2 b94a08f, merge1ab2f20:observed settled:true, inferred settled:false; settled arrivals absorb post-cut segments.
+- Known legacy src:inferred remains unsettled without the new flag; other legacy rows default observed.
+- Trace/view matches are settled; inferred-view promotion updates the flag and travel refreshes its edge.
+- Unsettled travel retains prior fold-last/drop-middle behavior; zero-motion presses/bumps remain processed.
+- World contract1fb1ecf. No new action filters, classes/modules, game-specific logic or RAM reads in agent/.
+- User approved minor-medium compatible test changes/contract-preserving decisions; no further permission was needed.
+
+## Verification and diagnosis
+- Baseline910passed1skipped. Main T-N3:915passed1skipped. G20:922passed1skipped,29000warnings,151.84s.
+- T18F/G/H/I:25/33/65/133PASS,0FAIL. T18-O2 output identical; O3 boot85/85 and phase109/109 JSON identical.
+- Golden fixtures unchanged. Comparators exclude only additive replan/first/settled/absorbed; direct tests cover metadata.
+- All4 reconstructed/verified crossing cases retain RAM-minus-tile[5,6] on merged production travel.
+- Historical lab full post-cut segment[112,80] ends tile[0,0]/RAM[5,6]; [7,6]/[12,12] was only its forced-step prefix.
+- House155 intermediate replay unavailable; saved checkpoint proves old tile[0,1]/RAM[5,6] vs observed anchor[0,0].
+- D2 confirms P3 semantics. House155 re-derivation explicitly uses measured r17 template plus saved endpoint.
+- LV19 battle78requests/26steps:26act,36perceiver,16skill. Perceiver excess is10 fresh pre-action reads, not retries.
+- No P4 cost code:stored menu schema or combined act/menu reading could each save up to16 LV19 requests; alternatives.
+
+## LV20, exactly one invocation
+- runs/m1_r20_odo resumed checkpoint150; steps151-210 completed,exit0; max160,actual139requests.
+- Ledger10629->10768 (smoke50,m110718), below10789 ceiling; no rerun,extension or early stop.
+- Plans7:T4x3,T2x1,T3+T5x3. New T1 raised4,qualified T1 dispatch0; text retained and consumed through other triggers.
+- One replan flag156 cited goal fulfillment; no eligible T1 was queued. No obsolete post-battle defeat quest appeared.
+- Lab exit154 (LV18g152,LV19 156). One new place p_place_6/map39 at159; return160.
+- Unexplored q11 closed on new ground182 after retarget179; q12 closed200; same place p_place_4 across Route1 seam.
+- Furthest Route1 RAM y25 vsLV19 24 (one row short); LV18g did not reach Route1 in comparison window.
+- World91requests/40steps=2.275; battle25/10=2.5. Six existing-cache hits explain part of lower battle request cost.
+- False crossings0; unchosen presses0; world lock40/40=100%; odometer gap0.
+- Pallet offsets[5,6] across both visits; Route1[5,42]; new place39[2,7]; one offset per visit.
+- Dropped73:45 inherited battle,27 current battle,1 zero-motion transition. Absorbed1 world segment at160.
+- Wall targets missed:NPC overlap1 at209/RAM[5,24]; crossed exit marked DOWN wall at160/p_place_6@0,0.
+- Wall split39:10 perceived props,25 scenery/no entity overlap,1 RAM-confirmed sprite,3 unscored map-change rows.
+
+## Open issues and evidence
+- NPC/prop/scenery classification and wall-on-crossed-exit learning need a later scoped fix; LV20 did not gate commits.
+- Initial exit-lab quest had no target until160; model continued exploring after arrival. Target/goal meaning remains imperfect.
+- Fake top-wall door and shop label remain open by scope. Battle request optimization needs the user's choice.
+- Full report,commit/net-line/test ledger: .tmp/r20/report.md; N3/report.md,A2/report.md and assertions.diff files.
+- Metrics: .tmp/r20/metrics.json,analysis.json,extra.json,walls.json,segment-audit.json.
+- Gates/integrity: .tmp/r20/g/,preflight.json,integrity.json,source-hashes.json,user-hashes.json,golden-hashes.json.
+- D2 raw copied inputs and corrected diagnosis: .tmp/r20/D/; A2 merged-endpoints.txt and rederive_endpoints.py.
+- Single-run log/exit: .tmp/r20/live.log,exit.txt. Original runs and user files stayed unchanged.
+- N3/D2/A2 worktrees were clean and removed normally; no force,symlink,junction,regen or push.
