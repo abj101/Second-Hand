@@ -327,6 +327,16 @@ def test_match_place_ignores_exit_prefix_and_follows_leads_to(tmp_path):
     assert mem.match_place({"screen": "world"}, 5, via=" Exit: Stairs", **cut) not in ("p_2f", "p_1f")  # a label is never arrival identity (HF contract 4)
     mem.relate("e_door", "leads_to", "p_2f", src="inferred", step=1)
     assert mem.match_place({"screen": "world"}, 5, prev="p_out", cut=True, via="exit: door", via_id="e_door") == "p_2f"
+    assert mem.get("places", "p_2f")["visits"] == 1 and mem.get("places", "p_2f")["last"] == 5  # a known place re-entered by its relation counts a visit
+
+
+def test_match_place_counts_visit_on_exit_match(tmp_path):
+    mem = Memory(tmp_path)
+    mem.upsert("places", {"id": "p_1f", "name": "1f", "edges": []})
+    mem.upsert("places", {"id": "p_2f", "name": "2f", "edges": [], "visits": 3, "last": 1})
+    mem.upsert("tiles", {"id": "t_door", "x": 4, "y": 4, "place": "p_1f", "exit": {"to": "p_2f", "dir": "south"}})
+    assert mem.match_place({"screen": "world"}, 9, prev="p_1f", cut=True, exit=(4, 4, "south")) == "p_2f"
+    assert mem.get("places", "p_2f")["visits"] == 4 and mem.get("places", "p_2f")["last"] == 9
 
 
 def test_observe_same_name_block_keeps_stable_ids(tmp_path):

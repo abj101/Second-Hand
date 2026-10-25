@@ -200,6 +200,10 @@ class Memory:
             candidate, n = f"{store[0]}_{base}_{n}", n + 1
         return candidate
 
+    def _visit(self, pid: str, step: int) -> str:
+        if row := self.get("places", pid): self.upsert("places", {**row, "visits": row.get("visits", 0) + 1, "last": step})
+        return pid
+
     def match_place(self, perception: dict, step: int, *, prev: str | None,
                     cut: bool, via: str | None = None,
                     exit: tuple[int, int, str] | None = None, via_id: str | None = None,
@@ -219,18 +223,17 @@ class Memory:
         exclude = None if back else prev
         if cut and frame is not None and (hit := self.seen_view(frame, screen, exclude, tile_px)):
             self.arrival_exit = None; self.arrival = (*hit[:2], "view")  # place, tile, source
-            row = self.get("places", hit[0])
-            return self.upsert("places", {**row, "visits": row.get("visits", 0) + 1, "last": step})["id"]
+            return self._visit(hit[0], step)
         if cut and prev and exit:  # the exact exit, else every known exit within one tile (position drifts) if they agree on where they lead
             near = [(max(abs(r["x"] - exit[0]), abs(r["y"] - exit[1])), r["exit"].get("dir") != exit[2], r["exit"]["to"], tuple(r["exit"].get("arrive") or ()), i, r["exit"].get("src"), r["id"]) for i, r in enumerate(self.rows("tiles"))
                     if r.get("place") == prev and (r.get("exit") or {}).get("to") not in (None, prev) and max(abs(r["x"] - exit[0]), abs(r["y"] - exit[1])) <= 1]
             if near and (min(near)[:2] == (0, False) or len({n[2] for n in near}) == 1):
                 best = min(near)
                 if best[3]: self.arrival = (best[2], best[3], best[5]); self.arrival_exit = best[6]  # ponytail: checkpoints between match_place and _locate may drop this id harmlessly; only correction is skipped
-                return best[2]
+                return self._visit(best[2], step)
         if cut and via_id:
             known = next((r["o"] for r in self.rows("relations") if r.get("s") == via_id and r.get("p") == "leads_to" and r.get("state") == "live" and r.get("o") != prev and self.get("places", r.get("o"))), None)
-            if known: return known
+            if known: return self._visit(known, step)
         pid = self._id("places", "place")
         self.upsert("places", {"id": pid, "screen": "world",
                                "state": "candidate", "visits": 1,
