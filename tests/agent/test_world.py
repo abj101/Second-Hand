@@ -1962,6 +1962,30 @@ def test_bump_at_seq_follows_camera_motion_from_that_frame(tmp_path):
     assert world.pos == (1, 0) and bump["_tile"] == (1, 0)
 
 
+def test_odometer_no_response_becomes_silent_then_unconfirmed_wall(tmp_path):
+    mem, world = _odo_world(tmp_path); frame = camera(); seq = 0; world.odometer(frame(100, 100), seq)
+    for step in (1, 2):
+        seq += 1; world.odometer(frame(100, 100), seq)
+        move = {"dir": "UP", "shift": None, "no_response": True}
+        after = frame(100, 100); after.info["frame_seq"] = seq
+        skill = SimpleNamespace(moves=[move], after=after, arrival_frame=after, scroll=(0, 0))
+        world.prepare(skill, "room", False, step); world.after(skill, "room", "room", False, step)
+        row = mem.get("tiles", "room@0,0")
+        if step == 1: assert row.get("silent") == {"UP": 1} and row["blocked"] == []
+        else: assert row["blocked"] == ["UP"] and "UP" not in row.get("firm", [])
+
+
+def test_odometer_no_response_is_at_the_moved_to_tile(tmp_path):
+    mem, world = _odo_world(tmp_path); frame = camera(); world.odometer(frame(100, 100), 0)
+    seq, _, _ = feed(world.odometer, frame, 0, 100, 100, 16, 0)
+    move = {"dir": "UP", "shift": None, "no_response": True, "at": seq}
+    after = frame(116, 100); after.info["frame_seq"] = seq
+    skill = SimpleNamespace(moves=[move], after=after, arrival_frame=after, scroll=(0, 0))
+    world.prepare(skill, "room", False, 1); world.after(skill, "room", "room", False, 1)
+    assert world.pos == (1, 0) and move["_tile"] == (1, 0)
+    assert mem.get("tiles", "room@1,0").get("silent") == {"UP": 1}
+
+
 def test_subtile_remainder_crosses_drains_once(tmp_path):
     _, world = _odo_world(tmp_path); frame = camera(); world.odometer(frame(100, 100), 0)
     seq, x, y = feed(world.odometer, frame, 0, 100, 100, 8, 0)
