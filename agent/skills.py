@@ -1,5 +1,7 @@
 """Game-neutral, closed-loop input skills."""
 from dataclasses import dataclass, field, replace; from typing import Literal
+import base64
+from io import BytesIO
 from functools import wraps
 import re
 import numpy as np
@@ -218,27 +220,57 @@ def interact(ctx: Ctx, target_at: list[float], player_at: list[float] | None, *,
     return _result("done" if changed_a else "failed",
                    "" if changed_a else "nothing changed", inputs, moved.calls,
                    start.frame, end.frame, total, start.blank_seen or moved.blank_seen or face_blank or end.blank_seen, moved.moves)
+def _menu_crop(perception: dict, frame: Image.Image, tile_px: int | None) -> Image.Image | None:
+    points = [e["at"] for e in perception.get("entities", []) if e.get("selectable") is True and
+              isinstance(e.get("at"), list) and len(e["at"]) == 2 and all(isinstance(v, (int, float)) for v in e["at"])]
+    if not points: return None
+    pad = tile_px or 8  # ponytail: assumes selectable points bound the menu; widen only if real menus escape the padded box.
+    xs, ys = [round(p[0] * frame.width) for p in points], [round(p[1] * frame.height) for p in points]
+    box = (max(0, min(xs) - pad), max(0, min(ys) - pad), min(frame.width, max(xs) + pad + 1), min(frame.height, max(ys) + pad + 1))
+    return frame.crop(box) if box[0] < box[2] and box[1] < box[3] else None
+
+def _menu_signature(crop: Image.Image) -> str:
+    data = BytesIO(); crop.save(data, format="PNG")
+    return base64.b64encode(data.getvalue()).decode("ascii")
+
 @_tracked
-def select(ctx: Ctx, item: str) -> SkillResult:
-    start = _settled(ctx)
-    schema = {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "string"}},
-              "cursor": {"type": "integer"}, "layout": {"type": "string"}, "cursor_cell": {"type": "array", "items": {"type": "integer"}}, "item_cell": {"type": "array", "items": {"type": "integer"}}}, "required": ["items", "cursor", "layout"]}
-    reply = ctx.model.ask("Read the visible menu and answer only with JSON.", f'Return one JSON object with these keys: "items" (the visible menu labels in order as strings), "cursor" (the highlighted item index, zero-based integer), and "layout" ("vertical", "horizontal" or "grid"); for a grid also "cursor_cell" and "item_cell", the [row, column] of the highlighted item and of the target. Match the target label case-insensitively: {item}', [for_model(start.frame)], schema, role="skill")
-    data = reply.data or {}; items, cursor = data.get("items"), data.get("cursor")
+def select(ctx: Ctx, item: str, perception: dict | None = None, menu: dict | None = None) -> SkillResult:
+    start = _settled(ctx); crop = _menu_crop(perception or {}, start.frame, ctx.tile_px)
+    matches = []
+    if crop:
+        for index, signature in (menu or {}).get("cursors", {}).items():
+            try:
+                previous = Image.open(BytesIO(base64.b64decode(signature))).convert("RGB")
+                if previous.size == crop.size and changed(previous, crop) <= .05: matches.append(int(index))
+            except (ValueError, TypeError): continue
+    items, layout = (menu or {}).get("items"), (menu or {}).get("layout")
+    reuse = layout != "grid" and len(matches) == 1 and isinstance(items, list) and bool(items)
+    calls = 0 if reuse else 1
+    if reuse:
+        data = {"items": items, "cursor": matches[0], "layout": layout}
+    else:
+        schema = {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "string"}},
+                  "cursor": {"type": "integer"}, "layout": {"type": "string"}, "cursor_cell": {"type": "array", "items": {"type": "integer"}}, "item_cell": {"type": "array", "items": {"type": "integer"}}}, "required": ["items", "cursor", "layout"]}
+        reply = ctx.model.ask("Read the visible menu and answer only with JSON.", f'Return one JSON object with these keys: "items" (the visible menu labels in order as strings), "cursor" (the highlighted item index, zero-based integer), and "layout" ("vertical", "horizontal" or "grid"); for a grid also "cursor_cell" and "item_cell", the [row, column] of the highlighted item and of the target. Match the target label case-insensitively: {item}', [for_model(start.frame)], schema, role="skill")
+        data = reply.data or {}
+    if menu is not None and isinstance(data.get("items"), list) and type(data.get("cursor")) is int and 0 <= data["cursor"] < len(data["items"]) and data.get("layout"):
+        menu.update(layout=data["layout"], items=data["items"], cursors=dict(menu.get("cursors", {})))
+        if crop: menu["cursors"][str(data["cursor"])] = _menu_signature(crop)
+    items, cursor = data.get("items"), data.get("cursor")
     cells = [data.get("cursor_cell"), data.get("item_cell")]
     if data.get("layout") == "grid" and all(isinstance(c, list) and len(c) == 2 and all(type(v) is int for v in c) for c in cells):  # a keyboard: rows and columns, as type_text moves
         (r0, c0), (r1, c1) = cells
         keys = ["DOWN" if r1 > r0 else "UP"] * abs(r1 - r0) + ["RIGHT" if c1 > c0 else "LEFT"] * abs(c1 - c0)
     else:
-        if not isinstance(items, list) or not items or not isinstance(cursor, int) or not 0 <= cursor < len(items): return _result("failed", "menu or item not identified", 0, 1, start.frame, start.frame, blank=start.blank_seen)
+        if not isinstance(items, list) or not items or not isinstance(cursor, int) or not 0 <= cursor < len(items): return _result("failed", "menu or item not identified", 0, calls, start.frame, start.frame, blank=start.blank_seen)
         diff = next((i - cursor for i, name in enumerate(items) if str(name).casefold() == item.casefold()), None)
-        if diff is None: return _result("failed", "menu or item not identified", 0, 1, start.frame, start.frame, blank=start.blank_seen)
+        if diff is None: return _result("failed", "menu or item not identified", 0, calls, start.frame, start.frame, blank=start.blank_seen)
         keys = [("RIGHT" if diff > 0 else "LEFT") if data.get("layout") == "horizontal" else ("DOWN" if diff > 0 else "UP")] * abs(diff)
     n = len(keys) + 1
-    if n > ctx.max_inputs: return _result("blocked", "input limit", 0, 1, start.frame, start.frame, blank=start.blank_seen)
+    if n > ctx.max_inputs: return _result("blocked", "input limit", 0, calls, start.frame, start.frame, blank=start.blank_seen)
     for key in keys: ctx.env.press(key, ctx.move_frames)
     ctx.env.press("A", ctx.move_frames); end = _settled(ctx)
-    return _result("done", "", n, 1, start.frame, end.frame, blank=start.blank_seen or end.blank_seen)
+    return _result("done", "", n, calls, start.frame, end.frame, blank=start.blank_seen or end.blank_seen)
 @_tracked
 def press(ctx: Ctx, key: str) -> SkillResult:
     start = _settled(ctx); keys = ctx.env.inputs(); words = set(re.findall(r"[a-z0-9]+", key.casefold())); matches = [k for k in keys if k.casefold() in words]
@@ -319,7 +351,7 @@ def type_text(ctx: Ctx, text: str) -> SkillResult:
         if not all(press(erase) for _ in name): return _result("blocked", "input limit", inputs, calls, start.frame, frame, blank=blank)
         frame = _settled(ctx).frame
 @_tracked
-def run_affordance(ctx: Ctx, aff: dict, perception: dict, text: str | None = None, *, exit: bool = False, route: dict | None = None, onto: bool = False) -> SkillResult:
+def run_affordance(ctx: Ctx, aff: dict, perception: dict, text: str | None = None, *, exit: bool = False, route: dict | None = None, onto: bool = False, menu: dict | None = None) -> SkillResult:
     verb, target, at = aff.get("verb"), aff.get("target", ""), aff.get("at")
     player = next((e.get("at") for e in perception.get("entities", []) if e.get("kind", "").lower() == "player"), None)
     if verb == "approach": return _pointer(ctx, at, target) if ctx.env.pointer else approach(ctx, at, player, exit_target=None if onto else (target or "visible target") if exit else target if target.startswith("exit") else None, route=route)
@@ -327,7 +359,7 @@ def run_affordance(ctx: Ctx, aff: dict, perception: dict, text: str | None = Non
     if verb == "select":
         if not any(str(e.get("name", "")).casefold() == target.casefold() and e.get("selectable") is True for e in perception.get("entities", [])):
             frame = ctx.env.screenshot(); return _result("failed", "not a selectable choice on this screen", 0, 0, frame, frame, failure={"stage": "interaction", "reason": "not a selectable choice on this screen"})
-        return select(ctx, target)
+        return select(ctx, target, perception, menu)
     if verb == "advance": return advance(ctx)
     if verb == "cancel": return cancel(ctx)
     if verb == "press": return press(ctx, target)

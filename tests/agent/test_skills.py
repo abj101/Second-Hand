@@ -374,6 +374,31 @@ def test_select_uses_one_model_call_then_moves_and_confirms():
     assert result.status == "done" and result.inputs == 3
     assert env.cursor == 2 and env.selected == "OPTION"
     assert result.calls == model.calls == 1
+
+def test_select_reuses_matching_stored_menu_signature():
+    perception = {"screen": "menu", "entities": [{"name": "OPTION", "kind": "menu_item", "at": [.3, .6], "selectable": True}]}
+    menu = {"items": ["one", "two", "OPTION"], "layout": "vertical", "cursors": {}}
+    first = MenuEnv(); first_model = StubModel([Reply("", {"items": first.items, "cursor": 0, "layout": "vertical"}, 0, None, None)])
+    result = select(Ctx(first, first_model, tile_px=16), "option", perception, menu)
+    assert result.calls == first_model.calls == 1 and menu["cursors"].keys() == {"0"}
+    second = MenuEnv(); second_model = StubModel([])
+    result = select(Ctx(second, second_model, tile_px=16), "option", perception, menu)
+    assert result.calls == second_model.calls == 0 and second.selected == "OPTION"
+    assert second.cursor == 2 and result.inputs == 3
+
+def test_select_different_menu_crop_reads_again_and_grid_always_reads():
+    from agent.skills import _menu_crop, _menu_signature
+    perception = {"entities": [{"name": "OPTION", "at": [.3, .6], "selectable": True}]}
+    env = MenuEnv(); crop = _menu_crop(perception, env.screenshot(), 16)
+    menu = {"items": env.items, "layout": "vertical", "cursors": {"0": _menu_signature(crop)}}
+    changed_frame = env.screenshot(); ImageDraw.Draw(changed_frame).rectangle((35, 73, 58, 95), fill=(255, 0, 0)); env.screenshot = lambda: changed_frame.copy()
+    model = StubModel([Reply("", {"items": env.items, "cursor": 0, "layout": "vertical"}, 0, None, None)])
+    result = select(Ctx(env, model, tile_px=16), "option", perception, menu)
+    assert result.calls == model.calls == 1
+    grid_env = MenuEnv(); grid_model = StubModel([Reply("", {"items": env.items, "cursor": 0, "layout": "grid", "cursor_cell": [0, 0], "item_cell": [0, 2]}, 0, None, None)])
+    menu["layout"] = "grid"
+    result = select(Ctx(grid_env, grid_model, tile_px=16), "option", perception, menu)
+    assert result.calls == grid_model.calls == 1
 def test_step_remeasures_entire_move_when_a_frame_shift_is_uncertain(monkeypatch):
     import agent.skills as skills
 
