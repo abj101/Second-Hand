@@ -153,6 +153,42 @@ def test_route_and_frontier_never_cross_known_exit(tmp_path):
     for pos in [(1, 0), (1, -1), (1, -2), (0, -2)]: tile(mem, "town", pos)
     assert route(mem, "town", (0, 0), (0, -2))[0] != "UP"  # detours (4 steps), never UP through the exit
     assert ((0, 0), "UP") not in frontier(mem, "town")
+
+
+def test_route_never_steps_onto_observed_exit_tile(tmp_path):
+    mem = Memory(tmp_path)
+    mark_exit(mem, "town", (0, 0), "UP", "house", (0, 1), 1)
+    for pos in [(0, 1), (1, 1), (1, 0), (1, -1), (0, -1)]: tile(mem, "town", pos)
+    path = route(mem, "town", (0, 1), (0, -1))
+    assert path is not None and (0, 0) not in _walk((0, 1), path)
+
+
+def test_route_can_reach_observed_exit_tile_when_it_is_the_goal(tmp_path):
+    mem = Memory(tmp_path)
+    mark_exit(mem, "town", (0, 0), "UP", "house", (0, 1), 1)
+    assert route(mem, "town", (0, 1), (0, 0)) == ["UP"]
+
+
+def test_route_can_enter_inferred_exit_tile_on_the_way_to_another_goal(tmp_path):
+    mem = Memory(tmp_path)
+    mark_exit(mem, "town", (0, 0), "UP", "house", (0, 1), 1)
+    tile(mem, "house", (0, 0))
+    tile(mem, "house", (0, 2))
+    path = route(mem, "house", (0, 0), (0, 2))
+    assert path is not None and (0, 1) in _walk((0, 0), path)
+
+
+def test_explore_dirs_routes_around_observed_exit_tile(tmp_path):
+    mem = Memory(tmp_path)
+    mem.upsert("seen", {"id": "town", "cells": [], "open": ["7,4"]})
+    for x in range(6, 9):
+        for y in range(4, 7): tile(mem, "town", (x, y))
+    mark_exit(mem, "town", (7, 5), "UP", "house", (0, 1), 1)
+    world = World(mem, 16); world.current_place, world.pos, world.size = "town", (7, 6), (160, 144)
+    routes = world.explore_dirs("town")
+    assert "UP" not in routes or routes["UP"]["dirs"][0] != "UP"
+
+
 def test_successful_move_clears_blocked_direction(tmp_path):
     mem = Memory(tmp_path)
     tile(mem, "hall", (0, 0), blocked=["RIGHT"])

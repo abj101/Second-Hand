@@ -72,7 +72,8 @@ def route(mem, place, start, goal, strict=True, *, occupied=frozenset()):  # str
             nxt = (at[0] + dx, at[1] + dy)
             cell = _get(mem, place, nxt)
             edge = row.get("exit") or {}
-            if direction in row.get("blocked", []) and (strict or direction in row.get("firm", [])) or (strict or edge.get("src") != "inferred") and direction == edge.get("dir") or nxt in seen or nxt in occupied or nxt in static and nxt != goal or cell and cell.get("floor") is False and nxt != goal or not (bounds[0] <= nxt[0] <= bounds[1] and bounds[2] <= nxt[1] <= bounds[3]): continue
+            # ponytail: old observed exits may be pressed-from tiles, so detour around them until cut landing semantics are stored.
+            if direction in row.get("blocked", []) and (strict or direction in row.get("firm", [])) or (strict or edge.get("src") != "inferred") and direction == edge.get("dir") or cell and (cell.get("exit") or {}).get("src") == "observed" and nxt != goal or nxt in seen or nxt in occupied or nxt in static and nxt != goal or cell and cell.get("floor") is False and nxt != goal or not (bounds[0] <= nxt[0] <= bounds[1] and bounds[2] <= nxt[1] <= bounds[3]): continue
             seen.add(nxt); queue.append((nxt, path + [direction]))
     return route(mem, place, start, goal, False, occupied=occupied) if strict else None
 def outward(mem, place, tile, placement=None):
