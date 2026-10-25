@@ -1,39 +1,53 @@
 # Handoff notes
 
-Last written: 2026-10-24. Round r18-fix complete; G18F passed; LV18b ran exactly once.
+Last written: 2026-10-24. Round r18-fix2 complete; G18G passed; LV18c ran exactly once.
 
 ## Code
 
-- Branch feat/lean-agent; base f283d2e. Production merge HEAD 443f4f3. Nothing pushed.
-- F1 42953c3 + orchestrator review 5df4086, merged --no-ff as 5d8c809: no-response presses reach space.fold, restoring silent/unconfirmed walls.
-- F2 76a9bc3 + orchestrator review 2a4dc11, merged --no-ff as 443f4f3: hold post-cut segments until world-place identification; resolve arrival from located minus held motion; one crossing and reciprocal exits.
-- Held state survives JSON checkpoints without frames/ndarrays. unseen_cross skips while held. Same-place identification flushes held motion into its source.
-- loop.py, match_place, space.mark_exit, and existing assertions unchanged. No new option filters or game logic.
-- Approved contract amendment/plan: 1e57374. Corrected fixture brief: 6bc2118 (1R,11D,1U onto door; cut;8U; source UP, destination DOWN).
+- Branch feat/lean-agent; base 99c96bc. Production merge c0100c2. Nothing pushed.
+- G1 eef05c7, merged --no-ff: hold no-response/shift-None evidence until next World.before().
+- World screen folds held presses with original step/place/tile/actor snapshot; other screens drop them.
+- JSON checkpoint state carries silent entries; old states default to []; unplaced entries are dropped.
+- Production scope: agent/world.py +10/-2. Six new tests, tests/agent/test_world.py +78.
+- Ring rule, skill results, travel stopping, no-response counters/notes, space.fold and D2 _held path unchanged.
+- Known ceiling: unrelated text discards a real no-response bump; text-only actions never become walls.
+- Prior r18-fix post-cut holding/crossing work remains intact; loop.py unchanged.
+- Plan/contract 0939eeb; comment indentation correction bf56c55.
 
-## Validation
+## Validation and approved stop
 
-- Baseline 885 passed, 1 skipped. Final merged G18F: 892 passed, 1 skipped (369.12s).
-- T18F: 25 PASS, zero model requests, actual pixel split and checkpoint replay. Script .tmp/r18fix/g/t18f.py.
-- T18-O2 unchanged: waited600, late26, pos(39,0). T18-O3 unchanged:85/85,77 exclusions,4 map flips.
-- Seven new tests. No golden differences, regeneration, or existing assertion changes.
+- Wave 0: 892 passed, 1 skipped. G1 focused: 8 passed.
+- T-G1: 896 passed, 3 skipped; T18G all PASS.
+- G18G merged suite: 898 passed, 1 skipped, 293.06s; T18G all PASS; nested T18F 25/0.
+- T18-O2 and T18-O3 output unchanged (0 differing lines); O3 85/85, 77 excluded, 4 map flips.
+- Only two pre-approved F1 tests gained next-step world before() calls; assertions unchanged.
+- Required stop: original T18F D1 failed because its second press had not reached the next before().
+- User approved one world-screen before() after D1's second Loop.step(); assertion unchanged; then 25/0.
+- No other existing assertion/golden changes or W0_REGEN. Formal gates and live run were orchestrator-only.
+- G1/G2 explicitly gpt-6-luna HIGH, fresh context, parallel, one WP each. Worktrees removed normally.
 
-## LV18b
+## LV18c
 
-- runs/m1_r18b_odo copied from m1_r17_boot; resume65, steps66–125, max-calls200, one invocation only.
-- 60/60 unique steps;175 call rows;0 errors. Ledger10033→10132 (99 new requests), below10233.
-- Source originals unchanged. Viewer was up.
-- Entry crossing p_place_4@7,5>p_place_5 n1 restored; source UP, lab return DOWN.
-- Lab offset(5,11) stable over21 eligible world steps. Return tile(0,0) maps RAM door(5,11).
-- Step69 identifies lab immediately: player(0,-8), entrance(0,0). Deferred fixture instead yields player(0,0), entrance(0,8). Live sample did not exercise held branch.
-- Source step69 has16 unique pre-cut tiles; erroneous continuation(7,4)…(7,-3) absent.
-- Walls restored:13 rows/11 tiles vs LV18 zero. No-response18 vs LV18 17 vs r17 1; longest streak15 (111–125).
-- Odometer:30856 frames,1988 uncertain,4 cuts,0 gap,0 dropped.
-- Agent did not leave lab within first15 free world steps (88–118), or by125. Bottom-return option selected88/90 but DOWN no-response/dialogue blocked routes. Later fake top exit(0,-11)=RAM(5,0) attracts repeated attempts; lab naming/goal interpretation remains unstable.
+- runs/m1_r18c_odo copied from m1_r17_boot; one resume from checkpoint 65, 60 steps, max-calls 200.
+- Completed steps 66-125 exactly once; truth through 126; boot source hashes unchanged.
+- Ledger 10132 -> 10214: 82 requests, 118 below ceiling 10332. Never rerun without authorization.
+- One handled MalformedReply at step 111; runner exit 0.
+- No-response steps/streak: 5/2 versus LV18b 18/15, LV18 17/6, r17 1/1.
+- Blocked-wall rows/tiles: 3/2 versus LV18b 13/11, LV18 0/0, r17 10/7.
+- Lab offset (5,11), 8/8 world rows, no changes; return exit (0,0) DOWN maps RAM (5,11).
+- Entry crossing p_place_4@7,5>p_place_5 n=1; total 3 crossings, no duplicates.
+- Odometer frames/uncertain 24977/2217; cuts/gap/dropped 5/0/0.
+- No DOWN wall targeting RAM (5,6). Strict terrain criterion still fails: UP92 and DOWN105 target RAM (5,2).
+- Their next trace screens are world93/dialogue106; internal probes mean these are not per-press timestamps.
+- Pending no-response at checkpoint105 is a different tile (-1,-5); absent by checkpoint110.
+- First party>=1 world step 103; only world steps103,104,105 before dialogue106-109 and battle110-125.
+- No lab departure; only two subsequent world steps observed, so 15-world-step deadline not fully tested.
+- 103 chose fake northern exit at (0,-10), RAM(5,1), labeled door(top wall); 104 DOWN no response.
+- 105 chose genuine outside-house return route, nine inputs, then no response followed by dialogue/battle.
 
-## Next
+## Open issues and evidence
 
-- Scope remains the two approved fixes. Do not claim navigation improvement or deferred live validation from LV18b.
-- Any further live run needs new authorization; do not exceed ledger10233 under this round.
-- Full report and gate logs: .tmp/r18fix/report.md; live analysis: .tmp/r18fix/lv18b/{a_out,c_out,choices}.txt.
-- User changes to eval_frames.py, watch_run.py, test_watch_run.py, baseline_eval.txt, frames_combo.json remain untouched.
+- Remaining terrain-walkable walls, actor/probe/perception attribution, fake top/northern exit and unproven departure.
+- Live findings inform rather than gate commits; no extra filters, game logic or live retries were added.
+- Full report: .tmp/r18fix2/report.md; gate logs in .tmp/r18fix2; live analysis in .tmp/r18fix2/lv18c.
+- Original five user files remain untouched. No pushes, branch rewrites or forced worktree removals.
