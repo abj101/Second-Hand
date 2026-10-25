@@ -559,6 +559,10 @@ class World:
         # from there and records the crossing and both exit sides once (unseen_cross is skipped while held); the same
         # place folds them as before. A no-response press (shift None) reaches space.fold like a bump (silent, then an
         # unconfirmed wall), as before r18. World.state carries the held segments without frames.
+                # r18-fix2 (approved 2026-10-25): a no-response press is held, not folded, until the next World.before().
+                # If that perception is a world screen it reaches space.fold with its original step (silent, then an unconfirmed
+                # wall); any other screen means the game answered (text, menu, battle) and the press leaves no evidence.
+                # World.state carries the held presses.
     def mark_exit(self, place: str, direction: str, to: str, arrive: tuple[int, int], step: int) -> None   # from the prepared exit tile
     def observe_after(self, per: dict, frame, reused: bool, place: str, size: tuple[int, int], step: int) -> tuple[int, int] | None
         # drift re-anchor (returns drift_fix) and the after-perception observe
