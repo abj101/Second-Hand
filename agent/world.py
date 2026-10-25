@@ -1522,7 +1522,7 @@ class World:
             if leg.get("expect"):
                 if not is_cut and result.failure and result.failure.get("stage") == "route": return self._travel_result(results, "blocked", f"leg {n} route blocked", ctx)  # the route never reached the exit: not an exit mismatch
                 if is_cut and len(directions) < len(current["dirs"]): self._travel_open = True; return self._travel_result(results, "done", f"leg {n} scene cut", ctx)  # a cut before the route's last press is another event (e.g. a modal screen); the loop re-identifies the place
-                arrival =self._arrival(result.after, trace) if trace else None
+                arrival = self._arrival(result.after, trace) if trace else None
                 cut_dir = leg.get("push") or next((m.get("dir") if isinstance(m, dict) else m[0] for m in reversed(result.moves) if m), None)
                 for segment in self._travel_segments[1:]: segment["_place"], segment["_screen"] = leg["expect"], {"screen": (self.mem.get("places", leg["expect"]) or {}).get("screen")}
                 edge = exit_to(self.mem, place, tuple(leg["exit_tile"]), cut_dir)
