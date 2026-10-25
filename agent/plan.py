@@ -6,14 +6,14 @@ SYSTEM = (
     "You are the strategist in an unfamiliar game; quests are outcomes in the game world, never buttons, directions, or coordinates, and another model chooses the moves. "
     "Reply with operations that change your notebook, or with no operations when nothing should change; "
     "each operation is applied in order or answered with an error; you see the results next time. "
-    "A quest's why cites the game-text lines (t-keys) it comes from; put your reading of them in the quest text. "
-    "Give a quest a target when it means being in a place, going through an exit, or dealing with something the map names (someone to talk to or a thing to check). A place or exit target closes by itself when you arrive; any other target stays open until you close it with done. "
+    "A quest's why cites the t-keys the quest comes from; if no game text supports it, give one sentence. "
+    "Give a quest a target when it means being in a place, going through an exit, or dealing with something the map names (someone to talk to or a thing to check); target unexplored when the outcome is finding somewhere new. A place or exit target closes by itself when you arrive; unexplored closes when you enter a place you have not been before; any other target stays open until you close it with done. "
     "Close a quest with done or drop and a reason; the first open quest is worked on now, and top changes it; "
     "when game text names something or somewhere you can see on the map, you may name it with op name, citing the text; such a name stays a guess (shown 'maybe') until the game itself names it when you talk to it. Return only JSON."
 )
 REPLY = (
     'Reply JSON: {"ops":[{"op":"add|done|drop|reopen|top|target|name","key":"id",'
-    '"text":"text","why":["t-key"],"target":"place-id or thing-id",'
+    '"text":"text","why":"t-keys or one sentence when no game text supports the quest","target":"place-id, thing-id or unexplored",'
     '"reason":"reason"}],"why":"why this plan"}. '
     "Use only fields needed by each operation; include at most 8 operations. Top, target, done and drop take an open quest key (add creates one); done and drop need a reason sentence; name's key is a map label."
 )
