@@ -13,6 +13,11 @@ def golden(root, episode):
     for row in actual["trace.jsonl"]:
         if isinstance(row.get("act"), dict): row["act"].pop("replan", None)
     for row in actual.get("memory/tiles.jsonl", []): row.pop("first", None)
+    # Additive r20/A2 annotations are covered directly in space/world tests.
+    for row in actual.get("memory/tiles.jsonl", []):
+        if isinstance(row.get("exit"), dict): row["exit"].pop("settled", None)
+    for row in actual["trace.jsonl"]:
+        if isinstance(row.get("odometer"), dict): row["odometer"].pop("absorbed", None)
     target = DATA / episode
     if os.getenv("W0_REGEN") == "1":
         shutil.rmtree(target, ignore_errors=True)

@@ -342,7 +342,7 @@ def test_inferred_arrival_uses_matching_view_and_corrects_its_exit(tmp_path):
 
     world.before({"screen": "world", "entities": []}, "b", "a", (160, 144), 2, frame=frame)
 
-    assert world.pos == (7, 8) and mem.get("tiles", row["id"])["exit"] == {"dir": "RIGHT", "to": "b", "arrive": [7, 8], "src": "observed"}
+    assert world.pos == (7, 8) and mem.get("tiles", row["id"])["exit"] == {"dir": "RIGHT", "to": "b", "arrive": [7, 8], "src": "observed", "settled": True}
 
 
 def test_observed_arrival_keeps_its_tile_when_a_view_matches_elsewhere(tmp_path):
@@ -397,7 +397,7 @@ def test_inferred_arrival_correction_updates_only_the_matched_exit(tmp_path):
 
     world.before({"screen": "world", "entities": []}, "b", "a", (160, 144), 3, frame=frame)
 
-    assert mem.get("tiles", "a@0,0")["exit"]["arrive"] == [4, 5] and mem.get("tiles", "a@1,0")["exit"] == {"dir": "LEFT", "to": "b", "arrive": [8, 9], "src": "observed"}
+    assert mem.get("tiles", "a@0,0")["exit"]["arrive"] == [4, 5] and mem.get("tiles", "a@1,0")["exit"] == {"dir": "LEFT", "to": "b", "arrive": [8, 9], "src": "observed", "settled": True}
 
 
 def test_place_refs_round_trip_printed_labels(tmp_path):
@@ -1377,7 +1377,7 @@ def test_travel_inferred_arrival_uses_view_but_observed_arrival_keeps_precedence
     world = World(mem, 16); world.current_place = "source"
     result = world.travel(Ctx(GridEnv(), StubModel([]), 16), [{"place": "source", "dirs": ["RIGHT"], "push": "RIGHT", "expect": "expected", "exit_tile": (1, 0)}], 5)
     assert result.status == "done" and world.current_place == "expected" and world.pos == ((2, 1) if src == "inferred" else (0, 0))
-    assert mem.get("tiles", "source@1,0")["exit"] == ({**edge, "arrive": [2, 1], "src": "observed"} if src == "inferred" else edge)
+    assert mem.get("tiles", "source@1,0")["exit"] == ({**edge, "arrive": [2, 1], "src": "observed", "settled": True} if src == "inferred" else edge)
 
 
 def test_travel_leg_through_a_matching_exit_counts_the_departure(tmp_path, monkeypatch):
@@ -2090,25 +2090,51 @@ def test_three_tile_agent_route_uses_odometer_once(tmp_path, monkeypatch):
     assert [move["dir"] for move in units] == ["RIGHT"] * 3
 
 
-def test_route_cut_on_exit_tile_counts_crossing_and_lands_at_arrival(tmp_path, monkeypatch):
+@pytest.mark.parametrize("exit, expected, fate, absorbed", [
+    ({"src": "observed", "settled": True}, (4, 7), "absorbed", 1),
+    ({"src": "inferred", "settled": False}, (4, 8), "folded", 0),
+    ({"src": "inferred"}, (4, 8), "folded", 0),
+    ({}, (4, 7), "absorbed", 1),
+    ({"src": "inferred", "settled": False, "trace": True}, (4, 7), "absorbed", 1),
+    ({"src": "inferred", "settled": False, "view": True}, (4, 7), "absorbed", 1),
+    ({"src": "observed", "settled": True, "multi": True}, (4, 7), "absorbed", 2),
+    (None, (4, 7), "absorbed", 1),
+])
+def test_route_cut_on_exit_tile_counts_crossing_and_arrival_fate(tmp_path, monkeypatch, exit, expected, fate, absorbed):
     from agent import world as world_module
     from agent.skills import Ctx, SkillResult
     from tests.agent.fakes import GridEnv
     mem, world = _odo_world(tmp_path, "source"); place(mem, "dest", "Dest")
-    mem.upsert("tiles", {"id": "source@1,0", "place": "source", "x": 1, "y": 0, "floor": True, "blocked": [], "pushed": [], "exit": {"dir": "RIGHT", "to": "dest", "arrive": [4, 7], "src": "observed"}, "step": 1})
+    is_trace = exit is None or bool(exit and exit.pop("trace", False))
+    is_view = bool(exit and exit.pop("view", False))
+    multi = bool(exit and exit.pop("multi", False))
+    edge = {"dir": "RIGHT", "to": "dest", "arrive": [4, 7], **exit} if exit is not None else None
+    mem.upsert("tiles", {"id": "source@1,0", "place": "source", "x": 1, "y": 0, "floor": True, "blocked": [], "pushed": [], "exit": edge, "step": 1})
     env = GridEnv(); world.tracker.wrap(env); world.pa = [.5, .5]; ctx = Ctx(env, SimpleNamespace(calls=0), 16, odometer=world.odometer)
+    if is_trace: monkeypatch.setattr(world, "_arrival", lambda *_: ("dest", (4, 7), "world"))
     source, dest = camera(), camera(4); seq = 0; x = y = 100; world.odometer(source(x, y), seq)
+    if is_view: mem.remember_view("dest", (4, 7), dest(200, 216))
     def cut_step(ctx, target, player, *, exit_target=None, route=None):
         nonlocal seq, x, y
         seq, x, y = feed(world.odometer, source, seq, x, y, 16, 0)
         from PIL import Image
         seq += 1; world.odometer(Image.new("RGB", (160, 144), "white"), seq); seq += 1; world.odometer(dest(200, 200), seq)
-        image = dest(200, 200); image.info["frame_seq"] = seq
+        seq, x, y = feed(world.odometer, dest, seq, 200, 200, 0, 16)
+        if multi:
+            seq += 1; world.odometer(Image.new("RGB", (160, 144), "white"), seq); seq += 1; world.odometer(dest(x, y), seq)
+            seq, x, y = feed(world.odometer, dest, seq, x, y, 0, 16)
+        image = dest(x, y); image.info["frame_seq"] = seq
         return SkillResult("done", "scene cut", 1, 0, image, image, (-16, 0), True, [{"dir": "RIGHT", "shift": (-16, 0), "at": 0}], arrival_frame=image)
     monkeypatch.setattr(world_module, "approach", cut_step)
-    result = world.travel(ctx, [{"place": "source", "dirs": ["RIGHT"], "push": None, "expect": "dest", "exit_tile": (1, 0)}], 2)
-    assert result.status == "done" and world.pos == (4, 7), (result.status, result.reason, world.pos, world._travel_push, world._travel_segments)
+    result = world.travel(ctx, [{"place": "source", "dirs": ["RIGHT"], "push": None, "expect": "dest", "exit_tile": (1, 0)}], 2, trace=object() if is_trace else None)
+    assert result.status == ("blocked" if exit is None else "done") and world.pos == expected, (result.status, result.reason, world.pos, world._travel_push, world._travel_segments)
     assert mem.get("crossings", "source@1,0>dest")["n"] == 1
+    assert world.odometer_trace()["absorbed"] == absorbed
+    assert world.odometer_segments()[-1]["fate"] == fate
+    if is_view: assert mem.get("tiles", "source@1,0")["exit"]["settled"] is True
+    if multi:
+        fates = [segment["fate"] for segment in world.odometer_segments()]
+        assert fates[-2:] == ["absorbed", "absorbed"]
 
 
 def test_r17_walk_keeps_motion_after_600_frame_settle_cap(tmp_path):
@@ -2188,8 +2214,8 @@ def test_new_place_resolves_held_motion_and_marks_both_exit_sides(tmp_path):
     world.before({"screen": "world", "entities": []}, "dest", "room", (160, 144), 3)
 
     assert world.pos == (0, 0) and world._held is None
-    assert mem.get("tiles", "room@1,10")["exit"] == {"dir": "UP", "to": "dest", "arrive": [0, 8], "src": "observed"}
-    assert mem.get("tiles", "dest@0,8")["exit"] == {"dir": "DOWN", "to": "room", "arrive": [1, 10], "src": "inferred"}
+    assert mem.get("tiles", "room@1,10")["exit"] == {"dir": "UP", "to": "dest", "arrive": [0, 8], "src": "observed", "settled": True}
+    assert mem.get("tiles", "dest@0,8")["exit"] == {"dir": "DOWN", "to": "room", "arrive": [1, 10], "src": "inferred", "settled": False}
     assert mem.get("crossings", "room@1,10>dest")["n"] == 1
 
 

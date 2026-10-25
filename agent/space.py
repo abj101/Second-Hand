@@ -50,7 +50,7 @@ def mark_exit(mem, place, tile, direction, to, arrive, step):
         if source == "inferred" and (row.get("exit") or {}).get("src") == "observed": continue  # a guessed way back never replaces a crossed exit
         old = dict(row, blocked=list(row["blocked"]), pushed=list(row["pushed"]))
         if source == "observed" and way in row["pushed"]: row["pushed"].remove(way)
-        row.update(exit={"dir": way, "to": dst, "arrive": list(dest), "src": source}, floor=True, step=step); _save(mem, row, old)
+        row.update(exit={"dir": way, "to": dst, "arrive": list(dest), "src": source, "settled": source == "observed"}, floor=True, step=step); _save(mem, row, old)
 def exit_to(mem, place, tile, direction): row = _get(mem, place, tile); edge = row.get("exit") if row else None; return edge if edge and edge.get("dir") == direction else None
 def route(mem, place, start, goal, strict=True, *, occupied=frozenset()):  # strict: an inferred exit (the guessed way back) is avoided too, unless no route avoids it; occupied: tiles held by actors
     from agent.memory import ACTOR_KINDS, TRANSIENT, _is_exit, normalize_kind

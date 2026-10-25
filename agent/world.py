@@ -375,7 +375,7 @@ class World:
                 row = {**row, "misses": misses, "status": status}
             if row.get("status") != self.mem.get("entities", ident).get("status") or row.get("misses") != self.mem.get("entities", ident).get("misses"):
                 self.mem.upsert("entities", row)
-    def odometer_begin(self): self._odo_stats = {"frames": 0, "px": [0, 0], "uncertain": 0, "cuts": 0, "gap": False, "dropped": 0, "drained": False, "segments": []}
+    def odometer_begin(self): self._odo_stats = {"frames": 0, "px": [0, 0], "uncertain": 0, "cuts": 0, "gap": False, "dropped": 0, "absorbed": 0, "drained": False, "segments": []}
     def odometer_trace(self): return {k: v for k, v in (self._odo_stats or {}).items() if k not in ("drained", "segments")} if self._odo_stats and self._odo_stats["drained"] else None
     def odometer_segments(self): return self._odo_stats["segments"] if self._odo_stats and self._odo_stats["drained"] else None  # per-segment log, kept off odometer_trace so golden trace rows stay unchanged
     def _odometer_drain(self, through, place, step, bumps=(), next_per=None, next_place=None):
@@ -588,7 +588,7 @@ class World:
         arrival = self._seen_at(place); tile = arrival[0] if arrival else None
         if frame is not None and self.tile_px and (tile is None or arrival and arrival[1] == "inferred") and (hit := self.mem.seen_view(frame, None, None, self.tile_px, only=place)):
             view = tuple(hit[1])
-            if arrival and arrival[1] == "inferred" and view != tile and (row := self.mem.get("tiles", getattr(self.mem, "arrival_exit", None))): self.mem.upsert("tiles", {**row, "exit": {**row["exit"], "arrive": list(view), "src": "observed"}})
+            if arrival and arrival[1] == "inferred" and (row := self.mem.get("tiles", getattr(self.mem, "arrival_exit", None))): self.mem.upsert("tiles", {**row, "exit": {**row["exit"], "arrive": list(view), "src": "observed", "settled": True}})
             tile = view
         self.mem.unplaced = None if tile is not None else place
         return tile if tile is not None else self.pos
@@ -1496,6 +1496,13 @@ class World:
         return legs
     def travel(self, ctx, legs, step, trace=None):
         results, inputs, place, bumps = [], 0, self.current_place, 0; self._travel_cut = self._travel_open = False; self._travel_push = self._travel_push_from = None; self._travel_bumps = 0; self._travel_segments = []; self._travel_screen_leg = len(legs) == 1 and (legs[0].get("target") or {}).get("kind") == "screen"  # open: a cut travel could not place; the loop re-identifies
+        def land_segments(edge, observed):
+            settled = observed or edge and edge.get("settled", edge.get("src") != "inferred")
+            post = self._travel_segments[1:]
+            if settled:
+                _fate(post, "absorbed"); self._odo_stats["absorbed"] += len(post)
+            elif post:
+                self._odometer_fold(post[-1], place, step); self._odo_stats["dropped"] += len(post) - 1; _fate(post[:-1], "dropped")
         if self._odo_screen is None: self._odo_screen = {"screen": (self.mem.get("places", place) or {}).get("screen")}
         for n, leg in enumerate(legs, 1):
             if inputs >= TRAVEL_MAX_INPUTS: break
@@ -1547,17 +1554,17 @@ class World:
                     if not arrival: self._travel_open = True; return self._travel_result(results, "blocked", f"leg {n} exit mismatch", ctx)
                     mark_exit(self.mem, place, tuple(leg["exit_tile"]), cut_dir, *arrival[:2], step); self._cross(place, tuple(leg["exit_tile"]), arrival[0], arrival[1], step)
                     self.pos, place = arrival[:2][1], arrival[0]; self._land(place)
-                    if len(self._travel_segments) > 1: self._odometer_fold(self._travel_segments[-1], place, step); self._odo_stats["dropped"] += max(0, len(self._travel_segments) - 2); _fate(self._travel_segments[1:-1], "dropped")
+                    land_segments(edge, arrival is not None)
                     self._travel_segments = []
                     return self._travel_result(results, "blocked", f"leg {n} {'arrival' if wrong or edge and edge.get('to') == leg['expect'] else 'exit'} mismatch", ctx)
                 if not arrival and edge.get("src") == "inferred":
                     self.mem.match_place({"screen": "world"}, step, prev=place, cut=True, exit=(*leg["exit_tile"], edge.get("dir")))
-                    arrive = self._locate(leg["expect"], result.after)
+                    arrive = self._locate(leg["expect"], result.after); edge = exit_to(self.mem, place, tuple(leg["exit_tile"]), cut_dir) or edge
                 else: arrive = arrival[1] if arrival else tuple(edge["arrive"])
                 self._cross(place, tuple(leg["exit_tile"]), leg["expect"], arrive, step)
                 self.pos, place = arrive, leg["expect"]
                 self._land(place)
-                if len(self._travel_segments) > 1: self._odometer_fold(self._travel_segments[-1], place, step); self._odo_stats["dropped"] += max(0, len(self._travel_segments) - 2); _fate(self._travel_segments[1:-1], "dropped")
+                land_segments(edge, arrival is not None)
                 self._travel_segments = []
             elif result.status != "done" and not (result.reason == "route blocked" and (self._facing_target(current, result) or screen_facing)):
                 return self._travel_result(results, result.status, f"leg {n} {result.reason or result.status}", ctx)

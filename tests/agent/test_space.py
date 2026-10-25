@@ -132,8 +132,8 @@ def test_mark_exit_records_observed_and_inferred_reverse(tmp_path):
     mem = Memory(tmp_path)
     mark_exit(mem, "west", (1, 2), "RIGHT", "east", (0, 2), 9)
     mem.upsert("places", {"id": "east", "name": "East Hall"})
-    assert exit_to(mem, "west", (1, 2), "RIGHT") == {"dir": "RIGHT", "to": "east", "arrive": [0, 2], "src": "observed"}
-    assert exit_to(mem, "east", (0, 2), "LEFT") == {"dir": "LEFT", "to": "west", "arrive": [1, 2], "src": "inferred"}
+    assert exit_to(mem, "west", (1, 2), "RIGHT") == {"dir": "RIGHT", "to": "east", "arrive": [0, 2], "src": "observed", "settled": True}
+    assert exit_to(mem, "east", (0, 2), "LEFT") == {"dir": "LEFT", "to": "west", "arrive": [1, 2], "src": "inferred", "settled": False}
     assert exit_to(mem, "west", (1, 2), "UP") is None
 
 
