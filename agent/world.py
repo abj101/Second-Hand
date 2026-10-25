@@ -106,6 +106,7 @@ class World:
         self.odometer = self.tracker.odometer; self.odometer.tile_px = tile_px; self._odo_px = (0, 0); self._odo_stats = None
         self._odo_screen = None
         self._held = None
+        self._silent = []
         self.pos, self.drift, self.drift_ref = (0, 0), None, None
         self.entity_tiles, self.entity_ids, self.actor_tiles = {}, {}, frozenset()
         self.entities, self.pa, self._prepared = [], None, None; self._prepared_segments, self._prepared_forced, self._prepared_scene_cut = [], False, False
@@ -179,6 +180,11 @@ class World:
     def before(self, per, place, prior, size, step, frame=None):
         self.current_place, self.size = place, size
         self._odo_screen = per
+        silent, self._silent = self._silent, []
+        if per.get("screen") == "world":
+            for entry in silent:
+                if entry["place"] != self.mem.unplaced:
+                    fold(self.mem, entry["place"], tuple(entry["tile"]), [{"dir": entry["dir"], "shift": None, "no_response": True}], self.tile_px, entry["step"], actors=frozenset(map(tuple, entry["actors"])))
         if per.get("screen") == "world": self.name(place, per.get("place"), step)
         if prior and place != prior:
             held = self._held
@@ -432,7 +438,8 @@ class World:
                     at = (origin[0] + tile_delta[0], origin[1] + tile_delta[1]); target = (at[0] + DIRS[move["dir"]][0], at[1] + DIRS[move["dir"]][1])
                     self._promote(i for i, tile in self.entity_tiles.items() if tile == target)
                     moves.append(move)
-                elif move.get("no_response") and move.get("shift") is None and move.get("dir") in DIRS: moves.append(move)
+                elif move.get("no_response") and move.get("shift") is None and move.get("dir") in DIRS: # ponytail: unrelated text drops a real bump; text-only actions never become walls, and failure notes persist
+                    self._silent.append({"place": place, "tile": move["_tile"], "dir": move["dir"], "step": step, "actors": sorted(self.actor_tiles)})
                 continue
             dx, dy, _held = move; px[0] += dx; px[1] += dy
             after = [round(-v / self.tile_px) for v in px]
@@ -713,7 +720,7 @@ class World:
 
     def state(self):
         return {"pos": self.pos, "drift": self.drift, "drift_ref": self.drift_ref, "entity_tiles": self.entity_tiles,
-                "held": _checkpoint(self._held) if self._held else None,
+                "held": _checkpoint(self._held) if self._held else None, "silent": _checkpoint(self._silent),
                 "entity_ids": self.entity_ids, "legend": self.legend,
                 "last_miss_hash": self._last_miss_hash,
                 "self_spot": self.self_spot, "self_contradictions": self._self_contradictions,
@@ -724,6 +731,7 @@ class World:
         self.pos, self.drift = tuple(state.get("pos", (0, 0))), tuple(state["drift"]) if state.get("drift") else None
         self._odo_px, self._prepared_segments = (0, 0), []
         self._held = state.get("held")
+        self._silent = state.get("silent", [])
         self.drift_ref, self.entity_tiles = state.get("drift_ref"), state.get("entity_tiles", {})
         self.entity_ids = {int(i): v for i, v in state.get("entity_ids", {}).items()}
         self.legend = dict(state.get("legend") or {})
