@@ -46,7 +46,8 @@ class Loop:
         self.notebook = Notebook(mem.root, ref=self.world.ref, canon=self.world.canon, label=self.world.label, ties=self.world.ties, route=self.world.exit_route, is_exit=self.world.is_exit, leads_to=self.world.leads_to,
             name=lambda ref, text, key, step: self.mem.call(ref.partition(":")[2], text, step, tier="text", key=key, store="places" if ref.startswith("place:") else "entities"),
             refs=lambda: [f"place:{p['id']}" for p in mem.rows("places") if p.get("state") != "merged"] + [f"thing:{e['id']}" for e in mem.rows("entities") if e.get("state") != "merged"],
-            place_first=lambda ref: (self.mem.get("places", str(ref).partition(":")[2]) or {}).get("first"))
+            place_first=lambda ref: (self.mem.get("places", str(ref).partition(":")[2]) or {}).get("first"), ground_far=self._ground_far)
+        self.text_replan = False
         self.last_plan, self._plan_row = None, None
         self.conversation, self.text_for_trigger = {"place": None, "lines": []}, ""
         self.fails, self.moves = {}, []
@@ -168,6 +169,9 @@ class Loop:
         if place_row.get("name"): here += " (a name read from the picture)"
         focus = f"{self.notebook.render_focus(self.world.label, recent=recent)}\nHere: {here}\nGame notes: {' '.join(_load(self.game).get('notes', []))}"
         a = act(self.model, per, focus, options, list(self.env.inputs()), "\n".join(_load(self.game).get("controls", [])))
+        if getattr(a, "replan", False):
+            self.text_replan = True
+            next((e for e in reversed(self.events) if e["kind"] == "T1"), {}).update(replan=True)
         picked = next((o for o in options if o["n"] == getattr(a, "option", None)), None)
         own_pick = picked if picked and picked.get("action") == a.action else None  # the option act picked, when its action is the one it answered with
         if per.get("screen") == "world" and not modal and self.tile_px: self.mem.remember_view(place, self.world.pos, before)
@@ -271,7 +275,7 @@ class Loop:
              "detail": "" if choice else None, "intent": intent, "unknown": unknown, "scene_cut": scene_cut,
              "exit_key": list(exit_key) if exit_key else None, "unseen_crossing": unseen_crossing, "cut_dir": cut_dir, "travel": travel_legs is not None, "route_len": len(act_route["dirs"]) if act_route else None,
              "refused": refused, "pressed_from": list(pressed_from), "push": self.world._travel_push if travel_legs is not None and choice else (act_route or {}).get("push"), "go_to": f'go_to "{a.action["go_to"]}": not in memory' if a.action and "go_to" in a.action and choice is None else None,
-             "no_action": not a.action, "act": {"place": self.world.place_label(place), "why": a.why, "action": a.action},
+             "no_action": not a.action, "act": {"place": self.world.place_label(place), "why": a.why, "action": a.action, "replan": bool(getattr(a, "replan", False))},
              "option": {k: picked[k] for k in ("n", "tool", "label", "notes", "state")} if picked else None, "pick_key": picked.get("intent_key") if picked else None, "plan": self._plan_row,
              "probe": None,
              "world": {"cut_dir": cut_dir, "pos": list(self.world.pos), "travelled": skill is self.world._travelled, "travel_open": self.world._travel_open, "current_place": self.world.current_place}}
@@ -441,11 +445,14 @@ class Loop:
         if screen == "world":
             self.conversation.pop("who", None)  # back in the world with no dialogue: nothing was said by the thing last touched
             if fresh:
+                self.text_replan = False
                 self.text_for_trigger = " / ".join(fresh)
                 for text in fresh: self.notebook.heard(step, None, self.world.place_label(place) if place else "?", text, at=list(self.world.pos))
                 self._event("T1", f"new game text: {self.text_for_trigger[:200]}", step)
             return bool(fresh)
-        if not self.conversation["lines"]: self.conversation.update(place=place, screen=screen, at=list(self.world.pos))
+        if not self.conversation["lines"]:
+            self.text_replan = False
+            self.conversation.update(place=place, screen=screen, at=list(self.world.pos))
         lines = self.conversation["lines"]
         for text in fresh:
             line = " ".join(str(text).replace("▼", "").replace("▶", "").split())
@@ -505,6 +512,18 @@ class Loop:
     def _unexplored(self, place, d=None):
         routes = self.world.explore_dirs(place)
         return routes.get(d) if d is not None else min(routes.values(), key=lambda row: len(row["dirs"]), default=None)
+
+    def _ground_far(self, ref, since):
+        if not self.tile_px or not self.world.size: return False
+        place = str(ref).partition(":")[2]
+        here = tuple(self.world.pos)
+        row = self.mem.get("tiles", f"{place}@{here[0]},{here[1]}")
+        if not row or type(row.get("first")) is not int or row["first"] < since: return False
+        old = [r for r in self.mem.rows("tiles") if r.get("place") == place and (type(r.get("first")) is not int or r["first"] < since)]
+        if not old: return False
+        half = [self.world.size[i] // self.tile_px // 2 for i in (0, 1)]
+        # ponytail: per-tile distance, not reachability; path distance needs a reliable explored map.
+        return all(any(abs(here[i] - r[("x", "y")[i]]) >= half[i] for i in (0, 1)) for r in old)
     def _live(self, frame, place, per, choice, a):
         """The decision before it is acted on, for scripts/watch_run.py; the trace row only lands after the skill and verification."""
         root = self.mem.root.parent; name = f"frames/{self.step_no+1:06d}.png"
@@ -529,7 +548,7 @@ class Loop:
     def _event(self, kind, text, step):  # T4 and T5 wait at most once
         if kind in ("T1", "T2", "T3"): self.t5_armed = True
         if kind in ("T4", "T5") and any(e["kind"] == kind for e in self.events): return
-        self.events.append({"kind": kind, "text": text, "step": step})
+        self.events.append({"kind": kind, "text": text, "step": step, **({"replan": self.text_replan} if kind == "T1" else {})})
     def _closed(self, keys, step):
         if not keys: return
         self._event("T3", f"quest {', '.join(keys)} closed", step); self.stuck.progress(); self.moves = []
@@ -570,11 +589,13 @@ class Loop:
     def _plan_trigger(self, per):
         """Replan after the three-step floor with an event waiting; T1 waits during dialogue or battle, and no open quest queues one."""
         if self.notebook.focus is None and self.t5_armed: self._event("T5", "no open quest", self.step_no + 1); self.t5_armed = False
-        if self.last_plan is not None and self.step_no + 1 - self.last_plan < 3 and all(e["kind"] in ("T2", "T4") for e in self.events): return None
-        if not any(e["kind"] != "T1" or per.get("screen") in ("world", "menu", "keyboard") for e in self.events): return None
+        eligible = [e for e in self.events if e["kind"] != "T1" or e.get("replan")]
+        if not eligible: return None
+        if self.last_plan is not None and self.step_no + 1 - self.last_plan < 3 and all(e["kind"] in ("T2", "T4") for e in eligible): return None
+        if not any(e["kind"] != "T1" or per.get("screen") in ("world", "menu", "keyboard") for e in eligible): return None
         return "; ".join(e["text"] for kind in ("T3", "T1", "T2", "T5", "T4") for e in self.events if e["kind"] == kind)
     def state(self):
-        state = {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "perception": self.cached, "frame_hash": self.cached_hash, "perception_marked": self.cached_marked, "frame_mark_eligible": self.prev_frame_mark_eligible, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "cut_carry": self.cut_carry, "pending_via": self.pending_via, "pending_key": self.pending_key, "flags": self.flags, "excursion": self.mem.excursion, "unplaced": self.mem.unplaced, "provenance_incomplete": self.provenance_incomplete, "planner": {"last": self.last_plan, "events": self.events, "t5_armed": self.t5_armed, "fails": self.fails, "moves": self.moves, "new_places": self.new_places, "planner_evidence": self.planner_evidence, "fail_baseline": self.fail_baseline, "conversation": self.conversation, "text_for_trigger": self.text_for_trigger, "cause": self.cause}}
+        state = {"step": self.step_no, "place": self.place, **self.world.state(), "tile_px": self.tile_px, "move_frames": self.move_frames, "stuck": self.stuck.state(), "perception": self.cached, "frame_hash": self.cached_hash, "perception_marked": self.cached_marked, "frame_mark_eligible": self.prev_frame_mark_eligible, "perception_version": self.cached_version, "parse_failed": self.parse_failed, "empty_streak": self.empty_streak, "repair_used": self.repair_used, "repair_pending": self.repair_pending, "pending_cut": self.pending_cut, "cut_carry": self.cut_carry, "pending_via": self.pending_via, "pending_key": self.pending_key, "flags": self.flags, "excursion": self.mem.excursion, "unplaced": self.mem.unplaced, "provenance_incomplete": self.provenance_incomplete, "planner": {"last": self.last_plan, "events": self.events, "t5_armed": self.t5_armed, "fails": self.fails, "moves": self.moves, "new_places": self.new_places, "planner_evidence": self.planner_evidence, "fail_baseline": self.fail_baseline, "conversation": self.conversation, "text_for_trigger": self.text_for_trigger, "text_replan": self.text_replan, "cause": self.cause}}
         if self.observation_stamp: state["observation_stamp"] = self.observation_stamp
         return state
     def restore(self, state):
@@ -597,6 +618,7 @@ class Loop:
         self.planner_evidence = planner.get("planner_evidence") or []
         self.fail_baseline = planner.get("fail_baseline", {key: value.get("n", 0) for key, value in self.fails.items()} if self.last_plan is not None else {})
         self.conversation, self.text_for_trigger = planner.get("conversation") or {"place": None, "lines": []}, planner.get("text_for_trigger", "")
+        self.text_replan = bool(planner.get("text_replan", False))
         self.cause = planner.get("cause")
         self.mem.excursion, self.mem.unplaced = state.get("excursion"), state.get("unplaced")
         if self.cached_version != self.prompt_version or digest != self.cached_hash: self.cached = self.cached_hash = None; self.cached_marked = False

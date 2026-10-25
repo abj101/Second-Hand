@@ -1103,6 +1103,8 @@ def test_failure_text_revisit_and_stall_planner_triggers(tmp_path):
     assert loop._plan_trigger({"screen": "world"}) is None
 
     loop._event("T1", "new game text: A sign gives a clue.", 1)
+    assert loop._plan_trigger({"screen": "world"}) is None
+    loop.events[-1]["replan"] = True
     assert loop._plan_trigger({"screen": "world"}).startswith("new game text:")
     loop.events = []
 
@@ -1308,6 +1310,7 @@ def test_planner_prioritizes_game_text_and_checks_it_before_throttle(tmp_path):
     loop.step_no = loop.last_plan = 10
     loop.text_for_trigger = "Someone is looking for you. " + "x" * 220
     loop._event("T1", "new game text: " + loop.text_for_trigger[:200], 10)
+    loop.events[-1]["replan"] = True  # act flagged the dialogue text earlier
 
     assert loop._plan_trigger({"screen": "dialogue"}) is None
     loop.step_no = 12
@@ -1319,6 +1322,7 @@ def test_dialogue_text_replans_on_a_naming_menu(tmp_path):
     loop.notebook.data["quests"] = [{"key": "q1", "text": "Choose a name", "status": "open"}]
     loop.last_plan, loop.step_no = 19, 24
     loop._event("T1", "Erm, what is his name again?", 24)
+    loop.events[-1]["replan"] = True
     for screen in ("world", "menu", "keyboard"):
         assert "what is his name again" in loop._plan_trigger({"screen": screen})
     for screen in ("dialogue", "battle"):
@@ -1354,6 +1358,7 @@ def test_plan_followup_before_act_is_bounded_and_reads_errors(tmp_path, monkeypa
     if case == "closes_without_adding":
         loop.notebook.apply_ops([{"op": "add", "key": "q1", "text": "Choose your name", "why": ["t1"]}], 0)
     loop._event("T1", "new game text", 1)
+    loop.events[-1]["replan"] = True  # This test covers planner followup after text was flagged.
 
     row = loop.step()
 
@@ -1401,6 +1406,7 @@ def test_followup_accomplished_at_once_gets_one_more_call(tmp_path, monkeypatch)
         loop.notebook.leads_to = lambda r: ["b"] if r == "thing:door" else []
         loop.notebook.data["moves"] = [[1, "a", "b"]]
         loop._event("T1", "new game text", 1)
+        loop.events[-1]["replan"] = True
         row = loop.step()
         return loop, row, [user for role, user in sent if role == "plan"], [user for role, user in sent if role == "act"]
 
@@ -2481,6 +2487,8 @@ def test_t3_skips_floor_while_lone_t2_waits(tmp_path):
     assert loop._plan_trigger({"screen": "world"}) is None
     loop.events = []; loop.last_plan = loop.step_no = 10
     loop._event("T1", "new game text", 10)
+    assert loop._plan_trigger({"screen": "world"}) is None
+    loop.events[-1]["replan"] = True
     assert loop._plan_trigger({"screen": "world"}) == "new game text"
 
 
@@ -2614,3 +2622,44 @@ def test_dialogue_forced_cut_records_only_navigable_crossing(tmp_path, monkeypat
     row = loop.step()
     assert bool(mem.rows("crossings")) == (destination_screen == "world")
     if destination_screen == "world": assert any(r.get("place") == row["place"] and (r.get("exit") or {}).get("dir") == "UP" for r in mem.rows("tiles"))
+
+
+def test_unexplored_closes_on_new_ground_only_half_a_screen_beyond_old_ground(tmp_path):
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.tile_px = loop.world.tile_px = 16
+    loop.world.size = (160, 144)
+    loop.notebook.apply_ops([{"op": "add", "key": "q", "text": "Explore", "why": "Explore", "target": "unexplored"}], 10)
+
+    def observe(x, first):
+        loop.world.pos = (x, 0)
+        for tx, seen in ((0, 1), (x, first)):
+            loop.mem.upsert("tiles", {"id": f"map@{tx},0", "place": "map", "x": tx, "y": 0, "first": seen})
+        closed = loop.notebook.observe(12, "place:map")
+        return closed
+
+    assert observe(0, 1) == []  # Old ground remains unexplored.
+    assert observe(1, 12) == []  # New ground within half a screen remains open.
+    assert observe(5, 12) == ["q"]  # Half a screen beyond old ground closes it.
+
+    for x, y in ((0, 0), (8, 8)):
+        row = {"id": f"map@{x},{y}", "place": "map", "x": x, "y": y}
+        if (x, y) == (8, 8): row["first"] = 1
+        loop.mem.upsert("tiles", row)  # Missing first is legacy ground.
+    loop.mem.upsert("tiles", {"id": "map@4,4", "place": "map", "x": 4, "y": 4, "first": 12})
+    loop.world.pos = (4, 4)
+    assert loop._ground_far("place:map", 10)  # New ground is far from each tile, despite sitting inside their bounding box.
+
+
+def test_unflagged_text_is_kept_without_a_plan_and_dialogue_flag_survives_flush(tmp_path):
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.notebook.data["quests"] = [{"key": "q", "text": "Find path", "status": "open"}]
+    loop._learn(["A sign gives a clue."], [], 1, "room", "world")
+    assert loop.notebook.data["text"][-1]["text"] == "A sign gives a clue."
+    assert loop._plan_trigger({"screen": "world"}) is None
+
+    loop.events = []
+    loop._learn(["A guide speaks."], [], 2, "room", "dialogue")
+    loop.text_replan = True  # The earlier dialogue act flagged this text.
+    loop._learn([], [], 3, "room", "world")
+    assert loop.events[-1]["replan"] is True
+    assert "A guide speaks." in loop._plan_trigger({"screen": "world"})

@@ -10,6 +10,9 @@ def golden(root, episode):
     for path in sorted((root / "memory").glob("*.jsonl")):
         actual[f"memory/{path.name}"] = sorted(map(json.loads, path.read_text().splitlines()), key=lambda r: r.get("id", ""))
     actual["trace.jsonl"] = [{k:v for k,v in r.items() if k not in {"t","ms","entities","scroll","after","settle_frames","segments"}} for r in map(json.loads, (root / "trace.jsonl").read_text().splitlines())]
+    for row in actual["trace.jsonl"]:
+        if isinstance(row.get("act"), dict): row["act"].pop("replan", None)
+    for row in actual.get("memory/tiles.jsonl", []): row.pop("first", None)
     target = DATA / episode
     if os.getenv("W0_REGEN") == "1":
         shutil.rmtree(target, ignore_errors=True)
@@ -44,4 +47,6 @@ def test_act_eight_steps(tmp_path, monkeypatch):
     rows = [loop.step() for _ in range(8)]
     assert rows[0]["choice"]["target"] == "door" and env.scene == 1 and rows[1]["choice"]["verb"] == "buttons" and env.player == (3, 8)
     assert len(rows) == 8 and model.calls == 15
+    assert all(row["act"]["replan"] is False for row in rows)
+    assert all(type(tile.get("first")) is int for tile in loop.mem.rows("tiles"))
     golden(tmp_path, "act")

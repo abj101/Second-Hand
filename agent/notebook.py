@@ -11,7 +11,7 @@ def _refs(value):
 
 
 class Notebook:
-    def __init__(self, root: Path, *, ref=None, canon=None, label=None, refs=None, ties=None, route=None, is_exit=None, leads_to=None, name=None, place_first=None) -> None:
+    def __init__(self, root: Path, *, ref=None, canon=None, label=None, refs=None, ties=None, route=None, is_exit=None, leads_to=None, name=None, place_first=None, ground_far=None) -> None:
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
         self.file, self.history = root / "notebook.json", root / "notebook.history"
@@ -22,6 +22,7 @@ class Notebook:
         self.leads_to = leads_to or (lambda ref: [])
         self.name = name or (lambda ident, text, key, step: None)  # applies a name the planner read in game text
         self.place_first = place_first or (lambda place: None)
+        self.ground_far = ground_far or (lambda place, since: False)
         try:
             loaded = json.loads(self.file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -188,7 +189,7 @@ class Notebook:
             if quest.get("status") != "open" or not target: continue
             if target == "unexplored":
                 first = self.place_first(here) if here else None
-                if prev != here and type(first) is int and type(since) is int and first >= since:
+                if type(since) is int and (prev != here and type(first) is int and first >= since or self.ground_far(here, since)):
                     quest.update(status="done", closed=step, reason="reached", by="observe")
                     closed.append(quest["key"]); events.append({"step": step, "op": "observe", "key": quest["key"], "quest": quest})
                 # ponytail: any newly minted place satisfies this target; add a directional frontier only if quests need precision.

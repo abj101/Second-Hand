@@ -41,7 +41,7 @@ def new_loop(tmp_path, model):
     return loop
 
 
-def test_fresh_text_plans_immediately_and_events_are_never_lost(tmp_path, monkeypatch):
+def test_text_events_survive_t5_plans(tmp_path, monkeypatch):
     scene(monkeypatch)
     loop, produced = new_loop(tmp_path, Scripted()), []
     real = loop._event
@@ -59,7 +59,7 @@ def test_fresh_text_plans_immediately_and_events_are_never_lost(tmp_path, monkey
         rows.append(loop.step())
     plans = [r for r in rows if r.get("plan")]
     steps = [r["step"] for r in plans]
-    assert len(plans) == 200 and steps == list(range(1, 201))
+    assert len(plans) == 200 and steps == list(range(1, 201))  # T5 keeps planning while there is no open quest.
     consumed = [e for r in plans for e in r["plan"]["events"]]
     assert sorted(map(json.dumps, produced), key=str) == sorted(map(json.dumps, consumed + loop.events), key=str)  # nothing lost: consumed or still waiting
     assert {e["kind"] for e in consumed} >= {"T1", "T2", "T5"}
@@ -87,3 +87,26 @@ def test_targeted_quest_closes_by_id_after_checkpoint_restore(tmp_path, monkeypa
     assert [event["kind"] for event in resumed.events] == ["T3"]
     assert row["verdict"] == "progress" and resumed.stuck.progress_n == 0
     assert model.plans == []
+
+
+def test_t1_dispatch_waits_for_the_act_replan_flag(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    scene(monkeypatch)
+    for flag in (False, True):
+        loop = new_loop(tmp_path / str(flag), Scripted())
+        model = loop.model
+        loop.step()  # Establish the initial place before measuring T1 dispatch.
+        loop.events.clear(); model.plans.clear(); loop.last_plan = None; loop.t5_armed = False
+        loop.notebook.data["quests"] = [{"key": "q", "text": "Find path", "status": "open"}]
+        loop._learn(["The sign gives a clue."], [], loop.step_no + 1, loop.place, "world")
+        monkeypatch.setattr(module, "act", lambda *args, **kwargs: SimpleNamespace(action=None, option=None, why="idle", text=None, replan=flag))
+
+        first = loop.step()
+        assert first["act"]["replan"] is flag and model.plans == []
+        assert loop.notebook.data["text"][-1]["text"] == "The sign gives a clue."
+        second = loop.step()
+        if flag:
+            assert len(model.plans) == 1
+            assert any(e["kind"] == "T1" and e["replan"] for e in second["plan"]["events"])
+        else:
+            assert model.plans == [] and second["plan"] is None

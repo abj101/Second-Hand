@@ -393,3 +393,11 @@ def test_successful_move_clears_silent_and_wall_evidence(tmp_path):
     assert fold(mem, "room", (0, 0), [("LEFT", (16, 0))], 16, 3) == (-1, 0)
     row = Memory(tmp_path).get("tiles", "room@0,0")
     assert row["blocked"] == [] and row["walled"] == {} and row["silent"] == {}
+
+
+def test_tile_first_survives_later_saves(tmp_path):
+    mem = Memory(tmp_path)
+    fold(mem, "room", (0, 0), [("UP", (0, 0))], 16, 1)
+    assert mem.get("tiles", "room@0,0")["first"] == 1
+    fold(mem, "room", (0, 0), [("DOWN", (0, 0))], 16, 4)
+    assert mem.get("tiles", "room@0,0")["first"] == 1
