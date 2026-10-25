@@ -1,46 +1,52 @@
 # Handoff notes
 
-Last written: 2026-10-24. Round r18-fix3 complete; G18H passed; LV18e ran once, ended early by user authorization.
+Last written: 2026-10-24. Round r18-fix4 complete; G18I passed; LV18f ran exactly once (85 steps, exit 0).
 
 ## Code and commits
 
-- Branch feat/lean-agent; starting base c33bb04. Nothing pushed.
-- Plan/approved contract 8420380; R1 e02b7bc; --no-ff merge e05308f.
-- agent/space.py +2/-1: route never enters observed exit tile unless goal, in both passes.
-- Start-on-exit, forbidden exit-direction press, inferred exits and all callers otherwise unchanged.
-- Ceiling: old observed exits may be pressed-from tiles; store cut landing semantics if detours matter.
-- Four new tests in test_space.py (+36); no existing assertions or goldens changed.
-- All lanes explicitly gpt-6-luna HIGH, fresh context, parallel, one WP; resumed after usage reset.
-- R2/D uncommitted scratch only. All three worktrees removed normally. No forced removals/rewrites.
+- Branch feat/lean-agent; base af48210. Nothing pushed.
+- Plan/approved contract 090ed44; S1 82b7ea7; --no-ff merge 55291bb.
+- Delete World.probe and loop probe execution/locals; trace keeps probe:null.
+- Live resume preserves self_spot, contradiction counter and motion-lock evidence.
+- Locked off-self player-kind entities count as actors; self index remains excluded.
+- Ceiling: busy-scene residual rejection can delay reacquisition after a real unlock.
+- S1 source/tests net -41 lines (+55/-96); production alone -52.
+- Two probe tests deleted; three regressions added; chosen-motion acquisition test reused.
+- Existing resume assertion changed only as pre-approved; no other existing assertion changed.
+- New P3 test corrected with explicit user authorization: silent first, held second, never blocked.
+- Both lanes explicitly gpt-6-luna HIGH, fresh context, parallel, one WP each; no model requests.
 
 ## Validation
 
-- Wave 0: 898 passed, 1 skipped, 371.20s. Worker: 900 passed, 3 skipped (no run fixtures), 374.31s.
-- T-R1 with main fixtures: 902 passed, 1 skipped, 383.48s; T18H all PASS.
-- Base T18H red before merge: S1 FAIL/S2 PASS; fallback UP,LEFT enters observed exit(7,5).
-- Initial gate green because strict routing detoured around entity; reviewed, added fallback check.
-- R1 fallback LEFT,UP avoids exit; direct exit goal UP works. Checkpoint explore_dirs yields no routes.
-- G18H suite: 902 passed, 1 skipped, 368.76s. T18H/G/F all PASS, standalone scripts exit0.
-- T18G 34/0, T18F 25/0 outputs unchanged; T18-O2/O3 also diff 0 lines.
-- O3: 85/85 scored steps agree, 77 excluded, 4 map flips. No W0_REGEN/new production gates.
+- Wave 0: 902 passed, 1 skipped, 369.61s.
+- Base T18I: G-a/G-b/G-c FAIL; G-d H67/G34/F25 PASS, before any S1 merge.
+- T-S1 after authorized test-only repair: 903 passed, 1 skipped, 391.39s; T18I all PASS.
+- G18I merged suite: 903 passed, 1 skipped, 391.64s; T18I/H/G/F all PASS.
+- T18H 67/0, T18G 34/0, T18F 25/0 outputs exactly match base.
+- T18-O2/O3 byte-for-byte unchanged; O3 85/85 scored steps agree, 77 excluded, 4 map flips.
+- Golden data unchanged; never set W0_REGEN. No new production gate/module/class/option filter.
 
-## LV18e and pending diagnosis
+## LV18f
 
-- m1_r18e_odo copied from m1_r18d_odo; one resume from 145, requested 20 steps/max 80 calls.
-- User authorized early stop after enough evidence. Completed 146-150; checkpoint 150 retained.
-- Window-close attempts failed; exact runner stopped after checkpoint 150. Exit -1; partial 151 retained.
-- Ledger 10292 -> 10313: 21 requests (20 completed + 1 partial); 59 below ceiling 10372. No rerun.
-- Two unintended lab re-entries: probe UP 146 and 150; 150 returns Pallet within same trace row.
-- Selected-route executed-prefix audit: 0 intermediate known observed exits; explicit exit goals allowed.
-- Full planned dirs not persisted; unexecuted tails and 20-step horizon not scored.
-- Lab offset(5,11), 3 rows 146-148; Pallet offset(5,6), 2 rows 149-150; each visit stable.
-- Existing Pallet/lab only; Pallet arrival(7,6), ends(6,6). No new place.
-- Odometer: 6880 frames, uncertain 960, cuts 6, gap 0, dropped 2 (146,150). Dropped target fails.
-- Crossings +2 Pallet@7,5>lab,+2 lab@-1,0>Pallet; intra-step150 warps hidden by endpoint maps.
-- D: original 146 has 1 probe + 9 selected inputs; transition likely precedes approach baseline.
-- Offline 146 detects first blank cut, does not reproduce miss; 145 replay matches after-image exactly.
-- Hypothesis: probe endpoint check loses a nonblank intermediate jump followed by compatible scroll.
-- Proposed probe odometer jump/blank check plus one test NOT IMPLEMENTED; needs user approval.
-- Fake top-wall exit, walls into NPC tiles, probe behavior and dropped segments remain open.
-- Original 1196 run files and five user files hash unchanged. Viewer remains up.
-- Full report: .tmp/r18fix3/report.md; gates: .tmp/r18fix3/g; diagnosis: .tmp/r18fix3/D/diagnosis.md.
+- Copied m1_r17_boot to m1_r18f_odo; resume checkpoint 65; steps 66-150, truth through 151.
+- One invocation (manifest 2), max 250 requests. Ledger 10313 -> 10430: 117 used, 133 below 10563.
+- 225 call rows, including cache hits; 2 logged malformed replies; runner recovered and exited 0.
+- 0 unchosen presses, probe null on all 85 rows, 12/12 world steps locked (100%).
+- 1 stable lab visit: RAM-tile offset (5,3) on all 12 scored world steps; odometer gap 0.
+- Odometer 28891 frames, 2672 uncertain, 7 cuts, dropped 0 (world/non-world both 0).
+- No NPC-wall hit. Literal any-sprite metric has 1: step102 RIGHT into Poké Ball/table at RAM(6,3).
+- 0 lab re-entries; one Pallet->lab crossing; inferred lab entrance (0,8) DOWN maps to RAM(5,11).
+- Party>=1 first world step113; only 4 later world steps in horizon. No lab exit observed.
+- Step120 selected Pallet exit; stopped into dialogue/battle. End150 post-battle dialogue, map40 RAM(5,6).
+- No Pallet continuation/new place after lab; 15-world-step exit criterion not fully observable.
+- Viewer remains up and followed m1_r18f_odo. No second live run.
+
+## Open issues and artifacts
+
+- Fake top-wall door remains open by scope; not fixed or claimed fixed by this round.
+- Literal sprite-target wall target0 is not met (Poké Ball prop); NPC wall target0 is met in this sample.
+- Lab departure/Pallet behavior remains unobserved; evaluation is informational, not a commit gate.
+- First-seen model mislabel 'shop' sticks on the lab this run; no naming-policy change in S1.
+- All 1070 original r17 files and 5 user files hash unchanged. No ledger edits outside runner.
+- Report: .tmp/r18fix4/report.md; gates: .tmp/r18fix4/g; live: .tmp/r18fix4/lv18f.log.
+- Read-only comparison audit: .tmp/r18fix4/metrics.py and metrics.json (r17, LV18c/d/e/f).
