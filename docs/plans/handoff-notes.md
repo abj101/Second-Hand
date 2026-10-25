@@ -1,56 +1,47 @@
 # Handoff notes
-
-Last written: 2026-10-25. LV18g measurement complete: one continuation, steps151-200, exit0.
-
-## Source and scope
-
-- Branch feat/lean-agent; live source HEAD745f88e (r18-fix4 result).
-- Fix4 code: S1 82b7ea7; --no-ff merge55291bb; result745f88e.
-- LV18g changed no code, tests, contracts or gates; no subagents or test/gate runs.
-- Preflight matched HEAD, branch, ledger10430, five user files plus the new brief; viewer up.
-- Copied m1_r18f_odo to previously absent m1_r18g_odo; never resumed the original.
-- Source checkpoint150 locked at [0.45,0.4513888888888889], contradictions0.
-- Metrics copied from fix4; only ranges changed to LV18f66-150 and LV18g151-200.
-
-## Execution and integrity
-
-- Command: .venv\Scripts\python.exe scripts/run_agent.py --run runs/m1_r18g_odo --resume --from-step 150 --steps 50 --max-calls 100
-- Exactly one new invocation (manifest3), no extension or early stop; all50 steps complete, truth through201.
-- Exit0; ledger10430 ->10509, delta79; cap100, ceiling10530, margin21.
-- 115 call rows: 79 requests +36 cached rows; zero malformed replies/errors.
-- All1137 source LV18f files and all5 user files hash unchanged; only runner wrote ledger.
-- Viewer stayed available. Nothing pushed. Commit only the brief and these notes.
-
-## Measurements
-
-- Unchosen presses0; probe null on all50 rows.
-- World lock25/25 (100%); all50 end-step locks true; checkpoint150,155,...,200 counters0.
-- No observed unlock/re-lock; transient intra-step counters are not logged.
-- Dialogue step151; first world step152 exits lab40 ->Pallet0 through the bottom door.
-- Exit is 1st post-dialogue world step, 5th at/after party>=1 world step113 (4 strictly after113).
-- Door RAM(5,11) is inferred from stored tile(0,8) DOWN +lab offset(5,3), supported by motion images.
-- No fake top-wall door choice; no untargeted lab re-entry.
-- Then house loop:152 Pallet,153 bedroom38 via ground floor37,155 Pallet,156 bedroom via37.
-- Step159 computer interaction crosses downstairs37;161 returns bedroom38; remains inside through200.
-- Six endpoint map changes expand to nine crossings using stored edges and motion images.
-- Intermediate warp RAM instants not logged; report separates measured endpoints from inferred paths.
-- No new place IDs or Route1 crossing. Canonical names: lab 'shop', town 'outside house', house floors 'room'.
-- Ends map38 RAM(4,5), party1, battle0, text_box false. Repeated object checks/advance; no northward escape.
-- Six scored visits each have one offset: Pallet(5,6), bedroom(3,6), Pallet(5,5), bedroom(3,6), ground(7,1), bedroom(3,6).
-- Pallet origin differs by one y tile between visits; cause unproven, no repair attempted.
-- Odometer23927 frames,1545 uncertain,11 cuts,gap0,dropped47.
-- Dropped45 are confirmed carried battle segments from source checkpoint150 (8571 frames), flushed at152.
-- Remaining2 drops at153/156 are inferred world-tagged middle travel segments; world target0 missed.
-- Classification uses serialized segment screen tags and travel tagging code, not before-screen label.
-- NPC sprite walls0 detected, prop sprite walls0 detected; 9/13 edge events RAM-scored.
-- Four intermediate-map edges have no at-press RAM snapshot; motion review shows terrain/scenery, not NPCs.
-
-## Open observations and artifacts
-
-- World travel's two dropped segments, house looping and cross-visit Pallet origin need future diagnosis.
-- No code change, rerun or extension was made to address any observation.
-- Fake top-wall lab door remains open by scope; not selected in this continuation.
-- Report: .tmp/r18g/report.md; raw metrics: metrics.json; supplementary evidence: analysis.json.
-- .tmp/r18g/source-hashes.json, user-hashes.json, integrity.json; live.log and exit.txt.
-- Motion contact sheets: .tmp/r18g/motion-152.png, motion-153.png, motion-155.png.
-- Prior fix4 full validation remains recorded in .tmp/r18fix4/report.md (903 passed,1 skipped).
+Last written: 2026-10-25. r19 code merged and G19 passed; LV19 ended at its authorized call cap.
+## Source and implementation
+- Branch feat/lean-agent; validated/live code HEAD 4c8ed14 (base a01c9b5).
+- Wave-0 plan/approved notebook contract: 2c03e15.
+- O1 9a28248, merge dcb3bef: known-place rows worked with visits/last/beyond notes.
+- N1 cf73fe8, merge 4c8ed14: own-idea quests, unexplored target, event floor correction.
+- Own quests store why [], basis <=200, source own; names retain strict citations.
+- Unexplored closes only on entry to a place first seen >= opened/retargeted.
+- Only all-T2/T4 queues keep the floor. User approved the additional T1 test update in chat.
+- Tests added four functions; detailed before/after assertions: .tmp/r19/N1/report.md.
+## Diagnosis and gates
+- D1 valid Loop replay stopped at step151: 558 RGB bytes differ from recorded after-frame.
+- H1/H2 unconfirmed; T1 skipped; no P5/P6 or world contract amendment.
+- H3 copied r18f replay65-90:26/26 RAM agreement. First row delta frame856 clears868.
+- G3 proposal: compare stable destination writes/door anchors before changing map stitching; no code.
+- Baseline904 passed,1 skipped. G19 merged908 passed,1 skipped.
+- T-O1:902 passed,3 skipped; T-N1:906 passed,3 skipped (worktrees omit ROM/runs links).
+- T18F/G/H/I PASS with unchanged PASS/FAIL counts. O2 exact output unchanged.
+- O3 complete JSON unchanged: boot85/85, phase109/109 agree. All9 golden files unchanged.
+## LV19 execution and outcome
+- Copied source m1_r18g_odo to previously absent m1_r19_odo; checkpoint150, invocation4.
+- Command: scripts/run_agent.py --run runs/m1_r19_odo --resume --from-step 150 --steps 60 --max-calls 120
+- Exactly one invocation. Completed151-192 (42 steps); attempt193 hit call_cap, exit3.
+- Ledger10509 ->10629, delta120; ceiling10630. No rerun, extension or manual early stop.
+- Requests: perceiver54, act44, plan6, skill16; four cached rows and one zero-request cap row.
+- Lab exit156 (LV18g152); nine party-present world steps through exit, five post-dialogue.
+- North crossing159: UP choice, RAM map0 ->12; wild battle160. LV18g never crossed north.
+- No new place minted: visual memory reuses p_place_4 and p_place_3 on map12.
+- No T2 events (honesty0/0, zero false novelty); q11 frontier remains open.
+- Plan5 rows/6 requests (LV18g8/10); add errors0 (was2); one name citation error remains.
+- Four own-idea quests; no Goal:(none) world prompts (LV18g actual153,154,156,157).
+- Untargeted house-route attempt175 chose bedroom; visual p_place_3, but RAM stayed map12.
+- No RAM-confirmed house/lab re-entry after156; no crossing-step exit wall recorded.
+- Walls18:15 RAM-scored nonsprite terrain,0 NPC/prop overlaps,3 unscored intermediate edges.
+- Unchosen presses0; all42 rows locked, world15/15 (100%); probe null; odo gap0.
+- Odo35287 frames,3566 uncertain,24 cuts. Dropped96 =90 battle +6 world-tagged middle travel.
+- World-type drop target0 missed at175 (7-cut travel into battle); real motion/fade unverified.
+- Each of5 (place,map) visits has one offset. Pallet[5,6] is an already-known origin.
+## Integrity, artifacts and open issues
+- All1469 source-run files, five user files and nine golden files unchanged by hash.
+- All r19 worktrees removed normally; no force, no push. Only runner updated the ledger.
+- Report .tmp/r19/report.md; raw metrics metrics.json, analysis.json, spatial-audit.json.
+- D1 evidence .tmp/r19/D/diagnosis.md; reproduction replay_loop.py and paired frame/hash evidence.
+- Gates .tmp/r19/g/; preflight.json, integrity.json, live.log and exit.txt preserve provenance.
+- Frontier identity failure and inappropriate battle unexplored targets remain observations, no added validator.
+- Fake top-wall door, shop label, persistent Pallet origin and conditional travel fixes remain open by scope.
