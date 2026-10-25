@@ -1521,7 +1521,8 @@ class World:
                 current = {**current, "dirs": dirs}
             if leg.get("expect"):
                 if not is_cut and result.failure and result.failure.get("stage") == "route": return self._travel_result(results, "blocked", f"leg {n} route blocked", ctx)  # the route never reached the exit: not an exit mismatch
-                arrival = self._arrival(result.after, trace) if trace else None
+                if is_cut and len(directions) < len(current["dirs"]): self._travel_open = True; return self._travel_result(results, "done", f"leg {n} scene cut", ctx)  # a cut before the route's last press is another event (e.g. a modal screen); the loop re-identifies the place
+                arrival =self._arrival(result.after, trace) if trace else None
                 cut_dir = leg.get("push") or next((m.get("dir") if isinstance(m, dict) else m[0] for m in reversed(result.moves) if m), None)
                 for segment in self._travel_segments[1:]: segment["_place"], segment["_screen"] = leg["expect"], {"screen": (self.mem.get("places", leg["expect"]) or {}).get("screen")}
                 edge = exit_to(self.mem, place, tuple(leg["exit_tile"]), cut_dir)
@@ -1529,7 +1530,7 @@ class World:
                     key = _cross_key(place, tuple(leg["exit_tile"]), leg["expect"]); row = self.mem.get("crossings", key) or {"id": key, "n": 0}
                     self.mem.upsert("crossings", {**row, "miss": row.get("miss", 0) + 1}); push_failed(self.mem, place, tuple(leg["exit_tile"]), self._travel_push, step)
                     return self._travel_result(results, "blocked", f"leg {n} exit mismatch", ctx)
-                if arrival and (arrival[2] in ("dialogue", "menu") or (self.mem.get("places", arrival[0]) or {}).get("screen") in ("dialogue", "menu")): return self._travel_result(results, "blocked", f"leg {n} modal opened", ctx)
+                if arrival and (arrival[2] in ("dialogue", "menu", "battle") or (self.mem.get("places", arrival[0]) or {}).get("screen") in ("dialogue", "menu", "battle")): return self._travel_result(results, "blocked", f"leg {n} modal opened", ctx)
                 wrong = arrival and arrival[0] != leg["expect"]
                 mismatch = wrong or not edge or edge.get("to") != leg["expect"] or arrival and tuple(edge["arrive"]) != arrival[1]
                 if mismatch:
