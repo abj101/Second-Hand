@@ -553,6 +553,12 @@ class World:
         # dialogue/menu screen over a world place); others are drained, not folded, and counted in "dropped".
         # Motion drained at the start of a step (frames emulated while the agent thought) folds into the
         # current place after perception and before World.before (amended 2026-10-24). after() stops returning "scroll" (no reader).
+        # r18-fix (approved 2026-10-24): when a cut's after-screen is not "world" and the place match is deferred
+        # (cut_carry), segments after the first cut are held, not folded into the old place, until the next world screen
+        # re-identifies the place. A new place resolves at arrival = located − held tiles, then folds the held segments
+        # from there and records the crossing and both exit sides once (unseen_cross is skipped while held); the same
+        # place folds them as before. A no-response press (shift None) reaches space.fold like a bump (silent, then an
+        # unconfirmed wall), as before r18. World.state carries the held segments without frames.
     def mark_exit(self, place: str, direction: str, to: str, arrive: tuple[int, int], step: int) -> None   # from the prepared exit tile
     def observe_after(self, per: dict, frame, reused: bool, place: str, size: tuple[int, int], step: int) -> tuple[int, int] | None
         # drift re-anchor (returns drift_fix) and the after-perception observe
