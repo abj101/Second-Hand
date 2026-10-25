@@ -3,7 +3,8 @@ import hashlib, json, re
 from collections import Counter
 from dataclasses import replace
 from itertools import pairwise
-from PIL import ImageDraw
+from PIL import Image, ImageDraw
+from numpy import ndarray
 from agent.memory import ACTOR_KINDS, STATIC_GATE, TRANSIENT, _actor, _base, _distance, _is_exit as _memory_is_exit, _nameable, normalize_kind, place_aliases, place_name
 from agent.observer import changed, cut
 from agent.space import DIRS, exit_to, fold, frontier, mark_exit, outward, push_dirs, push_failed, route, tile_of
@@ -13,6 +14,13 @@ from agent.track import Tracker
 TRAVEL_MAX_INPUTS, BUMPS = 120, 3
 MISS_TO_STALE, ACTOR_STALE_STEPS = 2, 20
 LANDMARKS_PER_PLACE, MAP_W, MAP_H, VIEW_TOKENS = 8, 21, 15, 500
+_DROP = object()
+
+def _checkpoint(value):
+    if isinstance(value, (Image.Image, ndarray)): return _DROP
+    if isinstance(value, dict): return {k: clean for k, v in value.items() if k not in {"arrival", "frame"} and (clean := _checkpoint(v)) is not _DROP}
+    if isinstance(value, (list, tuple)): return [clean for v in value if (clean := _checkpoint(v)) is not _DROP]
+    return value
 
 TYPING = {"keyboard", "input_field"}  # a text field on a modal screen: type
 FURNITURE = {"player", "dialogue_box", "text", "logo", "cursor"}  # screen chrome: never a choice on a modal screen
@@ -176,7 +184,7 @@ class World:
             held = self._held
             if held and held["src"] == prior:
                 located = self._locate(place, frame)
-                delta = tuple(round(-sum(move[i + 1] for move in seg.get("moves", [])) / self.tile_px) for i in (0, 1)) if self.tile_px else (0, 0)
+                delta = tuple(round(-sum(move[i + 1] for seg in held["segments"] for move in seg.get("moves", [])) / self.tile_px) for i in (0, 1)) if self.tile_px else (0, 0)
                 arrival = tuple(located[i] - delta[i] for i in (0, 1)); self.pos = arrival; self._odo_px = (0, 0)
                 self._held = None
                 for segment in held["segments"]: self._odometer_fold({**segment, "_place": place}, place, step)
@@ -556,8 +564,9 @@ class World:
         else:
             if self._held is None and scene_cut and next_place == place and (self._odo_screen or {}).get("screen") != "world":
                 cut_at = next((i for i, segment in enumerate(segments) if segment.get("cut")), len(segments) - 1)
-                last_dir = self._prepared[3]
-                for segment in segments[1:cut_at + 1]: last_dir = self._odometer_fold(segment, place, step) or last_dir
+                last_dir = self._prepared[3]; folded_dir = None
+                for segment in segments[1:cut_at + 1]: folded_dir = self._odometer_fold(segment, place, step) or folded_dir
+                last_dir = last_dir or folded_dir
                 self._held = {"src": place, "tile": self.pos, "dir": last_dir, "segments": segments[cut_at + 1:]}
             else:
                 for segment in segments[1:]: self._odometer_fold(segment, place, step)
@@ -704,7 +713,7 @@ class World:
 
     def state(self):
         return {"pos": self.pos, "drift": self.drift, "drift_ref": self.drift_ref, "entity_tiles": self.entity_tiles,
-                "held": ({**self._held, "segments": [{k: v for k, v in seg.items() if k not in ("arrival", "frame")} for seg in self._held["segments"]]} if self._held else None),
+                "held": _checkpoint(self._held) if self._held else None,
                 "entity_ids": self.entity_ids, "legend": self.legend,
                 "last_miss_hash": self._last_miss_hash,
                 "self_spot": self.self_spot, "self_contradictions": self._self_contradictions,

@@ -2123,20 +2123,33 @@ def test_r17_walk_keeps_motion_after_600_frame_settle_cap(tmp_path):
     assert world.pos == (39, 0) and model.calls == loop.model.calls == 0
 
 
-def test_after_holds_segments_after_cut_until_place_is_reidentified(tmp_path):
-    mem, world = _odo_world(tmp_path); world.pos = (1, 10); world.odometer_begin()
-    world._prepared = (None, "room", 1, "UP", world.pos)
-    world._prepared_segments = [
-        {"start": 1, "end": 1, "moves": [], "frames": 1, "uncertain": 0, "cut": None, "gap": False, "arrival": None, "_screen": {"screen": "world"}, "_place": "room"},
-        {"start": 10, "end": 10, "moves": [], "frames": 1, "uncertain": 0, "cut": "fade", "gap": False, "arrival": None, "_screen": {"screen": "world"}, "_place": "room"},
-        {"start": 20, "end": 20, "moves": [(20, 0, 128, False)], "frames": 1, "uncertain": 0, "cut": None, "gap": False, "arrival": None, "_screen": {"screen": "dialogue"}, "_place": "room"},
-    ]
-    world._odo_screen = {"screen": "dialogue"}
+def test_after_holds_post_cut_motion_for_reidentified_place(tmp_path, monkeypatch):
+    import agent.world as world_module
+    from PIL import Image
+    mem, world = _odo_world(tmp_path); source, dest = camera(31), camera(32); odo = world.odometer
+    x, y, seq = 300, 300, 0; odo(source(x, y), seq)
+    seq, x, y = feed(odo, source, seq, x, y, 16, 0)
+    seq, x, y = feed(odo, source, seq, x, y, 0, 176)
+    seq, x, y = feed(odo, source, seq, x, y, 0, -16)
+    seq += 1; odo(Image.new("RGB", (160, 144), "white"), seq)
+    seq += 1; odo(dest(300, 300), seq)
+    seq, dx, dy = feed(odo, dest, seq, 300, 300, 0, -128)
+    after = dest(dx, dy); after.info["frame_seq"] = seq
+    folded, real_fold = [], world_module.fold
+    def record(mem, place, pos, moves, *args, **kwargs):
+        if place == "room": folded.append([m["dir"] for m in moves])
+        return real_fold(mem, place, pos, moves, *args, **kwargs)
+    monkeypatch.setattr(world_module, "fold", record)
+    skill = SimpleNamespace(moves=[], after=after, arrival_frame=after, scroll=(0, 0))
 
-    world.after(SimpleNamespace(moves=[]), "room", "room", True, 2)
+    world.prepare(skill, "room", True, 2, through=seq)
+    assert world.pos == (1, 10) and folded == [["RIGHT", *(["DOWN"] * 11), "UP"]]
+    folded_before_after = len(folded); world._odo_screen = {"screen": "dialogue"}
+    world.after(skill, "room", "room", True, 2)
 
-    assert world.pos == (1, 10) and len(world._held["segments"]) == 1
+    assert world.pos == (1, 10) and len(folded) == folded_before_after
     assert world._held["src"] == "room" and world._held["tile"] == (1, 10) and world._held["dir"] == "UP"
+    assert sum(move[2] for seg in world._held["segments"] for move in seg["moves"]) == 128
 
 
 def test_new_place_resolves_held_motion_and_marks_both_exit_sides(tmp_path):
@@ -2156,34 +2169,38 @@ def test_new_place_resolves_held_motion_and_marks_both_exit_sides(tmp_path):
 
 def test_same_place_resolution_flushes_held_motion_into_source(tmp_path):
     mem, world = _odo_world(tmp_path); world.pos = (0, 8)
-    world._held = {"src": "room", "tile": (0, 8), "dir": "UP", "segments": [
-        {"start": 1, "end": 1, "moves": [(1, 0, 16, False)], "frames": 1, "uncertain": 0, "cut": None, "gap": False, "_screen": {"screen": "dialogue"}, "_place": "room"},
-    ]}
+    segment = {"start": 1, "end": 1, "moves": [(1, 0, 16, False)], "frames": 1, "uncertain": 0, "cut": None, "gap": False, "_screen": {"screen": "dialogue"}, "_place": "room"}
+    world._held = {"src": "room", "tile": (0, 8), "dir": "UP", "segments": [segment]}
+    expected_root = tmp_path / "expected"; expected_root.mkdir(); expected_mem, expected = _odo_world(expected_root); expected.pos = (0, 8)
+    expected._odometer_fold(dict(segment), "room", 3)
 
     world.before({"screen": "world", "entities": []}, "room", "room", (160, 144), 3)
 
-    assert world.pos == (0, 7) and world._held is None
-    assert mem.get("tiles", "room@0,7")["floor"] is True
+    assert world.pos == expected.pos == (0, 7) and world._held is None
+    assert mem.rows("tiles") == expected_mem.rows("tiles")
 
 
 def test_odometer_drain_appends_held_segments_without_folding(tmp_path):
-    mem, world = _odo_world(tmp_path); world.odometer_begin(); world.pos = (0, 8)
+    mem, world = _odo_world(tmp_path); world.pos = (0, 8)
     world._held = {"src": "room", "tile": (0, 8), "dir": "UP", "segments": []}
-    segment = {"start": 1, "end": 1, "moves": [(1, 0, 16, False)], "frames": 1, "uncertain": 0, "cut": None, "gap": False, "_screen": {"screen": "dialogue"}, "_place": "room"}
+    frame = camera(42); odo = world.odometer; odo(frame(100, 100), 0); seq, _, _ = feed(odo, frame, 0, 100, 100, 0, 16)
+    world._odo_screen = {"screen": "dialogue"}; world.odometer_start(seq, "room", 2, {"screen": "dialogue"}, "room")
 
-    assert world._odometer_fold(segment, "room", 2) is None
-    assert world._held["segments"] == [segment] and world.pos == (0, 8)
+    assert len(world._held["segments"]) == 1 and world.pos == (0, 8)
     assert not mem.rows("tiles") and world._odo_stats["dropped"] == 0
 
 
 def test_held_checkpoint_round_trips_and_skips_unseen_cross(tmp_path):
+    from PIL import Image
     mem, world = _odo_world(tmp_path); place(mem, "dest", "Destination"); world._locate = lambda *_: (0, 0)
     world.pos = (1, 10)
     world._held = {"src": "room", "tile": (1, 10), "dir": "UP", "segments": [
-        {"start": 20, "end": 20, "moves": [(20, 0, 128, False)], "frames": 1, "uncertain": 0, "cut": None, "gap": False, "arrival": object(), "frame": object(), "_screen": {"screen": "dialogue"}, "_place": "room"},
+        {"start": 20, "end": 20, "moves": [(20, 0, 128, False)], "frames": 1, "uncertain": 0, "cut": None, "gap": False, "arrival": Image.new("RGB", (2, 2)), "raw_image": Image.new("RGB", (2, 2)), "pixels": {"raw": __import__("numpy").zeros((2, 2))}, "_screen": {"screen": "dialogue"}, "_place": "room"},
     ]}
+    world._prepared = (None, "room", 2, "UP", (1, 10), (0, 8)); world.mark_exit("room", "UP", "dest", (0, 8), 2)
     state = json.loads(json.dumps(world.state()))
-    assert "arrival" not in state["held"]["segments"][0] and "frame" not in state["held"]["segments"][0]
+    segment = state["held"]["segments"][0]
+    assert "arrival" not in segment and "frame" not in segment and "raw_image" not in segment and segment["pixels"] == {}
     replay = World(mem, 16); replay._locate = lambda *_: (0, 0); replay.restore(state)
 
     replay.unseen_cross("room", "dest", 3)
