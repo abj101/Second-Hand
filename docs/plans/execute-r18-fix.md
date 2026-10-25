@@ -56,7 +56,7 @@ Run order: wave 0 → F1 and F3 in parallel → merge F1 → F2 (from merged F1;
 ### F3 (gate T18F; zero model requests)
 `.tmp/r18fix/g/t18f.py`: build World + Loop on `GridEnv`/`StubModel` (pattern: `.tmp/r18/g/t18_o2.py`). Two scenarios:
 1. **D1:** a world screen and two steps each pressing UP into a wall with no response. Assert the tile's `blocked` contains UP after the second step.
-2. **D2:** a non-direction press starts a scripted walk of 1R+10D, an instant/fade cut, then 8U, ending on a perceived dialogue screen; the next 2 steps are dialogue; then a world screen of a new, unseen place.
+2. **D2:** a non-direction press starts a scripted walk of 1R, 11D, then 1U onto the door (net +1,+10, as T18-O3 measured; r17 recorded this door as p_place_4 (7,5) UP), an instant/fade cut, then 8U, ending on a perceived dialogue screen; the next 2 steps are dialogue; then a world screen of a new, unseen place.
    - The source place gains tiles only on the pre-cut path, ending at the exit tile; none from the post-cut 8U walk.
    - New place pos (0,0), entrance exit tile (0,8) with dir DOWN, exactly one crossing source@exit>new.
    - Re-running from a checkpoint saved during the dialogue gives the same result.
@@ -64,7 +64,7 @@ Print PASS/FAIL per assertion. Expected: D1 red before F1 and green after; D2 re
 
 ### F2
 - **Tests** (`test_world.py`; `test_loop.py` only if a loop change is made):
-  1. the LV18 shape as a unit (segments pre-cut 1R+10D, cut, post-cut 8U; after-screen dialogue; `next_place == place`): no source tiles after the cut; then `before()` with a new place gives pos (0,0), entrance (0,8) DOWN, one crossing;
+  1. the LV18 shape as a unit (segments pre-cut 1R, 11D, 1U onto the door, cut, post-cut 8U; source exit = the door tile with dir UP, destination exit = (0,8) DOWN via space.mark_exit's opposite rule, unchanged; after-screen dialogue; `next_place == place`): no source tiles after the cut; then `before()` with a new place gives pos (0,0), entrance (0,8) DOWN, one crossing;
   2. the deferred match returns the same place: the held segments fold into the source, giving the same tiles as today's immediate fold;
   3. drains on intermediate dialogue steps go into `_held`, never into the source;
   4. `state()`/`restore()` round-trip with `_held` set, then resolve gives the same result;
