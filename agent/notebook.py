@@ -11,7 +11,7 @@ def _refs(value):
 
 
 class Notebook:
-    def __init__(self, root: Path, *, ref=None, canon=None, label=None, refs=None, ties=None, route=None, is_exit=None, leads_to=None, name=None) -> None:
+    def __init__(self, root: Path, *, ref=None, canon=None, label=None, refs=None, ties=None, route=None, is_exit=None, leads_to=None, name=None, place_first=None) -> None:
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
         self.file, self.history = root / "notebook.json", root / "notebook.history"
@@ -21,6 +21,7 @@ class Notebook:
         self.is_exit = is_exit or (lambda ref: False)
         self.leads_to = leads_to or (lambda ref: [])
         self.name = name or (lambda ident, text, key, step: None)  # applies a name the planner read in game text
+        self.place_first = place_first or (lambda place: None)
         try:
             loaded = json.loads(self.file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -72,16 +73,15 @@ class Notebook:
             if any(q.get("key") == key for q in quests): return "key is already used"
             text, why = op_data.get("text"), op_data.get("why")
             if not isinstance(text, str) or not text.strip(): return "text is empty"
-            refs = _refs(why)
-            if not refs or any(not isinstance(r, str) or not self._known_key(r) for r in refs):
-                newest = [row["key"] for row in self.data["text"][-3:][::-1]]
-                return f"why must cite game-text keys, newest: {', '.join(newest)}" if newest else "why must cite game-text keys, none heard yet"
+            refs = [r for r in _refs(why) if isinstance(r, str) and self._known_key(r)]
+            own = not refs
             if sum(q.get("status") == "open" for q in quests) >= MAX_OPEN: return "maximum open quests reached"
             target = op_data.get("target")
-            resolved = self._resolve(target) if target is not None else None  # an add whose target names nothing known keeps its text and why: the quest just has no target
+            resolved = "unexplored" if target == "unexplored" else self._resolve(target) if target is not None else None  # an add whose target names nothing known keeps its text and why: the quest just has no target
             if target is not None and resolved is None and self.ties(target): return self._no_target(target)
-            value = {"key": key, "text": text, "why": refs, "target": resolved,
+            value = {"key": key, "text": text, "why": [] if own else refs, "target": resolved,
                      "status": "open", "opened": step, "closed": None, "reason": None}
+            if own: value.update(basis=(why.strip() if isinstance(why, str) and why.strip() else text.strip())[:200], source="own")  # ponytail: own ideas are trusted without reconciliation; add map-evidence reconciliation if needed
             quests.append(value)
             event["quest"] = value
         elif op in ("done", "drop"):
@@ -107,7 +107,7 @@ class Notebook:
         elif op == "target":
             target = op_data.get("target")
             if target is None: return "target is missing"
-            resolved = self._resolve(target)
+            resolved = "unexplored" if target == "unexplored" else self._resolve(target)
             if resolved is None: return self._no_target(target)
             quest.update(target=resolved, retargeted=step)
             event["quest"] = quest
@@ -176,8 +176,16 @@ class Notebook:
             closed.extend(self._close_crossed(step, events))
         for quest in self.data["quests"]:
             target = quest.get("target")
-            since = quest.get("retargeted") or quest.get("opened")
-            if quest.get("status") != "open" or not target or target.partition(":")[0] != "place": continue
+            since = quest.get("retargeted") if quest.get("retargeted") is not None else quest.get("opened")
+            if quest.get("status") != "open" or not target: continue
+            if target == "unexplored":
+                first = self.place_first(here) if here else None
+                if prev != here and type(first) is int and type(since) is int and first >= since:
+                    quest.update(status="done", closed=step, reason="reached", by="observe")
+                    closed.append(quest["key"]); events.append({"step": step, "op": "observe", "key": quest["key"], "quest": quest})
+                # ponytail: any newly minted place satisfies this target; add a directional frontier only if quests need precision.
+                continue
+            if target.partition(":")[0] != "place": continue
             if (type(since) is int and step < since) or prev == here or here != self.canon(target): continue
             quest.update(status="done", closed=step, reason="reached", by="observe")
             closed.append(quest["key"])
@@ -238,6 +246,7 @@ class Notebook:
         target = q.get("target")
         if q.get("by") != "observe" or not target:
             return q.get("reason", "")
+        if target == "unexplored": return "reached a place you have not been before"
         if target.startswith("place:"): return f"reached {self.label(target)}"
         if q.get("reason") == "crossed" and self.is_exit(target): return f"went through {self.label(target)}"
         if q.get("reason") == "entered":
@@ -268,6 +277,7 @@ class Notebook:
         for q in open_quests:
             target = f" [target: {self.label(q['target'])}]" if q.get("target") else ""
             lines.append(f"- {q['key']}: {q['text']}{target}")
+            if q.get("source") == "own": lines.append(f" (your own idea: {q.get('basis', '')})")
             lines.extend(f"  {self._text_line(row)}" for row in self._game_text_for([q]))
         lines.append("Recently closed:")
         for q in closed:
@@ -291,7 +301,8 @@ class Notebook:
         if quest:
             target = quest.get("target")
             done_when = ""
-            if target:
+            if target == "unexplored": done_when = " (done when: you reach a place you have not been before)"
+            elif target:
                 kind = target.partition(":")[0]
                 if kind == "thing":
                     done_when = (f" (done when: you go through {label(target)})" if self.is_exit(target) else
@@ -300,6 +311,7 @@ class Notebook:
                 else: done_when = f" (done when: you enter {label(target)})"
             lines.extend([f"Goal: {quest['text']}{done_when}", "Because:"])
             rows = self._game_text_for([quest])[:3]
+            if quest.get("source") == "own": lines.append(f"(your own idea: {quest.get('basis', '')})")
         else:
             lines.extend(["Goal: (none)", "Because:"])
             rows = []

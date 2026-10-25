@@ -28,8 +28,8 @@ CASES = [
     ("add-ok", [], add("q"), None),
     ("add-key-used", closed_setup(), add("q"), "key is already used"),
     ("add-empty-text", [], {**add("q"), "text": "  "}, "text is empty"),
-    ("add-empty-why", [], {**add("q"), "why": []}, "why must cite game-text keys, newest: t1"),
-    ("add-unknown-why", [], {**add("q"), "why": ["missing"]}, "why must cite game-text keys, newest: t1"),
+    ("add-empty-why", [], {**add("q"), "why": []}, None),
+    ("add-unknown-why", [], {**add("q"), "why": ["missing"]}, None),
     ("add-open-cap", [add(f"q{i}") for i in range(MAX_OPEN)], add("extra"), "maximum open quests reached"),
     ("add-unresolved-target", [], {**add("q"), "target": "unknown"}, None),
     ("reopen-not-closed", [add("q")], {"op": "reopen", "key": "q", "reason": "Needed again"}, "key is not closed"),
@@ -353,16 +353,45 @@ def test_v2_file_loads_as_empty(tmp_path):
     assert nb.log == []
 
 
-def test_why_error_names_newest_text_keys_and_closest_target_candidates(tmp_path):
+def test_unknown_why_becomes_own_idea_and_closest_target_candidates(tmp_path):
     labels = {"place:hall": "Hall", "thing:mom": "MOM", "thing:guide": "Guide"}
     refs_by_label = {label: ref for ref, label in labels.items()}
     nb = notebook(tmp_path, ref=refs_by_label.get, label=lambda ref: labels.get(ref, ref), refs=lambda: list(labels))
-    assert nb.apply_ops([add("q")], 1)[0]["result"] == "error: why must cite game-text keys, none heard yet"
+    assert nb.apply_ops([add("q")], 1)[0]["result"] == "ok"
     for i in range(4): nb.heard(i, None, "Hall", f"Line {i}.")
 
-    assert nb.apply_ops([{**add("q"), "why": ["missing"]}], 5)[0]["result"] == \
-        "error: why must cite game-text keys, newest: t4, t3, t2"
-    assert nb.apply_ops([add("q", target="Hal")], 6)[0]["result"] == "ok"
+    assert nb.apply_ops([{**add("q2"), "why": ["missing"]}], 5)[0]["result"] == "ok"
+    assert nb.apply_ops([add("q3", target="Hal")], 6)[0]["result"] == "ok"
+
+def test_uncited_add_is_own_idea_but_names_still_need_citations(tmp_path):
+    nb = notebook(tmp_path, ref=lambda value: value if value.startswith(("place:", "thing:")) else None)
+    nb.heard(3, None, "here", "A sign.")
+    op = {**add("own"), "why": "Find somewhere new", "target": "unexplored"}
+    assert nb.apply_ops([op], 4)[0]["result"] == "ok"
+    quest = nb.data["quests"][0]
+    assert quest["why"] == [] and quest["basis"] == "Find somewhere new" and quest["source"] == "own"
+    assert quest["target"] == "unexplored"
+    assert nb.apply_ops([{**add("cited"), "why": ["t1"]}], 5)[0]["result"] == "ok"
+    assert nb.data["quests"][1]["why"] == ["t1"] and "source" not in nb.data["quests"][1]
+    assert "(your own idea: Find somewhere new)" in nb.render()
+    focus = nb.render_focus(lambda ref: ref)
+    assert "done when: you reach a place you have not been before" in focus and "(your own idea: Find somewhere new)" in focus
+    nb.heard(6, None, "here", "A sign.")
+    assert nb.apply_ops([{"op": "name", "key": "thing:sign", "text": "Sign", "why": "A prose guess"}], 7)[0]["result"] == "error: why must cite game-text keys"
+
+def test_unexplored_closes_only_on_place_first_seen_after_open(tmp_path):
+    first = {"place:known": 3, "place:fresh": 12}
+    nb = notebook(tmp_path, ref=lambda value: value if value.startswith(("place:", "thing:")) else None, place_first=first.get)
+    assert nb.apply_ops([{**add("new"), "why": "Explore", "target": "unexplored"}], 10)[0]["result"] == "ok"
+    assert nb.observe(11, "place:known") == []
+    assert nb.observe(12, "place:fresh") == ["new"]
+    assert nb._evidence(nb.data["quests"][0]) == "reached a place you have not been before"
+
+def test_unexplored_uses_retargeted_step(tmp_path):
+    nb = notebook(tmp_path, ref=lambda value: value if value.startswith(("place:", "thing:")) else None, place_first=lambda place: 8)
+    assert nb.apply_ops([{**add("new"), "why": "Explore"}], 2)[0]["result"] == "ok"
+    assert nb.apply_ops([{"op": "target", "key": "new", "target": "unexplored"}], 7)[0]["result"] == "ok"
+    assert nb.observe(8, "place:just_seen") == ["new"]
 
 
 def test_add_with_unknown_target_keeps_the_quest_without_a_target(tmp_path):

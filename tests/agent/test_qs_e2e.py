@@ -41,7 +41,7 @@ def new_loop(tmp_path, model):
     return loop
 
 
-def test_planner_calls_are_bounded_and_events_never_lost(tmp_path, monkeypatch):
+def test_fresh_text_plans_immediately_and_events_are_never_lost(tmp_path, monkeypatch):
     scene(monkeypatch)
     loop, produced = new_loop(tmp_path, Scripted()), []
     real = loop._event
@@ -59,7 +59,7 @@ def test_planner_calls_are_bounded_and_events_never_lost(tmp_path, monkeypatch):
         rows.append(loop.step())
     plans = [r for r in rows if r.get("plan")]
     steps = [r["step"] for r in plans]
-    assert 3 <= len(plans) <= 67 and all(b - a >= 3 for a, b in zip(steps, steps[1:]))
+    assert len(plans) == 200 and steps == list(range(1, 201))
     consumed = [e for r in plans for e in r["plan"]["events"]]
     assert sorted(map(json.dumps, produced), key=str) == sorted(map(json.dumps, consumed + loop.events), key=str)  # nothing lost: consumed or still waiting
     assert {e["kind"] for e in consumed} >= {"T1", "T2", "T5"}

@@ -1182,14 +1182,15 @@ def test_plan_ops_apply_and_plan_row_carries_results(tmp_path, monkeypatch):
     loop = Loop(Busy(), StubModel([]), Memory(tmp_path / "memory"), "grid")
     loop.notebook.heard(0, None, "room", "A guide is waiting.")
     loop._plan_trigger = lambda per: "stuck: no_progress"
-    plan = SimpleNamespace(ops=[{"op": "add", "key": "guide", "text": "Meet the guide", "why": ["t1"]}], why="new lead")
-    monkeypatch.setattr(module, "plan", lambda *a, **k: plan)
+    plan = SimpleNamespace(ops=[{"op": "add", "key": "guide", "text": "Meet the guide", "why": "Find the guide"}], why="new lead")
+    calls = []; monkeypatch.setattr(module, "plan", lambda *a, **k: calls.append(1) or plan)
 
     row = loop.step()
 
     assert loop.notebook.data["quests"][0]["key"] == "guide"
     assert row["plan"]["ops"] == [{"op": "add", "key": "guide", "result": "ok"}]
     assert row["plan"]["why"] == "new lead" and "quests_changed" not in row["plan"]
+    assert len(calls) == 1 and loop.notebook.data["quests"][0]["source"] == "own"
 
 
 @pytest.mark.parametrize("followup", [False, True])
@@ -1357,7 +1358,7 @@ def test_plan_followup_before_act_is_bounded_and_reads_errors(tmp_path, monkeypa
     row = loop.step()
 
     plan_prompts = [user for role, user in sent if role == "plan"]
-    assert len(plan_prompts) == (1 if case in ("rejected_target", "empty_ops", "malformed") else 2)
+    assert len(plan_prompts) == (1 if case in ("rejected_target", "empty_ops", "malformed", "invalid_twice") else 2)
     if case == "malformed":
         assert row["plan"]["ops"] == [{"op": None, "key": None, "result": "error: ops must be a list"}]
     if case in ("closes_without_adding", "rejected_target"):
@@ -1367,10 +1368,11 @@ def test_plan_followup_before_act_is_bounded_and_reads_errors(tmp_path, monkeypa
     if case == "rejected_target":
         assert row["plan"]["ops"][0]["result"] == "ok"
     if case == "invalid_twice":
-        assert loop.notebook.focus is None
-        assert len(row["plan"]["ops"]) == 2
+        quest = loop.notebook.data["quests"][0]
+        assert loop.notebook.focus == "q3" and quest["source"] == "own" and quest["why"] == []
+        assert len(row["plan"]["ops"]) == 1 and row["plan"]["ops"][0]["result"] == "ok"
         loop.step()
-        assert len([user for role, user in sent if role == "plan"]) == 2
+        assert len([user for role, user in sent if role == "plan"]) == 1
 
 
 def test_followup_accomplished_at_once_gets_one_more_call(tmp_path, monkeypatch):
@@ -1412,7 +1414,9 @@ def test_followup_accomplished_at_once_gets_one_more_call(tmp_path, monkeypatch)
 
     loop, row, plan_prompts, _ = run(
         [{"op": "add", "key": "q3", "text": "Talk to the professor"}], tmp_path / "invalid")
-    assert len(plan_prompts) == 3 and loop.notebook.focus is None
+    assert len(plan_prompts) == 3 and loop.notebook.focus == "q3"
+    own = next(q for q in loop.notebook.data["quests"] if q["key"] == "q3")
+    assert own["source"] == "own" and own["why"] == []
 
 
 def test_actor_speaker_name_attaches_after_new_text(tmp_path, monkeypatch):
@@ -2462,11 +2466,22 @@ def test_events_wait_out_the_floor_and_are_never_lost(tmp_path):
     loop.notebook.data["quests"] = [{"key": "q", "text": "explore", "status": "open"}]
     loop.last_plan = loop.step_no = 10
     for kind, text in (("T2", "arrived somewhere new: A"), ("T1", "new game text: hi"), ("T3", "quest x closed")): loop._event(kind, text, 10)
-    assert loop._plan_trigger({"screen": "world"}) is None and len(loop.events) == 3  # inside the floor: nothing consumed, nothing dropped
+    assert loop._plan_trigger({"screen": "world"}) == "quest x closed; new game text: hi; arrived somewhere new: A"  # T3 skips the floor
     loop.step_no = 12
     assert loop._plan_trigger({"screen": "world"}) == "quest x closed; new game text: hi; arrived somewhere new: A"  # T3, T1, T2
     loop._event("T5", "no open quest", 12); loop._event("T5", "no open quest", 12)
     assert [e["kind"] for e in loop.events].count("T5") == 1
+
+def test_t3_skips_floor_while_lone_t2_waits(tmp_path):
+    loop = _loop(tmp_path); loop.notebook.data["quests"] = [{"key": "q", "text": "q", "status": "open"}]; loop.last_plan = loop.step_no = 10
+    loop._event("T3", "quest closed", 10)
+    assert loop._plan_trigger({"screen": "world"}) == "quest closed"
+    loop.events = []; loop.last_plan = loop.step_no = 10
+    loop._event("T2", "arrived somewhere new", 10)
+    assert loop._plan_trigger({"screen": "world"}) is None
+    loop.events = []; loop.last_plan = loop.step_no = 10
+    loop._event("T1", "new game text", 10)
+    assert loop._plan_trigger({"screen": "world"}) == "new game text"
 
 
 def test_revisit_does_not_drop_pending_new_place_event(tmp_path):
