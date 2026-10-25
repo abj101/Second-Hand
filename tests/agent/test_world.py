@@ -1248,28 +1248,26 @@ def test_anchor_stand_in_applies_only_while_anchor_unknown(tmp_path):
     _, tiles, _ = world.before(per, "room", "room", SIZE, 2)
     assert tiles[1] not in world.actor_tiles and tiles[2] in world.actor_tiles
 
-def test_probe_locks_after_a_move(tmp_path, monkeypatch):
-    from agent import world as world_module
-    from agent.skills import Ctx
-    from tests.agent.fakes import StubModel
 
-    mem = Memory(tmp_path); env = GridEnv(); world = World(mem, 16); world.current_place = "room"
-    mem.upsert("tiles", {"id": "room@0,0", "place": "room", "x": 0, "y": 0,
-                         "floor": True, "blocked": ["RIGHT"], "pushed": [], "exit": None, "step": 1})
-    mem.upsert("tiles", {"id": "room@0,1", "place": "room", "x": 0, "y": 1,
-                         "floor": True, "blocked": [], "pushed": [], "exit": None, "step": 1})
-    world.self_spot = [.5, .5]  # legacy spot is present but has no motion evidence
-    original = world_module.press
+def test_locked_world_treats_other_player_label_as_actor_tile(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "Room")
+    world = World(mem, 16); world.self_spot, world._self_from_motion = [.5, .5], True
+    per = {"screen": "world", "entities": [
+        {"name": "player", "kind": "player", "at": [.5, .5]},
+        {"name": "player", "kind": "player", "at": [.5, .6111111111111112]},
+    ]}
 
-    def lock_after_press(ctx, direction):
-        result = original(ctx, direction)
-        result.moves[0]["self_at"] = (.5, .5)
-        return result
+    _, tiles, _ = world.before(per, "room", "room", SIZE, 1)
+    assert tiles[1] == (0, 1) and tiles[1] in world.actor_tiles
+    for step in (2, 3):
+        skill = SimpleNamespace(moves=[{"dir": "DOWN", "shift": None, "no_response": True}], scroll=(0, 0))
+        world.prepare(skill, "room", False, step)
+        world.after(skill, "room", "room", False, step)
+        world.before(per, "room", "room", SIZE, step + 1)
+        tile = mem.get("tiles", "room@0,0")
+        if step == 2: assert tile.get("silent", {}).get("DOWN") == 2 and "DOWN" not in tile.get("blocked", [])
+        else: assert "DOWN" in tile.get("held", []) and "DOWN" not in tile.get("blocked", [])
 
-    monkeypatch.setattr(world_module, "press", lock_after_press)
-    result = world.probe(Ctx(env, StubModel([]), tile_px=16))
-
-    assert result["presses"] == 1 and result["locked"] and world.self_spot == [.5, .5]
 def test_before_reuses_ids_after_observe_after_cached_perception(tmp_path, monkeypatch):
     from PIL import Image
 

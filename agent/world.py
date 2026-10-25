@@ -218,7 +218,7 @@ class World:
         observed = self._observation(per, size)
         ids = {} if per.get("screen") != "world" else self.entity_ids if per is self._observed_per else self.mem.observe(observed, place, step, tiles, self._hits(observed))
         self._observed_per = per; self._follow(per, ids, pa, size)
-        self.actor_tiles = frozenset(tiles[i] for i, e in enumerate(per.get("entities", [])) if i in tiles and self._actor(ids.get(i), e))
+        self.actor_tiles = frozenset(tiles[i] for i, e in enumerate(per.get("entities", [])) if i in tiles and (self._actor(ids.get(i), e) or self._self_from_motion and i != self._self_index(per, size) and e.get("kind", "").casefold() == "player"))
         self.entity_ids = ids
         if per.get("screen") == "world": self.entity_tiles = {ids[i]: p for i, p in tiles.items() if i in ids}
         self.entities = [{"id": ids.get(i), "name": e.get("name"), "kind": e.get("kind"), "at": e.get("at")}
@@ -511,31 +511,6 @@ class World:
         self._prepared = (skill, place, step, cut_dir, self.pos)
         return {"cut_dir": cut_dir, "exit_key": (*self.pos, cut_dir) if cut_dir and self.tile_px else None}
 
-    def probe(self, ctx):
-        place = self.current_place
-        result = {"presses": 0, "locked": self._self_from_motion}
-        if (not place or self.tile_px is None or self._self_from_motion): return result
-        step = getattr(ctx, "step", 0)
-        tried = set()
-        for _ in range(4):
-            tile = self.mem.get("tiles", f"{place}@{self.pos[0]},{self.pos[1]}") or {}
-            direction = next((d for d in DIRS if d not in tile.get("blocked", []) and d not in tried), None)
-            if direction is None: break
-            tried.add(direction)
-            skill = press(ctx, direction)
-            scene_cut = skill.blank_seen or cut(skill.before, skill.after)
-            self.prepare(skill, place, scene_cut, step)
-            scene_cut = self._prepared_scene_cut
-            result.update(presses=result["presses"] + skill.inputs, skill=skill, scene_cut=scene_cut)
-            if not scene_cut: self.after(skill, place, place, False, step)
-            move = skill.moves[-1] if skill.moves else {}
-            spot, shift = move.get("self_at"), move.get("shift")
-            if (spot is not None and isinstance(shift, tuple) and max(map(abs, shift)) >= self.tile_px):
-                self.self_spot, self._self_contradictions, self._self_from_motion = list(spot), 0, True
-            result["locked"] = self._self_from_motion
-            if scene_cut or skill.status != "done" or result["locked"]: break
-        return result
-
     def failed_push(self, skill, place, start, direction, step):
         moves = skill.moves
         if direction not in DIRS or not moves or not self.tile_px or place == self.mem.unplaced: return
@@ -642,6 +617,7 @@ class World:
             if spot is None:
                 self._self_contradictions = 0
             elif self.self_spot is None:
+                # ponytail: busy scenes can reject residuals; odometer-compensated residuals if acquisition stalls.
                 self.self_spot, self._self_contradictions, self._self_from_motion = list(spot), 0, True
             elif not self._self_from_motion:
                 self.self_spot, self._self_contradictions, self._self_from_motion = list(spot), 0, True
