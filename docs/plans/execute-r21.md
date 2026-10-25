@@ -144,7 +144,7 @@ Using `runs/m1_r19_odo` (copy what you read to `.tmp/r21/B1/` first):
 | Gate | Pass |
 |---|---|
 | T-M1 | suite green (baseline at `b24b7d2`: 922 passed, 1 skipped); changed assertions only as pre-approved. **Live-log check:** feed LV20 step 160's logged segments (trace `segments` + `presses.jsonl` `seqs`) through the M1 drain/fold: no `blocked DOWN` on the crossed door tile. |
-| T-X1 | suite green; on a copy of `m1_r20_odo/checkpoint/000210/memory`, `_exits(p_place_4)` shows `exit:0,8` and `e_exit_south_2` as refuted with their reasons, and Pallet's verified exits (house door, lab door, Route 1 side) unchanged. |
+| T-X1 | suite green; on a copy of `m1_r20_odo/checkpoint/000210/memory`, `_exits(p_place_4)` keeps the actual `e_exit_south` at `(1,8)` wall-refuted and makes `e_exit_south_2` at `(5,-5)` refuted because ground continues beyond it; Pallet's verified exits remain unchanged. User-approved correction during execution: `(0,8)` is the twice-unreached target, but no exit entity/tile exists there; keep P7 exact-tile, with no adjacent inference. |
 | T-B1 | suite green; offline check 100% agreement. |
 | T-C1 | `removed.json` lists only `p_place_4` rows with `first` 70–87 and their relations; a dry run on a copy of checkpoint 210 then loads with `Memory` without error. |
 | G21 | merged HEAD: full suite green. T18F/G/H/I PASS. T18-O2 unchanged. T18-O3 unchanged, or only wall rows removed that are crossing bumps (P5) or remembered-actor tiles (P6), each listed with RAM evidence. Golden unchanged (if it changes, stop and ask). |

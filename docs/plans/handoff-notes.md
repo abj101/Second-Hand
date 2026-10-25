@@ -1,51 +1,45 @@
 # Handoff notes
-Last written:2026-10-25. R20 implemented, G20 passed, single LV20 completed. Never pushed.
+Last written: 2026-10-25. R21 implemented, G21 passed, single LV21 completed. Never pushed.
 
 ## Source and implementation
-- Branch feat/lean-agent; base341264d; live/code HEAD1fb1ecf.
-- Wave0 docs/approved notebook contract24e9a74.
-- N3 b62f3ba, merge05209e7:optional act replan flag; T1 needs a flag; text always retained; T5 unchanged.
-- Tile first step persists; legacy missing first means old. Unexplored also closes half a screen beyond every old tile.
-- A2 b94a08f, merge1ab2f20:observed settled:true, inferred settled:false; settled arrivals absorb post-cut segments.
-- Known legacy src:inferred remains unsettled without the new flag; other legacy rows default observed.
-- Trace/view matches are settled; inferred-view promotion updates the flag and travel refreshes its edge.
-- Unsettled travel retains prior fold-last/drop-middle behavior; zero-motion presses/bumps remain processed.
-- World contract1fb1ecf. No new action filters, classes/modules, game-specific logic or RAM reads in agent/.
-- User approved minor-medium compatible test changes/contract-preserving decisions; no further permission was needed.
+- Branch feat/lean-agent; base b24b7d2; live/code HEAD fc31869. Initial docs/contract commit 477167f.
+- M1 6867d71, merge373ed20: final cut-segment bump is a crossing press, never folded as a wall.
+- Actors require two distinct inner-view misses or tracker loss; recent remembered live actor tiles remain held.
+- observe_after/_record_view skip unresolved-place writes and preserve re-observation after matching.
+- X1 7ef574f, merge695f16c: exact-tile reach n>=2 or known outward floor refutes unverified exits; crossings win.
+- User required existing option assertions preserved: new reasons appear in world view, legacy option notes/order stay.
+- User corrected T-X1: reach0,8 has n2 but no exit there; actual exit1,8 stays wall-refuted. No adjacent inference.
+- B1 511f579, mergefc31869: stored layout/model item order/cursor crops; unique match skips menu read; grids always read.
+- Learned order survives observe_screen. No new production module/class/filter, game-specific logic or RAM read.
 
-## Verification and diagnosis
-- Baseline910passed1skipped. Main T-N3:915passed1skipped. G20:922passed1skipped,29000warnings,151.84s.
-- T18F/G/H/I:25/33/65/133PASS,0FAIL. T18-O2 output identical; O3 boot85/85 and phase109/109 JSON identical.
-- Golden fixtures unchanged. Comparators exclude only additive replan/first/settled/absorbed; direct tests cover metadata.
-- All4 reconstructed/verified crossing cases retain RAM-minus-tile[5,6] on merged production travel.
-- Historical lab full post-cut segment[112,80] ends tile[0,0]/RAM[5,6]; [7,6]/[12,12] was only its forced-step prefix.
-- House155 intermediate replay unavailable; saved checkpoint proves old tile[0,1]/RAM[5,6] vs observed anchor[0,0].
-- D2 confirms P3 semantics. House155 re-derivation explicitly uses measured r17 template plus saved endpoint.
-- LV19 battle78requests/26steps:26act,36perceiver,16skill. Perceiver excess is10 fresh pre-action reads, not retries.
-- No P4 cost code:stored menu schema or combined act/menu reading could each save up to16 LV19 requests; alternatives.
+## Verification
+- Baseline922 passed/1 skipped; G21 final934 passed/1 skipped,29000 warnings. Twelve tests added, none deleted.
+- Only prior actor-omission assertion changed: one miss remembered/misses1, second distinct miss gone.
+- Worker M1 926/3 skipped; X1 923/3; B1 923/3. Extra worktree skips are expected missing ROM/data.
+- F/G/H/I25/33/65/133 PASS; O2 output identical; O3 boot85/85 and phase109/109 complete JSONs identical.
+- Step160 replay aligns10 seq/key pairs; DOWN15511 crossing leaves no door wall. Corrected T-X1 passed.
+- Offline LV19 menus30 selects,27 reads,3 skips,3/3 cursor agreement (168/178/188); actual16px crop confirmed.
+- Protected five user files, nine golden files and all1657 source-run files unchanged by SHA-256.
 
-## LV20, exactly one invocation
-- runs/m1_r20_odo resumed checkpoint150; steps151-210 completed,exit0; max160,actual139requests.
-- Ledger10629->10768 (smoke50,m110718), below10789 ceiling; no rerun,extension or early stop.
-- Plans7:T4x3,T2x1,T3+T5x3. New T1 raised4,qualified T1 dispatch0; text retained and consumed through other triggers.
-- One replan flag156 cited goal fulfillment; no eligible T1 was queued. No obsolete post-battle defeat quest appeared.
-- Lab exit154 (LV18g152,LV19 156). One new place p_place_6/map39 at159; return160.
-- Unexplored q11 closed on new ground182 after retarget179; q12 closed200; same place p_place_4 across Route1 seam.
-- Furthest Route1 RAM y25 vsLV19 24 (one row short); LV18g did not reach Route1 in comparison window.
-- World91requests/40steps=2.275; battle25/10=2.5. Six existing-cache hits explain part of lower battle request cost.
-- False crossings0; unchosen presses0; world lock40/40=100%; odometer gap0.
-- Pallet offsets[5,6] across both visits; Route1[5,42]; new place39[2,7]; one offset per visit.
-- Dropped73:45 inherited battle,27 current battle,1 zero-motion transition. Absorbed1 world segment at160.
-- Wall targets missed:NPC overlap1 at209/RAM[5,24]; crossed exit marked DOWN wall at160/p_place_6@0,0.
-- Wall split39:10 perceived props,25 scenery/no entity overlap,1 RAM-confirmed sprite,3 unscored map-change rows.
+## LV21, exactly one invocation
+- runs/m1_r21_odo copied from r20; checkpoint210 cleaned; steps211-270 completed, exit0, no extension/rerun.
+- C1 removed194 entity versions/15 contaminated IDs, zero relations/knowledge; dry/live removals match; Memory loads.
+- Ledger10768→10913:145/150 calls, five below10918 ceiling. Viewer stayed up.
+- World self-lock33/33=100%; unchosen presses0; odometer gap0; false travel crossings0.
+- Walls12:6 prop,5 scenery/no entity overlap,1 unscored map-change row; no NPC/sprite overlaps.
+- Crossed-door walls0; held-actor target candidates0 (conservative actor-history superset check).
+- One gone transition: e_npc_6 last244, misses1 at245, gone/misses2 by250; returned251. Inherited gone repaired212.
+- Unresolved observation writes0; no new entity first in carried-cut windows; offsets stable per RAM-map visit.
+- Route1 offsets[5,42] both visits; Pallet[5,6] at241. RAM transitions241/242, no new successful crossing versions.
+- Menus14,13 reads,1 skip (224 SCRATCH); all14 post-results verified, zero mismatches/ambiguities.
+- Battle68 requests/23 steps=2.9565 (LV19 3.0, LV20 2.5); cache alone did not lower total battle cost.
+- Furthest Route1 RAM y24 (LV19 24, LV20 25); no new places. Plans6: T4x5,T3+T5x1.
+- Seven already-refuted exit choices, including four explicit go_to trips; final reasons7 floor-beyond,1 reach,1 wall.
+- End270: wild Rattata L2 battle, Charmander L6 at2/21 HP. Dropped59 segments on before-world steps.
 
 ## Open issues and evidence
-- NPC/prop/scenery classification and wall-on-crossed-exit learning need a later scoped fix; LV20 did not gate commits.
-- Initial exit-lab quest had no target until160; model continued exploring after arrival. Target/goal meaning remains imperfect.
-- Fake top-wall door and shop label remain open by scope. Battle request optimization needs the user's choice.
-- Full report,commit/net-line/test ledger: .tmp/r20/report.md; N3/report.md,A2/report.md and assertions.diff files.
-- Metrics: .tmp/r20/metrics.json,analysis.json,extra.json,walls.json,segment-audit.json.
-- Gates/integrity: .tmp/r20/g/,preflight.json,integrity.json,source-hashes.json,user-hashes.json,golden-hashes.json.
-- D2 raw copied inputs and corrected diagnosis: .tmp/r20/D/; A2 merged-endpoints.txt and rederive_endpoints.py.
-- Single-run log/exit: .tmp/r20/live.log,exit.txt. Original runs and user files stayed unchanged.
-- N3/D2/A2 worktrees were clean and removed normally; no force,symlink,junction,regen or push.
+- Refutation warnings reach planner view but not preserved action-option notes; action repeatedly chose refuted exits.
+- Menu crop jitter/dynamic content causes frequent fallbacks. Lab shop label, replan misuse and held fates stay open.
+- Main report .tmp/r21/report.md; audits metrics/analysis/extra/walls/supplement/final-audit.json under .tmp/r21/.
+- Gates .tmp/r21/g/; integrity-final.json; live.log/exit.txt; M1/X1/B1/C1 artifacts and cleanup removed.json.
+- Historical r20 details/endpoints/diagnosis remain in .tmp/r20/report.md, A2/, D/ and g/.
