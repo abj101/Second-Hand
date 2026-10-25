@@ -203,3 +203,37 @@ def test_floor_exit_is_refuted_only_after_all_pushes_are_tried(tmp_path):
     assert world._refuted("room", (4, 0)) == 0
     mem.upsert("tiles", {**row, "pushed": ["UP", "DOWN", "LEFT"]})
     assert world._refuted("room", (4, 0)) == 1
+
+
+def test_exit_stopped_short_twice_is_refuted_until_reached_and_view_gives_reason(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    mem.upsert("entities", {"id": "stairs", "place": "room", "name": "exit: stairs", "kind": "exit", "tile": [2, 0]})
+    world, _ = setup(mem, [])
+    mem.mark_unreached("room", (2, 0), (1, 0), 2); mem.mark_unreached("room", (2, 0), (1, 0), 3)
+    exit = next(e for e in world._exits("room", {"room"}) if e["ident"] == "stairs")
+    assert exit["status"] == "refuted" and exit["reason"] == "not reached 2×"
+    assert "not an exit: stairs (not reached 2×)" in world.view("", "room")
+    mem.mark_reached("room", (2, 0), 4)
+    exit = next(e for e in world._exits("room", {"room"}) if e["ident"] == "stairs")
+    assert exit["status"] == "unverified"
+
+
+def test_bottom_exit_requires_known_floor_beyond_it(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    mem.upsert("entities", {"id": "south", "place": "room", "name": "exit: south", "kind": "exit", "tile": [0, 1], "placement": "bottom wall"})
+    world, _ = setup(mem, [])
+    exit = next(e for e in world._exits("room", {"room"}) if e["ident"] == "south")
+    assert exit["status"] == "refuted" and exit["reason"] == "ground continues beyond it"
+    assert "not an exit: south (ground continues beyond it)" in world.view("", "room")
+    mem.upsert("entities", {**mem.get("entities", "south"), "tile": [0, 2]})
+    exit = next(e for e in world._exits("room", {"room"}) if e["ident"] == "south")
+    assert exit["status"] == "unverified"
+
+
+def test_successful_crossing_wins_over_short_attempts_and_floor_beyond(tmp_path):
+    mem = Memory(tmp_path); room(mem); tile(mem, 0, 1, {"dir": "DOWN", "to": "hall", "arrive": [0, 0], "src": "observed"})
+    world, _ = setup(mem, [])
+    world._cross("room", (0, 1), "hall", (0, 0), 4)
+    mem.mark_unreached("room", (0, 1), (0, 0), 5); mem.mark_unreached("room", (0, 1), (0, 0), 6)
+    exit = world._exits("room", {"room", "hall"})[0]
+    assert exit["status"] == exit["option_status"] == "verified" and not exit["reason"]
