@@ -2350,6 +2350,17 @@ def test_selected_non_world_item_records_new_screen_reply(tmp_path, monkeypatch)
     screen = loop.mem.get("screens", "battle|RUN")
     assert row["choice"]["verb"] == "select" and row["choice"]["target"] == "RUN"
     assert screen["replies"]["RUN"] == [{"step": 1, "text": "Choice unavailable."}]
+    assert screen["layout"] == "vertical" and screen["items"] == ["RUN"] and set(screen["cursors"]) == {"0"}
+
+def test_observing_known_menu_keeps_model_order_and_cursor_signatures(tmp_path):
+    mem = Memory(tmp_path / "memory")
+    per = {"screen": "battle", "entities": [
+        {"name": "FIGHT", "selectable": True}, {"name": "BAG", "selectable": True}]}
+    row = mem.observe_screen(per, 1)
+    learned = {**row, "layout": "vertical", "items": ["BAG", "FIGHT"], "cursors": {"0": "signature"}}
+    mem.upsert("screens", learned)
+    observed = mem.observe_screen({**per, "entities": list(reversed(per["entities"]))}, 2)
+    assert observed["items"] == ["BAG", "FIGHT"] and observed["cursors"] == {"0": "signature"}
 
 
 def chosen(action, expect="screen_changes", why="test"):
