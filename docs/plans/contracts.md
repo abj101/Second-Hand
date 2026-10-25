@@ -372,6 +372,10 @@ def describe(mem, place: str, pos: tuple[int, int]) -> str
 - **Not in E3R4:** landmark matching by tile; perception skipping on known views; fixed-camera games (pos changes only from scroll).
 - **r18 (approved 2026-10-24), odometer:** `pos` changes only from the World's odometer drain: camera scroll measured on every emulated frame, whoever caused it (the agent's press or the game), split into segments at blank frames, instant cuts and gaps. World turns the summed pixels into tile steps by rounding the running sum (never per frame or per press) and feeds them to `fold`, merged in frame order with press bumps (confident `(0, 0)` moves) at their "at" seq. Each drained segment carries public `"start"` and `"end"` (first and last frame seq it covers, inclusive; amended 2026-10-24) so drains `through` a seq and bump merges by `"at"` are exact. Fixed-camera games stay out of scope: the odometer reports no camera motion there, and the self-sprite term is a later round.
 
+- **r18-fix3 (approved 2026-10-25):** since r18 a crossed (observed) exit is recorded on the tile the camera reached
+  at the cut, i.e. the warp tile itself. `route` never steps onto an observed exit tile unless it is the goal; starting
+  on one and the no-press-in-the-exit-direction rule are unchanged; inferred exits stay enterable.
+
 ## predict
 
 `agent/predict.py`:
