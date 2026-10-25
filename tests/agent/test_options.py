@@ -262,9 +262,16 @@ def test_on_screen_thing_on_player_tile_has_no_row_but_adjacent_thing_stays_offe
 def test_known_places_each_have_a_concrete_route_row(tmp_path):
     mem = Memory(tmp_path); room(mem)
     mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 1)
+    mem.upsert("places", {**mem.get("places", "hall"), "visits": 3, "last": 12})
     world, per = setup(mem, [])
+    beyond = world.beyond
+    world.beyond = lambda pid, screen=(): {"exits": {(0, 0): {"unused_exits": 1, "unexplored": 2}}, "dead_end": False, "through": None} if pid == "hall" else beyond(pid, screen)
+    mem.mark_unreached("hall", (0, 0), (1, 0), 2)
     rows = [o for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["ref"] == "place:hall"]
     assert len(rows) == 1 and rows[0]["label"].startswith("go to Hall, via ") and rows[0]["action"] == {"go_to": "place:hall"}
+    assert rows[0]["state"] == "worked" and rows[0]["notes"] == ["visited 3×, last step 12 (1 unexplored exit, 2 unexplored spots beyond)", "not reached: stopped at (1,0) 1× (last step 2)"]
+    explores = [row for row in world.options(per, "room", {}, 3, inputs=INPUTS) if row["tool"] == "explore"]
+    assert explores and all(row["state"] == "new" for row in explores)
 
 
 def test_options_are_deterministic_and_write_nothing(tmp_path):

@@ -1411,7 +1411,13 @@ class World:
                 via = self.label(exit_ref(exit), first["place"]) if exit else first["push"]
                 ref = f"place:{pid}"
                 place_label_ = f"go to {label}, via {via}"
-                places.append((_yx(found["tile"], label), option("go_to", place_label_, {"go_to": ref}, "approach", label, ref)))
+                visits = p.get("visits", 0)
+                far = self.beyond(pid)["exits"].values()
+                suffix = _beyond_suffix({k: sum(x[k] for x in far) for k in ("unused_exits", "unexplored")})
+                note = f"visited {visits}×, last step {p.get('last', 0)}{suffix}"
+                row = option("go_to", place_label_, {"go_to": ref}, "approach", label, ref, note=note)
+                if visits: row["state"] = "worked"
+                places.append((_yx(found["tile"], label), row))
             places = [row for _, row in sorted(places, key=lambda t: t[0])]
             nav = [row for _, row in sorted(exits, key=lambda t: t[0])] + actors + things + remembered + explores + places
             rows = sorted(nav, key=lambda r: ("new", "worked", "failed").index(r["state"])) + [free(free_label)]  # stable: state groups, order kept within
