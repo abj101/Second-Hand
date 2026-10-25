@@ -567,6 +567,10 @@ class World:
         # If that perception is a world screen it reaches space.fold with its original step (silent, then an unconfirmed
         # wall); any other screen means the game answered (text, menu, battle) and the press leaves no evidence.
         # World.state carries the held presses.
+        # r18-fix4 (approved 2026-10-25): no probe presses. The self spot is acquired only from the agent's own chosen
+        # full-tile moves (observe_after) and survives a live resume (it is screen geometry, restored from the checkpoint);
+        # only two contradicting moves unlock it. While locked, an entity perceived as "player" away from the self spot is
+        # another actor. The trace keeps "probe": null.
     def mark_exit(self, place: str, direction: str, to: str, arrive: tuple[int, int], step: int) -> None   # from the prepared exit tile
     def observe_after(self, per: dict, frame, reused: bool, place: str, size: tuple[int, int], step: int) -> tuple[int, int] | None
         # drift re-anchor (returns drift_fix) and the after-perception observe
