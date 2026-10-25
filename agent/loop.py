@@ -77,7 +77,6 @@ class Loop:
         self.world.tracker.phase = None; self.world.tracker.ignore = []
         self.world.drift = self.world.drift_ref = None
         for hud in self.world._hud.values(): hud["crop"] = None
-        self.world.self_spot, self.world._self_contradictions, self.world._self_from_motion = None, 0, False
         self.world.pa, self.world.actor_tiles, self.world._travelled = None, frozenset(), None
         self.live_invalidation_reason = "live_resume_cleared_pending" if had_pending else "live_resume_invalidated_pixels"
     def _observation_fields(self, stamp=None):
@@ -134,33 +133,6 @@ class Loop:
         size = before.size
         proj = self.world.before(per, place, prior, size, self.step_no + 1, frame=before)[0]
         drift_fix = None
-        probe = None
-        if per.get("screen") == "world" and not modal and not self.world._self_from_motion and self.tile_px:
-            probe_ctx = Ctx(self.env, self.model, self.tile_px, self.move_frames, self_spot=self.world.self_spot, odometer=self.world.odometer); probe_ctx.step = self.step_no + 1
-            probe = self.world.probe(probe_ctx)
-            if probe["presses"]:
-                probe_set = wait_settled(self.env); probe_frame = probe_set.frame
-                self.observation_stamp = dict(probe_set.frame_stamp) if probe_set.frame_stamp else None
-                self.observation_age_ms = None
-                probe_spatial = {"exit_key": None}
-                probe["scene_cut"] |= probe_set.blank_seen
-                if "skill" in probe:
-                    probe_through = (probe_set.frame_stamp or {}).get("frame_seq", self.world.odometer.seq)
-                    self.world._odo_through = probe_through
-                    probe_spatial = self.world.prepare(probe["skill"], place, probe["scene_cut"], self.step_no + 1, through=probe_through)
-                    probe["scene_cut"] |= self.world._prepared_scene_cut
-                probe_per, probe_hash, probe_reused, _ = self._see(probe_frame, place, force=True, screen_was_world=per.get("screen") == "world" and not probe["scene_cut"]); marked = self.seen_marked
-                probe_fix = self.world.fix_player(probe_per, probe_frame.size); player_fix = player_fix or probe_fix
-                if probe["scene_cut"]:
-                    probe_place = self.mem.match_place(probe_per, self.step_no + 1, prev=place, cut=True, exit=probe_spatial["exit_key"], frame=probe_frame, tile_px=self.tile_px)
-                    self.world._odo_screen = probe_per
-                    self.world.after(probe["skill"], place, probe_place, True, self.step_no + 1)
-                    if probe_place != place: self._moved(place, probe_place, "a step taken to locate yourself", self.step_no + 1)
-                    place = self.place = probe_place
-                elif "skill" in probe: self.world._prepared_segments = []
-                per, frame_hash, reused = probe_per, probe_hash, probe_reused
-                before, size = probe_frame, probe_frame.size
-                proj = self.world.before(per, place, place, size, self.step_no + 1)[0]
         self._learn(per.get("text", []), (self.prev or {}).get("text", []), self.step_no + 1, place, per.get("screen"))
         self.world.view_flags = self.flags
         view = self.world.view(self._goal_text(), place)
@@ -299,7 +271,7 @@ class Loop:
              "refused": refused, "pressed_from": list(pressed_from), "push": self.world._travel_push if travel_legs is not None and choice else (act_route or {}).get("push"), "go_to": f'go_to "{a.action["go_to"]}": not in memory' if a.action and "go_to" in a.action and choice is None else None,
              "no_action": not a.action, "act": {"place": self.world.place_label(place), "why": a.why, "action": a.action},
              "option": {k: picked[k] for k in ("n", "tool", "label", "notes", "state")} if picked else None, "pick_key": picked.get("intent_key") if picked else None, "plan": self._plan_row,
-             "probe": {"presses": probe["presses"], "locked": probe["locked"]} if probe is not None else None,
+             "probe": None,
              "world": {"cut_dir": cut_dir, "pos": list(self.world.pos), "travelled": skill is self.world._travelled, "travel_open": self.world._travel_open, "current_place": self.world.current_place}}
         try: after_set = wait_settled(self.env)
         except BaseException: self.cached = self.cached_hash = None; raise

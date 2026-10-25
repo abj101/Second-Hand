@@ -306,10 +306,44 @@ def test_live_resume_invalidation_clears_pending_but_keeps_durable_world(tmp_pat
     loop.world._hud["player"] = {"crop": object(), "changed": 2}
     loop.invalidate_live_observation()
     assert loop.pending is None and loop.cached is loop.cached_hash is None
-    assert loop.world.tracker.tracks == {} and loop.world.self_spot is None and not loop.world._self_from_motion
+    assert loop.world.tracker.tracks == {} and loop.world.self_spot == [.5, .5] and loop.world._self_from_motion
     assert loop.pos == (4, 5) and loop.world.entity_ids == {1: "npc"}
     assert loop.world._hud["player"] == {"crop": None, "changed": 2}
     assert loop.live_invalidation_reason == "live_resume_cleared_pending"
+
+
+def test_restored_self_spot_survives_live_invalidation_and_anchors_before(tmp_path):
+    loop = Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.env.snapshot = lambda: None
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    loop.restore(loop.state())
+
+    loop.invalidate_live_observation()
+    loop.world.before({"screen": "world", "entities": [{"kind": "player", "at": [.7, .5]}]}, "room", "room", (160, 144), 1)
+
+    assert loop.world._self_from_motion and loop.world.pa == [.5, .5]
+
+
+def test_unlocked_step_uses_before_perception_without_pre_choice_press(tmp_path, monkeypatch):
+    import agent.loop as loop_module
+
+    env = GridEnv(); env.tile_px = 16
+    per = env.perception(); seen = []; presses = []
+    original_press = env.press
+    def press(*args, **kwargs):
+        presses.append(args[0]); return original_press(*args, **kwargs)
+    env.press = press
+    monkeypatch.setattr(loop_module, "perceive", lambda *_: (per, reply(per)))
+    def act_spy(_model, observed, *args, **kwargs):
+        assert not presses
+        seen.append(observed)
+        return fake_act(None)(*args, **kwargs)
+    monkeypatch.setattr(loop_module, "act", act_spy)
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
+
+    loop.step()
+
+    assert seen == [per]
 
 def test_first_step_after_live_resume_has_no_prior_frame_and_keeps_its_place(tmp_path, monkeypatch):
     from agent import loop as module
@@ -483,27 +517,6 @@ def test_perceiver_guides_whole_name_entry(tmp_path):
     assert "Previous-place memory is reference only" not in model.prompt
     assert 'List every visible passage (door, stairs, door mat, opening) as an entity named "exit: <what it is>"' in model.prompt
     assert loop.prompt_version == "e5-perceiver-11"
-
-def test_probe_act_uses_post_probe_frame_and_perception(tmp_path, monkeypatch):
-    from agent import loop as loop_module
-
-    env = GridEnv(); env.tile_px = 16
-    monkeypatch.setattr(loop_module, "perceive", lambda _model, _frame, _prompt: (env.perception(), reply(env.perception())))
-    def probe(_ctx):
-        env.scene = 1
-        return {"presses": 1, "locked": False, "scene_cut": False}
-    def act_spy(_model, per, *args, **kwargs):
-        assert per == env.perception()
-        return fake_act(None)(*args, **kwargs)
-    monkeypatch.setattr(loop_module, "act", act_spy)
-    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
-    monkeypatch.setattr(loop.world, "probe", probe)
-
-    row = loop.step()
-
-    assert row["probe"] == {"presses": 1, "locked": False}
-    assert not row["perception_reused"]
-
 
 def test_dialogue_opening_over_world_keeps_place(tmp_path, monkeypatch):
     from agent import loop as loop_module
