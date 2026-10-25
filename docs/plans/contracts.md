@@ -481,6 +481,11 @@ runs/<run_id>/
 
 
 ## notebook and act
+- r20 (approved 2026-10-25): the act reply may carry "replan": true when the text on screen changes what should be
+  done; T1 (new game text) dispatches a plan only when an act reply flagged it since that text began. Text is always
+  recorded. An "unexplored" quest also closes on standing on ground first seen after it opened, at least half a
+  screen beyond everything seen before. A place target equal to the current place is refused (Hb).
+
 
 R1 P1 (built 2026-10-12, behind `--act`; P4 makes it the only path). W1 changes approved 2026-10-12. Notebook replaced by QS quest state (merged 2026-10-15 from [QS.md](QS.md) §9; design [quest-state.md](quest-state.md)).
 
