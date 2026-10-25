@@ -344,7 +344,7 @@ class Loop:
             "choice": choice, "pred": None, "used": [], "skill": {"status": skill.status, "reason": skill.reason, "inputs": skill.inputs, "calls": skill.calls, "failure": getattr(skill, "failure", None), "settled": getattr(skill, "settled", None), **({"bumps": skill.bumps} if getattr(skill, "bumps", 0) else {})},
             "outcome": outcome, "verdict": "unobservable", "calls": self.model.calls-calls, "ms": int((time.perf_counter()-start)*1000), "shortcut": None,
             "ranker": None, "perception_reused": s["reused"], "frame_hash": s["frame_hash"], "marked": s["marked"],
-            "scene_cut": scene_cut, "next_place": next_place, "verified_edge": verified_edge, "view_ids": [], "tile": self.world.pos if self.tile_px else None, "drift_fix": None, "player_fix": player_fix, "entities": self.world.entities, "scroll": list(skill.scroll) if skill.scroll is not None else None, "odometer": self.world.odometer_trace(), **({"exit": list(exit_key)} if scene_cut and not modal and next_place != place and exit_key else {}),
+            "scene_cut": scene_cut, "next_place": next_place, "verified_edge": verified_edge, "view_ids": [], "tile": self.world.pos if self.tile_px else None, "drift_fix": None, "player_fix": player_fix, "entities": self.world.entities, "scroll": list(skill.scroll) if skill.scroll is not None else None, "odometer": self.world.odometer_trace(), "segments": self.world.odometer_segments(), **({"exit": list(exit_key)} if scene_cut and not modal and next_place != place and exit_key else {}),
             "act": s["act"], "option": s["option"], "plan": s["plan"], "probe": s["probe"],
             "observation_status": "settled" if after_set.settled and s.get("before_settled", True) else "timed_out", "execution": skill.status, "action_step": None, **self._provenance(),
             "settle_frames": {"before": s["before_waited"], "after": after_set.waited},
@@ -420,7 +420,7 @@ class Loop:
         row = {"step": step, "t": time.time(), "place": place, "screen": None, "task": None, "frame": frame, "after": None, "options": None,
             "choice": None, "pred": None, "used": [], "skill": None, "outcome": None, "verdict": "unobservable", "calls": self.model.calls - calls, "ms": int((time.perf_counter() - start) * 1000),
             "shortcut": None, "ranker": None, "perception_reused": False, "frame_hash": None, "marked": False, "scene_cut": False, "next_place": place, "verified_edge": False,
-            "view_ids": [], "tile": self.world.pos if self.tile_px else None, "drift_fix": None, "player_fix": False, "entities": self.world.entities, "scroll": None, "odometer": self.world.odometer_trace(),
+            "view_ids": [], "tile": self.world.pos if self.tile_px else None, "drift_fix": None, "player_fix": False, "entities": self.world.entities, "scroll": None, "odometer": self.world.odometer_trace(), "segments": self.world.odometer_segments(),
             "act": None, "option": None, "plan": None, "probe": None, "observation_status": "pending", "execution": None, "action_step": None, **self._provenance(),
             **self._observation_fields(), **({"live_invalidation_reason": self.live_invalidation_reason} if self.live_invalidation_reason else {}), **fields}
         self.live_invalidation_reason = None

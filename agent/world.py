@@ -21,6 +21,8 @@ def _checkpoint(value):
     if isinstance(value, dict): return {k: clean for k, v in value.items() if k not in {"arrival", "frame"} and (clean := _checkpoint(v)) is not _DROP}
     if isinstance(value, (list, tuple)): return [clean for v in value if (clean := _checkpoint(v)) is not _DROP]
     return value
+def _fate(segments, fate):  # live-run odometer log: what became of each drained segment
+    for segment in segments: segment.setdefault("_log", {})["fate"] = fate
 
 TYPING = {"keyboard", "input_field"}  # a text field on a modal screen: type
 FURNITURE = {"player", "dialogue_box", "text", "logo", "cursor"}  # screen chrome: never a choice on a modal screen
@@ -373,8 +375,9 @@ class World:
                 row = {**row, "misses": misses, "status": status}
             if row.get("status") != self.mem.get("entities", ident).get("status") or row.get("misses") != self.mem.get("entities", ident).get("misses"):
                 self.mem.upsert("entities", row)
-    def odometer_begin(self): self._odo_stats = {"frames": 0, "px": [0, 0], "uncertain": 0, "cuts": 0, "gap": False, "dropped": 0, "drained": False}
-    def odometer_trace(self): return {k: v for k, v in (self._odo_stats or {}).items() if k != "drained"} if self._odo_stats and self._odo_stats["drained"] else None
+    def odometer_begin(self): self._odo_stats = {"frames": 0, "px": [0, 0], "uncertain": 0, "cuts": 0, "gap": False, "dropped": 0, "drained": False, "segments": []}
+    def odometer_trace(self): return {k: v for k, v in (self._odo_stats or {}).items() if k not in ("drained", "segments")} if self._odo_stats and self._odo_stats["drained"] else None
+    def odometer_segments(self): return self._odo_stats["segments"] if self._odo_stats and self._odo_stats["drained"] else None  # per-segment log, kept off odometer_trace so golden trace rows stay unchanged
     def _odometer_drain(self, through, place, step, bumps=(), next_per=None, next_place=None):
         segments = self.odometer.take(through=through)
         if self._odo_stats is None: self.odometer_begin()
@@ -403,6 +406,9 @@ class World:
                 segments.append({"start": None, "end": None, "moves": [], "cut": None, "gap": False, "arrival": None, "frames": 0, "uncertain": 0, "_synthetic": True, "_screen": self._odo_screen, "_place": place})
                 i = 0
             segments[i].setdefault("_bumps", []).append(move)
+        for seg in segments:  # ponytail: per-step log capped at 40 segments; fate is filled in by fold/travel
+            seg["_log"] = {"start": seg.get("start"), "end": seg.get("end"), "cut": seg["cut"], "gap": seg["gap"], "frames": seg["frames"], "uncertain": seg["uncertain"], "px": [sum(m[i + 1] for m in seg["moves"]) for i in (0, 1)], "screen": seg["_screen"].get("screen") if isinstance(seg["_screen"], dict) else None, "place": seg["_place"], "bumps": [[m.get("dir"), m.get("at")] for m in seg.get("_bumps", [])], "presses": [[m.get("dir"), m.get("at")] for m in seg.get("_presses", [])]}
+            if len(stats["segments"]) < 40: stats["segments"].append(seg["_log"])
         return segments
     def odometer_start(self, through, place, step, next_per=None, next_place=None):
         segments = self._odometer_drain(through, place, step, next_per=next_per, next_place=next_place)
@@ -411,19 +417,22 @@ class World:
         if stop < len(segments):
             if segments[stop].get("cut"): self._odometer_fold(segments[stop], place, step)
             self._odo_stats["dropped"] += len(segments) - stop - 1 if segments[stop].get("cut") else len(segments) - stop
+            _fate(segments[stop + 1:] if segments[stop].get("cut") else segments[stop:], "dropped")
         return any(segment.get("cut") for segment in segments)
     def _odometer_fold(self, segment, place, step):
         if self._held is not None:
-            self._held["segments"].append(segment)
+            self._held["segments"].append(segment); _fate([segment], "held")
             return None
         screen, place = segment.get("_screen"), segment.get("_place", place)
         screen_name = screen.get("screen") if isinstance(screen, dict) else None
         world_type = screen_name == "world" or screen_name in ("dialogue", "menu") and (self.mem.get("places", place) or {}).get("screen") == "world"
         if not world_type or segment.get("gap"):
+            _fate([segment], "dropped")
             if self._odo_stats is not None: self._odo_stats["dropped"] += 1
             if segment.get("cut") or segment.get("gap"): self._odo_px = (0, 0)
             return None
         if not self.tile_px or place == self.mem.unplaced:
+            _fate([segment], "dropped")
             if self._odo_stats is not None: self._odo_stats["dropped"] += 1
             if segment.get("cut") or segment.get("gap"): self._odo_px = (0, 0)
             return None
@@ -451,6 +460,7 @@ class World:
             prev_delta = after
         if not segment.get("gap") and moves: self.pos = fold(self.mem, place, self.pos, moves, self.tile_px, step, actors=self.actor_tiles)
         self._odo_px = (0, 0) if segment.get("cut") or segment.get("gap") else tuple(px[i] + self.tile_px * prev_delta[i] for i in (0, 1))
+        _fate([segment], "folded")
         return last_dir
     @staticmethod
     def _join_odometer_segments(segments):
@@ -533,7 +543,7 @@ class World:
             after_cut |= segment.get("cut") is not None or segment.get("gap", False)
         if scene_cut and next_place != place:
             last = segments[-1] if len(segments) > 1 else None
-            self._odo_stats["dropped"] += max(0, len(segments) - 2)
+            self._odo_stats["dropped"] += max(0, len(segments) - 2); _fate(segments[1:-1], "dropped")
             arrival = last.get("arrival") if last else None
             view = self._seen_at(next_place); located = self._locate(next_place, arrival or getattr(skill, "after", None))
             delta = tuple(round(-sum(move[i + 1] for move in last["moves"]) / self.tile_px) for i in (0, 1)) if view and view[1] == "view" and last and self.tile_px else (0, 0)
@@ -1536,7 +1546,7 @@ class World:
                     if not arrival: self._travel_open = True; return self._travel_result(results, "blocked", f"leg {n} exit mismatch", ctx)
                     mark_exit(self.mem, place, tuple(leg["exit_tile"]), cut_dir, *arrival[:2], step); self._cross(place, tuple(leg["exit_tile"]), arrival[0], arrival[1], step)
                     self.pos, place = arrival[:2][1], arrival[0]; self._land(place)
-                    if len(self._travel_segments) > 1: self._odometer_fold(self._travel_segments[-1], place, step); self._odo_stats["dropped"] += max(0, len(self._travel_segments) - 2)
+                    if len(self._travel_segments) > 1: self._odometer_fold(self._travel_segments[-1], place, step); self._odo_stats["dropped"] += max(0, len(self._travel_segments) - 2); _fate(self._travel_segments[1:-1], "dropped")
                     self._travel_segments = []
                     return self._travel_result(results, "blocked", f"leg {n} {'arrival' if wrong or edge and edge.get('to') == leg['expect'] else 'exit'} mismatch", ctx)
                 if not arrival and edge.get("src") == "inferred":
@@ -1546,7 +1556,7 @@ class World:
                 self._cross(place, tuple(leg["exit_tile"]), leg["expect"], arrive, step)
                 self.pos, place = arrive, leg["expect"]
                 self._land(place)
-                if len(self._travel_segments) > 1: self._odometer_fold(self._travel_segments[-1], place, step); self._odo_stats["dropped"] += max(0, len(self._travel_segments) - 2)
+                if len(self._travel_segments) > 1: self._odometer_fold(self._travel_segments[-1], place, step); self._odo_stats["dropped"] += max(0, len(self._travel_segments) - 2); _fate(self._travel_segments[1:-1], "dropped")
                 self._travel_segments = []
             elif result.status != "done" and not (result.reason == "route blocked" and (self._facing_target(current, result) or screen_facing)):
                 return self._travel_result(results, result.status, f"leg {n} {result.reason or result.status}", ctx)

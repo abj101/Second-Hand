@@ -197,10 +197,10 @@ def _play(env, a, run, cp, state, boot, invocation_row, cancelled=None):
     if cp:
         loop.restore(state)
         if callable(getattr(env, "snapshot", None)): loop.invalidate_live_observation()
-    press = env.press; failed = [False]; keys = []; clip = []  # clip: every emulated frame of this step's presses, for the viewer
+    press = env.press; failed = [False]; keys = []; seqs = []; clip = []  # clip: every emulated frame of this step's presses, for the viewer
     def guarded_press(key, frames=8, on_frame=None):
         check_cancel()
-        keys.append(key)
+        keys.append(key); seqs.append(getattr(getattr(loop.world, "odometer", None), "seq", None))
         def both(image): clip.append(image); on_frame and on_frame(image)
         try: return press(key, frames, on_frame=both)
         except BaseException: failed[0] = True; raise
@@ -213,14 +213,14 @@ def _play(env, a, run, cp, state, boot, invocation_row, cancelled=None):
             (run / "frames").mkdir(exist_ok=True); wait_settled(env); truth = {"step": loop.step_no+1, **read(env)}
             with (run / "truth.jsonl").open("a", encoding="utf8") as f: f.write(json.dumps(truth)+"\n")
             active_step[0]=loop.step_no+1; old_calls, old_requests = model.calls, invocation[0]
-            keys.clear(); clip.clear()
+            keys.clear(); seqs.clear(); clip.clear()
             try: row = loop.step()
             except (ModelCancelled, LiveEnvClosed, LiveEnvFailed): raise
             except Exception as e:
                 if failed[0]: loop.cached = loop.cached_hash = None; cp=_checkpoint(env, loop, run); print(f"input_error={e}; checkpoint={cp}",flush=True); return 0
                 raise
             check_cancel()
-            with (run / "presses.jsonl").open("a", encoding="utf8") as f: f.write(json.dumps({"step": row["step"], "keys": keys})+"\n")
+            with (run / "presses.jsonl").open("a", encoding="utf8") as f: f.write(json.dumps({"step": row["step"], "keys": keys, "seqs": seqs})+"\n")
             # ponytail: every 2nd frame at 33 ms = real time (GB is ~60 fps); browsers clamp GIF delays under 20 ms
             if len(clip) > 1: clip[0].save(run / "frames" / f"{row['step']:06d}_motion.gif", save_all=True, append_images=clip[2::2], duration=33, loop=0)
             choice = row.get("choice") or {}

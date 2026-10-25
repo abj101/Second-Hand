@@ -2029,6 +2029,19 @@ def test_battle_style_full_band_motion_is_dropped_but_world_dialogue_folds(tmp_p
     assert world.pos == (1, 0)
 
 
+def test_odometer_trace_logs_each_segment_fate(tmp_path):
+    _, world = _odo_world(tmp_path); world.odometer_begin(); frame = camera(); world.odometer(frame(100, 100), 0)
+    seq, x, y = feed(world.odometer, frame, 0, 100, 100, 16, 0)
+    for segment in world._odometer_drain(seq, "room", 1): world._odometer_fold(segment, "room", 1)
+    [seg] = world.odometer_segments()
+    assert seg["fate"] == "folded" and seg["frames"] > 0 and seg["cut"] is None and seg["px"] == [-16, 0]
+    world.odometer_begin(); world._odo_screen = {"screen": "battle"}
+    seq, x, y = feed(world.odometer, frame, seq, x, y, 32, 0)
+    for segment in world._odometer_drain(seq, "room", 2): world._odometer_fold(segment, "room", 2)
+    [seg] = world.odometer_segments()
+    assert seg["fate"] == "dropped" and seg["px"] == [-32, 0]
+
+
 def test_gap_after_restore_does_not_move_position(tmp_path):
     _, world = _odo_world(tmp_path); world.pos = (3, 4); world.restore({"pos": [3, 4]})
     world.odometer(None, 1)
