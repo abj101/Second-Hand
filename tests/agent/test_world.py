@@ -1871,12 +1871,58 @@ def test_actor_absent_from_current_view_is_gone_but_static_thing_is_remembered(t
         mem.upsert("entities", {"id": ident, "name": name, "kind": kind, "place": "room", "tile": [0, 0], "status": "remembered", "tier": "interest", "last": 1})
     world = World(mem, 16)
     per = {"screen": "world", "text": [], "entities": [{"name": "Player", "kind": "player", "at": [.5, .5]}]}
-    world.before(per, "room", None, (160, 144), 5)
+    from PIL import Image
+    world.before(per, "room", None, (160, 144), 5, frame=Image.new("RGB", (160, 144), "red"))
+    assert mem.get("entities", "guide")["status"] == "remembered" and mem.get("entities", "guide")["misses"] == 1
+    world.before({**per, "entities": list(per["entities"])}, "room", "room", (160, 144), 6, frame=Image.new("RGB", (160, 144), "blue"))
     rows = world.options(per, "room", {}, 5)
 
     assert mem.get("entities", "guide")["status"] == "gone"
     assert mem.get("entities", "sign")["status"] == "remembered"
     assert not any(o.get("ref") == "thing:guide" and o["tool"] == "go_to" for o in rows)
+
+
+def test_actor_track_loss_is_immediate(tmp_path, monkeypatch):
+    from PIL import Image
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    mem.upsert("entities", {"id": "guide", "name": "Guide", "kind": "npc", "place": "room", "tile": [0, 0], "status": "seen", "last": 1})
+    world = World(mem, 16); world.tracker.tracks["guide"] = {"status": "lost"}; monkeypatch.setattr(world.tracker, "gone", lambda: {"guide"})
+    world.before({"screen": "world", "text": [], "entities": [{"name": "Player", "kind": "player", "at": [.5, .5]}]}, "room", None, (160, 144), 2, frame=Image.new("RGB", (160, 144), "red"))
+    assert mem.get("entities", "guide")["status"] == "gone"
+
+
+def test_remembered_actor_tile_holds_a_bump_without_a_wall(tmp_path):
+    from PIL import Image
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    mem.upsert("entities", {"id": "guide", "name": "Guide", "kind": "npc", "place": "room", "tile": [0, -1], "status": "remembered", "last": 1})
+    world = World(mem, 16); per = {"screen": "world", "text": [], "entities": [{"name": "Player", "kind": "player", "at": [.5, .5]}]}
+    world.before(per, "room", None, (160, 144), 2, frame=Image.new("RGB", (160, 144), "red"))
+    assert (0, -1) in world.actor_tiles
+    world._odometer_fold({"moves": [], "cut": None, "gap": False, "_screen": {"screen": "world"}, "_place": "room", "_bumps": [{"dir": "UP", "shift": (0, 0), "at": 1}]}, "room", 2)
+    assert "UP" not in mem.get("tiles", "room@0,0").get("blocked", [])
+
+
+def test_unsettled_after_observation_and_view_write_nothing(tmp_path):
+    from PIL import Image
+    mem = Memory(tmp_path); place(mem, "old", "Old"); place(mem, "new", "New")
+    world = World(mem, 16); frame = Image.new("RGB", (160, 144), "red")
+    per = {"screen": "world", "text": [], "entities": [{"name": "Player", "kind": "player", "at": [.5, .5]}, {"name": "Sign", "kind": "object", "at": [.6, .5]}]}
+    world.unsettled = True
+    world._record_view(per, frame, False, "old", (160, 144), 2, [.5, .5], {})
+    world.observe_after(per, frame, False, "old", (160, 144), 2)
+    assert not any(mem.rows(store) for store in ("entities", "views", "looks", "tiles", "seen")) and world._observed_per is None
+    world.unsettled = False
+    world.before(per, "new", "old", (160, 144), 3, frame=frame)
+    assert any(row.get("place") == "new" for row in mem.rows("entities"))
+
+
+def test_fresh_cut_with_unresolved_after_frame_skips_observation(tmp_path):
+    from PIL import Image
+    mem = Memory(tmp_path); place(mem, "room", "room"); world = World(mem, 16)
+    world._prepared_scene_cut = True
+    frame = Image.new("RGB", (160, 144), "red")
+    world.observe_after({"screen": "dialogue", "text": ["Hello"], "entities": [{"name": "Sign", "kind": "object", "at": [.5, .5]}]}, frame, False, "room", (160, 144), 2)
+    assert not any(mem.rows(store) for store in ("entities", "views", "looks", "tiles")) and world._observed_per is None
 
 
 def test_dialogue_overlay_does_not_mark_in_view_actor_gone(tmp_path):
@@ -1943,6 +1989,23 @@ def test_forced_cut_folds_destination_once(tmp_path, monkeypatch, final_view):
 def _odo_world(tmp_path, pid="room"):
     mem = Memory(tmp_path); place(mem, pid, pid); world = World(mem, 16); world.current_place = pid; world._odo_screen = {"screen": "world"}
     return mem, world
+
+
+def test_last_bump_in_cut_segment_is_logged_as_crossing_and_not_folded(tmp_path):
+    mem, world = _odo_world(tmp_path)
+    segment = {"start": 1, "end": 10, "moves": [], "cut": "blank", "gap": False, "arrival": None, "frames": 1, "uncertain": 0}
+    world.odometer.take = lambda **_kwargs: [segment]
+    [drained] = world._odometer_drain(10, "room", 1, [{"dir": "DOWN", "shift": (0, 0), "at": 10}])
+    assert drained["_presses"][0]["crossing"] is True and drained["_log"]["presses"] == [["DOWN", 10, True]]
+    world._odometer_fold(drained, "room", 1)
+    assert not mem.rows("tiles")
+
+
+def test_bump_without_cut_still_records_a_wall(tmp_path):
+    mem, world = _odo_world(tmp_path)
+    segment = {"moves": [], "cut": None, "gap": False, "_screen": {"screen": "world"}, "_place": "room", "_bumps": [{"dir": "DOWN", "shift": (0, 0), "at": 1}]}
+    world._odometer_fold(segment, "room", 1)
+    assert "DOWN" in mem.get("tiles", "room@0,0")["blocked"]
 
 
 def test_pixels_since_is_bounded_non_consuming_and_take_exposes_bounds(tmp_path):

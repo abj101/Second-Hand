@@ -118,7 +118,7 @@ class World:
         self.current_place = None
         self.unsettled, self.no_response = False, 0
         self._travelled = None
-        self._last_miss_hash = {}
+        self._last_miss_hash, self._last_actor_miss_hash = {}, {}
         self.self_spot, self._self_contradictions, self._self_from_motion = None, 0, False
         self._hud, self._persist = {}, {}
     def _anchor(self, per, size):
@@ -218,9 +218,11 @@ class World:
         proj = lambda at: tile_of(at, pa, self.pos, size, self.tile_px) if pa and self.tile_px and isinstance(at, list) and len(at) == 2 else None
         tiles = self._tiles(per, pa, size, place)
         observed = self._observation(per, size)
-        ids = {} if per.get("screen") != "world" else self.entity_ids if per is self._observed_per else self.mem.observe(observed, place, step, tiles, self._hits(observed))
-        self._observed_per = per; self._follow(per, ids, pa, size)
-        self.actor_tiles = frozenset(tiles[i] for i, e in enumerate(per.get("entities", [])) if i in tiles and (self._actor(ids.get(i), e) or self._self_from_motion and i != self._self_index(per, size) and e.get("kind", "").casefold() == "player"))
+        reused = per is self._observed_per
+        ids = {} if per.get("screen") != "world" else self.entity_ids if reused else self.mem.observe(observed, place, step, tiles, self._hits(observed))
+        self._observed_per = per; self._follow(per, ids, pa, size, frame, reused, step)
+        held = {tuple(r["tile"]) for r in self.mem.rows("entities") if r.get("place") == place and r.get("status") not in ("gone", "stale") and self._actor(r["id"], r) and r.get("tile") and step - r.get("last", step) <= ACTOR_STALE_STEPS}  # ponytail: silent walkaways hold a tile for two misses; a wall there is skipped until then
+        self.actor_tiles = frozenset(held | {tiles[i] for i, e in enumerate(per.get("entities", [])) if i in tiles and (self._actor(ids.get(i), e) or self._self_from_motion and i != self._self_index(per, size) and e.get("kind", "").casefold() == "player")})
         self.entity_ids = ids
         if per.get("screen") == "world": self.entity_tiles = {ids[i]: p for i, p in tiles.items() if i in ids}
         self.entities = [{"id": ids.get(i), "name": e.get("name"), "kind": e.get("kind"), "at": e.get("at")}
@@ -242,18 +244,27 @@ class World:
             if d <= self.tile_px and i not in hits and ident not in used:
                 hits[i] = ident; used.add(ident)
         return hits
-    def _follow(self, per, ids, anchor=None, size=None):  # seed tracks for what was just perceived; a track lost in view for a while (no text box over it) means the thing left: "gone"
+    def _follow(self, per, ids, anchor=None, size=None, frame=None, reused=False, step=0):  # pixel loss is evidence that an actor left
         self.tracker.seed([(ids[i], e["at"], self._actor(ids[i], e)) for i, e in enumerate(per.get("entities", []))
                            if i in ids and self._actor(ids[i], e) and e.get("kind", "").casefold() != "player" and isinstance(e.get("at"), list) and len(e["at"]) == 2])
         if per.get("screen") != "world" or per.get("text") or any(e.get("kind") == "dialogue_box" for e in per.get("entities", [])): return
         gone = self.tracker.gone() - set(ids.values())
         for ident in gone: self.tracker.tracks.pop(ident)
-        if anchor and size and (rect := self._view_rect(anchor, size)):
-            x0, y0, x1, y1 = rect; present = set(ids.values()) | {ident for ident, track in self.tracker.tracks.items() if track["status"] == "live"}
-            gone.update(row["id"] for row in self.mem.rows("entities") if row.get("place") == self.current_place and row.get("state") != "merged" and row.get("status") != "gone" and row.get("tile") and x0 <= row["tile"][0] <= x1 and y0 <= row["tile"][1] <= y1 and row["id"] not in present and self._actor(row["id"], row))
         for ident in gone:
             row = self.mem.get("entities", ident)
             if row and row.get("status") != "gone": self.mem.upsert("entities", {**row, "status": "gone"})
+        rect = self._view_rect(anchor, size) if size else None
+        if rect and frame is not None and per.get("screen") == "world" and not modal(per) and not reused:
+            digest = hashlib.sha256(frame.tobytes()).hexdigest(); distinct = self._last_actor_miss_hash.get(self.current_place) != digest
+            if distinct: self._last_actor_miss_hash[self.current_place] = digest
+            if distinct:
+                x0, y0, x1, y1 = rect
+                for row in self.mem.rows("entities"):
+                    if row.get("place") != self.current_place or row.get("state") == "merged" or row.get("status") in ("gone", "stale") or row["id"] in ids.values() or not self._actor(row["id"], row) or not row.get("tile"): continue
+                    x, y = row["tile"]
+                    if x0 + 1 <= x <= x1 - 1 and y0 + 1 <= y <= y1 - 1:
+                        misses = row.get("misses", 0) + 1; status = "gone" if misses >= MISS_TO_STALE else row.get("status", "remembered")
+                        self.mem.upsert("entities", {**row, "misses": misses, "status": status})
     def _promote(self, ids):
         for ident in ids:
             row = self.mem.get("entities", ident)
@@ -323,6 +334,9 @@ class World:
         return (x0, y0, x0 + width - 1, y0 + height - 1)
     def _record_view(self, per, frame, reused, place, size, step, anchor, ids):
         self.novel = 0
+        if self.unsettled:
+            self._observed_per = None
+            return
         if per.get("screen") != "world": return
         live = {r["id"] for r in self.mem.rows("places") if r.get("state") != "merged"}
         rect = self._view_rect(anchor, size) if place in live and place != self.mem.unplaced else None
@@ -380,6 +394,7 @@ class World:
     def odometer_segments(self): return self._odo_stats["segments"] if self._odo_stats and self._odo_stats["drained"] else None  # per-segment log, kept off odometer_trace so golden trace rows stay unchanged
     def _odometer_drain(self, through, place, step, bumps=(), next_per=None, next_place=None):
         segments = self.odometer.take(through=through)
+        bumps = list(bumps)
         if self._odo_stats is None: self.odometer_begin()
         stats = self._odo_stats; stats["drained"] |= any(not seg.get("_synthetic") for seg in segments)
         screen, screen_place, cut = self._odo_screen or next_per, place, False
@@ -390,7 +405,7 @@ class World:
             stats["cuts"] += segment["cut"] is not None; stats["gap"] |= segment["gap"]
             stats["px"] = [stats["px"][i] + sum(move[i + 1] for move in segment["moves"]) for i in (0, 1)]
             cut |= segment.get("cut") is not None or segment.get("gap", False)
-        for move in bumps:
+        for bump_index, move in enumerate(bumps):
             raw = move
             if isinstance(move, (tuple, list)) and len(move) == 2: move = {"dir": move[0], "shift": move[1]}
             if not isinstance(move, dict): continue
@@ -405,9 +420,22 @@ class World:
             if i < 0:
                 segments.append({"start": None, "end": None, "moves": [], "cut": None, "gap": False, "arrival": None, "frames": 0, "uncertain": 0, "_synthetic": True, "_screen": self._odo_screen, "_place": place})
                 i = 0
-            segments[i].setdefault("_bumps", []).append(move)
+            seg = segments[i]
+            later = []
+            for candidate in bumps[bump_index + 1:]:
+                if isinstance(candidate, (tuple, list)) and len(candidate) == 2: candidate = {"dir": candidate[0], "shift": candidate[1]}
+                if not isinstance(candidate, dict): continue
+                candidate_at = candidate.get("at") if candidate.get("at") is not None else through if through is not None else self.odometer.seq
+                candidate_i = next((j for j, item in enumerate(segments) if item["end"] is not None and candidate_at is not None and candidate_at <= item["end"]), len(segments) - 1)
+                if candidate_i == i and candidate_at is not None: later.append(candidate_at)
+            last = max([*(m.get("at") for m in [*seg.get("_bumps", []), *seg.get("_presses", [])] if m.get("at") is not None), *later, at], default=None)
+            if seg.get("cut") and at is not None and at == last:
+                move["crossing"] = True
+                seg.setdefault("_presses", []).append(move)
+            else:
+                seg.setdefault("_bumps", []).append(move)
         for seg in segments:  # ponytail: per-step log capped at 40 segments; fate is filled in by fold/travel
-            seg["_log"] = {"start": seg.get("start"), "end": seg.get("end"), "cut": seg["cut"], "gap": seg["gap"], "frames": seg["frames"], "uncertain": seg["uncertain"], "px": [sum(m[i + 1] for m in seg["moves"]) for i in (0, 1)], "screen": seg["_screen"].get("screen") if isinstance(seg["_screen"], dict) else None, "place": seg["_place"], "bumps": [[m.get("dir"), m.get("at")] for m in seg.get("_bumps", [])], "presses": [[m.get("dir"), m.get("at")] for m in seg.get("_presses", [])]}
+            seg["_log"] = {"start": seg.get("start"), "end": seg.get("end"), "cut": seg["cut"], "gap": seg["gap"], "frames": seg["frames"], "uncertain": seg["uncertain"], "px": [sum(m[i + 1] for m in seg["moves"]) for i in (0, 1)], "screen": seg["_screen"].get("screen") if isinstance(seg["_screen"], dict) else None, "place": seg["_place"], "bumps": [[m.get("dir"), m.get("at")] for m in seg.get("_bumps", [])], "presses": [[m.get("dir"), m.get("at"), True] if m.get("crossing") else [m.get("dir"), m.get("at")] for m in seg.get("_presses", [])]}
             if len(stats["segments"]) < 40: stats["segments"].append(seg["_log"])
         return segments
     def odometer_start(self, through, place, step, next_per=None, next_place=None):
@@ -442,6 +470,7 @@ class World:
         events.extend((seq, 0, (dx, dy, held)) for seq, dx, dy, held in segment["moves"])
         for _seq, kind, move in sorted(events, key=lambda e: (e[0], e[1])):
             if kind == 1:
+                if move.get("crossing"): continue
                 move["_tile"] = (origin[0] + tile_delta[0], origin[1] + tile_delta[1])
                 if move.get("shift") in ((0, 0), 0) and move.get("dir") in DIRS:
                     at = (origin[0] + tile_delta[0], origin[1] + tile_delta[1]); target = (at[0] + DIRS[move["dir"]][0], at[1] + DIRS[move["dir"]][1])
@@ -620,6 +649,9 @@ class World:
             if hud["crop"] is not None and changed(hud["crop"], crop) > .05: hud["changed"] = step
             hud["crop"] = crop
     def observe_after(self, per, frame, reused, place, size, step, before=None, skill=None):
+        if self.unsettled or self._prepared_scene_cut and per.get("screen") != "world":
+            self._observed_per = None
+            return None
         for move in getattr(skill, "moves", []):
             if not isinstance(move, dict): continue
             shift, spot = move.get("shift"), move.get("self_at")
@@ -671,7 +703,7 @@ class World:
                 else: self.drift, self.drift_ref = drift, anchor if drift else None
         if not reused:
             self.entity_ids = ids
-            self._observed_per = per; self._follow(per, self.entity_ids, aa, size)
+            self._observed_per = per; self._follow(per, self.entity_ids, aa, size, frame, reused, step)
         if not reused:
             stored = any(self.mem._home(v["place"])[0] == place and
                          tuple(v["pos"][i] + self.mem._home(v["place"])[1][i] for i in (0, 1)) == tuple(self.pos)
@@ -709,6 +741,7 @@ class World:
                 "held": _checkpoint(self._held) if self._held else None, "silent": _checkpoint(self._silent),
                 "entity_ids": self.entity_ids, "legend": self.legend,
                 "last_miss_hash": self._last_miss_hash,
+            "last_actor_miss_hash": self._last_actor_miss_hash,
                 "self_spot": self.self_spot, "self_contradictions": self._self_contradictions,
                 "self_from_motion": self._self_from_motion,
                 "hud_changed": {k: v["changed"] for k, v in self._hud.items() if v["changed"] is not None}}
@@ -722,6 +755,7 @@ class World:
         self.entity_ids = {int(i): v for i, v in state.get("entity_ids", {}).items()}
         self.legend = dict(state.get("legend") or {})
         self._last_miss_hash = state.get("last_miss_hash", {})
+        self._last_actor_miss_hash = state.get("last_actor_miss_hash", {})
         self.self_spot = state.get("self_spot")
         self._self_contradictions = int(state.get("self_contradictions", 0))
         self._self_from_motion = bool(state.get("self_from_motion", False))
