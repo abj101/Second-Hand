@@ -97,6 +97,7 @@ class World:
         self.tracker = Tracker(tile_px or 16)  # pixel tracks keep one id per moving thing; Loop wraps the env so it sees every frame
         self.odometer = self.tracker.odometer; self.odometer.tile_px = tile_px; self._odo_px = (0, 0); self._odo_stats = None
         self._odo_screen = None
+        self._held = None
         self.pos, self.drift, self.drift_ref = (0, 0), None, None
         self.entity_tiles, self.entity_ids, self.actor_tiles = {}, {}, frozenset()
         self.entities, self.pa, self._prepared = [], None, None; self._prepared_segments, self._prepared_forced, self._prepared_scene_cut = [], False, False
@@ -172,9 +173,27 @@ class World:
         self._odo_screen = per
         if per.get("screen") == "world": self.name(place, per.get("place"), step)
         if prior and place != prior:
-            self.pos, self.drift, self.drift_ref = self._locate(place, frame), None, None
-            self._odo_px = (0, 0)
+            held = self._held
+            if held and held["src"] == prior:
+                located = self._locate(place, frame)
+                delta = tuple(round(-sum(move[i + 1] for move in seg.get("moves", [])) / self.tile_px) for i in (0, 1)) if self.tile_px else (0, 0)
+                arrival = tuple(located[i] - delta[i] for i in (0, 1)); self.pos = arrival; self._odo_px = (0, 0)
+                self._held = None
+                for segment in held["segments"]: self._odometer_fold({**segment, "_place": place}, place, step)
+                if held["dir"]:
+                    mark_exit(self.mem, held["src"], held["tile"], held["dir"], place, arrival, step)
+                    self._cross(held["src"], held["tile"], place, arrival, step)
+            else:
+                if held:
+                    self._held = None
+                    if self._odo_stats is None: self.odometer_begin()
+                    self._odo_stats["dropped"] += len(held["segments"])
+                self.pos, self._odo_px = self._locate(place, frame), (0, 0)
+            self.drift = self.drift_ref = None
             self._observed_per = None; self.tracker.clear()
+        elif self._held and per.get("screen") == "world" and place == self._held["src"]:
+            held = self._held; self._held = None
+            for segment in held["segments"]: self._odometer_fold(segment, held["src"], step)
         player = next((e for e in per.get("entities", []) if e.get("kind", "").casefold() == "player"), None)
         pa = self.self_spot if self._self_from_motion else self._anchor(per, size) if player else None
         self.pa = pa
@@ -380,6 +399,9 @@ class World:
             self._odo_stats["dropped"] += len(segments) - stop - 1 if segments[stop].get("cut") else len(segments) - stop
         return any(segment.get("cut") for segment in segments)
     def _odometer_fold(self, segment, place, step):
+        if self._held is not None:
+            self._held["segments"].append(segment)
+            return None
         screen, place = segment.get("_screen"), segment.get("_place", place)
         screen_name = screen.get("screen") if isinstance(screen, dict) else None
         world_type = screen_name == "world" or screen_name in ("dialogue", "menu") and (self.mem.get("places", place) or {}).get("screen") == "world"
@@ -532,7 +554,13 @@ class World:
             self.drift = self.drift_ref = None
             self.entity_tiles = self.entity_ids = {}
         else:
-            for segment in segments[1:]: self._odometer_fold(segment, place, step)
+            if self._held is None and scene_cut and next_place == place and (self._odo_screen or {}).get("screen") != "world":
+                cut_at = next((i for i, segment in enumerate(segments) if segment.get("cut")), len(segments) - 1)
+                last_dir = self._prepared[3]
+                for segment in segments[1:cut_at + 1]: last_dir = self._odometer_fold(segment, place, step) or last_dir
+                self._held = {"src": place, "tile": self.pos, "dir": last_dir, "segments": segments[cut_at + 1:]}
+            else:
+                for segment in segments[1:]: self._odometer_fold(segment, place, step)
         return {"known_exit": known_exit}
     def _cross(self, src, tile, dst, arrive, step):
         """Count a crossing on its departure tile only."""
@@ -543,6 +571,7 @@ class World:
         if row.get("miss"): row = {**row, "miss": 0}
         self.mem.upsert("crossings", {**row, "n": row["n"] + 1, "last": step})
     def unseen_cross(self, src, dst, step):  # a place change first seen at the next observation: pos is still in src, so its exit tile is the one within 1
+        if self._held is not None: return
         hits = [r for r in self.mem.rows("tiles") if r.get("place") == src and (r.get("exit") or {}).get("to") == dst and max(abs(r["x"] - self.pos[0]), abs(r["y"] - self.pos[1])) <= 1]
         if len(hits) == 1: self._cross(src, (hits[0]["x"], hits[0]["y"]), dst, hits[0]["exit"].get("arrive"), step)
         # ponytail: no exit tile within 1 of pos (or two): the crossing is not counted
@@ -675,6 +704,7 @@ class World:
 
     def state(self):
         return {"pos": self.pos, "drift": self.drift, "drift_ref": self.drift_ref, "entity_tiles": self.entity_tiles,
+                "held": ({**self._held, "segments": [{k: v for k, v in seg.items() if k not in ("arrival", "frame")} for seg in self._held["segments"]]} if self._held else None),
                 "entity_ids": self.entity_ids, "legend": self.legend,
                 "last_miss_hash": self._last_miss_hash,
                 "self_spot": self.self_spot, "self_contradictions": self._self_contradictions,
@@ -684,6 +714,7 @@ class World:
     def restore(self, state):
         self.pos, self.drift = tuple(state.get("pos", (0, 0))), tuple(state["drift"]) if state.get("drift") else None
         self._odo_px, self._prepared_segments = (0, 0), []
+        self._held = state.get("held")
         self.drift_ref, self.entity_tiles = state.get("drift_ref"), state.get("entity_tiles", {})
         self.entity_ids = {int(i): v for i, v in state.get("entity_ids", {}).items()}
         self.legend = dict(state.get("legend") or {})
