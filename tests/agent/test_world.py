@@ -1970,6 +1970,7 @@ def test_odometer_no_response_becomes_silent_then_unconfirmed_wall(tmp_path):
         after = frame(100, 100); after.info["frame_seq"] = seq
         skill = SimpleNamespace(moves=[move], after=after, arrival_frame=after, scroll=(0, 0))
         world.prepare(skill, "room", False, step); world.after(skill, "room", "room", False, step)
+        world.before({"screen": "world", "entities": []}, "room", "room", (160, 144), step + 1)
         row = mem.get("tiles", "room@0,0")
         if step == 1: assert row.get("silent") == {"UP": 1} and row["blocked"] == []
         else: assert row["blocked"] == ["UP"] and "UP" not in row.get("firm", [])
@@ -1982,6 +1983,7 @@ def test_odometer_no_response_is_at_the_moved_to_tile(tmp_path):
     after = frame(116, 100); after.info["frame_seq"] = seq
     skill = SimpleNamespace(moves=[move], after=after, arrival_frame=after, scroll=(0, 0))
     world.prepare(skill, "room", False, 1); world.after(skill, "room", "room", False, 1)
+    world.before({"screen": "world", "entities": []}, "room", "room", (160, 144), 2)
     assert world.pos == (1, 0) and move["_tile"] == (1, 0)
     assert mem.get("tiles", "room@1,0").get("silent") == {"UP": 1}
 
@@ -2207,3 +2209,79 @@ def test_held_checkpoint_round_trips_and_skips_unseen_cross(tmp_path):
     assert not mem.rows("crossings")
     replay.before({"screen": "world", "entities": []}, "dest", "room", (160, 144), 4)
     assert replay.pos == (0, 0) and mem.get("crossings", "room@1,10>dest")["n"] == 1
+
+
+def _hold_silent(world, place_id, tile, step):
+    world._silent.append({"place": place_id, "tile": tile, "dir": "DOWN", "step": step, "actors": []})
+
+
+def test_held_no_response_dialogue_drops_evidence(tmp_path):
+    mem, world = _odo_world(tmp_path); frame = camera(); world.odometer(frame(100, 100), 0)
+    for step in (1, 2):
+        seq, _, _ = feed(world.odometer, frame, step - 1, 100, 100, 0, 0)
+        move = {"dir": "DOWN", "shift": None, "no_response": True, "at": seq}
+        after = frame(100, 100); after.info["frame_seq"] = seq
+        skill = SimpleNamespace(moves=[move], after=after, arrival_frame=after, scroll=(0, 0))
+        world.prepare(skill, "room", False, step); world.after(skill, "room", "room", False, step)
+        assert len(world._silent) == 1
+        world.before({"screen": "dialogue", "entities": []}, "room", "room", (160, 144), step + 1)
+        row = mem.get("tiles", "room@0,0")
+        assert world._silent == [] and (row is None or not row.get("silent") and not row["blocked"] and not row.get("walled"))
+
+
+def test_held_no_response_world_resolves_silent_then_blocked(tmp_path):
+    mem, world = _odo_world(tmp_path); _hold_silent(world, "room", (0, 0), 1)
+    world.before({"screen": "world", "entities": []}, "room", "room", (160, 144), 2)
+    assert mem.get("tiles", "room@0,0")["silent"] == {"DOWN": 1}
+    _hold_silent(world, "room", (0, 0), 2)
+    world.before({"screen": "world", "entities": []}, "room", "room", (160, 144), 3)
+    assert mem.get("tiles", "room@0,0")["blocked"] == ["DOWN"]
+
+
+def test_silent_checkpoint_restores_and_resolves(tmp_path):
+    mem, world = _odo_world(tmp_path); _hold_silent(world, "room", (0, 0), 1)
+    import json
+    state = json.loads(json.dumps(world.state()))
+    restored = World(mem, 16); restored.restore(state)
+    other_mem, uninterrupted = _odo_world(tmp_path / "uninterrupted")
+    uninterrupted.restore(state)
+    per = {"screen": "world", "entities": []}
+    restored.before(per, "room", "room", (160, 144), 2)
+    uninterrupted.before(per, "room", "room", (160, 144), 2)
+    expected = mem.get("tiles", "room@0,0")
+    assert other_mem.get("tiles", "room@0,0") == expected and expected["silent"] == {"DOWN": 1}
+    old_state = dict(state); old_state.pop("silent")
+    restored.restore(old_state); assert restored._silent == []
+
+
+def test_silent_checkpoint_drops_evidence_on_dialogue(tmp_path):
+    mem, world = _odo_world(tmp_path); _hold_silent(world, "room", (0, 0), 1)
+    restored = World(mem, 16); restored.restore(world.state())
+    restored.before({"screen": "dialogue", "entities": []}, "room", "room", (160, 144), 2)
+    assert mem.get("tiles", "room@0,0") is None and restored._silent == []
+
+
+def test_silent_cut_resolves_at_original_place(tmp_path):
+    mem, world = _odo_world(tmp_path); place(mem, "next", "next")
+    _hold_silent(world, "room", (0, 0), 1)
+    world.before({"screen": "world", "entities": []}, "next", "room", (160, 144), 2)
+    assert mem.get("tiles", "room@0,0")["silent"] == {"DOWN": 1}
+    assert mem.get("tiles", "next@0,0") is None
+
+
+def test_travel_no_response_followed_by_dialogue_drops_evidence(tmp_path, monkeypatch):
+    import agent.world as world_module
+    from agent.skills import SkillResult
+    mem, world = _odo_world(tmp_path); frame = camera(); world.odometer(frame(100, 100), 0)
+    seq, _, _ = feed(world.odometer, frame, 0, 100, 100, 0, 0)
+    after = frame(100, 100); after.info["frame_seq"] = seq
+    move = {"dir": "DOWN", "shift": None, "no_response": True, "at": seq}
+    result = SkillResult("blocked", "no response", 1, 0, after, after, (0, 0), False, [move], arrival_frame=after)
+    monkeypatch.setattr(world_module, "approach", lambda *args, **kwargs: result)
+    from tests.agent.fakes import GridEnv, StubModel
+    from agent.skills import Ctx
+    env = GridEnv(); ctx = Ctx(env, StubModel([]), 16, self_spot=(.5, .5), odometer=world.odometer)
+    travel = world.travel(ctx, [{"place": "room", "dirs": ["DOWN"], "push": None}], 1)
+    assert travel.status == "blocked" and travel.reason == "travel: leg 1 no response" and len(world._silent) == 1
+    world.before({"screen": "dialogue", "entities": []}, "room", "room", (160, 144), 2)
+    assert not world._silent and not any(row.get("silent") or row.get("blocked") or row.get("walled") for row in mem.rows("tiles"))
