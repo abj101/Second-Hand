@@ -17,6 +17,7 @@ class Act:
     text: str | None
     why: str
     option: int | None
+    replan: bool = False
 
 
 def _ask_valid(model, system, user, schema, check):
@@ -50,15 +51,17 @@ def act(model, per, focus, options, buttons, controls) -> Act:
         f"Screen: {per.get('screen', '')}",
         f"Text on screen: {'; '.join(str(t) for t in per.get('text') or [])}",
         *_option_lines(per, options),
-        'Reply JSON: {"why": one sentence, "i": the option number}',
+        'Reply JSON: {"why": one sentence, "i": the option number, "replan": true only if new text changes what to do}',
     ]
     numbers = [o["n"] for o in options]
     schema = {"type": "object", "properties": {
         "why": {"type": "string", "maxLength": 200},
         "i": {"type": "integer", "enum": numbers},
+        "replan": {"type": "boolean"},
     }, "required": ["why", "i"], "additionalProperties": False}
 
     def pick(data):
+        if "replan" in data and not isinstance(data["replan"], bool): return None, '"replan" must be boolean'
         n = data.get("i")
         n = int(n) if isinstance(n, str) and n.strip().isdigit() else n
         return (n, None) if type(n) is int and n in numbers else (None, f'"i" must be one of {numbers}')
@@ -94,4 +97,4 @@ def act(model, per, focus, options, buttons, controls) -> Act:
         text = typed
         action = action if text else None
 
-    return Act(action=action, text=text, why=why, option=n if option else None)
+    return Act(action=action, text=text, why=why, option=n if option else None, replan=data.get("replan", False) if isinstance(data, dict) else False)

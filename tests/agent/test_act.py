@@ -67,7 +67,7 @@ def test_type_followup_is_bounded_and_has_no_preferences():
 
 
 def test_act_shape_and_system_are_generic():
-    assert [field.name for field in fields(Act)] == ["action", "text", "why", "option"]
+    assert [field.name for field in fields(Act)] == ["action", "text", "why", "option", "replan"]
     assert all(word not in SYSTEM.casefold() for word in ("pokemon", "oak", "mom", "rug"))
     assert len(SYSTEM) <= 1200
 
@@ -105,3 +105,11 @@ def test_world_menu_headers_mark_state_changes_and_modal_menus_get_none():
     model = Queue({"why": "x", "i": 1})
     act(model, {"screen": "dialogue", "text": []}, "Goal", opts, BUTTONS, "A")
     assert "here:" not in model.calls[0][1]
+
+
+def test_replan_is_optional_and_parsed():
+    out, model = run({"why": "new clue changes the goal", "i": 1, "replan": True})
+    schema = model.calls[0][3]
+    assert out.replan is True
+    assert schema["properties"]["replan"] == {"type": "boolean"}
+    assert "replan" not in schema["required"]
