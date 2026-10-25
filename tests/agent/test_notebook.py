@@ -213,18 +213,6 @@ def test_observe_ignores_thing_quest_until_heard_from_target(tmp_path):
     assert nb.observe(5, "place:hall") == []
 
 
-def test_place_quest_targeted_while_in_place_closes_only_on_arrival(tmp_path):
-    nb = notebook(tmp_path, ref=lambda value: value if str(value).startswith(("place:", "thing:")) else None)
-    nb.heard(1, None, "Hall", "Go on.")
-    nb.observe(1, "place:hall")
-    assert nb.apply_ops([add("q", target="place:hall")], 2)[0]["result"] == "ok"
-
-    assert nb.observe(2, "place:hall") == []
-    assert nb.observe(3, "place:kitchen") == []
-    assert nb.observe(4, "place:hall") == ["q"]
-    assert nb.data["quests"][0]["reason"] == "reached"
-
-
 @pytest.mark.parametrize(("target", "name", "done_when"), [
     ("thing:person", "Mira", "target: Mira; close this quest with done when it is achieved"),
     ("thing:exit", "doorway", "you go through doorway"),
@@ -544,3 +532,17 @@ def test_name_of_another_place_reports_its_label(tmp_path):
     result = loop.notebook.apply_ops([{"op": "name", "key": "place:lab", "text": "LAB", "why": [key]}], 2)
 
     assert result[0]["result"] == "ok (named Laboratory, maybe LAB, not where you are)"
+
+
+def test_place_target_refused_where_you_are(tmp_path):
+    nb = notebook(tmp_path, ref=lambda value: value if str(value).startswith("place:") else None)
+    nb.heard(1, None, "here", "A map.")
+    nb.observe(1, "place:here")
+    here = 'you are already in here; a place target closes when you arrive there, so give a target only if going there is the outcome'
+
+    assert nb.apply_ops([add("q", target="place:here")], 2)[0]["result"] == f"error: {here}"
+    assert nb.data["quests"] == []
+    assert nb.apply_ops([add("q", target="place:there")], 3)[0]["result"] == "ok"
+    assert nb.apply_ops([{"op": "target", "key": "q", "target": "place:here"}], 4)[0]["result"] == f"error: {here}"
+    assert nb.data["quests"][0]["target"] == "place:there"
+    assert nb.apply_ops([{"op": "target", "key": "q", "target": "place:elsewhere"}], 5)[0]["result"] == "ok"

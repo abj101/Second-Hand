@@ -57,6 +57,12 @@ class Notebook:
         tail = f"closest: {', '.join(closest)}" if closest else "no known places or things yet"
         return f'"{target}" names no known thing or place; {tail}' if name else f'target "{target}" matches no known place or thing; {tail}'
 
+    def _at_here(self, resolved):
+        return resolved.startswith("place:") and self.data.get("here") is not None and resolved == self.canon(self.data["here"])
+
+    def _already_here(self, resolved):
+        return f"you are already in {self.label(resolved)}; a place target closes when you arrive there, so give a target only if going there is the outcome"
+
     def _resolve(self, target):
         resolved = self.ref(target) if target is not None else None
         if not isinstance(resolved, str) or not resolved.startswith(("place:", "thing:")):
@@ -79,6 +85,7 @@ class Notebook:
             target = op_data.get("target")
             resolved = "unexplored" if target == "unexplored" else self._resolve(target) if target is not None else None  # an add whose target names nothing known keeps its text and why: the quest just has no target
             if target is not None and resolved is None and self.ties(target): return self._no_target(target)
+            if resolved and self._at_here(resolved): return self._already_here(resolved)
             value = {"key": key, "text": text, "why": [] if own else refs, "target": resolved,
                      "status": "open", "opened": step, "closed": None, "reason": None}
             if own: value.update(basis=(why.strip() if isinstance(why, str) and why.strip() else text.strip())[:200], source="own")  # ponytail: own ideas are trusted without reconciliation; add map-evidence reconciliation if needed
@@ -109,6 +116,7 @@ class Notebook:
             if target is None: return "target is missing"
             resolved = "unexplored" if target == "unexplored" else self._resolve(target)
             if resolved is None: return self._no_target(target)
+            if resolved and self._at_here(resolved): return self._already_here(resolved)
             quest.update(target=resolved, retargeted=step)
             event["quest"] = quest
         elif op == "name":
