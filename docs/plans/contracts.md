@@ -537,6 +537,12 @@ def act(model, image, perception: dict, notebook: str, facts: str, flags: list[s
   - **Checkpoint state:** `stall_unchanged` persists (old checkpoints default to 0).
 - Act/decide output shape is unchanged. `Act.ops` is parsed but never applied to the notebook: closure belongs to checks and the planner.
 
+- r19 (approved 2026-10-25): a quest's why cites the t-keys it comes from; with none it is still added as the
+  planner's own idea (why [], basis = its sentence, source "own"), shown as such. name keeps its citation rule.
+  A quest may target "unexplored": it closes when a place first seen at or after its opened/retargeted step is
+  entered. T3 and T5 skip the 3-step floor (T2/T4 keep it). Known-place option rows are "worked" when visited and
+  note "visited N×, last step S" plus what lies beyond.
+
 ## world
 
 World Memory, approved 2026-10-12. Design: [world-memory.md](world-memory.md); packets W0–W4. `agent/world.py`. No model calls; never reads RAM; never picks goals or filters options.
