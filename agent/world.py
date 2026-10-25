@@ -402,6 +402,7 @@ class World:
                     at = (origin[0] + tile_delta[0], origin[1] + tile_delta[1]); target = (at[0] + DIRS[move["dir"]][0], at[1] + DIRS[move["dir"]][1])
                     self._promote(i for i, tile in self.entity_tiles.items() if tile == target)
                     moves.append(move)
+                elif move.get("no_response") and move.get("shift") is None and move.get("dir") in DIRS: moves.append(move)
                 continue
             dx, dy, _held = move; px[0] += dx; px[1] += dy
             after = [round(-v / self.tile_px) for v in px]
