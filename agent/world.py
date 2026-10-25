@@ -317,6 +317,19 @@ class World:
         here = self.mem.get("tiles", f"{place}@{x},{y}")
         if here and here.get("floor") is True and not push_dirs(self.mem, place, tile): blocked += 1
         return blocked
+    def _exit_reason(self, place, tile, placement=None):
+        if tile is None: return ""
+        x, y = tile
+        reach = self.mem.get("reach", f"{place}@{x},{y}") or {}
+        if reach.get("n", 0) >= 2: return f"not reached {reach['n']}×"
+        direction = outward(self.mem, place, tile, placement); dx, dy = DIRS[direction]
+        # ponytail: known floor only; no reachability inference beyond an exit.
+        if any(r.get("place") == place and r.get("floor") is True and
+               (r["y"] == y if dx else r["x"] == x) and
+               (r["x"] - x) * dx + (r["y"] - y) * dy > 0 for r in self.mem.rows("tiles")):
+            return "ground continues beyond it"
+        blocked = self._refuted(place, tile)
+        return f"walked into {blocked}×" if blocked else ""
     def _notes(self, ident):
         """Evidence shown after a remembered thing: refuted 'does_nothing' (walked into it) and repeated text."""
         out = []
@@ -765,7 +778,7 @@ class World:
         paths, queue = {start: []}, [start]
         for p in queue:
             for rec in (self._exits(p, live) if p in live else ()):
-                if rec["status"] != "refuted" and rec["doors"] and rec["to"] not in paths and rec["to"] not in avoid: paths[rec["to"]] = [*paths[p], (p, rec)]; queue.append(rec["to"])
+                if rec["option_status"] != "refuted" and rec["doors"] and rec["to"] not in paths and rec["to"] not in avoid: paths[rec["to"]] = [*paths[p], (p, rec)]; queue.append(rec["to"])
         return paths
     def beyond(self, place, screen=()):
         """What lies beyond each verified exit of place: for every place reachable through it (never back through place), its unused
@@ -1054,13 +1067,20 @@ class World:
             uses = max(sum(m["n"] for m in g), 1 if any(m["observed"] for m in g) else 0)
             name = best["name"] or next((m["name"] for m in g if m["name"]), None); dir_ = door["dir"]
             head = (name[5:].strip() if name.casefold().startswith("exit:") else name) if name else self.place_label(dest) if dest else dir_
-            refuted = not uses and any(self._refuted(pid, m["tile"]) for m in g) or bool(doors) and all(m["miss"] >= 2 for m in doors)
+            old_refuted = (not uses and any(self._refuted(pid, m["tile"]) for m in g)
+                           or bool(doors) and all(m["miss"] >= 2 for m in doors))
+            crossed = any(m["n"] for m in g)
+            reasons = [self._exit_reason(pid, m["tile"], m.get("placement") or m["row"].get("placement")) for m in g] if not uses else []
+            reason = next((r for r in reasons if r), "")
+            refuted = not crossed and (old_refuted or bool(reason))
+            if refuted and not reason: reason = f"walked into {max(m['miss'] for m in g)}×"
             status = "refuted" if refuted else "verified" if uses else "unverified"
+            option_status = "verified" if crossed else "refuted" if old_refuted else "verified" if uses else "unverified"
             out.append({"tile": door["tile"], "dir": dir_, "dest": dest, "to": dest, "place": pid, "arrive": door.get("arrive"), "src": door.get("src"),
                         "doors": [{"tile": m["tile"], "dir": m["dir"], "to": dest, "arrive": m.get("arrive"), "src": m.get("src")} for m in doors],
                         "name": name, "head": head, "idx": next((m["idx"] for m in g if m["idx"] is not None), None),
                         "ident": next((m["ident"] for m in g if m["ident"]), None), "pushed": bool(doors), "uses": uses, "last": max(steps, default=None),
-                        "status": status, "placement": best["row"].get("placement")})
+                        "status": status, "option_status": option_status, "reason": reason, "placement": best["row"].get("placement")})
         return sorted(out, key=lambda x: _yx(x["tile"], x["name"] or x["dir"]))
 
     def view(self, goal_text, place):
@@ -1069,6 +1089,7 @@ class World:
         places = [p for p in self.mem.rows("places") if p.get("id") in live and (p.get("visits") or p["id"] in populated)]
         def exit_text(x, far=None):  # by _exits status: verified "head -> place used N×" + what lies beyond; refuted: its label; else a guess
             if x["status"] == "refuted":
+                if x["reason"] and not x["reason"].startswith("walked into "): return f"not an exit: {x['head']} ({x['reason']})"
                 walks = [r for r in self.mem.rows("relations") if r.get("s") == x["ident"] and r.get("p") == "does_nothing" and r.get("state") == "refuted"]
                 ev = [s for r in walks for s in (r.get("ev") or [])]
                 count = max([self._refuted(place, x["tile"])] + [r.get("con", 0) for r in walks])
@@ -1346,10 +1367,10 @@ class World:
                 ref = exit_ref(x)
                 history = self.history(ref, place)
                 suffix = _beyond_suffix(beyond["exits"].get(x["tile"]))
-                if history.get("status") == "verified": note = f"crossed {history['uses']}× → {self.place_label(history['dest'])}{suffix}"
-                elif history.get("status") == "refuted": note = f"exit failed: blocked {self._refuted(place, x['tile'])}×"
+                if x["option_status"] == "verified": note = f"crossed {history['uses']}× → {self.place_label(history['dest'])}{suffix}"
+                elif x["option_status"] == "refuted": note = f"exit failed: blocked {self._refuted(place, x['tile'])}×"
                 else: note = "exit, never crossed"
-                if not x["dir"] and x["status"] != "refuted":
+                if not x["dir"] and x["option_status"] != "refuted":
                     wall = x.get("placement"); here = (self.mem.get("tiles", f"{place}@{x['tile'][0]},{x['tile'][1]}") or {}) if x["tile"] else {}
                     untried = push_dirs(self.mem, place, x["tile"], wall) if x["tile"] else list(DIRS)
                     if not x["tile"] and wall: untried = list(dict.fromkeys([outward(self.mem, place, self.pos, wall), *untried]))
