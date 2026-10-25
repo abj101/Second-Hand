@@ -1811,6 +1811,19 @@ def test_travel_leg_that_cuts_into_another_place_is_done_and_left_open_for_reide
     assert result.status == "done" and result.failure is None and world._travel_open and world._travel_cut
 
 
+def test_early_cut_on_a_door_leg_is_not_a_crossing(tmp_path, monkeypatch):
+    from PIL import Image; from agent.skills import Ctx, SkillResult; from agent import world as world_module; from tests.agent.fakes import GridEnv, StubModel
+
+    mem = Memory(tmp_path); place(mem, "source", "Source"); place(mem, "expected", "Expected")
+    frame = Image.new("RGB", (8, 8), "red")  # a battle flash after 1 of 3 route presses
+    monkeypatch.setattr(world_module, "approach", lambda ctx, *_a, **_k: SkillResult("done", "scene cut", 1, 0, frame, frame, (0, 0), False, [("RIGHT", (0, 0))]))
+    world = World(mem, 16); world.current_place = "source"
+    result = world.travel(Ctx(GridEnv(), StubModel([]), 16), [{"place": "source", "dirs": ["RIGHT", "RIGHT", "RIGHT"], "push": "RIGHT", "expect": "expected", "exit_tile": (3, 0)}, {"place": "expected", "dirs": ["RIGHT"], "push": None}], 5)
+
+    assert result.status == "done" and "leg 1 scene cut" in result.reason and world._travel_open
+    assert world.current_place == "source" and mem.rows("crossings") == []
+
+
 def _remembered_scene(tmp_path, cells):
     mem = Memory(tmp_path); place(mem, "room", "room")
     _rooms(mem, "room", cells)
