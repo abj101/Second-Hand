@@ -58,6 +58,10 @@ E2 hardens `ask`:
 
 ## perception
 
+- r22: entities may carry "highlighted": true for the one selectable item under the cursor. select navigates by the
+  selectables' grid geometry from the highlighted item to the target and reads the menu with a model call only when
+  that is not determined.
+
 ```python
 def perceive(model: Ollama, image: Image, context: str = "", *,
              with_rulers: bool = False) -> tuple[Perception, Reply]
@@ -556,6 +560,9 @@ World Memory, approved 2026-10-12. Design: [world-memory.md](world-memory.md); p
 
 ```python
 class World:
+    # r22: an explore option's subject is its frontier cell (explore:{place}:{x},{y}), never a bare direction.
+    # A same-name group row carries the group's history in this place (failed/worked + one note). A refuted exit's
+    # act option is "failed" with its refutation reason; a crossing always wins.
     # r20: a cut before a door leg's last press is not that door (travel stops open, the loop re-identifies) (Ha).
     # Trace odometer stats carry per-segment logs (He). An edge's arrive is the settled standing tile;
     # inferred ways back are marked settled:false until crossed; landing on a settled arrive absorbs post-cut motion.
