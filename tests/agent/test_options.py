@@ -17,12 +17,14 @@ def test_uncrossed_exit_rows_offer_each_push_and_keep_tried_facts(tmp_path):
     world, per = setup(mem, [{"name": "exit: doorway", "kind": "exit", "at": at(2, 0), "placement": "bottom wall"}])
     rows = [o for o in world.options(per, "room", {}, 2, inputs=INPUTS) if o["ref"] == "exit:2,0"]
     assert len(rows) == 1 and rows[0]["label"] == "walk onto doorway (bottom wall), 2 right"
-    assert rows[0]["action"] == {"thing": 1, "verb": "approach", "onto": True} and rows[0]["notes"] == ["exit, never crossed"]
+    assert rows[0]["action"] == {"thing": 1, "verb": "approach", "onto": True} and rows[0]["notes"] == ["ground continues beyond it"]
     push_failed(mem, "room", (2, 0), "LEFT", 3)
     row = mem.get("tiles", "room@2,0"); mem.upsert("tiles", {**row, "blocked": ["RIGHT"]})
     rows = [o for o in world.options(per, "room", {}, 4, inputs=INPUTS) if o["ref"] == "exit:2,0"]
     assert len(rows) == 1 and rows[0]["state"] == "failed" and rows[0]["action"] == {"thing": 1, "verb": "approach", "onto": True}
-    assert rows[0]["notes"] == ["exit, never crossed", "pressed LEFT: moved, no exit", "pressed RIGHT: blocked"]
+    refuted = next(x for x in world._exits("room", {p["id"] for p in mem.rows("places")}) if x["tile"] == (2, 0))
+    assert rows[0]["notes"][0] == refuted["reason"]
+    assert rows[0]["notes"][1:] == ["pressed LEFT: moved, no exit", "pressed RIGHT: blocked"]
     failed = world.options(per, "room", {rows[0]["intent_key"]: {"n": 1, "why": "route blocked", "step": 4}}, 5, inputs=INPUTS)
     walk = [o for o in failed if o["ref"] == "exit:2,0"]
     assert len(walk) == 1 and walk[0]["state"] == "failed" and mem.get("tiles", "room@2,0")["pushed"] == ["LEFT"]
@@ -30,11 +32,12 @@ def test_uncrossed_exit_rows_offer_each_push_and_keep_tried_facts(tmp_path):
     rows = [o for o in world.options(per, "room", {}, 5, inputs=INPUTS) if o["ref"] == "exit:2,0"]
     assert [o["action"].get("push") for o in rows] == [*push_dirs(mem, "room", (2, 0), "bottom wall"), "LEFT", "RIGHT"]
     assert all(o["label"].startswith(f"press {o['action']['push']} here:") and o["intent_key"].endswith(f">{o['action']['push']}") for o in rows)
-    assert rows[0]["notes"][0] == "exit, never crossed"
+    assert rows[0]["notes"][0] == "ground continues beyond it"
     world.pos = (0, 0)
     for direction in DIRS: push_failed(mem, "room", (2, 0), direction, 5)
     rows = [o for o in world.options(per, "room", {}, 6, inputs=INPUTS) if o["ref"] == "exit:2,0"]
-    assert len(rows) == 1 and rows[0]["state"] == "failed" and rows[0]["label"] == "go to doorway, 2 right" and rows[0]["notes"][0].startswith("exit failed: blocked ")
+    refuted = next(x for x in world._exits("room", {p["id"] for p in mem.rows("places")}) if x["tile"] == (2, 0))
+    assert len(rows) == 1 and rows[0]["state"] == "failed" and rows[0]["label"] == "go to doorway, 2 right" and rows[0]["notes"][0] == "ground continues beyond it"
 
 
 def test_uncrossed_exit_direction_facts_come_from_tile_memory(tmp_path):
@@ -213,7 +216,7 @@ def test_room_lists_exits_things_explore_and_free_input_in_rule_order_with_notes
     assert opts[0]["label"].startswith("go to Cave,") and opts[7]["label"].startswith("go through door,")
     assert opts[9]["label"].startswith("go to fake,")
     assert opts[8]["label"].startswith("talk to npc,") and opts[8]["notes"] == ['talked step 91: "Hi"']
-    assert opts[9]["notes"][0].startswith("exit failed: blocked ")
+    assert opts[9]["notes"][0] == "walked into 1×"
     assert opts[0]["action"] == {"go_to": "place:cave"} and opts[7]["action"] == {"thing": 1, "verb": "approach"}
     assert all(o["label"].startswith("explore ") and o["action"]["dir"] for o in opts[1:5])
     assert opts[-1]["action"] is None and all(o["ref"] for o in opts[:-1])
@@ -304,7 +307,7 @@ def test_fail_notes_use_the_loop_failure_key(tmp_path):
     actor = next(o for o in by.values() if o["label"].startswith("talk to npc,"))
     assert actor["notes"] == ["wall 2× (last step 50)", 'talked step 91: "Hi"']
     fake = next(o for o in by.values() if o["label"].startswith("go to fake,"))
-    assert fake["state"] == "failed" and fake["notes"][0].startswith("exit failed: blocked ")
+    assert fake["state"] == "failed" and fake["notes"][0] == "walked into 1×"
 
 
 def walk(world, src, dst, direction, step):  # one crossing as the loop reports it: a scene cut after a single press
@@ -332,7 +335,25 @@ def test_perceived_exit_never_crossed_is_unverified_then_refuted_after_two_faile
     for x, direction in ((0, "RIGHT"), (2, "LEFT")):
         row = mem.get("tiles", f"room@{x},-2")
         mem.upsert("tiles", {**row, "blocked": [direction]})
-    assert any(o["label"].startswith("go to wall,") and o["state"] == "failed" for o in world.options(per, "room", {}, 4, inputs=INPUTS))
+    row = next(o for o in world.options(per, "room", {}, 4, inputs=INPUTS) if o["label"].startswith("go to wall,"))
+    tile = tuple(map(int, row["ref"].partition(":")[2].split(",")))
+    refuted = next(x for x in world._exits("room", {p["id"] for p in mem.rows("places")}) if x["tile"] == tile)
+    assert row["state"] == "failed" and row["notes"][0] == refuted["reason"]
+
+
+def test_refuted_reach_reason_and_crossing_win_over_failure(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, [{"name": "exit: doorway", "kind": "exit", "at": at(2, 0)}])
+    mem.upsert("reach", {"id": "room@2,0", "n": 2, "at": [0, 0], "last": 4})
+    row = next(o for o in world.options(per, "room", {}, 5, inputs=INPUTS) if o["ref"] == "exit:2,0")
+    refuted = next(x for x in world._exits("room", {p["id"] for p in mem.rows("places")}) if x["tile"] == (2, 0))
+    assert row["state"] == "failed" and row["notes"][0] == refuted["reason"] == "not reached 2×"
+    mark_exit(mem, "room", (2, 0), "RIGHT", "hall", (0, 0), 6)
+    world._cross("room", (2, 0), "hall", (0, 0), 6)
+    row = next(o for o in world.options(per, "room", {}, 7, inputs=INPUTS) if o["ref"] == "exit:2,0")
+    failed = {row["intent_key"]: {"why": "late failure", "n": 1, "step": 7}}
+    row = next(o for o in world.options(per, "room", failed, 8, inputs=INPUTS) if o["ref"] == "exit:2,0")
+    assert row["state"] == "worked" and row["notes"][0].startswith("crossed 1×")
 
 
 def test_inferred_exit_next_to_a_verified_one_is_listed_once(tmp_path):
@@ -417,8 +438,65 @@ def test_each_explore_direction_has_a_ref_and_concrete_action(tmp_path, monkeypa
     per = {"screen": "world", "text": [], "entities": [player()]}
     rows = [o for o in world.options(per, "a", {}, 3, inputs=INPUTS) if o["tool"] == "explore"]
     assert [o["label"] for o in rows] == ["explore UP, 2 steps, 3 unexplored cells that way", "explore RIGHT, 1 steps, 1 unexplored cells that way"]
-    assert [o["ref"] for o in rows] == ["explore:a:up", "explore:a:right"]
+    assert [o["ref"] for o in rows] == ["explore:a:0,-2", "explore:a:2,0"]
     assert [o["action"] for o in rows] == [{"go_to": "unexplored", "dir": "UP"}, {"go_to": "unexplored", "dir": "RIGHT"}]
+
+
+def test_explore_retry_moves_to_a_new_frontier_in_the_same_direction(tmp_path):
+    world = World(two_rooms(tmp_path, []), 16); world.current_place = "a"
+    route = {"dirs": ["UP"], "unseen": 1, "to": [0, -2]}
+    world.explore_dirs = lambda place: {"UP": route}
+    per = {"screen": "world", "text": [], "entities": [player()]}
+    old_ref = "explore:a:0,-2"
+    fails = {fail_key("a", "approach", "unexplored", INPUTS, old_ref): {"why": "route blocked", "n": 1, "step": 3}}
+    failed = next(o for o in world.options(per, "a", fails, 4, inputs=INPUTS) if o["tool"] == "explore")
+    route["to"] = [0, -3]
+    fresh = next(o for o in world.options(per, "a", fails, 5, inputs=INPUTS) if o["tool"] == "explore")
+    assert failed["ref"] == old_ref and failed["state"] == "failed"
+    assert fresh["ref"] == "explore:a:0,-3" and fresh["state"] == "new" and failed["action"]["dir"] == fresh["action"]["dir"] == "UP"
+
+
+def test_same_name_group_carries_member_failure_and_note(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, [{"name": "bush", "kind": "furniture", "at": at(1, 0)}, {"name": "bush", "kind": "furniture", "at": at(2, 0)}, {"name": "bush", "kind": "furniture", "at": at(3, 0)}])
+    failed_ref = f"thing:{world.entity_ids[3]}"
+    fails = {fail_key("room", "interact", "bush", INPUTS, failed_ref): {"why": "nothing changed", "n": 1, "step": 2}}
+    rows = world.options(per, "room", fails, 3, inputs=INPUTS)
+    group = next(o for o in rows if o["tool"] == "interact" and o.get("ref") != failed_ref)
+    member = next(o for o in rows if o.get("ref") == failed_ref)
+    assert "nearest of 2" in group["label"] and group["state"] == "failed" and "2 others named bush here: nothing changed" in group["notes"][-1]
+    assert member["state"] == "failed"
+
+
+def test_same_name_group_without_history_is_new_and_checked_member_makes_it_worked(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, [{"name": "bush", "kind": "furniture", "at": at(1, 0)}, {"name": "bush", "kind": "furniture", "at": at(2, 0)}])
+    row = next(o for o in world.options(per, "room", {}, 3, inputs=INPUTS) if o["tool"] == "interact")
+    assert row["state"] == "new"
+    ident = world.entity_ids[2]
+    mem.upsert("relations", {"id": "check-bush", "s": ident, "p": "says", "text": "nothing", "step": 2, "ev": [2]})
+    row = next(o for o in world.options(per, "room", {}, 4, inputs=INPUTS) if o["tool"] == "interact")
+    assert row["state"] == "worked" and "1 other named bush here: nothing" in row["notes"][-1]
+
+
+def test_same_name_group_includes_history_outside_viewport(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, [{"name": "bush", "kind": "furniture", "at": at(1, 0)}])
+    mem.upsert("entities", {"id": "far-bush", "name": "bush", "kind": "furniture", "place": "room", "tile": [20, 20], "status": "remembered", "last": 1, "seen": 1, "recent_names": ["tree"]})
+    assert world.label("thing:far-bush") == "bush (or: tree)"
+    fails = {fail_key("room", "interact", "bush", INPUTS, "thing:far-bush"): {"why": "nothing changed", "n": 1, "step": 2}}
+    group = next(o for o in world.options(per, "room", fails, 3, inputs=INPUTS) if o["tool"] == "interact")
+    assert group["state"] == "failed" and group["notes"][-1] == "1 other named bush here: nothing changed"
+
+
+def test_same_name_group_note_prefers_failure_over_earlier_checked_member(tmp_path):
+    mem = Memory(tmp_path); room(mem)
+    world, per = setup(mem, [{"name": "bush", "kind": "furniture", "at": at(1, 0)}, {"name": "bush", "kind": "furniture", "at": at(2, 0)}, {"name": "bush", "kind": "furniture", "at": at(3, 0)}])
+    checked_ref, failed_ref = f"thing:{world.entity_ids[1]}", f"thing:{world.entity_ids[2]}"
+    mem.upsert("relations", {"id": "checked-first", "s": world.entity_ids[1], "p": "says", "text": "a previous result", "step": 1, "ev": [1]})
+    fails = {fail_key("room", "interact", "bush", INPUTS, failed_ref): {"why": "route blocked", "n": 1, "step": 2}}
+    row = next(o for o in world.options(per, "room", fails, 3, inputs=INPUTS) if o["tool"] == "interact" and o.get("ref") not in {checked_ref, failed_ref})
+    assert row["state"] == "failed" and row["notes"][-1] == "2 others named bush here: route blocked"
 
 
 def test_remembered_things_have_individual_rows_and_gone_things_are_hidden(tmp_path):
