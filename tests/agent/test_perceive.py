@@ -55,6 +55,18 @@ def test_selectable_is_kept_only_when_a_real_true():
     assert normalize({"entities": [base]})["entities"] == [{"kind": "menu_item", "name": "YES", "at": [.5, .5]}]
     assert SCHEMA["properties"]["entities"]["items"]["properties"]["selectable"] == {"type": "boolean"}
     assert "selectable" not in SCHEMA["properties"]["entities"]["items"]["required"]
+    assert SCHEMA["properties"]["entities"]["items"]["properties"]["highlighted"] == {"type": "boolean"}
+    assert "highlighted" not in SCHEMA["properties"]["entities"]["items"]["required"]
+
+def test_normalize_preserves_highlight_only_on_valid_selectable_entities():
+    from agent.perceive import normalize
+    rows = normalize({"entities": [
+        {"kind": "menu_item", "name": "YES", "at": [500, 500], "selectable": True, "highlighted": True},
+        {"kind": "menu_item", "name": "NO", "at": [250, 500], "highlighted": True},
+        {"kind": "menu_item", "name": "bad", "at": None, "selectable": True, "highlighted": True},
+    ]})["entities"]
+    assert rows == [{"kind": "menu_item", "name": "YES", "at": [.5, .5], "selectable": True, "highlighted": True},
+                    {"kind": "menu_item", "name": "NO", "at": [.25, .5]}]
 
 
 def test_dialogue_over_furniture_has_no_selectable_flags():
