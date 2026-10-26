@@ -177,6 +177,7 @@ class Memory:
         if not ident: return None
         items = [str(e["name"]) for e in per.get("entities", []) if e.get("name") and e.get("selectable") is True]
         row = self.get("screens", ident) or {"id": ident, "screen": per["screen"], "items": items, "seen": 0, "first": step, "replies": {}}
+        row.pop("cursors", None)
         return self.upsert("screens", {**row, "items": row.get("items", items) if row.get("layout") else items, "seen": row["seen"] + 1, "last": step})
     def screen_reply(self, ident, item, step, text):
         row = self.get("screens", ident)

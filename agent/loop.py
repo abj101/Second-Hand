@@ -258,9 +258,8 @@ class Loop:
             screen_target = next((e for e in per.get("entities", []) if e.get("name") == affs[choice["i"]].get("target")), {})
             push = act_route.get("push") if screen_target.get("kind", "").casefold() == "exit" or str(screen_target.get("name", "")).casefold().startswith("exit:") else None
             travel_legs = [{"place": place, "dirs": act_route["dirs"], "push": push, "expect": None, "cross": bool(push), "exit_tile": t, "target": {"kind": "screen", "tile": t}}]
-        menu = (self.mem.get("screens", self.mem.screen_id(per)) or {}) if choice and affs[choice["i"]].get("verb") == "select" else None
         try:
-            skill = SkillResult("blocked", refused, 0, 0, before, before, (0, 0), False, failure={"stage": "route", "reason": refused, "direction": None}) if refused else self.world.travel(skillctx, travel_legs, self.step_no + 1, self.trace) if travel_legs is not None and choice else wait_until(skillctx) if not affs or choice is None else press_seq(skillctx, affs[choice["i"]]["target"].split()) if affs[choice["i"]].get("verb") == "buttons" else run_affordance(skillctx, affs[choice["i"]], per, text=choice["text"], exit=False, **({"menu": menu} if menu is not None else {}), **({"onto": True} if onto else {}), **({"route": act_route} if act_route else {}))
+            skill = SkillResult("blocked", refused, 0, 0, before, before, (0, 0), False, failure={"stage": "route", "reason": refused, "direction": None}) if refused else self.world.travel(skillctx, travel_legs, self.step_no + 1, self.trace) if travel_legs is not None and choice else wait_until(skillctx) if not affs or choice is None else press_seq(skillctx, affs[choice["i"]]["target"].split()) if affs[choice["i"]].get("verb") == "buttons" else run_affordance(skillctx, affs[choice["i"]], per, text=choice["text"], exit=False, **({"onto": True} if onto else {}), **({"route": act_route} if act_route else {}))
         except BaseException: self.pending_cut, self.pending_via, self.pending_key = cut(before, self.env.screenshot()), affs[choice["i"]].get("target") if choice else None, intent; self.cached = self.cached_hash = None; raise
         if choice and skill.status == "done" and self.conversation["lines"] and affs[choice["i"]].get("verb") == "select": self.conversation["lines"].append(f"(you chose {affs[choice['i']]['target']})")
         if choice and skill.status == "done" and affs[choice["i"]].get("verb") in ("approach", "interact") and choice["i"] < len(targets) and targets[choice["i"]]:
@@ -271,7 +270,7 @@ class Loop:
         exit_key, cut_dir = None, None
         row_choice = {"i": choice["i"], **affs[choice["i"]], "id": targets[choice["i"]], "called": True, "text": choice["text"], "why": choice["why"], "intent": intent} if choice else None
         # the action's state, JSON-safe: values used by the outcome tail below
-        s = {"action_step": self.step_no + 1, "before_settled": before_set.settled, "before_waited": before_set.waited, "frame": f"frames/{self.step_no + 1:06d}.png", "place": place, "per": per, "reused": reused, "frame_hash": frame_hash, "marked": marked, "observation_stamp": self.observation_stamp, "menu": menu,
+        s = {"action_step": self.step_no + 1, "before_settled": before_set.settled, "before_waited": before_set.waited, "frame": f"frames/{self.step_no + 1:06d}.png", "place": place, "per": per, "reused": reused, "frame_hash": frame_hash, "marked": marked, "observation_stamp": self.observation_stamp,
              "player_fix": player_fix, "options": len(affs), "choice": row_choice, "aff": affs[choice["i"]] if choice else None, "tid": targets[choice["i"]] if choice else None, "target_tile": list(target_tile) if target_tile else None, "target_place": target_place,
              "detail": "" if choice else None, "intent": intent, "unknown": unknown, "scene_cut": scene_cut,
              "exit_key": list(exit_key) if exit_key else None, "unseen_crossing": unseen_crossing, "cut_dir": cut_dir, "travel": travel_legs is not None, "route_len": len(act_route["dirs"]) if act_route else None,
@@ -356,9 +355,6 @@ class Loop:
             }
         self.step_no += 1
         screen = self.mem.observe_screen(per, self.step_no)
-        menu = s.get("menu")
-        if screen and menu is not None and menu:
-            screen = self.mem.upsert("screens", {**screen, **{key: menu[key] for key in ("layout", "items", "cursors") if key in menu}})
         if screen and choice and choice.get("verb") == "select":
             before_text = per.get("text", []); before_text = [before_text] if isinstance(before_text, str) else before_text
             after_lines = after_per.get("text", []); after_lines = [after_lines] if isinstance(after_lines, str) else after_lines

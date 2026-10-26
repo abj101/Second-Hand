@@ -31,7 +31,8 @@ Coordinates are the centre of the thing on a 0-1000 grid: [0, 0] is top-left, [1
 Report only what is visible.
 If the player's own character is visible, list it as an entity with kind "player".
 List each distinct thing separately, including small icons.
-List every visible passage (door, stairs, door mat, opening) as an entity named "exit: <what it is>", placed on the tile to step onto. Set "selectable": true only for an item the player can choose right now in a menu, list, or yes/no prompt; omit it for scenery, characters, objects behind a dialogue box, text, and cursors."""
+List every visible passage (door, stairs, door mat, opening) as an entity named "exit: <what it is>", placed on the tile to step onto. Set "selectable": true only for an item the player can choose right now in a menu, list, or yes/no prompt; omit it for scenery, characters, objects behind a dialogue box, text, and cursors.
+- Set "selectable": true only for an item the player can choose right now in a menu, list, or yes/no prompt, and set "highlighted": true only for the selectable item currently under the cursor; omit scenery, characters, objects behind dialogue box, text, and cursors."""
 
 _POINT = {"type": "array", "items": {"type": "number"}}
 SCHEMA = {
@@ -41,7 +42,7 @@ SCHEMA = {
         "place": {"type": ["string", "null"]},
         "text": {"type": "array", "items": {"type": "string"}},
         "entities": {"type": "array", "items": {"type": "object", "properties": {
-            "kind": {"type": "string"}, "name": {"type": "string"}, "at": _POINT, "placement": {"type": "string", "enum": list(PLACEMENTS)}, "selectable": {"type": "boolean"}},
+            "kind": {"type": "string"}, "name": {"type": "string"}, "at": _POINT, "placement": {"type": "string", "enum": list(PLACEMENTS)}, "selectable": {"type": "boolean"}, "highlighted": {"type": "boolean"}},
             "required": ["kind", "name", "at"]}},
     },
     "required": ["screen", "text", "entities"],
@@ -80,5 +81,6 @@ def normalize(data: dict | None) -> dict:
         if isinstance(e, dict) and (at := _point(e.get("at"))):
             out["entities"].append({"kind": str(e.get("kind") or ""), "name": str(e.get("name") or ""), "at": at,
                                     **({"placement": e["placement"]} if e.get("placement") in PLACEMENTS else {}),
-                                    **({"selectable": True} if e.get("selectable") is True else {})})
+                                    **({"selectable": True} if e.get("selectable") is True else {}),
+                                    **({"highlighted": True} if e.get("highlighted") is True and e.get("selectable") is True else {})})
     return out
