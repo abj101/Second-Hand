@@ -178,7 +178,7 @@ class Loop:
         action, i, onto, target_tile, target_place = a.action, None, False, None, None
         if action and "go_to" in action and action["go_to"].casefold().startswith("unexplored"):
             act_route = self._unexplored(place, action.get("dir"))
-            if act_route and player: affs.append({"verb": "approach", "target": "unexplored", "at": player.get("at")}); targets.append(None); intents.append(self._fail_key(place, "approach", "unexplored")); i = len(affs) - 1
+            if act_route and player: affs.append({"verb": "approach", "target": "unexplored", "at": player.get("at")}); targets.append(None); intents.append(self._fail_key(place, "approach", "unexplored", f"explore:{place}:{act_route['to'][0]},{act_route['to'][1]}")); i = len(affs) - 1
             else: act_route = action = None
         if action and "go_to" in action and act_route is None:
             resolved = self.world.resolve(action["go_to"], per, place); e = next((e for n, e in enumerate(per.get("entities", [])) if self.world.entity_ids.get(n) == resolved.get("id")), None) if resolved and resolved["kind"] == "screen" else None

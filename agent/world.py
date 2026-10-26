@@ -1080,7 +1080,7 @@ class World:
                         "doors": [{"tile": m["tile"], "dir": m["dir"], "to": dest, "arrive": m.get("arrive"), "src": m.get("src")} for m in doors],
                         "name": name, "head": head, "idx": next((m["idx"] for m in g if m["idx"] is not None), None),
                         "ident": next((m["ident"] for m in g if m["ident"]), None), "pushed": bool(doors), "uses": uses, "last": max(steps, default=None),
-                        "status": status, "option_status": option_status, "reason": reason, "placement": best["row"].get("placement")})
+                        "status": status, "option_status": option_status, "crossed": crossed, "reason": reason, "placement": best["row"].get("placement")})
         return sorted(out, key=lambda x: _yx(x["tile"], x["name"] or x["dir"]))
 
     def view(self, goal_text, place):
@@ -1367,8 +1367,8 @@ class World:
                 ref = exit_ref(x)
                 history = self.history(ref, place)
                 suffix = _beyond_suffix(beyond["exits"].get(x["tile"]))
-                if x["option_status"] == "verified": note = f"crossed {history['uses']}× → {self.place_label(history['dest'])}{suffix}"
-                elif x["option_status"] == "refuted": note = f"exit failed: blocked {self._refuted(place, x['tile'])}×"
+                if x["status"] == "refuted": note = x["reason"]
+                elif x["option_status"] == "verified": note = f"crossed {history['uses']}× → {self.place_label(history['dest'])}{suffix}"
                 else: note = "exit, never crossed"
                 if not x["dir"] and x["option_status"] != "refuted":
                     wall = x.get("placement"); here = (self.mem.get("tiles", f"{place}@{x['tile'][0]},{x['tile'][1]}") or {}) if x["tile"] else {}
@@ -1379,10 +1379,10 @@ class World:
                     on_tile = bool(x["tile"] and self.current_place != self.mem.unplaced and tuple(self.pos) == tuple(x["tile"]))
                     if x["tile"] and not on_tile:
                         action = {"thing": x["idx"], "verb": "approach", "onto": True} if x["idx"] is not None else {"go_to": ref, "onto": True}
-                        row = option("approach", f"walk onto {self.label(ref, place)}{f' ({wall})' if wall else ''}{self._where(x['tile'])}", action, "approach", target, ref, x["ident"], note="exit, never crossed")
+                        row = option("approach", f"walk onto {self.label(ref, place)}{f' ({wall})' if wall else ''}{self._where(x['tile'])}", action, "approach", target, ref, x["ident"], note=note)
                         row["notes"].extend(f"pressed {d}: {'blocked' if d in here.get('blocked', []) else 'someone stood there' if d in here.get('held', []) else 'moved, no exit'}" for d in tried)
                         reach = self.mem.get("reach", f"{place}@{x['tile'][0]},{x['tile'][1]}")
-                        row["state"] = "failed" if row["intent_key"] in fails or reach and reach.get("n", 0) > 0 or tried else "new"  # a tile whose pushes already failed is no untried door
+                        row["state"] = "worked" if x["crossed"] else "failed" if x["status"] == "refuted" or row["intent_key"] in fails or reach and reach.get("n", 0) > 0 or tried else "new"  # a tile whose pushes already failed is no untried door
                         exits.append((key, row)); continue
                     for direction in [*untried, *tried] if untried else [None]:
                         fact = "all four pushes tried" if direction is None else f"pressed {direction}: blocked" if direction in here.get("blocked", []) else f"pressed {direction}: someone stood there" if direction in here.get("held", []) else f"pressed {direction}: moved, no exit" if direction in here.get("pushed", []) else "untried"
@@ -1393,15 +1393,17 @@ class World:
                             facts.append(f"onto a known exit to {self.place_label(neighbour['exit'].get('to'))}" if neighbour.get("exit") else "back onto floor you walked" if neighbour.get("floor") is True else "onto ground not yet seen")
                             text += f": {', '.join(facts)}"
                         if x["tile"] and on_tile: text = f"press {direction} here: {', '.join(facts)}" if direction else "all four pushes tried here"
-                        row = option(tool, text, {**action, "push": direction} if direction else action, "approach", target, ref, x["ident"], note="exit, never crossed", push=direction)
+                        row = option(tool, text, {**action, "push": direction} if direction else action, "approach", target, ref, x["ident"], note=note, push=direction)
                         if direction in tried: row["notes"].insert(1, fact)
-                        row["state"] = "failed" if direction is None or direction in tried or row["intent_key"] in fails else "new"
+                        row["state"] = "worked" if x["crossed"] else "failed" if x["status"] == "refuted" or direction is None or direction in tried or row["intent_key"] in fails else "new"
                         exits.append((key, row))
                     continue
                 label = f"{'go through' if history.get('uses') else 'go to'} {self.label(ref, place)}{self._where(x['tile'])}"
                 door = {"tile": list(tiles[0]), "to": dest} if tiles else None
                 resolved = self.resolve(action["go_to"], per, place) if action.get("go_to") else None
                 row = option(tool, label, action, "approach", target, ref, x["ident"], door, note)
+                if x["crossed"]: row["state"] = "worked"
+                elif x["status"] == "refuted": row["state"] = "failed"
                 if action.get("go_to") and self.plan(resolved, exit=door) is None: row["notes"].append("no known route from here (remembered walls block every path)")
                 if beyond["dead_end"] and x["tile"] == beyond["through"]: row["notes"].insert(0, "everything unexplored from here is through this exit")
                 exits.append((_yx(x["tile"], label), row))
@@ -1414,6 +1416,18 @@ class World:
                                   if r.get("place") == place and r.get("tile") and x0 <= r["tile"][0] <= x1 and y0 <= r["tile"][1] <= y1
                                   and r["id"] not in on and r["id"] not in listed and r.get("state") != "merged" and r.get("status") != "gone"
                                   and normalize_kind(r.get("kind")) not in TRANSIENT | ACTOR_KINDS and not _actor(r) and not _is_exit(r))
+            def group_history(name, verb):
+                # ponytail: scan remembered names per group (O(n²)); index only if place entity counts justify it.
+                members, seen = [], set()
+                for r in self.mem.rows("entities"):
+                    if r.get("place") != place or r.get("status") == "gone" or r.get("state") == "merged" or (str(r.get("name") or "").casefold() != name.casefold() and self.label(f"thing:{r['id']}").casefold() != name.casefold()): continue
+                    ref = f"thing:{r['id']}"; seen.add(r["id"])
+                    members.append((ref, self.history(ref, place), fails.get(fail_key(place, verb, name if verb == "interact" else ref, inputs, ref))))
+                for i, e, ident in candidates:
+                    if not ident or ident in seen or not e.get("name") or (str(e.get("name")).casefold() != name.casefold() and self.label(thing_ref(ident)).casefold() != name.casefold()): continue
+                    ref = thing_ref(ident); seen.add(ident)
+                    members.append((ref, self.history(ref, place), fails.get(fail_key(place, verb, name if verb == "interact" else ref, inputs, ref))))
+                return members
             for i, e, ident in candidates:
                 kind, name = normalize_kind(e.get("kind")), e.get("name")
                 if not name or kind in TRANSIENT or _is_exit(e) or (ident and ident in listed): continue  # two perceptions of one thing (one tile, one id) are one row
@@ -1436,6 +1450,15 @@ class World:
                 shown = f"{name} (nearest of {len(group)})" if len(group) > 1 else name
                 label = f"check {shown}{where}"
                 row = option("interact", label, {"thing": i if i >= 0 else ref, "verb": "interact"}, "interact", e["name"], ref, ident)
+                members = group_history(name, "interact")
+                failed = any(hit for _, _, hit in members)
+                worked = any(h.get("talked") or h.get("checked") is not None for _, h, _ in members)
+                row["state"] = "failed" if failed else "worked" if worked else row["state"]
+                others = [m for m in members if m[0] != ref]
+                if others:
+                    outcome = next((hit.get("why") or "nothing changed" for _, _, hit in others if hit), None)
+                    if outcome is None: outcome = next((str(h.get("checked") or "no response") for _, h, _ in others if h.get("talked") or h.get("checked") is not None), "not checked or talked")
+                    row["notes"].append(f"{len(others)} other{'' if len(others) == 1 else 's'} named {e['name']} here: {outcome}")
                 things.append((_yx(self._tile(ident) or e.get("at"), name), row))
             actors = [row for _, row in sorted(actors, key=lambda t: t[0])]
             things = [row for _, row in sorted(things, key=lambda t: t[0])]
@@ -1449,7 +1472,7 @@ class World:
                     far_groups.setdefault(self.label(ref).casefold(), []).append(r)  # like on-screen plain things: one row per name, the nearest member
                     continue
                 far_groups[ref] = [r]  # history or a failure: its own row, with its notes
-            for group in far_groups.values():
+            for group_key, group in far_groups.items():
                 group.sort(key=lambda r: (sum(abs(a - b) for a, b in zip(r["tile"], self.pos)), _yx(r["tile"], r["id"])))
                 r = next((m for m in group if self.reachable(f"thing:{m['id']}", per, place)), None)  # offered = executable: the loop runs exactly resolve + plan
                 if r is None: continue
@@ -1457,11 +1480,22 @@ class World:
                 shown = f"{self.label(ref)} (nearest of {len(group)})" if len(group) > 1 else self.label(ref)
                 label = f"go to {shown}, not on screen{self._where(tile)}" + (f", last seen {step - r.get('last', step)} steps ago" if self._actor(r["id"], r) else "")
                 row = option("go_to", label, {"go_to": ref}, "approach", ref, ref, r["id"])
+                if not group_key.startswith("thing:"):
+                    members = group_history(self.label(ref).casefold(), "approach")
+                    failed = any(hit for _, _, hit in members)
+                    worked = any(h.get("talked") or h.get("checked") is not None for _, h, _ in members)
+                    row["state"] = "failed" if failed else "worked" if worked else row["state"]
+                    others = [m for m in members if m[0] != ref]
+                    if others:
+                        outcome = next((hit.get("why") or "nothing changed" for _, _, hit in others if hit), None)
+                        if outcome is None: outcome = next((str(h.get("checked") or "no response") for _, h, _ in others if h.get("talked") or h.get("checked") is not None), "not checked or talked")
+                        row["notes"].append(f"{len(others)} other{'' if len(others) == 1 else 's'} named {self.label(ref)} here: {outcome}")
                 remembered.append((_yx(tile, r["name"]), row))
             remembered = [row for _, row in sorted(remembered, key=lambda t: t[0])]
             for direction, route in sorted(self.explore_dirs(place).items(), key=lambda item: _yx(item[1]["to"], item[0])):
                 label = f"explore {direction}, {route.get('steps', len(route['dirs']))} steps, {route.get('unseen', 0)} unexplored cells that way"
-                ref = f"explore:{place}:{direction.casefold()}"
+                ref = f"explore:{place}:{route['to'][0]},{route['to'][1]}"
+                # ponytail: changed frontiers can be retried; each failed route shrinks known frontiers.
                 explores.append(option("explore", label, {"go_to": "unexplored", "dir": direction}, "approach", "unexplored", ref))
             for p in self.mem.rows("places"):
                 pid = p["id"]

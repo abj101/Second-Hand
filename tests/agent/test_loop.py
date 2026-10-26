@@ -1925,21 +1925,27 @@ def test_go_to_unexplored_skips_a_frontier_whose_step_cell_is_held(tmp_path):
 
 def test_go_to_unexplored_direction_walks_route_and_marks_new_view(tmp_path, monkeypatch):
     from agent import loop as module
+    seen = {}
     class Recording(GridEnv):
         def __init__(self): super().__init__(); self.keys = []
         def press(self, key, frames=8, on_frame=None): self.keys.append(key); super().press(key, frames, on_frame)
     env = Recording(); env.door = (100, 100); per = env.perception()
     monkeypatch.setattr(module, "perceive", lambda *_: (per, reply({})))
-    monkeypatch.setattr(module, "act", lambda *a, **k: SimpleNamespace(place="", ops=[], action={"go_to": "unexplored", "dir": "RIGHT"}, expect="screen_changes", why="explore", text=None))
+    def choose(*args, **kwargs):
+        option = next(o for o in args[3] if o["tool"] == "explore")
+        seen["option"] = option
+        return SimpleNamespace(place="", ops=[], option=option["n"], action=option["action"], expect="screen_changes", why="explore", text=None)
+    monkeypatch.setattr(module, "act", choose)
     loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     route = {"dirs": ["RIGHT"] * 4, "to": (0, 0)}
     loop.world.explore_dirs = lambda place: {"RIGHT": route}
 
-    loop.step()
+    row = loop.step()
 
     assert env.keys == route["dirs"]
     assert loop.world.novel >= env.view_tiles[1]
+    assert row["choice"]["intent"] == seen["option"]["intent_key"]
 
 
 @pytest.mark.parametrize("action", [{"go_to": "npc"}, {"thing": 1, "verb": "approach"}, {"thing": 1, "verb": "interact"}])
