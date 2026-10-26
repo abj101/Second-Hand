@@ -61,6 +61,7 @@ E2 hardens `ask`:
 - r22: entities may carry "highlighted": true for the one selectable item under the cursor. select navigates by the
   selectables' grid geometry from the highlighted item to the target and reads the menu with a model call only when
   that is not determined.
+- r23: perception may carry "meters": [{name, value, max}] for labelled gauges/counters on screen; [] when none.
 
 ```python
 def perceive(model: Ollama, image: Image, context: str = "", *,
@@ -381,6 +382,8 @@ def describe(mem, place: str, pos: tuple[int, int]) -> str
 - **r18-fix3 (approved 2026-10-25):** since r18 a crossed (observed) exit is recorded on the tile the camera reached
   at the cut, i.e. the warp tile itself. `route` never steps onto an observed exit tile unless it is the goal; starting
   on one and the no-press-in-the-exit-direction rule are unchanged; inferred exits stay enterable.
+- r23: route is a cost search: walked floor (floor True) costs 1, any other non-refused cell costs UNKNOWN_COST; refusal
+  rules are unchanged. The walk-on past an explore target stops at the first cell route would refuse.
 
 ## predict
 
@@ -554,12 +557,19 @@ def act(model, image, perception: dict, notebook: str, facts: str, flags: list[s
   entered. T3 and T5 skip the 3-step floor (T2/T4 keep it). Known-place option rows are "worked" when visited and
   note "visited N×, last step S" plus what lies beyond.
 
+- r23: the notebook keeps the latest reading per meter name (status) and both focus renders show one "Status (last
+  seen)" line when any exists. No thresholds or advice.
+
 ## world
 
 World Memory, approved 2026-10-12. Design: [world-memory.md](world-memory.md); packets W0–W4. `agent/world.py`. No model calls; never reads RAM; never picks goals or filters options.
 
 ```python
 class World:
+    # r23: a newly written blocked edge counts as novelty for the step. explore_dirs takes the loop's fails and
+    # skips failed frontier targets while an untried one exists in that direction. A place displays its called name
+    # (said or text tier) before its picture name; identity and matching are unchanged. Odometer fate tags land on
+    # the logged segments. All grid mechanisms are inert when tile_px is None.
     # r22: an explore option's subject is its frontier cell (explore:{place}:{x},{y}), never a bare direction.
     # A same-name group row carries the group's history in this place (failed/worked + one note). A refuted exit's
     # act option is "failed" with its refutation reason; a crossing always wins.
