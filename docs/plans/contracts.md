@@ -566,7 +566,7 @@ World Memory, approved 2026-10-12. Design: [world-memory.md](world-memory.md); p
 
 ```python
 class World:
-    # r23: a newly written blocked edge counts as novelty for the step. explore_dirs takes the loop's fails and
+    # r23: a newly written blocked edge counts as novelty for an explore step only. explore_dirs takes the loop's fails and
     # skips failed frontier targets while an untried one exists in that direction. A place displays its called name
     # (said or text tier) before its picture name; identity and matching are unchanged. Odometer fate tags land on
     # the logged segments. All grid mechanisms are inert when tile_px is None.

@@ -71,10 +71,13 @@ Scope: mechanical errors only. The agent's **sense of direction** (it walked bac
   - (b) a vision walkability classifier: a model or game-specific guess where runtime evidence exists;
   - (c) ROM collision data: game-specific, forbidden in agent/.
 
-### T2, a new wall is novelty (F3)
+### T2, a new wall is novelty for explore intents only (F3; amended 2026-10-26 after T's second gate failure)
 - `World` counts blocked edges **newly added** this step (in the fold path, `space.fold` around `space.py:26-28`; count only `direction not in row["blocked"]` → appended) into a per-step count.
-- Loop `novel` (`loop.py:369`) also becomes true when that count is above 0.
-- A walk that wrote a wall is then `changed`, not `failed`, and sets no fail mark.
+- Loop `novel` (`loop.py:369`) also becomes true when that count is above 0, **but only when the step's intent is an explore intent** (target `unexplored`, ref `explore:{place}:{x},{y}`).
+  - For every other intent (approach a thing, buttons into a thing, exits, travel), verdicts, `fails` entries (`n`, `why`, `avoid`, `blocker`), `mark_unreached`, failure causes, planner evidence and no-change relations are byte-for-byte unchanged.
+  - **Why:** a bump on the way to a known thing is real evidence against that thing or route. Explore's subject is the unknown itself, so learning a wall there is the purpose.
+  - The first T attempt applied novelty to all intents. That erased "route blocked" causes, `avoid` tiles and the first "walked into" evidence (6 failures in `.tmp/r23/T/focused-failures.txt`).
+- An explore walk that wrote a wall is then `changed`, not `failed`, and sets no fail mark. T3 may re-offer the same target by the new route.
 - The existing safety net stays: `loop.py:389` fails a repeated blocked intent even when it revealed something.
 - **Bounded:** every edge can be written once, so the count cannot repeat for the same wall.
 
@@ -130,7 +133,7 @@ Under `## space` (end of section):
 ```
 Under `## world` (top of the class comment block):
 ```
-        # r23: a newly written blocked edge counts as novelty for the step. explore_dirs takes the loop's fails and
+        # r23: a newly written blocked edge counts as novelty for an explore step only. explore_dirs takes the loop's fails and
         # skips failed frontier targets while an untried one exists in that direction. A place displays its called name
         # (said or text tier) before its picture name; identity and matching are unchanged. Odometer fate tags land on
         # the logged segments. All grid mechanisms are inert when tile_px is None.
@@ -158,7 +161,7 @@ Under `## notebook and act` (end of section):
 - **T:**
   - assertions on exact `route()` paths where an equal-length BFS path now differs because of cost ties, or where a longer path over known floor now beats a shorter path over unknown cells;
   - explore option `to`/target assertions where a failed target is now skipped;
-  - verdict assertions that change from `failed` to `changed` because the step wrote a new wall;
+  - verdict assertions **on explore intents only** that change from `failed` to `changed` because the step wrote a new wall. Every non-explore failure assertion (verdict, `fails` n/why/avoid/blocker, causes, planner packet, relation `ev`) must pass unchanged;
   - the r22 T18G route-mock `to` field stays as approved.
 - **NO:**
   - place label strings `"<name>, maybe <called>"` → `"<called>"`;
@@ -172,7 +175,7 @@ Under `## notebook and act` (end of section):
 ### New tests (minimum)
 - **T:**
   1. `route` prefers a 5-step path over known floor to a 3-step path through unknown cells, and still crosses unknown cells when no floor path exists.
-  2. A step that writes a new blocked edge makes `novel` true and the verdict `changed`; bumping the same edge again does not.
+  2. An explore step that writes a new blocked edge makes `novel` true and the verdict `changed`; bumping the same edge again does not. A non-explore step (approach a thing) that writes a new wall keeps today's `failed` verdict, `fails` entry with `avoid`, and route-blocked cause.
   3. With `fails` holding a direction's best target, `explore_dirs` returns the next-best target in that direction, and the option row is `new`.
   4. With every target in a direction failed, the row is still present and `failed`.
   5. The walk past the target stops before a remembered static entity and before a blocked edge.
