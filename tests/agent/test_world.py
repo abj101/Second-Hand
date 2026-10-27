@@ -938,6 +938,25 @@ def test_joined_odometer_fates_update_source_logs_and_absent_odometer_is_inert(t
     assert no_odo.odometer_trace() is None and no_odo.odometer_segments() is None and no_odo.pos == (3, 4)
 
 
+def test_held_odometer_drop_is_logged_on_resolution_step(tmp_path):
+    mem, world = _odo_world(tmp_path); place(mem, "dest", "dest")
+    source = [{"start": i, "end": i, "moves": [], "_log": {"start": i, "screen": "world"}} for i in range(3)]
+    world._held = {"src": "other", "tile": (0, 0), "dir": None, "segments": source}
+    world._odo_stats = {"drained": True, "dropped": 0, "segments": [segment["_log"] for segment in source]}
+    earlier = json.dumps({"odometer": world.odometer_trace(), "segments": world.odometer_segments()})
+    world._odo_stats = {"drained": True, "dropped": 0, "segments": []}
+    world.before({"screen": "world", "entities": []}, "dest", "src", (160, 144), 2)
+    row = {"odometer": world.odometer_trace(), "segments": world.odometer_segments()}
+    assert all("fate" not in segment for segment in json.loads(earlier)["segments"])
+    assert row["odometer"]["dropped"] == sum(segment.get("fate") == "dropped" for segment in row["segments"]) == 3
+
+
+def test_held_odometer_repair_is_inert_without_odometer_or_held_segments(tmp_path):
+    mem = Memory(tmp_path); place(mem, "room", "room")
+    world = World(mem, None); world.odometer = None; world.pos = (3, 4)
+    assert world.odometer_trace() is None and world.odometer_segments() is None and world._held is None and world.pos == (3, 4)
+
+
 def test_said_and_legacy_called_names_are_shown_without_maybe(tmp_path):
     mem = Memory(tmp_path); place(mem, "room", "Room")
     entity(mem, "npc", "NPC", "room", [1, 0])

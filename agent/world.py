@@ -205,7 +205,9 @@ class World:
                 if held:
                     self._held = None
                     if self._odo_stats is None: self.odometer_begin()
-                    self._odo_stats["dropped"] += _log_count(held["segments"]); _fate(held["segments"], "dropped")
+                    logs = [log for segment in held["segments"] for log in (segment.get("_logs") or [segment.setdefault("_log", {})])]
+                    dropped = [dict(log, fate="dropped") for log in logs[:max(0, 40 - len(self._odo_stats["segments"]))]]
+                    self._odo_stats["segments"].extend(dropped); self._odo_stats["dropped"] += len(dropped); _fate(held["segments"], "dropped")
                 self.pos, self._odo_px = self._locate(place, frame), (0, 0)
             self.drift = self.drift_ref = None
             self._observed_per = None; self.tracker.clear()
