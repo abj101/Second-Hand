@@ -434,7 +434,7 @@ def test_untried_edge_into_a_seen_cell_is_not_unexplored_so_the_dead_end_fires(t
 
 def test_each_explore_direction_has_a_ref_and_concrete_action(tmp_path, monkeypatch):
     world = World(two_rooms(tmp_path, []), 16); world.current_place = "a"
-    world.explore_dirs = lambda place: {"UP": {"dirs": ["UP", "UP"], "unseen": 3, "to": [0, -2]}, "RIGHT": {"dirs": ["RIGHT"], "unseen": 1, "to": [2, 0]}}
+    world.explore_dirs = lambda place, fails=None: {"UP": {"dirs": ["UP", "UP"], "unseen": 3, "to": [0, -2]}, "RIGHT": {"dirs": ["RIGHT"], "unseen": 1, "to": [2, 0]}}
     per = {"screen": "world", "text": [], "entities": [player()]}
     rows = [o for o in world.options(per, "a", {}, 3, inputs=INPUTS) if o["tool"] == "explore"]
     assert [o["label"] for o in rows] == ["explore UP, 2 steps, 3 unexplored cells that way", "explore RIGHT, 1 steps, 1 unexplored cells that way"]
@@ -445,7 +445,7 @@ def test_each_explore_direction_has_a_ref_and_concrete_action(tmp_path, monkeypa
 def test_explore_retry_moves_to_a_new_frontier_in_the_same_direction(tmp_path):
     world = World(two_rooms(tmp_path, []), 16); world.current_place = "a"
     route = {"dirs": ["UP"], "unseen": 1, "to": [0, -2]}
-    world.explore_dirs = lambda place: {"UP": route}
+    world.explore_dirs = lambda place, fails=None: {"UP": route}
     per = {"screen": "world", "text": [], "entities": [player()]}
     old_ref = "explore:a:0,-2"
     fails = {fail_key("a", "approach", "unexplored", INPUTS, old_ref): {"why": "route blocked", "n": 1, "step": 3}}
@@ -752,3 +752,36 @@ def test_free_row_reports_and_clears_consecutive_no_response(tmp_path):
     assert "your last 2 presses changed nothing on screen" in free()["notes"]
     world.prepare(SimpleNamespace(moves=[{"dir": "UP", "shift": (0, -16)}]), "room", False, 3)
     assert not any("changed nothing" in note for note in free()["notes"])
+
+
+def test_explore_skips_failed_targets_and_keeps_failed_direction(tmp_path, monkeypatch):
+    from agent.world import fail_key
+    mem = two_rooms(tmp_path, [])
+    for pos in ((0, 0), (0, -1), (0, -2), (1, -2)):
+        mem.upsert("tiles", {"id": f"a@{pos[0]},{pos[1]}", "place": "a", "x": pos[0], "y": pos[1], "floor": True, "blocked": [], "pushed": [], "exit": None, "step": 1})
+    world = World(mem, 16); world.current_place, world.pos, world.size = "a", (0, 0), (48, 48)
+    candidates = {(0, -2), (1, -2)}
+    monkeypatch.setattr("agent.world.unexplored", lambda *_: candidates)
+    ref = lambda pos: f"explore:a:{pos[0]},{pos[1]}"
+    fails = {fail_key("a", "approach", "unexplored", INPUTS, ref((0, -2))): {"n": 1}}
+    assert world.explore_dirs("a", fails)["UP"]["to"] == (1, -2)
+    fails[fail_key("a", "approach", "unexplored", INPUTS, ref((1, -2)))] = {"n": 1}
+    per = {"screen": "world", "text": [], "entities": [player()]}
+    row = next(o for o in world.options(per, "a", fails, 3, inputs=INPUTS) if o["tool"] == "explore")
+    assert row["state"] == "failed" and row["ref"] in {ref((0, -2)), ref((1, -2))}
+
+
+def test_explore_walk_stops_at_blocked_edge_and_static_entity_and_none_grid_is_inert(tmp_path, monkeypatch):
+    mem = two_rooms(tmp_path, [])
+    for pos in ((0, 0), (0, -1)):
+        mem.upsert("tiles", {"id": f"a@{pos[0]},{pos[1]}", "place": "a", "x": pos[0], "y": pos[1], "floor": True, "blocked": ["UP"] if pos == (0, -1) else [], "pushed": [], "exit": None, "step": 1})
+    world = World(mem, 16); world.current_place, world.pos, world.size = "a", (0, 0), (48, 48)
+    monkeypatch.setattr("agent.world.unexplored", lambda *_: {(0, -1)})
+    assert world.explore_dirs("a")["UP"]["dirs"] == ["UP"]
+    mem.get("tiles", "a@0,-1")["blocked"] = []
+    mem.upsert("entities", {"id": "stone", "place": "a", "tile": [0, -2], "kind": "furniture", "state": "live"})
+    assert world.explore_dirs("a")["UP"]["dirs"] == ["UP"]
+    inert = World(mem, None); inert.current_place, inert.pos = "a", (0, 0)
+    assert inert.explore_dirs("a") == {}
+    per = {"screen": "world", "text": [], "entities": [player()]}
+    assert not [o for o in inert.options(per, "a", {}, 4, inputs=INPUTS) if o["tool"] == "explore"]

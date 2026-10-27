@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw
 from numpy import ndarray
 from agent.memory import ACTOR_KINDS, STATIC_GATE, TRANSIENT, _actor, _base, _distance, _is_exit as _memory_is_exit, _nameable, normalize_kind, place_aliases, place_name
 from agent.observer import changed, cut
-from agent.space import DIRS, exit_to, fold, frontier, mark_exit, outward, push_dirs, push_failed, route, tile_of
+from agent.space import DIRS, exit_to, fold, frontier, mark_exit, outward, push_dirs, push_failed, route, route_refuses, tile_of
 from agent.skills import SkillResult, approach, on_player, press
 from agent.track import Tracker
 
@@ -346,7 +346,7 @@ class World:
         x0, y0 = self.pos[0] - ax, self.pos[1] - ay
         return (x0, y0, x0 + width - 1, y0 + height - 1)
     def _record_view(self, per, frame, reused, place, size, step, anchor, ids):
-        self.novel = 0
+        self.novel = 0; self.new_walls = getattr(self.mem, "new_walls", 0); self.mem.new_walls = 0
         if self.unsettled:
             self._observed_per = None
             return
@@ -1492,7 +1492,7 @@ class World:
                         row["notes"].append(f"{len(others)} other{'' if len(others) == 1 else 's'} named {self.label(ref)} here: {outcome}")
                 remembered.append((_yx(tile, r["name"]), row))
             remembered = [row for _, row in sorted(remembered, key=lambda t: t[0])]
-            for direction, route in sorted(self.explore_dirs(place).items(), key=lambda item: _yx(item[1]["to"], item[0])):
+            for direction, route in sorted(self.explore_dirs(place, fails).items(), key=lambda item: _yx(item[1]["to"], item[0])):
                 label = f"explore {direction}, {route.get('steps', len(route['dirs']))} steps, {route.get('unseen', 0)} unexplored cells that way"
                 ref = f"explore:{place}:{route['to'][0]},{route['to'][1]}"
                 # ponytail: changed frontiers can be retried; each failed route shrinks known frontiers.
@@ -1523,19 +1523,30 @@ class World:
         return [{"n": n, **row} for n, row in enumerate(rows, 1)]
     def occupied(self, place):  # actors hold tiles of the current place only; another place's actors are stale
         return self.actor_tiles if place == self.current_place else frozenset()
-    def explore_dirs(self, place):
+    def explore_dirs(self, place, fails=None):
         if not self.tile_px: return {}
         span = [max(1, self.size[i] // self.tile_px // 2) for i in (0, 1)] if self.size else [4, 4]
-        candidates, routes = unexplored(self.mem, place), {}
+        candidates, routes, failed = unexplored(self.mem, place), {}, {}
+        fails = fails or {}
         unseen = Counter(d for target in candidates if (d := _direction(self.pos, target)))
         for target in sorted(candidates):
             direction = _direction(self.pos, target)
             if not direction: continue
             dirs = route(self.mem, place, self.pos, target, occupied=self.occupied(place))
-            if dirs is not None and (direction not in routes or (len(dirs), target) < (len(routes[direction][0]), routes[direction][1])):
-                routes[direction] = (dirs, target)
-        return {d: {"dirs": dirs + [d] * span[0 if d in ("LEFT", "RIGHT") else 1], "steps": len(dirs), "unseen": unseen[d], "to": target}
-                for d, (dirs, target) in routes.items()}
+            if dirs is None: continue
+            item = (dirs, target); key = f"explore:{place}:{target[0]},{target[1]}"
+            if fail_key(place, "approach", "unexplored", (), key) in fails:
+                if direction not in failed or (len(dirs), target) < (len(failed[direction][0]), failed[direction][1]): failed[direction] = item
+            elif direction not in routes or (len(dirs), target) < (len(routes[direction][0]), routes[direction][1]): routes[direction] = item
+        for direction, item in failed.items(): routes.setdefault(direction, item)
+        result = {}
+        for direction, (dirs, target) in routes.items():
+            tail, here = [], target
+            for _ in range(span[0 if direction in ("LEFT", "RIGHT") else 1]):
+                if route_refuses(self.mem, place, here, direction, occupied=self.occupied(place)): break
+                tail.append(direction); dx, dy = DIRS[direction]; here = here[0] + dx, here[1] + dy
+            result[direction] = {"dirs": dirs + tail, "steps": len(dirs), "unseen": unseen[direction], "to": target}
+        return result
     def beside(self, place, pos, tile):  # nearest reachable free tile beside tile and the direction that faces it: (stand, facing, dirs)
         rows = {(r["x"], r["y"]): r for r in self.mem.rows("tiles") if r.get("place") == place}; occupied = self.occupied(place); near = []
         for d, (dx, dy) in DIRS.items():

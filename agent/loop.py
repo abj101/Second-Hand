@@ -111,6 +111,7 @@ class Loop:
         return per, key, False, []
     def step(self):
         start, calls, self._seq0 = time.perf_counter(), self.model.calls, getattr(self.model, "seq", None)
+        self.world.new_walls = 0; self.mem.new_walls = 0
         self.world.odometer_begin()
         before_set = wait_settled(self.env); before = before_set.frame; prior = self.place
         self.observation_stamp = dict(before_set.frame_stamp) if before_set.frame_stamp else None
@@ -366,7 +367,8 @@ class Loop:
         closed = self.notebook.observe(self.step_no, f"place:{next_place}" if next_place else None)
         self._closed(closed, self.step_no)
         first_visit = (self.mem.get("places", next_place) or {}).get("first") == self.step_no
-        novel = bool(closed) or self.world.novel > 0 or verified_edge or (next_place != place and first_visit)
+        explore_wall = bool(getattr(self.world, "new_walls", 0) and choice and aff.get("target") == "unexplored" and str(intent).startswith(f"{place}|approach|explore:{place}:"))
+        novel = bool(closed) or self.world.novel > 0 or verified_edge or explore_wall or (next_place != place and first_visit)
         idle = bool((choice or s.get("pick_key")) and not skill.inputs and skill.status == "done")  # a picked option that sent no input yet "succeeded" did nothing: a failure of that option, so the menu changes (blocked/failed keep their own reason)
         idle |= bool(choice and skill.status == "done" and next_place == place and not scene_cut and sum((r.get("choice") or {}).get("intent") == intent and r.get("frame_hash") == s["frame_hash"] and r.get("execution") == "done" for r in self.recent) >= 2)  # the same action from the same screen for the third time in five steps changed nothing that lasts
         idle |= repeated  # this reply said the same thing as before
@@ -510,7 +512,7 @@ class Loop:
         result = self._screen_route(place, t, None if onto else push, [tuple(held)] if held else (), beside=beside) if t is not None and (push or beside or onto) else None
         return t, result, bool(t is not None and result is None or beside and t is None)
     def _unexplored(self, place, d=None):
-        routes = self.world.explore_dirs(place)
+        routes = self.world.explore_dirs(place, self.fails)
         return routes.get(d) if d is not None else min(routes.values(), key=lambda row: len(row["dirs"]), default=None)
 
     def _ground_far(self, ref, since):
