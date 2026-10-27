@@ -504,8 +504,8 @@ def test_name_op_names_a_place_and_resolves_its_guess(tmp_path):
 
     assert result[0]["result"] == "ok"
     assert loop.world.ref("LAB") == "place:hall"
-    assert loop.world.label("place:hall") == "Hall, maybe LAB"
-    assert loop.notebook.apply_ops([{"op": "name", "key": "unknown", "text": "X", "why": [key]}], 3)[0]["result"] == 'error: "unknown" names no known thing or place; closest: Hall, maybe LAB'
+    assert loop.world.label("place:hall") == "LAB"
+    assert loop.notebook.apply_ops([{"op": "name", "key": "unknown", "text": "X", "why": [key]}], 3)[0]["result"] == 'error: "unknown" names no known thing or place; closest: LAB'
 
 
 def test_name_error_lists_closest_label(tmp_path):
@@ -531,7 +531,7 @@ def test_name_of_another_place_reports_its_label(tmp_path):
 
     result = loop.notebook.apply_ops([{"op": "name", "key": "place:lab", "text": "LAB", "why": [key]}], 2)
 
-    assert result[0]["result"] == "ok (named Laboratory, maybe LAB, not where you are)"
+    assert result[0]["result"] == "ok (named LAB, not where you are)"
 
 
 def test_place_target_refused_where_you_are(tmp_path):

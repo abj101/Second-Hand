@@ -1213,7 +1213,7 @@ def test_descriptive_name_success_keeps_planner_success_semantics(tmp_path, monk
     monkeypatch.setattr(module, "plan", reply)
     row = loop.step()
     assert len(calls) == (3 if followup else 1) and loop.stuck.u == 0
-    assert row["plan"]["ops"][-1]["result"].startswith("ok (named Annex")
+    assert row["plan"]["ops"][-1]["result"].startswith("ok (named Sign")
 
 
 def test_zero_ok_stuck_plan_reply_increments_backoff(tmp_path, monkeypatch):
