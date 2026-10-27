@@ -103,7 +103,8 @@ def test_same_look_bump_avoids_wall_and_walking_makes_it_mixed(tmp_path):
     assert route(mem, "hall", (0, 0), (2, 0))[0] != "RIGHT"
     mem.learn_look("hall", (1, 1), "floor", 3)
     assert mem.looks.says("wall-look") == "mixed"
-    assert route(mem, "hall", (0, 0), (2, 0))[0] == "RIGHT"
+    path = route(mem, "hall", (0, 0), (2, 0))
+    assert len(path) == 4 and path[0] == "UP"
 
 
 def test_look_wall_fallback_keeps_a_route_when_it_is_the_only_corridor(tmp_path):
@@ -401,3 +402,24 @@ def test_tile_first_survives_later_saves(tmp_path):
     assert mem.get("tiles", "room@0,0")["first"] == 1
     fold(mem, "room", (0, 0), [("DOWN", (0, 0))], 16, 4)
     assert mem.get("tiles", "room@0,0")["first"] == 1
+
+
+def test_route_prefers_known_floor_over_unknown_and_keeps_unknown_fallback(tmp_path):
+    mem = Memory(tmp_path)
+    for pos in ((0, 0), (1, 0), (2, 0), (3, 0), (0, 1), (1, 1), (2, 1), (3, 1)):
+        tile(mem, "hall", pos, floor=True)
+    mem.get("tiles", "hall@1,0")["floor"] = None
+    mem.get("tiles", "hall@2,0")["floor"] = None
+    path = route(mem, "hall", (0, 0), (3, 0))
+    assert len(path) == 5 and path[0] == "DOWN"
+    for pos in ((0, 1), (1, 1), (2, 1), (3, 1)):
+        mem.get("tiles", f"hall@{pos[0]},{pos[1]}")["floor"] = False
+    assert route(mem, "hall", (0, 0), (3, 0)) == ["RIGHT", "RIGHT", "RIGHT"]
+
+
+def test_fold_counts_only_new_blocked_edges(tmp_path):
+    mem = Memory(tmp_path)
+    fold(mem, "hall", (0, 0), [("RIGHT", (0, 0))], 16, 1)
+    assert mem.new_walls == 1
+    fold(mem, "hall", (0, 0), [("RIGHT", (0, 0))], 16, 2)
+    assert mem.new_walls == 1

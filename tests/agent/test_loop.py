@@ -1939,7 +1939,7 @@ def test_go_to_unexplored_direction_walks_route_and_marks_new_view(tmp_path, mon
     loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
     loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
     route = {"dirs": ["RIGHT"] * 4, "to": (0, 0)}
-    loop.world.explore_dirs = lambda place: {"RIGHT": route}
+    loop.world.explore_dirs = lambda place, fails=None: {"RIGHT": route}
 
     row = loop.step()
 
@@ -1948,7 +1948,40 @@ def test_go_to_unexplored_direction_walks_route_and_marks_new_view(tmp_path, mon
     assert row["choice"]["intent"] == seen["option"]["intent_key"]
 
 
-@pytest.mark.parametrize("action", [{"go_to": "npc"}, {"thing": 1, "verb": "approach"}, {"thing": 1, "verb": "interact"}])
+def test_new_wall_is_novel_only_for_explore_and_repeat_block_still_fails(tmp_path, monkeypatch):
+    from agent import loop as module
+    env = GridEnv()
+    per = {"screen": "world", "text": [], "entities": [{"name": "player", "kind": "player", "at": [.5, .5]}]}
+    monkeypatch.setattr(module, "perceive", lambda *_: (per, reply(per)))
+    effects = iter(("screen_changes", "no_change", "no_change"))
+    monkeypatch.setattr(module, "effects", lambda *a, **k: {"effects": [next(effects)], "basis": {}, "to": None})
+    monkeypatch.setattr(module.Notebook, "observe", lambda *a, **k: [])
+    def act(*args, **kwargs):
+        option = next(o for o in args[3] if o["tool"] == "explore")
+        return SimpleNamespace(place="", ops=[], option=option["n"], action=dict(option["action"]), expect="screen_changes", why="explore", text=None)
+    monkeypatch.setattr(module, "act", act)
+    monkeypatch.setattr(module.World, "explore_dirs", lambda self, place, fails=None: {"UP": {"dirs": ["UP"], "steps": 1, "unseen": 1, "to": (22, 33)}})
+    statuses = iter(("done", "blocked", "blocked"))
+    def blocked(ctx, *_args, **_kwargs):
+        frame = ctx.env.screenshot(); status = next(statuses)
+        return SimpleNamespace(status=status, reason="no response" if status == "blocked" else "", inputs=1, calls=0, before=frame, after=frame, scroll=(0, 0), blank_seen=False, moves=[], failure={"stage": "route", "reason": "no response", "direction": "UP"} if status == "blocked" else None)
+    approach_stub(monkeypatch, blocked)
+    original = module.World.observe_after; walls = iter((0, 1, 0))
+    def observe_after(world, *args, **kwargs):
+        result = original(world, *args, **kwargs); world.novel = 0; world.new_walls = next(walls); return result
+    monkeypatch.setattr(module.World, "observe_after", observe_after)
+    loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
+    loop.notebook.observe = lambda *a, **k: []
+    loop.recent = []
+    loop.world.self_spot, loop.world._self_from_motion = [.5, .5], True
+    loop.step(); fresh = loop.step()
+    key = fresh["choice"]["intent"]
+    assert fresh["verdict"] == "changed" and key not in loop.fails
+    repeat = loop.step()
+    assert repeat["verdict"] == "failed" and loop.fails[key]["n"] == 1
+
+@pytest.mark.parametrize("action", [{"go_to":"npc"},{"thing":1,"verb":"approach"},{"thing":1,"verb":"interact"}])
+
 def test_on_screen_npc_routes_beside_it_facing_it_around_another_actor(tmp_path, monkeypatch, action):
     from agent import loop as module
     per = {"screen": "world", "text": [], "entities": [

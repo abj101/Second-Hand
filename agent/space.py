@@ -1,6 +1,7 @@
-from collections import deque; from agent.observer import snap
+from collections import deque; from heapq import heappop, heappush; from agent.observer import snap
 DIRS = {"UP": (0, -1), "DOWN": (0, 1), "LEFT": (-1, 0), "RIGHT": (1, 0)}
 _OPPOSITE = {"UP": "DOWN", "DOWN": "UP", "LEFT": "RIGHT", "RIGHT": "LEFT"}
+UNKNOWN_COST = 3  # ponytail: one constant; tune if detours over known floor grow too long.
 def _id(place, pos): return f"{place}@{pos[0]},{pos[1]}"
 def _get(mem, place, pos): return mem.get("tiles", _id(place, pos))
 def _new(place, pos, step): return {"id": _id(place, pos), "place": place, "x": pos[0], "y": pos[1], "floor": None, "blocked": [], "pushed": [], "exit": None, "step": step, "first": step}
@@ -25,7 +26,7 @@ def fold(mem, place, pos, moves, tile_px, step, actors: frozenset[tuple[int, int
         mem.learn_look(place, here, "floor", step)
         if shift == (0, 0) or shift == 0:
             if direction in row["blocked"] and step > row.get("walled", {}).get(direction, row["step"]) and direction not in row.get("firm", []): row.setdefault("firm", []).append(direction)
-            if direction not in row["blocked"]: row["blocked"].append(direction); row["step"] = step; row.setdefault("walled", {})[direction] = step
+            if direction not in row["blocked"]: row["blocked"].append(direction); row["step"] = step; row.setdefault("walled", {})[direction] = step; mem.new_walls = getattr(mem, "new_walls", 0) + 1
             dx, dy = DIRS[direction]; mem.learn_look(place, (here[0] + dx, here[1] + dy), "wall", step)
             _save(mem, row, before); continue
         if direction in row["blocked"]: row["blocked"].remove(direction)
@@ -52,30 +53,43 @@ def mark_exit(mem, place, tile, direction, to, arrive, step):
         if source == "observed" and way in row["pushed"]: row["pushed"].remove(way)
         row.update(exit={"dir": way, "to": dst, "arrive": list(dest), "src": source, "settled": source == "observed"}, floor=True, step=step); _save(mem, row, old)
 def exit_to(mem, place, tile, direction): row = _get(mem, place, tile); edge = row.get("exit") if row else None; return edge if edge and edge.get("dir") == direction else None
-def route(mem, place, start, goal, strict=True, *, occupied=frozenset()):  # strict: an inferred exit (the guessed way back) is avoided too, unless no route avoids it; occupied: tiles held by actors
+def _route_context(mem, place, start, goal, strict):
     from agent.memory import ACTOR_KINDS, TRANSIENT, _is_exit, normalize_kind
-    if goal in occupied: return None
     static = {tuple(r["tile"]) for r in mem.rows("entities") if r.get("place") == place and r.get("tile") and r.get("state") != "merged" and r.get("status") != "gone" and normalize_kind(r.get("kind")) not in ACTOR_KINDS | TRANSIENT and not _is_exit(r.get("kind"), r.get("name"))} if strict else set()
     if strict:
         for look in mem.rows("looks"):
-            at = (look["x"], look["y"]); tile = _get(mem, place, at) or {}
-            store = getattr(mem, "looks", None)
+            at = (look["x"], look["y"]); tile = _get(mem, place, at) or {}; store = getattr(mem, "looks", None)
             if look.get("place") == place and at != goal and tile.get("floor") is not True and not tile.get("exit") and store and store.says(look["look"]) == "wall": static.add(at)
-    # ponytail: O(cells) look scan per call; cache per step if routing gets slow.
     rows = [r for r in mem.rows("tiles") if r.get("place") == place]; xs = [start[0], goal[0], *(r["x"] for r in rows)]; ys = [start[1], goal[1], *(r["y"] for r in rows)]
-    bounds = (min(xs) - 1, max(xs) + 1, min(ys) - 1, max(ys) + 1); queue = deque([(start, [])]); seen = {start}
+    return static, (min(xs) - 1, max(xs) + 1, min(ys) - 1, max(ys) + 1)
+def _refuses(mem, place, at, direction, nxt, goal, occupied, static, bounds, strict):
+    row = _get(mem, place, at) or {}; cell = _get(mem, place, nxt); edge = row.get("exit") or {}
+    return (direction in row.get("blocked", []) and (strict or direction in row.get("firm", [])) or
+            (strict or edge.get("src") != "inferred") and direction == edge.get("dir") or
+            cell and (cell.get("exit") or {}).get("src") == "observed" and nxt != goal or nxt in occupied or
+            nxt in static and nxt != goal or cell and cell.get("floor") is False and nxt != goal or
+            not (bounds[0] <= nxt[0] <= bounds[1] and bounds[2] <= nxt[1] <= bounds[3]))
+def route_refuses(mem, place, at, direction, *, occupied=frozenset()):
+    dx, dy = DIRS[direction]; nxt = at[0] + dx, at[1] + dy
+    static, bounds = _route_context(mem, place, at, (nxt[0] + dx, nxt[1] + dy), True)
+    return _refuses(mem, place, at, direction, nxt, None, occupied, static, bounds, True)
+def route(mem, place, start, goal, strict=True, *, occupied=frozenset()):  # strict: inferred exits avoided when possible; occupied: tiles held by actors
+    if goal in occupied: return None
+    static, bounds = _route_context(mem, place, start, goal, strict)
+    # ponytail: O(cells) look scan per call; cache per step if routing gets slow.
+    queue = [(0, 0, 0, start, [])]; best = {start: (0, 0)}; serial = 0
     while queue:
-        at, path = queue.popleft()
+        cost, unknown, _, at, path = heappop(queue)
+        if (cost, unknown) != best[at]: continue
         if at == goal: return path
-        row = _get(mem, place, at) or {}
         for direction, (dx, dy) in DIRS.items():
-            nxt = (at[0] + dx, at[1] + dy)
-            cell = _get(mem, place, nxt)
-            edge = row.get("exit") or {}
-            # ponytail: old observed exits may be pressed-from tiles, so detour around them until cut landing semantics are stored.
-            if direction in row.get("blocked", []) and (strict or direction in row.get("firm", [])) or (strict or edge.get("src") != "inferred") and direction == edge.get("dir") or cell and (cell.get("exit") or {}).get("src") == "observed" and nxt != goal or nxt in seen or nxt in occupied or nxt in static and nxt != goal or cell and cell.get("floor") is False and nxt != goal or not (bounds[0] <= nxt[0] <= bounds[1] and bounds[2] <= nxt[1] <= bounds[3]): continue
-            seen.add(nxt); queue.append((nxt, path + [direction]))
+            nxt = at[0] + dx, at[1] + dy
+            if _refuses(mem, place, at, direction, nxt, goal, occupied, static, bounds, strict): continue
+            cell = _get(mem, place, nxt) or {}; next_unknown = unknown + (cell.get("floor") is not True); score = (cost + (1 if cell.get("floor") is True else UNKNOWN_COST), next_unknown)
+            if score >= best.get(nxt, (float("inf"), float("inf"))): continue
+            best[nxt] = score; serial += 1; heappush(queue, (*score, serial, nxt, path + [direction]))
     return route(mem, place, start, goal, False, occupied=occupied) if strict else None
+
 def outward(mem, place, tile, placement=None):
     if placement in ("top wall", "bottom wall", "left wall", "right wall"): return {"top wall": "UP", "bottom wall": "DOWN", "left wall": "LEFT", "right wall": "RIGHT"}[placement]
     floors = [r for r in mem.rows("tiles") if r.get("place") == place and r.get("floor") is True]
