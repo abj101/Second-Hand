@@ -205,7 +205,7 @@ def test_twenty_steps_have_contract_keys_and_reuse(tmp_path):
     from collections import deque
     class Roles(StubModel):
         def __init__(self):
-            observed = perception(); observed["meters"] = [{"name": "HP", "value": 5, "max": 20}]
+            observed = perception(); observed["meters"] = [{"name": "HP", "value": 5, "max": 20}]; observed["text"] = [*observed.get("text", []), "HP 5/20"]
             super().__init__([]); self.replies = {"perceiver": deque([reply(observed), reply(perception())]),
                                                    "act": deque(act_reply(None) for _ in range(20))}
         def ask(self, *args, **kwargs):

@@ -6,6 +6,8 @@ normalized to [0, 1] screen fractions. Nothing returned is a fact until it is ve
 
 from __future__ import annotations
 
+import re
+
 from PIL import Image
 
 from agent.locate import rulers
@@ -75,6 +77,11 @@ def _point(value) -> list[float] | None:
     return [min(max(x / 1000, 0.0), 1.0), min(max(y / 1000, 0.0), 1.0)]
 
 
+def _printed(meter, text: str) -> bool:  # a meter counts only when its digits appear in the screen's text: a bar without numbers or a guess is dropped
+    number = lambda v: rf"(?<![\d.]){re.escape(f'{v:g}')}(?![\d.])"
+    return re.search(number(meter["value"]) + (rf"\s*/\s*{number(meter['max'])}" if meter["max"] is not None else ""), text) is not None
+
+
 def normalize(data: dict | None) -> dict:
     """Model JSON -> screen fractions; drops rows without a usable point. Never raises on bad output."""
     data = data or {}
@@ -88,7 +95,8 @@ def normalize(data: dict | None) -> dict:
         out["meters"] = [{"name": m["name"].strip(), "value": m["value"], "max": m["max"]} for m in meters
                           if isinstance(m, dict) and isinstance(m.get("name"), str) and m["name"].strip()
                           and isinstance(m.get("value"), (int, float)) and not isinstance(m["value"], bool)
-                          and "max" in m and (m["max"] is None or isinstance(m["max"], (int, float)) and not isinstance(m["max"], bool))]
+                          and "max" in m and (m["max"] is None or isinstance(m["max"], (int, float)) and not isinstance(m["max"], bool))
+                          and _printed(m, " ".join(out["text"]))]
     for e in data.get("entities") or []:
         if isinstance(e, dict) and (at := _point(e.get("at"))):
             out["entities"].append({"kind": str(e.get("kind") or ""), "name": str(e.get("name") or ""), "at": at,

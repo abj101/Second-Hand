@@ -84,4 +84,12 @@ def test_meters_are_optional_and_normalized():
     from agent.perceive import normalize, SCHEMA
     assert "meters" not in normalize({"text": ["plain screen"]})
     assert SCHEMA["properties"]["meters"]["items"]["required"] == ["name", "value", "max"]
-    assert normalize({"meters": [{"name": " HP ", "value": 2, "max": 21}, {"name": "bad", "value": True, "max": 4}, {"name": "bad"}]})["meters"] == [{"name": "HP", "value": 2, "max": 21}]
+    assert normalize({"text": ["HP: 2/ 21"], "meters": [{"name": " HP ", "value": 2, "max": 21}, {"name": "bad", "value": True, "max": 4}, {"name": "bad"}]})["meters"] == [{"name": "HP", "value": 2, "max": 21}]
+
+
+def test_meters_need_their_digits_on_screen():
+    from agent.perceive import normalize
+    text = ["RATTATA :L3", "HP:", "CHARMANDER", "TYPE/ NORMAL 32/35", "16/ 19", "LEVEL 5"]
+    meters = [{"name": "Charmander HP", "value": 16, "max": 19}, {"name": "Rattata HP", "value": 1, "max": 7},
+              {"name": "Rattata HP", "value": 3, "max": 5}, {"name": "Level", "value": 5, "max": None}, {"name": "Gold", "value": 9, "max": None}]
+    assert normalize({"text": text, "meters": meters})["meters"] == [meters[0], meters[3]]  # a guessed bar value (1/7), 3/5 from "32/35", and an unprinted 9 are dropped
