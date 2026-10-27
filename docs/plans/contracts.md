@@ -61,7 +61,7 @@ E2 hardens `ask`:
 - r22: entities may carry "highlighted": true for the one selectable item under the cursor. select navigates by the
   selectables' grid geometry from the highlighted item to the target and reads the menu with a model call only when
   that is not determined.
-- r23: perception may carry "meters": [{name, value, max}] for labelled gauges/counters on screen; [] when none.
+- r24: perception may carry "fields": [{owner, label, kind: bar|number, value?, box}]; a number keeps its value only when its digits are in the screen text; a bar's value is never taken from the model.
 
 ```python
 def perceive(model: Ollama, image: Image, context: str = "", *,
@@ -181,6 +181,7 @@ def cut(a: Image, b: Image, blank_seen: bool = False) -> bool    # scene cut: bl
 - **Settling:** a frame is quiet if its hash equals a frame already seen in the last `quiet` frames. Animated tiles cycle through the same frames, while text printing and fades don't. The screen is settled after `quiet` consecutive quiet frames. **Never** settle on a near-uniform frame (≥ 95% one colour).
 - **r18 (approved 2026-10-24):** a `Settle` is evidence for the skill that waited (quiet, blank, arrival frame); the player's position never comes from a `Settle`. Position comes from the per-frame odometer (see [world](#world)), so a settle that stops at `max_frames` mid-walk loses no motion.
 - **Places before E3 memory exists:** callers keep a counter and start a new place id on every `cut()`. From E3 on, `Memory.match_place` uses the same `cut` as its trigger (see [memory](#memory)).
+- r24: bar_fill(image, box) -> fraction | None: the longest single-colour horizontal run in the padded box is the outline; fill is the leading run under it.
 
 ## skills
 
@@ -559,6 +560,7 @@ def act(model, image, perception: dict, notebook: str, facts: str, flags: list[s
 
 - r23: the notebook keeps the latest reading per meter name (status) and both focus renders show one "Status (last
   seen)" line when any exists. No thresholds or advice.
+- r24: status readings come from fields; a bar's reading is its pixel fill (bar_fill) as a percentage with unit "%".
 
 ## world
 
