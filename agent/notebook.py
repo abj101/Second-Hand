@@ -29,12 +29,13 @@ class Notebook:
             loaded = {}
         if isinstance(loaded, dict) and isinstance(loaded.get("text"), list) and isinstance(loaded.get("quests"), list):
             self.data = {"text": loaded["text"], "quests": loaded["quests"], "last": loaded.get("last", {}), "here": loaded.get("here"),
-                         "moves": loaded.get("moves", [])}
+                         "moves": loaded.get("moves", []), "status": loaded.get("status", {})}
             if not isinstance(self.data["last"], dict): self.data["last"] = {}
             if not isinstance(self.data["moves"], list): self.data["moves"] = []
+            if not isinstance(self.data["status"], dict): self.data["status"] = {}
             self.log = loaded.get("log", [])
         else:
-            self.data = {"text": [], "quests": [], "last": {}, "here": None, "moves": []}
+            self.data = {"text": [], "quests": [], "last": {}, "here": None, "moves": [], "status": {}}
             self.log = []
         if not isinstance(self.log, list): self.log = []
 
@@ -45,6 +46,21 @@ class Notebook:
 
     def focused_quest(self):
         return next((q for q in self.data["quests"] if q.get("status") == "open"), None)
+
+    def status(self, meters, step):
+        if not isinstance(meters, list): return
+        valid = []
+        for meter in meters:
+            if not isinstance(meter, dict) or not isinstance(meter.get("name"), str) or not meter["name"].strip(): continue
+            name, value, maximum = meter["name"].strip(), meter.get("value"), meter.get("max")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or (maximum is not None and (isinstance(maximum, bool) or not isinstance(maximum, (int, float)))): continue
+            valid.append((name, value, maximum))
+        if not valid: return
+        latest = self.data.setdefault("status", {})
+        for name, value, maximum in valid:
+            latest.pop(name, None)
+            latest[name] = {"value": value, "max": maximum, "step": step}
+        self._save([{"step": step, "op": "status", "value": latest}])
 
     def _known_key(self, key):
         return any(row.get("key") == key for row in self.data["text"] if isinstance(row, dict))
@@ -283,6 +299,8 @@ class Notebook:
         lines = [f"Your last ops (step {last.get('step', 0)}):"]
         lines.extend(f"- {row.get('op')} {row.get('key')}: {row.get('result')}" for row in last.get("results", []))
         lines.extend(["Your last why:", str(last.get("why", "")), "Open quests (first is worked on now):"])
+        status = list(d.get("status", {}).items())[-4:][::-1]
+        if status: lines.append("Status (last seen): " + "; ".join(f"{name} {row['value']}/{row['max']} (step {row['step']})" if row.get("max") is not None else f"{name} {row['value']} (step {row['step']})" for name, row in status))
         for q in open_quests:
             target = f" [target: {self.label(q['target'])}]" if q.get("target") else ""
             lines.append(f"- {q['key']}: {q['text']}{target}")
@@ -307,6 +325,8 @@ class Notebook:
     def render_focus(self, label, recent=None) -> str:
         quest = self.focused_quest()
         lines = []
+        status = list(self.data.get("status", {}).items())[-4:][::-1]
+        if status: lines.append("Status (last seen): " + "; ".join(f"{name} {row['value']}/{row['max']} (step {row['step']})" if row.get("max") is not None else f"{name} {row['value']} (step {row['step']})" for name, row in status))
         if quest:
             target = quest.get("target")
             done_when = ""

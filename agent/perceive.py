@@ -35,12 +35,18 @@ List every visible passage (door, stairs, door mat, opening) as an entity named 
 - Set "selectable": true only for an item the player can choose right now in a menu, list, or yes/no prompt, and set "highlighted": true only for the selectable item currently under the cursor; omit scenery, characters, objects behind dialogue box, text, and cursors."""
 
 _POINT = {"type": "array", "items": {"type": "number"}}
+METERS_SENTENCE = '- "meters": every labelled gauge or counter on screen that measures something about a character or the player (a bar or "value/max" numbers), with its owner and label as name, e.g. {"name": "<owner> <label>", "value": 7, "max": 20}; [] when none.'
+PROMPT += "\n" + METERS_SENTENCE
+
 SCHEMA = {
     "type": "object",
     "properties": {
         "screen": {"type": "string", "enum": ["world", "dialogue", "menu", "keyboard", "battle", "title", "other"]},
         "place": {"type": ["string", "null"]},
         "text": {"type": "array", "items": {"type": "string"}},
+        "meters": {"type": "array", "items": {"type": "object", "properties": {
+            "name": {"type": "string"}, "value": {"type": "number"}, "max": {"type": ["number", "null"]}},
+            "required": ["name", "value", "max"]}},
         "entities": {"type": "array", "items": {"type": "object", "properties": {
             "kind": {"type": "string"}, "name": {"type": "string"}, "at": _POINT, "placement": {"type": "string", "enum": list(PLACEMENTS)}, "selectable": {"type": "boolean"}, "highlighted": {"type": "boolean"}},
             "required": ["kind", "name", "at"]}},
@@ -77,6 +83,12 @@ def normalize(data: dict | None) -> dict:
     screen = data.get("screen")
     out = {"screen": screen if screen in ("world", "dialogue", "menu", "keyboard", "battle", "title", "other") else "other", "text": [str(t) for t in text if t],
            "entities": [], **({"place": data["place"].strip()[:40]} if isinstance(data.get("place"), str) and data["place"].strip() else {})}
+    meters = data.get("meters")
+    if isinstance(meters, list):
+        out["meters"] = [{"name": m["name"].strip(), "value": m["value"], "max": m["max"]} for m in meters
+                          if isinstance(m, dict) and isinstance(m.get("name"), str) and m["name"].strip()
+                          and isinstance(m.get("value"), (int, float)) and not isinstance(m["value"], bool)
+                          and "max" in m and (m["max"] is None or isinstance(m["max"], (int, float)) and not isinstance(m["max"], bool))]
     for e in data.get("entities") or []:
         if isinstance(e, dict) and (at := _point(e.get("at"))):
             out["entities"].append({"kind": str(e.get("kind") or ""), "name": str(e.get("name") or ""), "at": at,

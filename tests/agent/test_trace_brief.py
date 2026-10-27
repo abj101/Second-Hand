@@ -28,4 +28,4 @@ def test_prompt_version_tracks_exit_knowledge(tmp_path):
     from agent.memory import Memory
     from tests.agent.fakes import GridEnv, StubModel
 
-    assert Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid").prompt_version == "e5-perceiver-11"
+    assert Loop(GridEnv(), StubModel([]), Memory(tmp_path / "memory"), "grid").prompt_version == "e5-perceiver-12"

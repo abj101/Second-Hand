@@ -205,7 +205,8 @@ def test_twenty_steps_have_contract_keys_and_reuse(tmp_path):
     from collections import deque
     class Roles(StubModel):
         def __init__(self):
-            super().__init__([]); self.replies = {"perceiver": deque([reply(perception()), reply(perception())]),
+            observed = perception(); observed["meters"] = [{"name": "HP", "value": 5, "max": 20}]
+            super().__init__([]); self.replies = {"perceiver": deque([reply(observed), reply(perception())]),
                                                    "act": deque(act_reply(None) for _ in range(20))}
         def ask(self, *args, **kwargs):
             if kwargs["role"] == "plan": return SimpleNamespace(data={"goals": [], "focus": "", "why": "stub"}, text="")
@@ -217,6 +218,7 @@ def test_twenty_steps_have_contract_keys_and_reuse(tmp_path):
     assert model.calls == 21 and rows[1]["perception_reused"] and rows[1]["calls"] == 1
     assert rows[0]["calls"] == 2 and not rows[0]["perception_reused"]
     assert sum(row["calls"] == 2 for row in rows) == 1  # initial perception plus action
+    assert loop.notebook.data["status"]["HP"] == {"value": 5, "max": 20, "step": 1}
 
 def test_act_receives_controls_as_text(tmp_path, monkeypatch):
     from agent import loop as loop_module
@@ -516,7 +518,7 @@ def test_perceiver_guides_whole_name_entry(tmp_path):
     assert "visible editable text field with its on-screen keyboard" not in model.prompt
     assert "Previous-place memory is reference only" not in model.prompt
     assert 'List every visible passage (door, stairs, door mat, opening) as an entity named "exit: <what it is>"' in model.prompt
-    assert loop.prompt_version == "e5-perceiver-11"
+    assert loop.prompt_version == "e5-perceiver-12"
 
 def test_dialogue_opening_over_world_keeps_place(tmp_path, monkeypatch):
     from agent import loop as loop_module
@@ -2713,3 +2715,18 @@ def test_unflagged_text_is_kept_without_a_plan_and_dialogue_flag_survives_flush(
     loop._learn([], [], 3, "room", "world")
     assert loop.events[-1]["replan"] is True
     assert "A guide speaks." in loop._plan_trigger({"screen": "world"})
+
+
+def test_captured_act_prompt_contains_status_meter(tmp_path):
+    from agent.act import act
+
+    class Capture(StubModel):
+        def ask(self, *args, **kwargs):
+            self.prompt = args[1]
+            return reply({"i": 1, "why": "Recorded status."})
+
+    model, nb = Capture([]), Notebook(tmp_path / "memory")
+    nb.status([{"name": "CHAMP HP", "value": 2, "max": 21}], 262)
+    act(model, {"screen": "battle", "text": []}, nb.render_focus(lambda ref: str(ref), recent=[]),
+        [{"n": 1, "label": "Wait", "action": None, "tool": "approach"}], [], "")
+    assert "Status (last seen): CHAMP HP 2/21 (step 262)" in model.prompt

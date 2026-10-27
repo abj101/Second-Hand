@@ -78,3 +78,10 @@ def test_dialogue_over_furniture_has_no_selectable_flags():
     out = normalize(perception)
     assert out["screen"] == "dialogue" and len(out["entities"]) == 3
     assert all("selectable" not in e for e in out["entities"])
+
+
+def test_meters_are_optional_and_normalized():
+    from agent.perceive import normalize, SCHEMA
+    assert "meters" not in normalize({"text": ["plain screen"]})
+    assert SCHEMA["properties"]["meters"]["items"]["required"] == ["name", "value", "max"]
+    assert normalize({"meters": [{"name": " HP ", "value": 2, "max": 21}, {"name": "bad", "value": True, "max": 4}, {"name": "bad"}]})["meters"] == [{"name": "HP", "value": 2, "max": 21}]
