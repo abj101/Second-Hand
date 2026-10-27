@@ -1968,10 +1968,11 @@ def test_new_wall_is_novel_only_for_explore_and_repeat_block_still_fails(tmp_pat
         frame = ctx.env.screenshot(); status = next(statuses)
         return SimpleNamespace(status=status, reason="no response" if status == "blocked" else "", inputs=1, calls=0, before=frame, after=frame, scroll=(0, 0), blank_seen=False, moves=[], failure={"stage": "route", "reason": "no response", "direction": "UP"} if status == "blocked" else None)
     approach_stub(monkeypatch, blocked)
-    original = module.World.observe_after; walls = iter((0, 1, 0))
+    original = module.World.observe_after; walls = iter((0, 1, 0)); wrote = [0]
     def observe_after(world, *args, **kwargs):
-        result = original(world, *args, **kwargs); world.novel = 0; world.new_walls = next(walls); return result
+        result = original(world, *args, **kwargs); world.novel = 0; wrote[0] = next(walls); return result
     monkeypatch.setattr(module.World, "observe_after", observe_after)
+    monkeypatch.setattr(module, "walls_written", lambda mem, place, step: wrote[0])
     loop = Loop(env, StubModel([]), Memory(tmp_path / "memory"), "grid")
     loop.notebook.observe = lambda *a, **k: []
     loop.recent = []

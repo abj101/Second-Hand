@@ -12,7 +12,7 @@ from agent.predict import PRED, effects, result as action_result
 from agent.skills import Ctx, SkillResult, press_seq, run_affordance, wait_until
 from agent.tasks import STALL, Stuck
 from agent.trace import Trace
-from agent.space import DIRS, outward, push_dirs, route
+from agent.space import DIRS, outward, push_dirs, route, walls_written
 from agent.world import World, fail_key
 CAPTION = 'The sprite inside the red box is the player\'s own character (you); list it with kind "player".'
 def failure_cause(intent, label, stage, reason, tile=None, blocker=None):
@@ -111,7 +111,6 @@ class Loop:
         return per, key, False, []
     def step(self):
         start, calls, self._seq0 = time.perf_counter(), self.model.calls, getattr(self.model, "seq", None)
-        self.world.new_walls = 0; self.mem.new_walls = 0
         self.world.odometer_begin()
         before_set = wait_settled(self.env); before = before_set.frame; prior = self.place
         self.observation_stamp = dict(before_set.frame_stamp) if before_set.frame_stamp else None
@@ -368,7 +367,7 @@ class Loop:
         closed = self.notebook.observe(self.step_no, f"place:{next_place}" if next_place else None)
         self._closed(closed, self.step_no)
         first_visit = (self.mem.get("places", next_place) or {}).get("first") == self.step_no
-        explore_wall = bool(getattr(self.world, "new_walls", 0) and choice and aff.get("target") == "unexplored" and str(intent).startswith(f"{place}|approach|explore:{place}:"))
+        explore_wall = bool(choice and aff.get("target") == "unexplored" and str(intent).startswith(f"{place}|approach|explore:{place}:") and walls_written(self.mem, place, self.step_no))
         novel = bool(closed) or self.world.novel > 0 or verified_edge or explore_wall or (next_place != place and first_visit)
         idle = bool((choice or s.get("pick_key")) and not skill.inputs and skill.status == "done")  # a picked option that sent no input yet "succeeded" did nothing: a failure of that option, so the menu changes (blocked/failed keep their own reason)
         idle |= bool(choice and skill.status == "done" and next_place == place and not scene_cut and sum((r.get("choice") or {}).get("intent") == intent and r.get("frame_hash") == s["frame_hash"] and r.get("execution") == "done" for r in self.recent) >= 2)  # the same action from the same screen for the third time in five steps changed nothing that lasts

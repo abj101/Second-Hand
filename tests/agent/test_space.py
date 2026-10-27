@@ -1,7 +1,7 @@
 import pytest
 
 from agent.memory import Looks, Memory
-from agent.space import DIRS, exit_to, fold, frontier, mark_exit, outward, route, tile_of
+from agent.space import DIRS, exit_to, fold, frontier, mark_exit, outward, route, tile_of, walls_written
 from agent.world import World
 
 
@@ -420,6 +420,6 @@ def test_route_prefers_known_floor_over_unknown_and_keeps_unknown_fallback(tmp_p
 def test_fold_counts_only_new_blocked_edges(tmp_path):
     mem = Memory(tmp_path)
     fold(mem, "hall", (0, 0), [("RIGHT", (0, 0))], 16, 1)
-    assert mem.new_walls == 1
+    assert walls_written(mem, "hall", 1) == 1
     fold(mem, "hall", (0, 0), [("RIGHT", (0, 0))], 16, 2)
-    assert mem.new_walls == 1
+    assert walls_written(mem, "hall", 2) == 0

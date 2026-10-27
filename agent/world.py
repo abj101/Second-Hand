@@ -350,7 +350,7 @@ class World:
         x0, y0 = self.pos[0] - ax, self.pos[1] - ay
         return (x0, y0, x0 + width - 1, y0 + height - 1)
     def _record_view(self, per, frame, reused, place, size, step, anchor, ids):
-        self.novel = 0; self.new_walls = getattr(self.mem, "new_walls", 0); self.mem.new_walls = 0
+        self.novel = 0
         if self.unsettled:
             self._observed_per = None
             return

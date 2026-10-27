@@ -26,7 +26,7 @@ def fold(mem, place, pos, moves, tile_px, step, actors: frozenset[tuple[int, int
         mem.learn_look(place, here, "floor", step)
         if shift == (0, 0) or shift == 0:
             if direction in row["blocked"] and step > row.get("walled", {}).get(direction, row["step"]) and direction not in row.get("firm", []): row.setdefault("firm", []).append(direction)
-            if direction not in row["blocked"]: row["blocked"].append(direction); row["step"] = step; row.setdefault("walled", {})[direction] = step; mem.new_walls = getattr(mem, "new_walls", 0) + 1
+            if direction not in row["blocked"]: row["blocked"].append(direction); row["step"] = step; row.setdefault("walled", {})[direction] = step
             dx, dy = DIRS[direction]; mem.learn_look(place, (here[0] + dx, here[1] + dy), "wall", step)
             _save(mem, row, before); continue
         if direction in row["blocked"]: row["blocked"].remove(direction)
@@ -115,3 +115,4 @@ def frontier(mem, place):
             edge = row.get("exit") or {}
             if direction not in row.get("blocked", []) and direction not in row.get("pushed", []) and (edge.get("src") == "inferred" or direction != edge.get("dir")) and not _get(mem, place, (row["x"] + dx, row["y"] + dy)): result.append(((row["x"], row["y"]), direction))
     return result
+def walls_written(mem, place, step): return sum(v == step for r in mem.rows("tiles") if r.get("place") == place for v in r.get("walled", {}).values())  # blocked edges in place first written at step
