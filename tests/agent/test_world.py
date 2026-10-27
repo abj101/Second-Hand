@@ -951,6 +951,28 @@ def test_held_odometer_drop_is_logged_on_resolution_step(tmp_path):
     assert row["odometer"]["dropped"] == sum(segment.get("fate") == "dropped" for segment in row["segments"]) == 3
 
 
+def test_held_segments_dropped_on_same_place_return_are_logged_on_resolution_step(tmp_path):
+    mem, world = _odo_world(tmp_path)
+    source = [{"start": i, "end": i, "moves": [], "_screen": {"screen": "battle"}, "_place": "room", "_log": {"start": i, "screen": "battle"}} for i in range(3)]
+    world._held = {"src": "room", "tile": (0, 0), "dir": None, "segments": source}
+    world._odo_stats = {"drained": True, "dropped": 0, "segments": [segment["_log"] for segment in source]}
+    earlier = json.dumps({"odometer": world.odometer_trace(), "segments": world.odometer_segments()})
+    world._odo_stats = {"drained": True, "dropped": 0, "segments": []}
+    world.before({"screen": "world", "entities": []}, "room", "room", (160, 144), 2)
+    row = {"odometer": world.odometer_trace(), "segments": world.odometer_segments()}
+    assert all("fate" not in segment for segment in json.loads(earlier)["segments"])
+    assert row["odometer"]["dropped"] == sum(segment.get("fate") == "dropped" for segment in row["segments"]) == len(source)
+
+
+def test_dropped_counter_counts_past_the_log_cap(tmp_path):
+    mem, world = _odo_world(tmp_path); place(mem, "dest", "dest")
+    source = [{"start": i, "end": i, "moves": [], "_log": {"start": i, "screen": "world"}} for i in range(45)]
+    world._held = {"src": "other", "tile": (0, 0), "dir": None, "segments": source}
+    world._odo_stats = {"drained": True, "dropped": 0, "segments": []}
+    world.before({"screen": "world", "entities": []}, "dest", "src", (160, 144), 2)
+    assert world.odometer_trace()["dropped"] == 45 and len(world.odometer_segments()) <= 40
+
+
 def test_held_odometer_repair_is_inert_without_odometer_or_held_segments(tmp_path):
     mem = Memory(tmp_path); place(mem, "room", "room")
     world = World(mem, None); world.odometer = None; world.pos = (3, 4)
