@@ -596,11 +596,6 @@ def om_talk(run):
     print(f"requests={counter['requests']}")
     return 0 if target and any(str(e.get("called", "")).casefold() == "mom" for e in called) and later else 1
 
-def _om_scratch(name):
-    root = Path(".tmp/om").resolve(); target = (root / name).resolve()
-    if target == root or root not in target.parents: raise ValueError(f"unsafe OM scratch path: {target}")
-    return target
-
 def _qs6_scratch(name):
     root = Path(".tmp/qs/qs6").resolve(); target = (root / name).resolve()
     if target == root or root not in target.parents: raise ValueError(f"unsafe QS.6 scratch path: {target}")

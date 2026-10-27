@@ -73,3 +73,7 @@ Thumbs.db
 /inspect_*.txt
 /scripts/_tmp_*.py
 /tests/fixtures/affordance/affordance/
+
+# Coverage output
+.coverage
+htmlcov/

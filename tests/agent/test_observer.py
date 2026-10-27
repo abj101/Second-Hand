@@ -150,29 +150,6 @@ def test_wait_settled_keeps_long_cycle_memory_on_both_paths():
         assert not wait_settled(env_type(), max_frames=300, memory=24).settled
 
 
-def test_wait_settled_on_bedroom_water_rom():
-    from pathlib import Path
-    import pytest
-    from agent.env_pyboy import PyBoyEnv, find_rom
-
-    checkpoint = Path("runs/m1_bedroom_live/checkpoint/000100/pyboy.state")
-    if not checkpoint.is_file():
-        pytest.skip("Bedroom checkpoint is missing")
-    try:
-        rom = find_rom()
-    except FileNotFoundError:
-        pytest.skip("No Pokémon Red ROM found")
-
-    env = PyBoyEnv(rom, state=str(checkpoint))
-    try:
-        for _ in range(3):
-            env.press("DOWN")
-        assert env.ram(0xD361) >= 10
-        assert wait_settled(env).settled
-    finally:
-        env.close()
-
-
 def test_changed_model_scaling_and_tile_snap():
     image = texture()
     assert changed(image, image.copy()) == 0

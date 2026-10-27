@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from agent import tasks
 from agent.predict import result
 from agent.tasks import Stuck
@@ -55,9 +57,8 @@ def test_stuck_roundtrips_only_current_state_keys():
 
 
 def _m1_replay(rows, k):
-    old = tasks.STALL
-    tasks.STALL = k
-    try:
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(tasks, "STALL", k)
         stuck, fires = Stuck(), []
         for row in rows:
             effects = [e for e in row["outcome"]["effects"] if not e.startswith("entity_")]
@@ -66,8 +67,6 @@ def _m1_replay(rows, k):
             if stuck.update({**row, "verdict": verdict}) == "no_progress":
                 fires.append(row["step"])
         return fires
-    finally:
-        tasks.STALL = old
 
 
 def test_m1_replay_backoff_thresholds_and_chosen_k():

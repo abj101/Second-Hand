@@ -6,9 +6,7 @@ from agent.loop import Loop
 from agent.memory import Memory
 from agent.notebook import Notebook
 from agent.space import mark_exit
-from tests.agent.fakes import GridEnv, StubModel
-from tests.agent.test_skills import Busy, short_settle
-from tests.agent.test_options import INPUTS, room
+from tests.agent.fakes import Busy, GridEnv, INPUTS, SavedEnv, StubModel, room, short_settle
 from agent.model import ModelUnavailable
 
 def reply(data): return type("Reply", (), {"data": data})()
@@ -901,40 +899,27 @@ def test_interact_without_place_change_contradicts_leads_to_only_when_complete(t
     assert len(relations) == 1 and relation["sup"] == 1 and relation["con"] == expected_con and relation["state"] == "live"
     assert relation["verb"] == "approach"
 
-def test_runner_press_exception_and_truncation(tmp_path, monkeypatch):
-    from scripts import run_agent
-    class Broken(GridEnv):
+def test_runner_press_exception_and_truncation(tmp_path, stub_runner):
+    class Broken(SavedEnv):
         def press(self,*a,**k): raise RuntimeError("focus lost")
-        def save(self,path): Path(path).write_text("state")
-        def close(self): pass
     model=StubModel([reply(perception()),reply({"i": 1, "why": "test"})]); model._post=lambda p: None
-    monkeypatch.setattr(run_agent,"PyBoyEnv",lambda *a,**k: Broken())
-    monkeypatch.setattr(run_agent,"find_rom",lambda:"rom")
-    monkeypatch.setattr(run_agent,"Ollama",lambda *a,**kw:model)
-    monkeypatch.setattr(run_agent,"_ledger",lambda *a:None)
-    monkeypatch.setattr(run_agent,"read",lambda env:{"map":1})
+    run_agent=stub_runner(Broken, model, read=lambda env:{"map":1})
     run=tmp_path/"run"
     assert run_agent.main(["--headless","--steps","1","--max-calls","5","--run",str(run)]) == 0
     assert (run/"checkpoint/000000/harness.json").exists()
     path=tmp_path/"rows.jsonl"; path.write_text('{"step":1}\n{"step":2}\n')
     run_agent._truncate(path,1); assert len(path.read_text().splitlines()) == 1
 
-def test_runner_call_cap_and_unavailable_checkpoint(tmp_path, monkeypatch):
-    from scripts import run_agent
-    class Saved(GridEnv):
-        def save(self,path): Path(path).write_text("state")
-        def close(self): pass
-    monkeypatch.setattr(run_agent,"PyBoyEnv",lambda *a,**k:Saved()); monkeypatch.setattr(run_agent,"find_rom",lambda:"rom")
-    monkeypatch.setattr(run_agent,"_ledger",lambda *a:None); monkeypatch.setattr(run_agent,"read",lambda env:{})
+def test_runner_call_cap_and_unavailable_checkpoint(tmp_path, stub_runner):
     class Posts(StubModel):
         def ask(self,*a,**k): self._post({}); return super().ask(*a,**k)
-    monkeypatch.setattr(run_agent,"Ollama",lambda *a,**k:model)
     model=Posts([reply(perception()),reply({"i": 1, "why": "test"})]); model._post=lambda p:None
+    run_agent=stub_runner(SavedEnv, model, read=lambda env:{})
     assert run_agent.main(["--headless","--steps","1","--max-calls","1","--run",str(tmp_path/"cap")]) == 3
     assert (tmp_path/"cap/checkpoint/000000/harness.json").exists()
     class Offline(StubModel):
         def ask(self,*a,**k): raise ModelUnavailable("offline")
-    model=Offline([]); model._post=lambda p:None; monkeypatch.setattr(run_agent,"Ollama",lambda *a,**k:model)
+    model=Offline([]); model._post=lambda p:None; stub_runner(model=model)
     assert run_agent.main(["--headless","--steps","1","--max-calls","5","--run",str(tmp_path/"offline")]) == 4
     assert (tmp_path/"offline/checkpoint/000000/harness.json").exists()
 
@@ -974,11 +959,7 @@ def test_stage_b_cap_override_keeps_phase_and_m1_limits(tmp_path, monkeypatch):
     with pytest.raises(run_agent.CallCap): run_agent._ledger(Path("runs/m1"),"b",300)
     assert json.loads(path.read_text()) == m1_exhausted
 
-def test_stage_b_override_reaches_invocation_guard(tmp_path, monkeypatch):
-    from scripts import run_agent
-    class Saved(GridEnv):
-        def save(self,path): Path(path).write_text("state")
-        def close(self): pass
+def test_stage_b_override_reaches_invocation_guard(tmp_path, monkeypatch, stub_runner):
     class Model(StubModel):
         def __init__(self): super().__init__([])
         def _post(self,payload): self.calls+=1
@@ -989,66 +970,48 @@ def test_stage_b_override_reaches_invocation_guard(tmp_path, monkeypatch):
             self.step_no+=1
             return {"step":self.step_no,"place":"","task":"","choice":{},"verdict":""}
         def state(self): return {"step":self.step_no}
-    monkeypatch.setattr(run_agent,"PyBoyEnv",lambda *a,**k:Saved()); monkeypatch.setattr(run_agent,"find_rom",lambda:"rom")
-    monkeypatch.setattr(run_agent,"Loop",ManyRequests); monkeypatch.setattr(run_agent,"read",lambda env:{})
-    monkeypatch.setattr(run_agent,"_ledger",lambda *a:None); monkeypatch.setattr(run_agent,"Ollama",lambda *a,**k:Model())
+    run_agent=stub_runner(SavedEnv, Model(), read=lambda env:{})
+    monkeypatch.setattr(run_agent,"Loop",ManyRequests)
     common=["--steps","1","--max-calls","300","--stage","b"]
     assert run_agent.main(["--headless",*common,"--run",str(tmp_path/"default")]) == 3
+    stub_runner(model=Model())
     assert run_agent.main(["--headless",*common,"--stage-b-cap","300","--run",str(tmp_path/"override")]) == 0
 
-def test_from_step_zero_rebuilds_boot_and_preserves_ledger(tmp_path, monkeypatch):
-    from scripts import run_agent
+def test_from_step_zero_rebuilds_boot_and_preserves_ledger(tmp_path, monkeypatch, stub_runner):
     monkeypatch.chdir(tmp_path); run=tmp_path/"runs/m1"; (run/"checkpoint/000025/memory").mkdir(parents=True)
     (run/"checkpoint/000025/harness.json").write_text('{"step":25}')
     (run/"memory").mkdir(); (run/"memory/places.jsonl").write_text('{"id":"old"}\n')
     for name in ("trace.jsonl","chooser.jsonl","calls.jsonl","truth.jsonl"): (run/name).write_text('{"step":25}\n')
     budget=tmp_path/"runs/e3_budget.json"; budget.parent.mkdir(exist_ok=True); budget.write_text('{"total":33,"m1":33,"smoke":0}')
-    class Saved(GridEnv):
-        def save(self,path): Path(path).write_text("state")
-        def close(self): pass
-    monkeypatch.setattr(run_agent,"PyBoyEnv",lambda *a,**k:Saved()); monkeypatch.setattr(run_agent,"find_rom",lambda:"rom")
-    monkeypatch.setattr(run_agent,"read",lambda env:{"map":1})
-    model=StubModel([reply(perception()),act_reply(None)]); model._post=lambda p:None; monkeypatch.setattr(run_agent,"Ollama",lambda *a,**k:model)
+    model=StubModel([reply(perception()),act_reply(None)]); model._post=lambda p:None
+    run_agent=stub_runner(SavedEnv, model, ledger=True, read=lambda env:{"map":1})
     assert run_agent.main(["--headless","--resume","--from-step","0","--steps","1","--max-calls","5","--run",str(run)]) == 0
     assert (run/"checkpoint/000000/harness.json").exists() and not (run/"checkpoint/000025").exists()
     assert not list((run/"checkpoint/000000/memory").glob("*.jsonl"))
     assert [json.loads(x)["step"] for x in (run/"trace.jsonl").read_text().splitlines()] == [1]
     assert json.loads(budget.read_text())["total"] == 33
 
-def test_resume_prunes_checkpoints_after_selected_step(tmp_path, monkeypatch):
-    from scripts import run_agent
+def test_resume_prunes_checkpoints_after_selected_step(tmp_path, monkeypatch, stub_runner):
     monkeypatch.chdir(tmp_path); run=tmp_path/"runs/m1"
     for n in (10,25):
         cp=run/f"checkpoint/{n:06d}"; (cp/"memory").mkdir(parents=True); (cp/"harness.json").write_text(json.dumps({"step":n,"place":None,"stuck":{}})); (cp/"pyboy.state").write_text("state")
     (run/"trace.jsonl").parent.mkdir(parents=True,exist_ok=True); (run/"trace.jsonl").write_text("".join(json.dumps({"step":n})+"\n" for n in range(1,26)))
-    class Saved(GridEnv):
-        def save(self,path): Path(path).write_text("state")
-        def close(self): pass
-    monkeypatch.setattr(run_agent,"PyBoyEnv",lambda *a,**k:Saved()); monkeypatch.setattr(run_agent,"find_rom",lambda:"rom"); monkeypatch.setattr(run_agent,"read",lambda env:{})
-    model=StubModel([reply(perception()),act_reply(None)]); model._post=lambda p:None; monkeypatch.setattr(run_agent,"Ollama",lambda *a,**k:model); monkeypatch.setattr(run_agent,"_ledger",lambda *a:None)
+    model=StubModel([reply(perception()),act_reply(None)]); model._post=lambda p:None
+    run_agent=stub_runner(SavedEnv, model, read=lambda env:{})
     assert run_agent.main(["--headless","--resume","--from-step","10","--steps","1","--max-calls","5","--run",str(run)]) == 0
     assert not (run/"checkpoint/000025").exists() and (run/"checkpoint/000011").exists()
     assert [json.loads(x)["step"] for x in (run/"trace.jsonl").read_text().splitlines()] == list(range(1,12))
 
-def test_keyboard_interrupt_writes_checkpoint(tmp_path, monkeypatch):
-    from scripts import run_agent
-    class Saved(GridEnv):
-        def save(self,path): Path(path).write_text("state")
-        def close(self): pass
+def test_keyboard_interrupt_writes_checkpoint(tmp_path, stub_runner):
     class Interrupted(StubModel):
         def ask(self,*a,**k): raise KeyboardInterrupt
-    monkeypatch.setattr(run_agent,"PyBoyEnv",lambda *a,**k:Saved()); monkeypatch.setattr(run_agent,"find_rom",lambda:"rom")
-    monkeypatch.setattr(run_agent,"read",lambda env:{}); model=Interrupted([]); model._post=lambda p:None
-    monkeypatch.setattr(run_agent,"Ollama",lambda *a,**k:model); monkeypatch.setattr(run_agent,"_ledger",lambda *a:None)
+    model=Interrupted([]); model._post=lambda p:None
+    run_agent=stub_runner(SavedEnv, model, read=lambda env:{})
     run=tmp_path/"interrupted"
     assert run_agent.main(["--headless","--steps","1","--max-calls","5","--run",str(run)]) == 0
     assert (run/"checkpoint/000000/harness.json").exists()
 
-def test_probe_stage_stops_at_thirty_invocations(tmp_path, monkeypatch):
-    from scripts import run_agent
-    class Saved(GridEnv):
-        def save(self, path): Path(path).write_text("state")
-        def close(self): pass
+def test_probe_stage_stops_at_thirty_invocations(tmp_path, monkeypatch, stub_runner):
     class Model(StubModel):
         def __init__(self): super().__init__([])
         def _post(self, payload): self.calls += 1
@@ -1060,17 +1023,12 @@ def test_probe_stage_stops_at_thirty_invocations(tmp_path, monkeypatch):
             return {"step": self.step_no, "place": "p", "task": "t", "choice": {}, "verdict": ""}
         def state(self): return {"step": self.step_no}
     ledger = []
-    monkeypatch.setattr(run_agent, "PyBoyEnv", lambda *a, **k: Saved()); monkeypatch.setattr(run_agent, "find_rom", lambda: "rom")
-    monkeypatch.setattr(run_agent, "Loop", ManyRequests); monkeypatch.setattr(run_agent, "read", lambda env: {"map": 1})
-    monkeypatch.setattr(run_agent, "_ledger", lambda *a: ledger.append(a)); monkeypatch.setattr(run_agent, "Ollama", lambda *a, **k: Model())
+    run_agent = stub_runner(SavedEnv, Model(), read=lambda env: {"map": 1})
+    monkeypatch.setattr(run_agent, "Loop", ManyRequests); monkeypatch.setattr(run_agent, "_ledger", lambda *a: ledger.append(a))
     assert run_agent.main(["--headless", "--steps", "1", "--max-calls", "100", "--stage", "p", "--run", str(tmp_path/"m1")]) == 3
     assert len(ledger) == 30
 
-def test_probe_stage_stops_after_reaching_town(tmp_path, monkeypatch):
-    from scripts import run_agent
-    class Saved(GridEnv):
-        def save(self, path): Path(path).write_text("state")
-        def close(self): pass
+def test_probe_stage_stops_after_reaching_town(tmp_path, monkeypatch, stub_runner):
     class OneStep:
         def __init__(self, env, model, mem, game, looks=None): self.env, self.mem, self.step_no = env, mem, 0
         def step(self): self.step_no += 1; return {"step": self.step_no, "place": "p", "task": "t", "choice": {}, "verdict": ""}
@@ -1078,12 +1036,11 @@ def test_probe_stage_stops_after_reaching_town(tmp_path, monkeypatch):
     steps = []
     class CountStep(OneStep):
         def step(self): steps.append(1); return super().step()
-    monkeypatch.setattr(run_agent, "PyBoyEnv", lambda *a, **k: Saved()); monkeypatch.setattr(run_agent, "find_rom", lambda: "rom")
-    monkeypatch.setattr(run_agent, "Loop", CountStep); monkeypatch.setattr(run_agent, "read", lambda env: {"map": 0})
-    monkeypatch.setattr(run_agent, "_ledger", lambda *a: pytest.fail("Town stop should precede any model call"))
     class Model(StubModel):
         def _post(self, payload): self.calls += 1
-    monkeypatch.setattr(run_agent, "Ollama", lambda *a, **k: Model([]))
+    run_agent = stub_runner(SavedEnv, Model([]), read=lambda env: {"map": 0})
+    monkeypatch.setattr(run_agent, "Loop", CountStep)
+    monkeypatch.setattr(run_agent, "_ledger", lambda *a: pytest.fail("Town stop should precede any model call"))
     run = tmp_path/"m1"
     assert run_agent.main(["--headless", "--steps", "15", "--max-calls", "30", "--stage", "p", "--run", str(run)]) == 0
     assert steps == [1] and json.loads((run/"checkpoint/000001/harness.json").read_text())["step"] == 1

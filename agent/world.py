@@ -97,7 +97,7 @@ def _open_edge(frame, t):
     """{side: [i, ...]}: the edge tiles (i-th along that side) that show something, not uniform void, so the place may continue past them.
     ponytail: <=2 grey levels in a tile = void (Game Boy black/white borders); a game with textured void needs a better test"""
     g = frame.convert("L"); w, h = g.size; cols, rows = w // t, h // t
-    drawn = lambda x, y: len(set(g.crop((x * t, y * t, x * t + t, y * t + t)).getdata())) > 2
+    drawn = lambda x, y: g.crop((x * t, y * t, x * t + t, y * t + t)).getcolors(2) is None  # None = more than 2 levels
     return {"LEFT": [y for y in range(rows) if drawn(0, y)], "RIGHT": [y for y in range(rows) if drawn(cols - 1, y)],
             "UP": [x for x in range(cols) if drawn(x, 0)], "DOWN": [x for x in range(cols) if drawn(x, rows - 1)]}
 

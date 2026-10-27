@@ -1,10 +1,25 @@
 from __future__ import annotations
 
 from collections import deque
+from functools import lru_cache
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
 from PIL import Image, ImageDraw
+
+from agent.model import Reply
+from agent.world import World
+
+@lru_cache(maxsize=None)
+def _grass(tx: int, ty: int, base: tuple[int, int, int]) -> Image.Image:
+    """One textured 16 px ground tile; cached because redrawing 64 cells per tile per frame dominated suite time."""
+    tile = Image.new("RGB", (16, 16)); draw = ImageDraw.Draw(tile)
+    for sy in range(0, 16, 2):
+        for sx in range(0, 16, 2):
+            shade = hash((tx * 8 + sx // 2, ty * 8 + sy // 2)) % 5
+            draw.rectangle((sx, sy, sx + 1, sy + 1), fill=tuple(max(0, c - shade * 5) for c in base))
+    return tile
 
 class GridEnv:
     """Textured 16 px world; player centered, NPC left, door right."""
@@ -72,12 +87,7 @@ class GridEnv:
                 elif self.animated and tile == (9, 7):
                     color = (60, 120, 200) if self._beat % 2 == 0 else (90, 150, 230)
                 else:
-                    for sy in range(0, 16, 2):
-                        for sx in range(0, 16, 2):
-                            shade = hash((tx * 8 + sx // 2, ty * 8 + sy // 2)) % 5
-                            color = tuple(max(0, c - shade * 5) for c in ground[0])
-                            draw.rectangle((x + sx, y + sy, x + sx + 1, y + sy + 1), fill=color)
-                    continue
+                    image.paste(_grass(tx, ty, ground[0]), (x, y)); continue
                 draw.rectangle((x, y, x + 15, y + 15), fill=color, outline=(color[0] - 8, color[1] - 8, color[2] - 8))
         if self._top == 72: draw.rectangle((76, 68, 83, 77), fill=(194, 56, 44))
         else: draw.rectangle((84, 67, 91, 76), fill=(194, 56, 44))  # sprite centred on its tile
@@ -134,6 +144,12 @@ class GridEnv:
             self._frame()
             if self._listeners: self._notify(self.screenshot())
 
+
+class SavedEnv(GridEnv):
+    """GridEnv that can be checkpointed and closed, for runner tests."""
+    def save(self, path): Path(path).write_text("state")
+    def close(self): pass
+
 class StubModel:
     def __init__(self, replies: list[Any]) -> None: self._replies, self.calls = deque(replies), 0
 
@@ -143,3 +159,105 @@ class StubModel:
         if kwargs.get("role") == "plan" and not (isinstance(getattr(nxt, "data", None), dict) and "focus" in nxt.data):
             return SimpleNamespace(data={"goals": [], "focus": "", "why": "stub"}, text="")
         self.calls += 1; return self._replies.popleft()
+
+class Busy(GridEnv):
+    """A screen that keeps changing after a press: plan lists, per press, the ticks the screen keeps changing for (0 = still); busy=N starts it changing.
+    A changing screen never gives two equal frames in a row, so a settle times out there."""
+    def __init__(self, plan=(), *, busy: float = 0) -> None:
+        super().__init__(); self.plan, self.busy, self.serial, self.ticks, self.keys = iter(plan), busy, 0, 0, []
+    def press(self, key, frames=8, on_frame=None):
+        self.keys.append(key); super().press(key, frames, on_frame); self.busy = next(self.plan, 0)
+    def tick(self, frames=1):
+        for _ in range(frames):
+            super().tick(); self.ticks += 1
+            if self.busy > 0: self.busy -= 1; self.serial += 1
+    def screenshot(self):
+        image = super().screenshot()
+        if self.serial: ImageDraw.Draw(image).rectangle((0, 0, 3, 3), fill=(self.serial % 251, self.serial // 251 % 251, 1))
+        return image
+
+
+def short_settle(monkeypatch):
+    """A settle needs two still frames and gives up after six ticks, so a test can force either outcome cheaply."""
+    from agent import observer
+    monkeypatch.setitem(observer.wait_settled.__kwdefaults__, "quiet", 2)
+    monkeypatch.setitem(observer.wait_settled.__kwdefaults__, "max_frames", 6)
+
+
+INPUTS = GridEnv().inputs()
+
+
+def room(mem):
+    mem.upsert("places", {"id": "room", "name": "Room", "screen": "world", "state": "place", "first": 1, "last": 1})
+    for pid, name in (("hall", "Hall"), ("cave", "Cave")): mem.upsert("places", {"id": pid, "name": name, "screen": "world", "state": "place", "first": 1, "last": 1})
+    for x in range(-2, 3):
+        for y in range(-2, 3): tile(mem, x, y)
+
+
+def tile(mem, x, y, exit=None):
+    mem.upsert("tiles", {"id": f"room@{x},{y}", "place": "room", "x": x, "y": y, "floor": True, "blocked": [], "pushed": [], "exit": exit, "step": 1})
+
+
+def at(dx, dy):  # GridEnv(wander=True) geometry: the player's centre is (88, 72), tiles are 16 px
+    return [(88 + 16 * dx) / 160, (72 + 16 * dy) / 144]
+
+
+def player(): return {"name": "player", "kind": "player", "at": at(0, 0)}
+
+
+def setup(mem, entities, screen="world"):
+    world = World(mem, 16); world.current_place = "room"
+    per = {"screen": screen, "text": [], "entities": [player(), *entities]}
+    world.before(per, "room", None, (160, 144), 1)
+    return world, per
+
+
+def chain(mem):
+    """Rooms A - B - C in a line. Every floor edge is blocked or an exit, so no place has untried edges of its own. C has an unused exit (north)."""
+    for pid, name in (("a", "Room A"), ("b", "Room B"), ("c", "Room C")):
+        mem.upsert("places", {"id": pid, "name": name, "screen": "world", "state": "place", "first": 1, "last": 1})
+    def cell(place, x, y, blocked, exit=None): mem.upsert("tiles", {"id": f"{place}@{x},{y}", "place": place, "x": x, "y": y, "floor": True, "blocked": blocked, "pushed": [], "exit": exit, "step": 1})
+    cell("a", 0, 0, ["UP", "DOWN", "LEFT"], {"dir": "RIGHT", "to": "b", "arrive": [0, 0], "src": "observed"})
+    cell("b", 0, 0, ["UP", "DOWN"], {"dir": "LEFT", "to": "a", "arrive": [0, 0], "src": "observed"})
+    cell("b", 1, 0, ["UP", "DOWN"], {"dir": "RIGHT", "to": "c", "arrive": [0, 0], "src": "observed"})
+    cell("c", 0, 0, ["UP", "DOWN", "RIGHT"], {"dir": "LEFT", "to": "b", "arrive": [1, 0], "src": "observed"})
+    mem.upsert("entities", {"id": "north", "name": "exit: north", "kind": "exit", "place": "c", "tile": [0, -2], "status": "remembered", "last": 1, "seen": 1})
+
+
+class KeyboardEnv:
+    pointer = False
+    rows = ["ABCDEFGHI", "JKLMNOPQR", "STUVWXYZ "]
+
+    def __init__(self, name="", menu=False):
+        self.events, self.cursor, self.name = [], [0, 0], name
+        self.lower, self.committed, self.menu = False, False, menu
+        self.case_toggle, self.done_key = [2, 7], [2, 6]
+
+    def screenshot(self): return Image.new("RGB", (20, 20), "#777")
+    def tick(self, frames=1): pass
+    def inputs(self): return ("UP", "DOWN", "LEFT", "RIGHT", "A", "B")
+
+    def press(self, key, frames=8, on_frame=None):
+        self.events.append(key)
+        if self.menu:
+            if key == "DOWN": self.cursor[0] += 1
+            elif key == "UP": self.cursor[0] -= 1
+            elif key == "A": self.name = ("RED", "BLUE")[self.cursor[0]]; self.committed = True
+        elif key in ("UP", "DOWN", "LEFT", "RIGHT"):
+            self.cursor[0] += (key == "DOWN") - (key == "UP")
+            self.cursor[1] += (key == "RIGHT") - (key == "LEFT")
+        elif key == "B": self.name = self.name[:-1]
+        elif key == "A":
+            if self.cursor == self.case_toggle: self.lower = not self.lower
+            elif self.cursor == self.done_key: self.committed = True
+            else: self.name += self.rows[self.cursor[0]][self.cursor[1]].lower() if self.lower else self.rows[self.cursor[0]][self.cursor[1]]
+
+
+class NameModel(StubModel):
+    def __init__(self, replies, env): super().__init__(replies); self.env = env
+    def ask(self, *args, **kwargs):
+        if "currently shown" in args[0]:
+            self.calls += 1
+            if not self.env.menu: assert not self.env.committed
+            return Reply("", {"name": self.env.name}, 0, None, None)
+        return super().ask(*args, **kwargs)

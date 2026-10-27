@@ -2,46 +2,7 @@ from PIL import Image
 
 from agent.model import Reply
 from agent.skills import Ctx, approach, press, run_affordance, select, type_text
-from tests.agent.fakes import StubModel
-
-
-class KeyboardEnv:
-    pointer = False
-    rows = ["ABCDEFGHI", "JKLMNOPQR", "STUVWXYZ "]
-
-    def __init__(self, name="", menu=False):
-        self.events, self.cursor, self.name = [], [0, 0], name
-        self.lower, self.committed, self.menu = False, False, menu
-        self.case_toggle, self.done_key = [2, 7], [2, 6]
-
-    def screenshot(self): return Image.new("RGB", (20, 20), "#777")
-    def tick(self, frames=1): pass
-    def inputs(self): return ("UP", "DOWN", "LEFT", "RIGHT", "A", "B")
-
-    def press(self, key, frames=8, on_frame=None):
-        self.events.append(key)
-        if self.menu:
-            if key == "DOWN": self.cursor[0] += 1
-            elif key == "UP": self.cursor[0] -= 1
-            elif key == "A": self.name = ("RED", "BLUE")[self.cursor[0]]; self.committed = True
-        elif key in ("UP", "DOWN", "LEFT", "RIGHT"):
-            self.cursor[0] += (key == "DOWN") - (key == "UP")
-            self.cursor[1] += (key == "RIGHT") - (key == "LEFT")
-        elif key == "B": self.name = self.name[:-1]
-        elif key == "A":
-            if self.cursor == self.case_toggle: self.lower = not self.lower
-            elif self.cursor == self.done_key: self.committed = True
-            else: self.name += self.rows[self.cursor[0]][self.cursor[1]].lower() if self.lower else self.rows[self.cursor[0]][self.cursor[1]]
-
-
-class NameModel(StubModel):
-    def __init__(self, replies, env): super().__init__(replies); self.env = env
-    def ask(self, *args, **kwargs):
-        if "currently shown" in args[0]:
-            self.calls += 1
-            if not self.env.menu: assert not self.env.committed
-            return Reply("", {"name": self.env.name}, 0, None, None)
-        return super().ask(*args, **kwargs)
+from tests.agent.fakes import KeyboardEnv, NameModel, StubModel
 
 
 def layout(**changes):

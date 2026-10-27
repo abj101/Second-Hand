@@ -15,7 +15,7 @@ from agent.loop import Loop
 from agent.memory import Memory
 from agent.model import Ollama
 from tests.agent.fakes import GridEnv, StubModel
-from tests.agent.test_skills import Busy, short_settle
+from tests.agent.fakes import Busy, short_settle
 
 STEPS = {"UP": (0, -1), "DOWN": (0, 1), "LEFT": (-1, 0), "RIGHT": (1, 0)}
 
@@ -237,7 +237,7 @@ def test_flagged_menu_choice_is_selected_by_its_own_name_and_the_menu_is_read_on
 # ---------------------------------------------------------------- case 4, typing
 def test_typing_field_on_a_name_screen_is_offered_and_typing_runs_to_the_name(tmp_path, monkeypatch):
     from PIL import Image, ImageDraw
-    from tests.agent.test_type_text import KeyboardEnv, NameModel
+    from tests.agent.fakes import KeyboardEnv, NameModel
     from agent.model import Reply
 
     class Textured(KeyboardEnv):  # a near-uniform frame reads as blank to the settle check: stripes and the cursor cell give it texture

@@ -1635,7 +1635,7 @@ def test_beyond_suffix_counts_in_words_and_drops_zero_parts():
 
 
 def test_view_exit_lines_say_status_and_the_dead_end_line_names_the_through_exit(tmp_path):
-    from tests.agent.test_options import chain  # rooms A - B - C; C has an unverified north exit
+    from tests.agent.fakes import chain  # rooms A - B - C; C has an unverified north exit
     mem = Memory(tmp_path); chain(mem)
     mem.upsert("tiles", {"id": "c@1,2", "place": "c", "x": 1, "y": 2, "floor": True, "blocked": ["UP", "DOWN", "LEFT", "RIGHT"], "pushed": [], "exit": None, "step": 1})
     entity(mem, "hatch", "exit: hatch", "c", [1, 2])

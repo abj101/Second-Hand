@@ -276,21 +276,6 @@ class Memory:
             ox, oy, place = ox + row["offset"][0], oy + row["offset"][1], row["into"]
         return place, (ox, oy), row
 
-    def views_agree(self, src: str, dst: str, offset, tile_px: int | None):
-        """None: no stored views of src and dst within scroll reach of each other at this offset; else whether any pair matches."""
-        step, scores = (tile_px or 0) // 2, []
-        if not step: return None
-        load = lambda v: np.frombuffer(base64.b64decode(v["q"]), np.uint8).reshape(v["shape"])
-        home = lambda v: self._home(v["place"])
-        theirs = [(v, h[1]) for v in self.rows("views") if (h := home(v))[0] == dst]
-        for mine, (sx, sy) in ((v, h[1]) for v in self.rows("views") if (h := home(v))[0] == src):
-            at = (mine["pos"][0] + sx + offset[0], mine["pos"][1] + sy + offset[1])
-            for v, (tx, ty) in theirs:
-                dx, dy = at[0] - v["pos"][0] - tx, at[1] - v["pos"][1] - ty
-                if max(abs(dx), abs(dy)) <= VIEW_REACH and v["shape"] == mine["shape"]:
-                    scores.append(_view_score(load(v), load(mine), dx * step, dy * step))
-        return max(scores) >= VIEW_MATCH if scores else None
-
     def name_place(self, place: str, name: str, step: int) -> None:
         name, row = str(name or "").strip(), self.get("places", place)
         if not row or not _nameable(name): return
@@ -464,6 +449,3 @@ class Memory:
             row.update(text=text, src=src, step=step)
         return self.upsert("knowledge", row)["id"]
 
-def conf(rel: dict) -> float:
-    sup, con = rel.get("sup", 0), rel.get("con", 0)
-    return (sup + 1) / (sup + con + 2)

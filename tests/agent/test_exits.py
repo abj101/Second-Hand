@@ -2,7 +2,8 @@ import pytest
 
 from agent.memory import Memory
 from agent.space import mark_exit
-from tests.agent.test_options import INPUTS, at, room, setup, tile
+from tests.agent.fakes import INPUTS, room, tile
+from tests.agent.fakes import at, setup
 
 OBSERVED = (2, 0, {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "observed"})
 INFERRED = (2, 1, {"dir": "DOWN", "to": "hall", "arrive": [1, 0], "src": "inferred"})  # a guessed way back, one tile from the observed door

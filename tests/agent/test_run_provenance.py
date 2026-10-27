@@ -9,7 +9,7 @@ from agent.loop import Loop
 from agent.memory import Memory
 from agent.model import Ollama, _b64, load_image_ref
 from scripts import run_agent
-from tests.agent.fakes import GridEnv, StubModel
+from tests.agent.fakes import GridEnv, SavedEnv, StubModel
 from scripts.run_agent import append_manifest, flag_manifest, manifest_record, source_fingerprint
 
 MANIFEST_KEYS = {"invocation", "t", "resume", "start_checkpoint", "from_step", "steps", "max_calls", "stage",
@@ -31,12 +31,12 @@ def _git(cwd, *args):
                           cwd=cwd, capture_output=True, check=True, text=True)
 
 
-def test_removed_mode_flag_exits_before_any_input_or_env(tmp_path, monkeypatch):
+def test_removed_mode_flag_exits_before_any_input_or_env(tmp_path, stub_runner):
     run = tmp_path / "run"; checkpoint = run / "checkpoint" / "000005"; checkpoint.mkdir(parents=True)
     (checkpoint / "harness.json").write_text(json.dumps({"modes": {"decide": True, "act_text": False}}))
     (run / "trace.jsonl").write_text('{"step": 5}\n')
     def no_env(*args, **kwargs): raise AssertionError("env must not start")
-    monkeypatch.setattr(run_agent, "PyBoyEnv", no_env)
+    stub_runner(no_env)
 
     with pytest.raises(SystemExit):
         run_agent.main(["--resume", "--steps", "1", "--max-calls", "1", "--run", str(run), "--no-decide"])
@@ -185,26 +185,22 @@ def test_checkpoint_provenance_follows_the_manifest_and_the_loop(tmp_path):
     assert "modes" not in state and state["provenance"]["incomplete"] is True
 
 
-def _spy_runner(monkeypatch):
+def _spy_runner(monkeypatch, stub_runner):
     built = []
-    class Saved(GridEnv):
-        def save(self, path): Path(path).write_text("state")
-        def close(self): pass
     class Spy(Loop):
         def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs); built.append((kwargs, self))
         def step(self): self.step_no += 1; return {"step": self.step_no, "place": "", "task": "", "choice": {}, "verdict": ""}
     model = StubModel([]); model._post = lambda payload: None
-    monkeypatch.setattr(run_agent, "PyBoyEnv", lambda *a, **k: Saved()); monkeypatch.setattr(run_agent, "find_rom", lambda: "rom")
-    monkeypatch.setattr(run_agent, "read", lambda env: {}); monkeypatch.setattr(run_agent, "_ledger", lambda *a: None)
-    monkeypatch.setattr(run_agent, "Loop", Spy); monkeypatch.setattr(run_agent, "Ollama", lambda *a, **k: model)
-    return built, Saved
+    stub_runner(SavedEnv, model, read=lambda env: {})
+    monkeypatch.setattr(run_agent, "Loop", Spy)
+    return built
 
 
-def test_resume_ignores_checkpoint_modes_and_records_only_runtime_mode(tmp_path, monkeypatch):
-    built, Saved = _spy_runner(monkeypatch)
+def test_resume_ignores_checkpoint_modes_and_records_only_runtime_mode(tmp_path, monkeypatch, stub_runner):
+    built = _spy_runner(monkeypatch, stub_runner)
     run = tmp_path / "run"
     loop = Loop(GridEnv(), StubModel([]), Memory(run / "memory"), "grid")
-    run_agent._checkpoint(Saved(), loop, run)
+    run_agent._checkpoint(SavedEnv(), loop, run)
     harness = run / "checkpoint" / "000000" / "harness.json"
     state = json.loads(harness.read_text(encoding="utf-8")); state["modes"] = {"decide": True, "act_text": True}
     harness.write_text(json.dumps(state), encoding="utf-8")
@@ -217,10 +213,10 @@ def test_resume_ignores_checkpoint_modes_and_records_only_runtime_mode(tmp_path,
     assert manifest["modes"] == {"headless": True} and "decide" not in manifest["modes"] and "act_text" not in manifest["modes"] and manifest["provenance"] == "complete"
 
 
-def test_resume_from_a_checkpoint_without_modes_is_incomplete_everywhere(tmp_path, monkeypatch):
-    built, Saved = _spy_runner(monkeypatch)
+def test_resume_from_a_checkpoint_without_modes_is_incomplete_everywhere(tmp_path, monkeypatch, stub_runner):
+    built = _spy_runner(monkeypatch, stub_runner)
     run = tmp_path / "run"
-    root = run_agent._checkpoint(Saved(), Loop(GridEnv(), StubModel([]), Memory(run / "memory"), "grid"), run)
+    root = run_agent._checkpoint(SavedEnv(), Loop(GridEnv(), StubModel([]), Memory(run / "memory"), "grid"), run)
     state = json.loads((root / "harness.json").read_text(encoding="utf-8")); state.pop("modes", None); state.pop("provenance"); state.pop("provenance_incomplete")
     (root / "harness.json").write_text(json.dumps(state), encoding="utf-8")
 
@@ -299,7 +295,7 @@ def test_continuous_runner_cancels_waiting_model_on_window_close():
     assert ended.is_set()
 
 
-def test_normal_runner_selects_visible_owner_and_records_runtime_mode(tmp_path, monkeypatch):
+def test_normal_runner_selects_visible_owner_and_records_runtime_mode(tmp_path, monkeypatch, stub_runner):
     from threading import Event, get_ident
     from types import SimpleNamespace
     import agent.env_pyboy as env_module
@@ -318,9 +314,8 @@ def test_normal_runner_selects_visible_owner_and_records_runtime_mode(tmp_path, 
     def play(*args): calls.append(("agent", get_ident())); return 0
     monkeypatch.setattr(env_module, "LivePyBoyHost", Host)
     monkeypatch.setattr(viewer, "FramePublisher", Publisher)
-    monkeypatch.setattr(run_agent, "find_rom", lambda: "rom")
     monkeypatch.setattr(run_agent, "_play", play)
-    monkeypatch.setattr(run_agent, "PyBoyEnv", lambda *a, **k: pytest.fail("normal runner must be visible"))
+    stub_runner(lambda: pytest.fail("normal runner must be visible"))
     run = tmp_path / "run"
     assert run_agent.main(["--steps", "1", "--max-calls", "1", "--run", str(run)]) == 0
     assert dict(calls)["constructed"] == dict(calls)["owner"] == main_thread

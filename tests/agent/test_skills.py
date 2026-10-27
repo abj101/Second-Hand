@@ -3,7 +3,7 @@ from PIL import Image, ImageDraw
 
 from agent.model import Reply
 from agent.skills import Ctx, approach, interact, press_seq, run_affordance, select
-from tests.agent.fakes import GridEnv, StubModel
+from tests.agent.fakes import Busy, GridEnv, StubModel, short_settle
 
 
 def point(env, at):
@@ -474,30 +474,6 @@ def test_select_on_flagged_menu_item_reads_menu_once_and_presses_bounded(pointer
     assert result.status == "done" and result.inputs == 3
     assert env.cursor == 2 and env.selected == "OPTION"
     assert result.calls == model.calls == 1
-
-
-class Busy(GridEnv):
-    """A screen that keeps changing after a press: plan lists, per press, the ticks the screen keeps changing for (0 = still); busy=N starts it changing.
-    A changing screen never gives two equal frames in a row, so a settle times out there."""
-    def __init__(self, plan=(), *, busy: float = 0) -> None:
-        super().__init__(); self.plan, self.busy, self.serial, self.ticks, self.keys = iter(plan), busy, 0, 0, []
-    def press(self, key, frames=8, on_frame=None):
-        self.keys.append(key); super().press(key, frames, on_frame); self.busy = next(self.plan, 0)
-    def tick(self, frames=1):
-        for _ in range(frames):
-            super().tick(); self.ticks += 1
-            if self.busy > 0: self.busy -= 1; self.serial += 1
-    def screenshot(self):
-        image = super().screenshot()
-        if self.serial: ImageDraw.Draw(image).rectangle((0, 0, 3, 3), fill=(self.serial % 251, self.serial // 251 % 251, 1))
-        return image
-
-
-def short_settle(monkeypatch):
-    """A settle needs two still frames and gives up after six ticks, so a test can force either outcome cheaply."""
-    from agent import observer
-    monkeypatch.setitem(observer.wait_settled.__kwdefaults__, "quiet", 2)
-    monkeypatch.setitem(observer.wait_settled.__kwdefaults__, "max_frames", 6)
 
 
 def test_settled_flag_ands_every_settle_inside_a_skill_sequence(monkeypatch):

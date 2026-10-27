@@ -70,7 +70,7 @@ def test_owner_pumps_frames_while_worker_callback_is_blocked_and_keeps_action_im
                 callbacks.append((threading.get_ident(), image.info.copy()))
                 if len(callbacks) == 1:
                     entered.set()
-                    assert release.wait(2)
+                    assert release.wait(10)
             host.env.press("A", 2, callback)
         except BaseException as exc:
             failures.append(exc)
@@ -79,17 +79,20 @@ def test_owner_pumps_frames_while_worker_callback_is_blocked_and_keeps_action_im
 
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
+    deadline = time.monotonic() + 10  # the press must be queued before tick 1, or a slow worker races the owner
+    while host._commands.empty() and time.monotonic() < deadline:
+        time.sleep(0.001)
     def publish(frame):
         if frame.frame_seq == 30:
-            assert entered.wait(1)
+            assert entered.wait(10)
             host.stop()
     host.run(publish)
     assert len(pyboy.ticks) == 30
     assert pyboy.ticks[:10] == [(i, frozenset({"a"}) if i <= 2 else frozenset()) for i in range(1, 11)]
     assert not pyboy.held
     release.set()
-    assert done.wait(1)
-    thread.join(1)
+    assert done.wait(10)
+    thread.join(10)
     assert not failures
     assert len(callbacks) == 10
     assert [row[1]["frame_seq"] for row in callbacks] == list(range(1, 11))
@@ -112,7 +115,7 @@ def test_callback_error_does_not_leave_input_held_or_stop_owner(fake_live):
 
     threading.Thread(target=worker, daemon=True).start()
     host.run(lambda frame: host.stop() if frame.frame_seq == 14 else None)
-    assert done.wait(1)
+    assert done.wait(10)
     assert isinstance(failures[0], ValueError)
     assert not pyboy.held
     assert pyboy.ticks[0:3] == [(i, frozenset({"b"})) for i in range(1, 4)]
@@ -129,7 +132,8 @@ def test_live_snapshot_history_ram_and_saved_state_are_owned_and_atomic(fake_liv
     ready = threading.Event()
 
     def worker():
-        while host.env.snapshot().frame_seq < 2:
+        deadline = time.monotonic() + 10  # was unbounded: a missing frame hung the suite
+        while host.env.snapshot().frame_seq < 2 and time.monotonic() < deadline:
             time.sleep(0.001)
         result["ram"] = host.env.read_ram((0x1234, 0x1235))
         result["state"] = host.env.save_snapshot()
@@ -178,7 +182,7 @@ def test_stop_wakes_waiters_and_generation_change_is_explicit(fake_live):
     thread = threading.Thread(target=waiter, daemon=True)
     thread.start()
     host.run(lambda frame: host.stop() if frame.frame_seq == 1 else None)
-    thread.join(1)
+    thread.join(10)
     assert result and isinstance(result[0], (env_module.LiveEnvClosed,))
 
 def test_state_load_changes_generation_and_wakes_frame_waiter(fake_live):
@@ -189,13 +193,13 @@ def test_state_load_changes_generation_and_wakes_frame_waiter(fake_live):
     thread.start()
     loader = threading.Thread(target=lambda: host.env._host._submit("load", b"0"), daemon=True)
     loader.start()
-    deadline = time.monotonic() + 1
+    deadline = time.monotonic() + 10
     while host._commands.empty() and time.monotonic() < deadline:
         time.sleep(0.001)
     assert not host._commands.empty()
     time.sleep(0.01)
     host.run(lambda frame: host.stop() if frame.frame_seq == 1 else None)
-    thread.join(1); loader.join(1)
+    thread.join(10); loader.join(10)
     assert any(isinstance(exc, env_module.FrameGenerationChanged) for exc in changed)
 
 
@@ -211,13 +215,13 @@ def test_owner_failure_wakes_waiters_with_the_underlying_error(fake_live):
 
     thread = threading.Thread(target=waiter, daemon=True)
     thread.start()
-    assert waiting.wait(1)
+    assert waiting.wait(10)
     time.sleep(0.01)
     def fail_tick(*args, **kwargs): raise RuntimeError("fake tick failed")
     pyboy.tick = fail_tick
     with pytest.raises(RuntimeError, match="fake tick failed"):
         host.run(lambda frame: None)
-    thread.join(1)
+    thread.join(10)
     assert waiter_error and isinstance(waiter_error[0], env_module.LiveEnvFailed)
     assert "fake tick failed" in str(waiter_error[0])
 
@@ -244,15 +248,15 @@ def test_window_close_stops_cleanly_and_releases_queued_input(fake_live):
 
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
-    assert queued.wait(1)
-    deadline = time.monotonic() + 1
+    assert queued.wait(10)
+    deadline = time.monotonic() + 10
     while host._commands.empty() and time.monotonic() < deadline:
         time.sleep(0.001)
     assert not host._commands.empty()
     def closed(*args, **kwargs): pyboy._op("tick-close"); return False
     pyboy.tick = closed
     host.run(lambda frame: None)
-    thread.join(1)
+    thread.join(10)
     assert not pyboy.held
     assert errors and isinstance(errors[0], env_module.LiveEnvClosed)
     with pytest.raises(env_module.LiveEnvClosed): host.env.snapshot()

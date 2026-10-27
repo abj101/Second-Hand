@@ -5,9 +5,8 @@ from agent.loop import Loop
 from agent.memory import Memory
 from agent.space import mark_exit
 from agent.world import World, fail_key
-from tests.agent.fakes import GridEnv, StubModel
+from tests.agent.fakes import INPUTS, GridEnv, StubModel, at, chain, player, room, setup, tile
 
-INPUTS = GridEnv().inputs()
 BUTTONS = f"free buttons: {', '.join(INPUTS)}"
 
 
@@ -86,31 +85,6 @@ def test_unreached_note_is_shared_by_rows_to_a_tile_and_clears_on_arrival(tmp_pa
     assert len(rows) == 2 and all("not reached: stopped at (1,0) 1× (last step 3)" in o["notes"] for o in rows)
     mem.mark_reached("room", (2, 0), 4)
     assert mem.get("reach", "room@2,0")["n"] == 0 and mem.get("reach", "room@2,0")["reached"] == 4
-
-
-def at(dx, dy):  # GridEnv(wander=True) geometry: the player's centre is (88, 72), tiles are 16 px
-    return [(88 + 16 * dx) / 160, (72 + 16 * dy) / 144]
-
-
-def player(): return {"name": "player", "kind": "player", "at": at(0, 0)}
-
-
-def room(mem):
-    mem.upsert("places", {"id": "room", "name": "Room", "screen": "world", "state": "place", "first": 1, "last": 1})
-    for pid, name in (("hall", "Hall"), ("cave", "Cave")): mem.upsert("places", {"id": pid, "name": name, "screen": "world", "state": "place", "first": 1, "last": 1})
-    for x in range(-2, 3):
-        for y in range(-2, 3): tile(mem, x, y)
-
-
-def tile(mem, x, y, exit=None):
-    mem.upsert("tiles", {"id": f"room@{x},{y}", "place": "room", "x": x, "y": y, "floor": True, "blocked": [], "pushed": [], "exit": exit, "step": 1})
-
-
-def setup(mem, entities, screen="world"):
-    world = World(mem, 16); world.current_place = "room"
-    per = {"screen": screen, "text": [], "entities": [player(), *entities]}
-    world.before(per, "room", None, (160, 144), 1)
-    return world, per
 
 
 def ids(world, per): return {e["name"]: world.entity_ids[i] for i, e in enumerate(per["entities"]) if i in world.entity_ids and e.get("name")}
@@ -362,18 +336,6 @@ def test_inferred_exit_next_to_a_verified_one_is_listed_once(tmp_path):
     tile(mem, 2, 1, {"dir": "RIGHT", "to": "hall", "arrive": [0, 0], "src": "inferred"})
     world, per = setup(mem, [])
     assert sum(o["label"].startswith("go through") for o in world.options(per, "room", {}, 3, inputs=INPUTS)) == 1
-
-
-def chain(mem):
-    """Rooms A - B - C in a line. Every floor edge is blocked or an exit, so no place has untried edges of its own. C has an unused exit (north)."""
-    for pid, name in (("a", "Room A"), ("b", "Room B"), ("c", "Room C")):
-        mem.upsert("places", {"id": pid, "name": name, "screen": "world", "state": "place", "first": 1, "last": 1})
-    def cell(place, x, y, blocked, exit=None): mem.upsert("tiles", {"id": f"{place}@{x},{y}", "place": place, "x": x, "y": y, "floor": True, "blocked": blocked, "pushed": [], "exit": exit, "step": 1})
-    cell("a", 0, 0, ["UP", "DOWN", "LEFT"], {"dir": "RIGHT", "to": "b", "arrive": [0, 0], "src": "observed"})
-    cell("b", 0, 0, ["UP", "DOWN"], {"dir": "LEFT", "to": "a", "arrive": [0, 0], "src": "observed"})
-    cell("b", 1, 0, ["UP", "DOWN"], {"dir": "RIGHT", "to": "c", "arrive": [0, 0], "src": "observed"})
-    cell("c", 0, 0, ["UP", "DOWN", "RIGHT"], {"dir": "LEFT", "to": "b", "arrive": [1, 0], "src": "observed"})
-    mem.upsert("entities", {"id": "north", "name": "exit: north", "kind": "exit", "place": "c", "tile": [0, -2], "status": "remembered", "last": 1, "seen": 1})
 
 
 def test_beyond_counts_what_lies_through_each_exit_and_finds_the_dead_end(tmp_path):

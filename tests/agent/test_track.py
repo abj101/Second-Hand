@@ -295,7 +295,7 @@ def test_odometer_concurrent_take_does_not_lose_10000_frames():
         for seq in range(10000): odo(image, seq)
         done.set()
     def read():
-        while not done.is_set():
+        while not done.wait(0.001):  # yield the GIL so the writer runs; a bare spin starved it for ~300s
             batches = odo.take(); counts.extend(s["frames"] for s in batches); sums.extend(m[1] for s in batches for m in s["moves"])
         batches = odo.take(); counts.extend(s["frames"] for s in batches); sums.extend(m[1] for s in batches for m in s["moves"])
     writer = Thread(target=write); reader = Thread(target=read); writer.start(); reader.start(); writer.join(); reader.join()

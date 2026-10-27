@@ -21,6 +21,6 @@ include = ["agent*"]
 agent = ["briefs/*.json"]
 
 [tool.pytest.ini_options]
-addopts = ["--import-mode=importlib", "-n", "auto"]
+addopts = ["--import-mode=importlib", "-n", "auto", "-ra", "--durations=5", "--strict-markers"]
 testpaths = ["tests"]
 pythonpath = ["."]
