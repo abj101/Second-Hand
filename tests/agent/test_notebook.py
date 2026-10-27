@@ -19,6 +19,25 @@ def closed_setup():
     return [add("q"), {"op": "drop", "key": "q", "reason": "No longer needed"}]
 
 
+def test_status_is_optional_persisted_recent_first_and_inert_without_meters(tmp_path):
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    (legacy / "notebook.json").write_text('{"text": [], "quests": []}', encoding="utf-8")
+    assert Notebook(legacy).data["status"] == {}
+    nb = notebook(tmp_path)
+    before = (nb.render(), nb.render_focus(lambda ref: str(ref)), dict(nb.data))
+    nb.status([], 1)
+    nb.status(None, 2)
+    assert (nb.render(), nb.render_focus(lambda ref: str(ref)), nb.data) == before
+    nb.status([{"name": f"M{i}", "value": i, "max": 10} for i in range(5)], 3)
+    nb.status([{"name": "M2", "value": 9, "max": 10}], 4)
+    line = "Status (last seen): M2 9/10 (step 4); M4 4/10 (step 3); M3 3/10 (step 3); M1 1/10 (step 3)"
+    assert line in nb.render() and line in nb.render_focus(lambda ref: str(ref))
+    loaded = notebook(tmp_path)
+    assert loaded.data["status"] == {name: {"value": value, "max": 10, "step": step}
+                                     for name, value, step in (("M0", 0, 3), ("M1", 1, 3), ("M3", 3, 3), ("M4", 4, 3), ("M2", 9, 4))}
+
+
 CASES = [
     ("non-object", [], None, "op must be an object"),
     ("unknown-op", [], {"op": "other", "key": "q"}, "unknown op"),
@@ -337,7 +356,7 @@ def test_v2_file_loads_as_empty(tmp_path):
 
     nb = notebook(tmp_path)
 
-    assert nb.data == {"text": [], "quests": [], "last": {}, "here": None, "moves": []}
+    assert nb.data == {"text": [], "quests": [], "last": {}, "here": None, "moves": [], "status": {}}
     assert nb.log == []
 
 

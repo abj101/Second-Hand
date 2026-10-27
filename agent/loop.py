@@ -33,7 +33,7 @@ class Loop:
         self.trace = Trace(mem.root.parent / "trace.jsonl"); self.step_no = 0
         self.place = None; self.prev = None; self.tile_px = getattr(env, "tile_px", None)
         self.move_frames = 16; self.stuck = Stuck()
-        self.recent = self.trace.tail(5); self.cached = None; self.cached_hash = None; self.cached_marked = False; self.prev_frame = None; self.prev_frame_mark_eligible = None; self.prompt_version = "e5-perceiver-11"; self.cached_version = self.prompt_version
+        self.recent = self.trace.tail(5); self.cached = None; self.cached_hash = None; self.cached_marked = False; self.prev_frame = None; self.prev_frame_mark_eligible = None; self.prompt_version = "e5-perceiver-12"; self.cached_version = self.prompt_version
         self.seen_image, self.seen_marked = None, False
         self.cut_carry = False  # a cut seen while no world screen could be matched: the next world screen re-identifies the place
         self.pending_cut, self.pending_via, self.parse_failed, self.empty_streak, self.repair_used, self.repair_pending = False, None, False, 0, False, False
@@ -120,6 +120,7 @@ class Loop:
         if self.prev_frame is not None and hashlib.sha256(before.tobytes()).hexdigest() == hashlib.sha256(self.prev_frame.tobytes()).hexdigest() and self.prev_frame_mark_eligible is not None:
             before_mark = self.prev_frame_mark_eligible
         per, frame_hash, reused, _ = self._see(before, prior, screen_was_world=before_mark); marked = self.seen_marked
+        if not reused: self.notebook.status(per.get("meters"), self.step_no + 1)
         player_fix = self.world.fix_player(per, before.size); self.empty_streak = self.empty_streak + 1 if self.parse_failed else 0; self.repair_used = self.repair_used if self.parse_failed else False
         modal = self.prev and {self.prev.get("screen"), per.get("screen")} <= {"world", "dialogue", "menu"} and self.prev.get("screen") != per.get("screen") and "world" in (self.prev.get("screen"), per.get("screen")) and not (self.pending_cut or self.cut_carry or before_set.blank_seen)
         before_seq = (before_set.frame_stamp or {}).get("frame_seq", self.world.odometer.seq)
