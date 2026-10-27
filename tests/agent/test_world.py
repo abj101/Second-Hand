@@ -910,6 +910,34 @@ def test_text_tier_name_is_shown_as_a_guess_in_options_and_view(tmp_path):
     assert "NPC, maybe PROF" in world.view("", "room")
 
 
+def test_called_place_name_precedes_picture_name_without_changing_matching(tmp_path):
+    mem = Memory(tmp_path); place(mem, "lab", "shop"); mem.call("lab", "Lab X", 2, tier="text", store="places")
+    world = World(mem, 16)
+    assert world.place_label("lab") == "Lab X" and world.resolve("shop", {"entities": []}, "lab")["id"] == "lab"
+    assert world.here("lab") == "Lab X"
+    place(mem, "unnamed", "kitchen")
+    assert world.place_label("unnamed") == "kitchen"
+
+
+def test_joined_odometer_fates_update_source_logs_and_absent_odometer_is_inert(tmp_path):
+    _, world = _odo_world(tmp_path)
+    source = [{"start": 1, "end": 1, "cut": "blank", "gap": False, "moves": [], "frames": 1, "uncertain": 0},
+              {"start": 2, "end": 2, "cut": None, "gap": False, "moves": [], "frames": 1, "uncertain": 0},
+              {"start": 3, "end": 3, "cut": None, "gap": False, "moves": [], "frames": 1, "uncertain": 0},
+              {"start": 4, "end": 4, "cut": "blank", "gap": False, "moves": [], "frames": 1, "uncertain": 0},
+              {"start": 5, "end": 5, "cut": None, "gap": False, "moves": [], "frames": 1, "uncertain": 0}]
+    for segment in source: segment["_log"] = {"start": segment["start"]}
+    skill = SimpleNamespace(moves=[])
+    world._odo_stats = {"drained": True, "dropped": 0, "segments": [s["_log"] for s in source]}
+    world._prepared = (skill, "room", 1, None, world.pos); world._prepared_segments = source
+    world._odometer_drain = lambda *args: []; world._odometer_fold = lambda *args, **kwargs: None
+    world._locate = lambda *args: (0, 0); world._seen_at = lambda *args: None
+    world.after(skill, "room", "dest", True, 1)
+    assert sum(s["_log"].get("fate") == "dropped" for s in source) == 3 == world.odometer_trace()["dropped"]
+    no_odo = World(world.mem, None); no_odo.odometer = None; no_odo.pos = (3, 4)
+    assert no_odo.odometer_trace() is None and no_odo.odometer_segments() is None and no_odo.pos == (3, 4)
+
+
 def test_said_and_legacy_called_names_are_shown_without_maybe(tmp_path):
     mem = Memory(tmp_path); place(mem, "room", "Room")
     entity(mem, "npc", "NPC", "room", [1, 0])
@@ -1018,7 +1046,7 @@ def test_loop_act_uses_world_facts_active_quests_and_labels(tmp_path, monkeypatc
     from agent import loop as loop_module
     from tests.agent.fakes import GridEnv, StubModel
 
-    mem = Memory(tmp_path / "act"); place(mem, "home", "Home"); place(mem, "p_world", "Town"); place(mem, "p_world2", "Town")
+    mem = Memory(tmp_path / "act"); place(mem, "home", "Home"); mem.call("home", "Entry Hall", 1, tier="text", store="places"); place(mem, "p_world", "Town"); place(mem, "p_world2", "Town")
     mem.upsert("tiles", {"id": "home@0,0", "place": "home", "x": 0, "y": 0, "floor": True, "blocked": [], "pushed": [], "exit": {"dir": "RIGHT", "to": "p_world", "arrive": [1, 0]}, "step": 1})
     entity(mem, "chest", "Chest", "home", [1, 0]); mem.upsert("entities", {**mem.get("entities", "chest"), "tier": "landmark"})
     entity(mem, "oak", "Oak", "home", [2, 0]); mem.upsert("entities", {**mem.get("entities", "oak"), "tier": "landmark"})
@@ -1036,7 +1064,7 @@ def test_loop_act_uses_world_facts_active_quests_and_labels(tmp_path, monkeypatc
     loop.step()
 
     assert "Goal: Find Chest" in seen["focus"] and "Chest is in Home" in seen["focus"]
-    assert "Here: Home" in seen["focus"]
+    assert "Here: Entry Hall" in seen["focus"] and "a name read from the picture" not in seen["focus"]
     assert any(row["label"].startswith("check Chest,") and row["action"] == {"thing": 1, "verb": "interact"} for row in seen["options"])
     assert mem.get("entities", "chest")["tier"] == "interest" and mem.get("entities", "oak")["tier"] == "landmark"
 

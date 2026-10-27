@@ -22,7 +22,9 @@ def _checkpoint(value):
     if isinstance(value, (list, tuple)): return [clean for v in value if (clean := _checkpoint(v)) is not _DROP]
     return value
 def _fate(segments, fate):  # live-run odometer log: what became of each drained segment
-    for segment in segments: segment.setdefault("_log", {})["fate"] = fate
+    for segment in segments:
+        for log in segment.get("_logs", [segment.setdefault("_log", {})]): log["fate"] = fate
+def _log_count(segments): return sum(len(segment.get("_logs", ())) or 1 for segment in segments)
 
 TYPING = {"keyboard", "input_field"}  # a text field on a modal screen: type
 FURNITURE = {"player", "dialogue_box", "text", "logo", "cursor"}  # screen chrome: never a choice on a modal screen
@@ -203,7 +205,7 @@ class World:
                 if held:
                     self._held = None
                     if self._odo_stats is None: self.odometer_begin()
-                    self._odo_stats["dropped"] += len(held["segments"])
+                    self._odo_stats["dropped"] += _log_count(held["segments"]); _fate(held["segments"], "dropped")
                 self.pos, self._odo_px = self._locate(place, frame), (0, 0)
             self.drift = self.drift_ref = None
             self._observed_per = None; self.tracker.clear()
@@ -457,8 +459,8 @@ class World:
         for segment in segments[:stop]: self._odometer_fold(segment, place, step)
         if stop < len(segments):
             if segments[stop].get("cut"): self._odometer_fold(segments[stop], place, step)
-            self._odo_stats["dropped"] += len(segments) - stop - 1 if segments[stop].get("cut") else len(segments) - stop
-            _fate(segments[stop + 1:] if segments[stop].get("cut") else segments[stop:], "dropped")
+            dropped = segments[stop + 1:] if segments[stop].get("cut") else segments[stop:]
+            self._odo_stats["dropped"] += _log_count(dropped); _fate(dropped, "dropped")
         return any(segment.get("cut") for segment in segments)
     def _odometer_fold(self, segment, place, step):
         if self._held is not None:
@@ -469,12 +471,12 @@ class World:
         world_type = screen_name == "world" or screen_name in ("dialogue", "menu") and (self.mem.get("places", place) or {}).get("screen") == "world"
         if not world_type or segment.get("gap"):
             _fate([segment], "dropped")
-            if self._odo_stats is not None: self._odo_stats["dropped"] += 1
+            if self._odo_stats is not None: self._odo_stats["dropped"] += _log_count([segment])
             if segment.get("cut") or segment.get("gap"): self._odo_px = (0, 0)
             return None
         if not self.tile_px or place == self.mem.unplaced:
             _fate([segment], "dropped")
-            if self._odo_stats is not None: self._odo_stats["dropped"] += 1
+            if self._odo_stats is not None: self._odo_stats["dropped"] += _log_count([segment])
             if segment.get("cut") or segment.get("gap"): self._odo_px = (0, 0)
             return None
         moves, px = [], list(self._odo_px); tile_delta, prev_delta, origin, last_dir = [0, 0], [0, 0], self.pos, None
@@ -512,7 +514,8 @@ class World:
                 prior = joined[-1]; prior["moves"].extend(segment["moves"]); prior["frames"] += segment["frames"]; prior["uncertain"] += segment["uncertain"]
                 prior["end"], prior["cut"], prior["gap"] = segment["end"], segment["cut"], segment["gap"]
                 if prior.get("arrival") is None: prior["arrival"] = segment.get("arrival")
-            else: joined.append(dict(segment, moves=list(segment["moves"])))
+                prior.setdefault("_logs", [prior.setdefault("_log", {})]).extend(segment.get("_logs", [segment.setdefault("_log", {})]))
+            else: joined.append(dict(segment, moves=list(segment["moves"]), _log=segment.setdefault("_log", {}), _logs=[segment.setdefault("_log", {})]))
         return joined
     def prepare(self, skill, place, scene_cut, step, through=None):
         repeated = bool(self._prepared and self._prepared[0] is skill and self._prepared[1:3] == (place, step))
@@ -585,7 +588,7 @@ class World:
             after_cut |= segment.get("cut") is not None or segment.get("gap", False)
         if scene_cut and next_place != place:
             last = segments[-1] if len(segments) > 1 else None
-            self._odo_stats["dropped"] += max(0, len(segments) - 2); _fate(segments[1:-1], "dropped")
+            dropped = segments[1:-1]; self._odo_stats["dropped"] += _log_count(dropped); _fate(dropped, "dropped")
             arrival = last.get("arrival") if last else None
             view = self._seen_at(next_place); located = self._locate(next_place, arrival or getattr(skill, "after", None))
             delta = tuple(round(-sum(move[i + 1] for move in last["moves"]) / self.tile_px) for i in (0, 1)) if view and view[1] == "view" and last and self.tile_px else (0, 0)
@@ -986,9 +989,9 @@ class World:
         name = place_name(row)
         if not name:  # ponytail: unnamed reads "place <n>", n = the id's numeric suffix (minted ids: place, place_2, ...)
             n = place.rsplit("_", 1)[-1]
-            return self._shown(row, f"place {n if n.isdigit() else 1}")
+            return row.get("called") or self._shown(row, f"place {n if n.isdigit() else 1}")
         duplicates = sum(place_name(p).casefold() == name.casefold() for p in rows) > 1
-        return self._shown(row, f"{name} [{place}]" if duplicates else name)
+        return row.get("called") or self._shown(row, f"{name} [{place}]" if duplicates else name)
 
     def here(self, place):
         unknown = ": the scene changed under the text; where you are is not known yet" if self.unsettled else ""
@@ -1602,7 +1605,7 @@ class World:
             if settled:
                 _fate(post, "absorbed"); self._odo_stats["absorbed"] += len(post)
             elif post:
-                self._odometer_fold(post[-1], place, step); self._odo_stats["dropped"] += len(post) - 1; _fate(post[:-1], "dropped")
+                dropped = post[:-1]; self._odometer_fold(post[-1], place, step); self._odo_stats["dropped"] += _log_count(dropped); _fate(dropped, "dropped")
         if self._odo_screen is None: self._odo_screen = {"screen": (self.mem.get("places", place) or {}).get("screen")}
         for n, leg in enumerate(legs, 1):
             if inputs >= TRAVEL_MAX_INPUTS: break
